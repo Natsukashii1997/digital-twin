@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-26 · D20261026-11（followup 保留历史回执，仅源文件）
+
+- `hermes/scripts/dispatch.py`：`run --followup` 启动 worker 前，把已有 `out/receipt.json` 的独立字节副本归档为 `receipt-1.json`、`receipt-2.json` 等；编号按已有最大值递增，已有路径不覆盖，`receipt.json` 仍供读取最新回执。
+- 归档先完整写入同目录临时文件并同步，再以不覆盖的方式发布。回执读取、解析、归档或发布失败时返回失败，不启动 worker、不把台账改成 running；当前回执为目录或符号链接时拒绝续跑。确实没有旧回执时保留原有无 resume 启动行为。
+- 新增隔离自测和说明：`hermes/scripts/tests/test_dispatch_followup.py`、`hermes/scripts/tests/README.md`。真实执行 `python3 -B -m unittest discover -s hermes/scripts/tests -v`：13 项通过；覆盖首次归档、多轮保留、已有历史及发布冲突不覆盖、普通运行兼容、失败停止。全部使用临时数据和假 worker，未调用真实模型或外部服务。
+- 本单明确仅改当前 worktree 的仓库源文件：**未同步任何安装文件，未重启网关，未改配置，未合并或 push**。工程自测通过不代表运行环境已经采用。
+- 下一步：由 Hermes 回报当前分支的提交；合并及安装采用留待另行授权。
+
 ## 2026-10-26 · M1 第 0、1 批
 
 - 时间：开工 16:50

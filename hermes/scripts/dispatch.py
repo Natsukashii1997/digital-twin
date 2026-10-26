@@ -7,6 +7,7 @@
   python3 dispatch.py list [--all]
 
 每张单一个目录 ~/.hermes/dispatch/<单号>/：order.json（台账）、task.md、out/。
+续跑前把已有回执归档为 out/receipt-N.json；out/receipt.json 仍是最新回执。
 写入单在 ~/.hermes/worktrees/<项目>/<单号> 建 worktree，分支 hermes/<单号>，从名册里的主分支拉出。
 并发：同时最多 2 张单在跑；同一个仓库同一时间只跑 1 张。
 每条命令最后输出一行 JSON，字段 ok 表示成败、msg 是给常浩看的一句话。
@@ -15,9 +16,11 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HOME = Path.home()
@@ -91,6 +94,19 @@ def cmd_new(a):
     done(True, f"已开单 {no}（{p['name']} · {a.tool} · {'写入' if a.mode == 'write' else '只读'}）", order=o)
 
 
+def archive_receipt(receipt, content):
+    numbers = [int(m[1]) for p in receipt.parent.iterdir()
+               if (m := re.fullmatch(r"receipt-([0-9]+)\.json", p.name))]
+    archive = receipt.with_name(f"receipt-{max(numbers, default=0) + 1}.json")
+    # 先写完整的独立副本，再原子发布；link 不覆盖已占用的路径。
+    # 不能直接链接 receipt.json：worker 会原位截断它，连带改坏历史。
+    with tempfile.NamedTemporaryFile(dir=receipt.parent, prefix=".receipt-", suffix=".tmp") as backup:
+        backup.write(content)
+        backup.flush()
+        os.fsync(backup.fileno())
+        os.link(backup.name, archive)
+
+
 def cmd_run(a):
     o = load(a.no)
     if o["status"] in ("running", "merged", "cleaned"):
@@ -107,7 +123,23 @@ def cmd_run(a):
         task = ROOT / a.no / f"followup-{dt.datetime.now():%H%M%S}.md"
         shutil.copy(a.followup, task)
     receipt = ROOT / a.no / "out/receipt.json"
-    resume = json.loads(receipt.read_text()).get("session_id") if a.followup and receipt.exists() else None
+    resume = None
+    if a.followup:
+        try:
+            if receipt.is_symlink():
+                raise ValueError("receipt.json 是符号链接，不能安全续跑")
+            try:
+                previous = receipt.read_bytes()
+            except FileNotFoundError:
+                previous = None  # 兼容原行为：没有回执时从新会话开始。
+            if previous is not None:
+                rc = json.loads(previous)
+                if not isinstance(rc, dict):
+                    raise ValueError("receipt.json 必须是 JSON 对象")
+                resume = rc.get("session_id")
+                archive_receipt(receipt, previous)
+        except (OSError, ValueError) as e:
+            done(False, f"{a.no} 续跑前读取或归档回执失败，未启动车间：{e}")
     o["status"] = "running"
     save(o)
     cmd = [sys.executable, str(WORKER), "--tool", o["tool"], "--cwd", o["cwd"], "--task-file", str(task),
