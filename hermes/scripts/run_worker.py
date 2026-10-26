@@ -9,7 +9,8 @@
 - read 模式只读；write 模式放开权限（PRD M2 决定：边界靠独立 worktree + 下面的护栏 + 合并须常浩确认）
 - 跑完写 结果目录/receipt.json，并检查护栏：车间有没有把东西弄进主分支、远端分支有没有变（有没有 push）。
   主分支被别的会话正常更新（例如另一个 Claude 会话合并了自己的分支）不算违规，只记在 note_main_moved。
-退出码：0 正常；1 车间失败或超时；2 护栏被触发（主分支或远端被动过）。
+- 只接项目名册（digital-twin/projects.json）里登记的仓库；worktree 按所属主仓库匹配
+退出码：0 正常；1 车间失败或超时；2 护栏被触发（主分支或远端被动过）；3 不在名册里或名册不允许写入。
 """
 import argparse
 import datetime as dt
@@ -22,6 +23,7 @@ import subprocess
 from pathlib import Path
 
 PROXY = os.environ.get("DT_PROXY", "http://127.0.0.1:8086")
+ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
 PREAMBLE = """你是被常浩的数字分身 Hermes 派来干活的车间。规矩：
 - 先读本仓库根目录的 AGENTS.md（没有就读 README），按项目规矩工作。
 - 只在当前目录和当前分支干活：不要切换到主分支，不要合并，不要 push，不要删除分支。
@@ -44,6 +46,16 @@ def snapshot(cwd, main):
         "main": git(cwd, "rev-parse", f"refs/heads/{main}"),
         "remotes": git(cwd, "for-each-ref", "refs/remotes", "--format=%(refname) %(objectname)"),
     }
+
+
+def roster_lookup(cwd):
+    """按 cwd 所属的主仓库（worktree 也算）在名册里找项目；找不到返回 None。"""
+    common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    repo = os.path.realpath(os.path.dirname(common)) if common else None
+    for proj in json.loads(ROSTER.read_text())["projects"]:
+        if repo and os.path.realpath(os.path.expanduser(proj["path"])) == repo:
+            return proj
+    return None
 
 
 def proxy_up():
@@ -118,10 +130,16 @@ def main():
     p.add_argument("--mode", choices=["read", "write"], default="read")
     p.add_argument("--resume")
     p.add_argument("--timeout", type=int, default=3600)
-    p.add_argument("--main", default="main")
+    p.add_argument("--main", help="主分支名，默认取名册里的配置")
     a = p.parse_args()
 
     a.cwd = git(a.cwd, "rev-parse", "--show-toplevel") or a.cwd
+    proj = roster_lookup(a.cwd)
+    if not proj or (a.mode == "write" and not proj.get("write_allowed")):
+        why = "不在项目名册里" if not proj else "名册不允许写入"
+        print(json.dumps({"refused": True, "cwd": a.cwd, "reason": why, "roster": str(ROSTER)}, ensure_ascii=False))
+        raise SystemExit(3)
+    a.main = a.main or proj["main"]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     task = PREAMBLE + Path(a.task_file).read_text()
@@ -158,7 +176,7 @@ def main():
                      if l.strip().startswith("NEED_DECISION:")), None)
     changed = git(a.cwd, "diff", "--name-only", f"{before['head']}..HEAD") if before["head"] else ""
     receipt = {
-        "tool": a.tool, "mode": a.mode, "cwd": a.cwd, "started": started,
+        "project": proj["id"], "tool": a.tool, "mode": a.mode, "cwd": a.cwd, "started": started,
         "ended": dt.datetime.now().isoformat(timespec="seconds"),
         "exit_code": code, "timed_out": timed_out, "worker_error": err,
         "session_id": sid, "need_decision": decision,

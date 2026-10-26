@@ -65,7 +65,19 @@
   - 修正：`run_worker.py` 的护栏改成只在两种情况下报违规——写入模式下车间自己的提交进了主分支，或者车间把当前分支切到了主分支；别的会话正常更新主分支只记在 `note_main_moved`，不告警。技能升到 0.1.1，同步说明“note 不算告警”。回归：干净环境下 Claude 只读单退出码 0，护栏 false，note 为空。网关已重启（pid 33234）。
   - 中间有一次回归用错了任务文件（拿第一单的重任务去跑 agent-kit），300 秒超时，浪费了一次 Claude 额度，没有其他影响。
 - **M2 批 A 完成。**
-- 下一步：批 B（项目名册 v0 + digital-twin 建独立仓库）。
+
+## 2026-10-26 · M2 批 B（项目名册 v0）
+
+- digital-twin 建了独立 git 仓库（`main`，首次提交 `2b11a3a`），并新增 `AGENTS.md`（结构、源文件和安装位置的对应关系、规则）。它还套在上级仓库 `ChatGPT/个人` 里，属于仓库套仓库，M3 整理目录时一起处理。
+- 名册 `projects.json` v0 收了 5 个项目：牛马之家、personal-ai-workbench、agent-kit、github-center、digital-twin。每个项目写了别名、路径、主分支、AGENTS 位置、测试命令、是否允许写入、备注。github-center 没有 main 分支，远端默认分支是 `codex/bootstrap`，名册按这个记；它的远端还在另一个 GitHub 账号下，待 M3 处理。
+- `run_worker.py` 接入名册：按 cwd 所属的主仓库匹配（worktree 也认），名册外的直接拒绝，退出码 3；主分支默认从名册取。测试：公司战略系统 robot-cards → 拒绝，退出码 3；work-desk-ui-bitmap（work-desk 的 worktree）→ 识别为 work-desk/main。
+- 车间技能升到 0.2.0：派单前先读名册，按名称和别名匹配；匹配不上或匹配到多个时先问常浩。
+- **验收时发现的问题**：说“让 Codex 看一下公司战略系统”时，Hermes 加载的是自带的 `codex` 技能，直接 `codex exec`，绕开了名册和护栏（只读沙箱，没有造成改动）。修复：
+  - `skills.disabled = [claude-code, codex]`，停用自带的两个技能（`hermes skills list` 回读显示 disabled；`hermes config set` 提示这个键“不认识”，但技能列表确实读到了）。
+  - SOUL 新增「派活给 Claude Code / Codex」一节：一律走 workshop，名册外不派单，也不能改成自己去读那个项目来代替派单。改后的 SOUL 存档在证据目录 `SOUL.after-M2B.md`。
+- 复测（`hermes -z`）：“数码世界 / 全局坑”能匹配到名册项目，路径和主分支都正确；“公司战略系统 robot-cards”→ 回复“不在名册里，要加进去吗”，没有读取项目；“让 Codex 看一下全局坑”→ 走 workshop 技能和包装脚本，单号 `D20261026-3`，✅ 回报正确。
+- **M2 批 B 完成。**
+- 下一步：批 C（派单技能 dispatch：写入单、worktree、确认门、并发、台账）。
 
 ### M1 分批（PRD 第 10 节细化）
 

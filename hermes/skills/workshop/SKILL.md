@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.1.1
+version: 0.2.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -14,20 +14,16 @@ metadata:
 
 常浩让你“叫 Claude / Codex 去做……”“让车间看一下……”时用这个技能。**一律通过包装脚本调用**，不要直接敲 `claude -p` 或 `codex exec`：网关环境没有代理，直接调用 claude 会 403；包装脚本还负责护栏和回执。需求总纲见 `~/Documents/ChatGPT/个人/work/digital-twin/PRD.md` 的 F5、F6。
 
-## 当前阶段（M2 批 A）
+## 当前阶段（M2 批 B）
 
 - **只接只读单**（读代码、读文档、总结、查问题、给方案），`--mode read`。
 - 写入单（改代码、提交）要等派单技能 `dispatch` 上线（M2 批 C），在那之前常浩要写入就告诉他“写入单还没开通”。
-- 只能在下面这些仓库里跑（项目名册上线前的临时清单）：
-  - 牛马之家 `~/Documents/ChatGPT/个人/work/work-desk`
-  - personal-ai-workbench `~/Documents/ChatGPT/个人/work/personal-ai-workbench`
-  - agent-kit `~/Documents/ChatGPT/个人/work/agent-kit`
-  - github-center `~/Documents/ChatGPT/个人/work/github-center`
-  - digital-twin `~/Documents/ChatGPT/个人/work/digital-twin`
+- 只能在**项目名册**登记的仓库里跑：`~/Documents/ChatGPT/个人/work/digital-twin/projects.json`。每次派单前先读名册，按 `name` 和 `aliases` 匹配常浩说的项目，用 `path` 作为 `--cwd`。主分支由包装脚本自动从名册里取。名册里没有的项目，直接告诉常浩“不在名册里”，并问他要不要加进名册，不要自己猜路径去跑（包装脚本也会拒绝，退出码 3）。
+- 匹配到多个项目、或者匹配不上时，先问常浩，不要自己挑。
 
 ## 步骤
 
-1. 确定 **项目**（在上面的清单里）和 **交给谁**：常浩点名就听他的；没点名时，读代码、查资料类默认 Codex，写文档、梳理方案类默认 Claude，在回复里说一句为什么。
+1. 确定 **项目**（从名册里匹配）和 **交给谁**：常浩点名就听他的；没点名时，读代码、查资料类默认 Codex，写文档、梳理方案类默认 Claude，在回复里说一句为什么。
 2. 生成单号 `D` + 年月日 + `-` + 当天序号，例如 `D20261026-1`。建目录 `~/.hermes/dispatch/<单号>/`，把任务写进 `task.md`：要做什么、交付什么、哪些不做。写清楚，车间看不到你和常浩的对话。
 3. 用 terminal 工具**后台**运行（`background=true`），并告诉常浩“已派给 X，单号 …”：
    ```
@@ -39,7 +35,7 @@ metadata:
    - 有 `need_decision` 时，把问题原样转给常浩
    - 护栏：`guard_main_changed` 或 `guard_remote_changed` 只要有一个是 true，**第一行就改成 ⚠️**，并说明是车间把提交弄进了主分支，或者远端被动过
    - `note_main_moved` 不为空时，说明跑单期间主分支被别的会话正常更新了（不是车间干的），在回报末尾提一句即可，**不算告警**
-5. 失败信号：退出码 1（车间失败或超时）就看 `out/stderr.log` 的最后几行，说明原因；退出码 2 是护栏被触发，立刻报告，不要重试。同一张单最多重试一次。
+5. 失败信号：退出码 3 是不在名册里或名册不允许写入，照实告诉常浩；退出码 1（车间失败或超时）就看 `out/stderr.log` 的最后几行，说明原因；退出码 2 是护栏被触发，立刻报告，不要重试。同一张单最多重试一次。
 
 ## 验收方式
 

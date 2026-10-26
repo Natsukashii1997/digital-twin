@@ -1,0 +1,66 @@
+{
+  "version": "v0 · 2026-10-26",
+  "note": "Hermes 只往这里登记的仓库派单。worktree 按所属主仓库匹配。M3 项目库工程化时会重排目录、统一 GitHub，届时更新本文件。",
+  "projects": [
+    {
+      "id": "work-desk",
+      "name": "牛马之家",
+      "aliases": ["牛马之家", "work-desk", "工作台"],
+      "path": "~/Documents/ChatGPT/个人/work/work-desk",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "test": "npm test",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "正式服务 5280 由 launchd 常驻；发布只能在常浩同意后，在 main 执行 scripts/release-app.sh。测试自动用临时数据目录，不碰 data/。"
+    },
+    {
+      "id": "personal-ai-workbench",
+      "name": "个人 AI 工作台（数码世界）",
+      "aliases": ["数码世界", "个人AI工作台", "personal-ai-workbench", "工作台5178"],
+      "path": "~/Documents/ChatGPT/个人/work/personal-ai-workbench",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "test": "npm test",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "PRD 决定已收缩为看板和资产库，调度、接力、提醒类功能不再做。"
+    },
+    {
+      "id": "agent-kit",
+      "name": "agent-kit",
+      "aliases": ["agent-kit", "全局坑", "LESSONS"],
+      "path": "~/Documents/ChatGPT/个人/work/agent-kit",
+      "main": "main",
+      "agents": "README.md",
+      "test": null,
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "Claude 和 Codex 共用的全局 LESSONS 与 project-starter。改 LESSONS 只出提案，常浩批准才写。"
+    },
+    {
+      "id": "github-center",
+      "name": "GitHub 快速中心",
+      "aliases": ["github-center", "GitHub 快速中心"],
+      "path": "~/Documents/ChatGPT/个人/work/github-center",
+      "main": "codex/bootstrap",
+      "agents": "AGENTS.md",
+      "test": "npm test",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "没有 main 分支，远端默认分支是 codex/bootstrap，当前检出 claude/v1；分支规范待 M3 整理。远端在另一个 GitHub 账号 Natsukashii1997 下。"
+    },
+    {
+      "id": "digital-twin",
+      "name": "数字分身",
+      "aliases": ["数字分身", "digital-twin", "Hermes 项目"],
+      "path": "~/Documents/ChatGPT/个人/work/digital-twin",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "test": null,
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "本项目。改了脚本和技能要同步到安装位置（见 AGENTS.md）。"
+    }
+  ]
+}
