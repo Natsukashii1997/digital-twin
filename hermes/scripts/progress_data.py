@@ -1,0 +1,146 @@
+"""项目进展取数：按项目名册读各仓库某一天的进展，给 Hermes 回答“今天各项目怎么样”用（只读，只用标准库）。
+
+用法：python3 progress_data.py [--date YYYY-MM-DD] [--project 项目id或别名]
+读：每个仓库当天的提交（所有本地分支，按分支归）、主分支停在哪、主目录未提交文件数、
+    CURRENT 最上面一节的标题和“下一步”、当天的派单台账（~/.hermes/dispatch）。
+输出：Markdown 到 stdout。某个仓库读不了只标在该项目下；名册读不了输出「取数失败」，退出码 1。
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
+DISPATCH = Path(os.environ.get("DT_DISPATCH", "~/.hermes/dispatch")).expanduser()
+CLIP = 200  # “下一步”最多保留多少字
+NEXT = re.compile(r"下一步\s*[：:|]|^#+.*下一步")  # “下一步：…”、表格“| 唯一下一步 |”、标题“## 唯一下一步”
+
+
+def git(cwd, *args):
+    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[:200])
+    return r.stdout
+
+
+def commits(path, main, day):
+    """当天的提交，按分支归；一个提交只记在第一个含它的分支下，主分支优先。"""
+    since, until = f"{day} 00:00", f"{day + dt.timedelta(days=1)} 00:00"
+    branches = git(path, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
+    branches.sort(key=lambda b: b != main)
+    seen, out = set(), {}
+    for b in branches:
+        log = git(path, "log", b, f"--since={since}", f"--until={until}",
+                  "--format=%h%x09%cd%x09%s", "--date=format:%H:%M")
+        for line in log.splitlines():
+            h, t, s = line.split("\t", 2)
+            if h not in seen:
+                seen.add(h)
+                out.setdefault(b, []).append(f"{t} `{h}` {s}")
+    return out
+
+
+def plain(s, clip=CLIP):
+    s = re.sub(r"^[#|\-\s]+|[|\s]+$", "", s)
+    s = re.sub(r"\s*\|\s*", "：", s, count=1)  # 表格行“| 唯一下一步 | …”变成“唯一下一步：…”
+    s = s.replace("**", "")
+    return s if len(s) <= clip else s[:clip] + "…"
+
+
+def current(path, day):
+    """CURRENT 最上面一节的标题、第一处“下一步”、今天有没有改过。"""
+    f = Path(path) / "CURRENT.md"
+    if not f.exists():
+        return None
+    lines = f.read_text(encoding="utf-8").splitlines()
+    head = next((plain(x, 80) for x in lines if x.startswith("## ")), "（没有二级标题）")
+    nxt = "（没写下一步）"
+    for i, x in enumerate(lines):
+        if NEXT.search(x):
+            if x.startswith("#"):  # “## 唯一下一步”这种标题，取下面第一行正文
+                x = next((y for y in lines[i + 1:] if y.strip()), x)
+            nxt = re.sub(r"^.{0,12}?下一步[：:]\s*", "", plain(x)) or nxt  # 去掉行首的“遗留 / 下一步：”这类标签
+            break
+    touched = dt.date.fromtimestamp(f.stat().st_mtime) == day
+    return head, nxt, touched
+
+
+def orders(day):
+    out = []
+    for f in sorted(DISPATCH.glob("*/order.json")):
+        try:
+            o = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if any(str(o.get(k, "")).startswith(day.isoformat()) for k in ("created", "updated")):
+            out.append(o)
+    return out
+
+
+def pick(projects, key):
+    key = key.lower()
+    return [p for p in projects if key == p["id"].lower() or key in (a.lower() for a in p.get("aliases", []))]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", help="哪一天，默认今天")
+    ap.add_argument("--project", help="只看一个项目（id 或别名）")
+    a = ap.parse_args()
+    day = dt.date.fromisoformat(a.date) if a.date else dt.date.today()
+    try:
+        projects = json.loads(ROSTER.read_text())["projects"]
+    except (OSError, ValueError, KeyError) as e:
+        print(f"取数失败：读不了项目名册 {ROSTER}（{e}）")
+        sys.exit(1)
+    if a.project:
+        projects = pick(projects, a.project)
+        if not projects:
+            print(f"取数失败：名册里没有项目「{a.project}」")
+            sys.exit(1)
+
+    todays = orders(day)
+    print(f"# 项目进展 · {day}（{'截至 ' + dt.datetime.now().strftime('%H:%M') if day == dt.date.today() else '全天'}）")
+    quiet = []
+    for p in projects:
+        path = os.path.expanduser(p["path"])
+        mine = [o for o in todays if o.get("project") == p["id"]]
+        try:
+            cm = commits(path, p["main"], day)
+            branch = git(path, "branch", "--show-current").strip() or "（游离 HEAD）"
+            head = git(path, "log", "-1", "--format=%h %s", p["main"]).strip()
+            dirty = len(git(path, "status", "--porcelain").splitlines())
+        except (RuntimeError, OSError) as e:
+            print(f"\n## {p['name']}（{p['id']}）\n\n- 读不了这个仓库：{e}")
+            continue
+        cur = current(path, day)
+        if not cm and not mine and not (cur and cur[2]):
+            quiet.append(p["name"])
+            continue
+        print(f"\n## {p['name']}（{p['id']}）\n")
+        n = sum(len(v) for v in cm.values())
+        print(f"- 今天提交：{n} 个" + ("" if n else "（没有）"))
+        for b, items in cm.items():
+            print(f"  - 分支 `{b}`：")
+            for c in items:
+                print(f"    - {c}")
+        print(f"- 主分支 `{p['main']}`：{head}")
+        print(f"- 主目录检出 `{branch}`，未提交文件 {dirty} 个")
+        if cur:
+            print(f"- CURRENT 最新一节：{cur[0]}{'（今天改过）' if cur[2] else ''}")
+            print(f"- CURRENT 下一步：{cur[1]}")
+        else:
+            print("- 无 CURRENT")
+        for o in mine:
+            print(f"- 派单 {o['no']}：{o.get('tool')} · {'写入' if o.get('mode') == 'write' else '只读'} · {o.get('status')}")
+    if quiet:
+        print(f"\n## 今天没动静\n\n- {'、'.join(quiet)}：没有提交、没有派单、CURRENT 没改")
+    print(f"\n来源：本机 git 与 {DISPATCH}；未读 GitHub（PR、issue 等 M3 统一 GitHub 后再加）")
+
+
+if __name__ == "__main__":
+    main()
