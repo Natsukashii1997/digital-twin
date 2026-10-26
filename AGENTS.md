@@ -15,6 +15,8 @@ hermes/
     brief_data.py      晨报取数（第 4 批挂起中）
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
+    workshop/          车间派单（F5）
+    progress/          项目进展现查（F6）
   prompts/             定时任务等用的提示词
   samples/             样稿
 ops/
