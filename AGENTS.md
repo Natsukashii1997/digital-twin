@@ -8,7 +8,7 @@
 
 ```
 PRD.md / CURRENT.md / AGENTS.md
-projects.json          项目名册：Hermes 只往名册里的仓库派单（run_worker.py 也会拦）
+projects.json          项目名册：Hermes 只往 projects 里的活跃仓库派单（run_worker.py 也会拦）；inventory 是 M3 盘点的其余仓库及去留，不派单
 hermes/
   scripts/             给 Hermes 用的脚本（源文件）；安装副本在 ~/.hermes/scripts/
     run_worker.py      车间包装：统一调用 Claude / Codex，写回执、查护栏

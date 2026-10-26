@@ -14,7 +14,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 6 项，共 19 项），末尾显示 `Ran 19 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项，共 20 项），末尾显示 `Ran 20 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -34,4 +34,4 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 
 ## 项目进展取数（test_progress_data.py）
 
-用临时 git 仓库、临时名册（`DT_ROSTER`）和临时台账（`DT_DISPATCH`）跑 `progress_data.py --date 2000-01-02`，不碰真实仓库和 `~/.hermes`。覆盖：当天提交按分支归、主分支优先、同一提交不重复、别的日子不算；CURRENT“下一步”的三种写法（列表、表格行、标题）且不误认说明文字；没动静的项目并成一行；只列当天的派单；读不了的仓库只标该项目；`--project` 按别名筛选、找不到报「取数失败」；名册坏了退出码 1。
+用临时 git 仓库、临时名册（`DT_ROSTER`）和临时台账（`DT_DISPATCH`）跑 `progress_data.py --date 2000-01-02`，不碰真实仓库和 `~/.hermes`。覆盖：当天提交按分支归、主分支优先、同一提交不重复、别的日子不算；CURRENT“下一步”的三种写法（列表、表格行、标题）且不误认说明文字；没动静的项目并成一行；只列当天的派单；读不了的仓库只标该项目；`--project` 按别名筛选、找不到报「取数失败」；名册 `inventory` 里的盘点仓库不现查；名册坏了退出码 1。

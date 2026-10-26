@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-26 · M3 项目工程化：计划定稿与批 1（B1 盘点 + 名册 v1）
+
+- **决定**（常浩）：M3 分 6 批（批 1 → 批 2、批 3 并行 → 批 4 → 批 5 → 批 6），10 个问题全按推荐定，写进 PRD 12.1。要点：GitHub 统一用 `Natsukashii1997`（就是原来的 `abdoulaziznafiou03-creator`，改了名）；8.2 加上「本人 GitHub 私有仓库」一行（普通、内部可以放）；项目根就是 `work/`，活跃项目不搬，沙盒定为 `~/Sandbox/`；删除类只移到 `~/Archive/repos/`。计划全文在会话共享笔记 `M3-项目工程化-分批计划.md`。
+- **账号核实**：`gh api user` 返回 `Natsukashii1997`，`users/abdoulaziznafiou03-creator` 返回 404；账号下有 4 个私有仓库（github-center、personal-ai-workbench、little-steps-private、my-app-lumist），权限都是 admin。
+- **批 1**：`projects.json` 升到 v1。`projects` 还是 5 个活跃项目，加了 `category`、`github` 两个字段（只有 personal-ai-workbench、github-center 有远端）；新增 `inventory`，列出其余 40 个 `.git` 的去留：沙盒 18、只登记 10、拆外壳 7、待删 2、常浩自删 2（营销战役），另 1 个是牛马之家的 worktree。Obsidian Second Brain 按 M4 的决定标为“M4 移到 `~/Archive/`”。脚本只读 `projects`，所以 `dispatch.py`、`progress_data.py`、`run_worker.py` 都没改，不用同步、不用重启网关。PRD 改了状态行、8.2、Q4、Q6、附录，新增 12.1；AGENTS 结构说明补了 inventory。
+- 测试：自测加 1 项（`inventory` 里的仓库不现查），共 20 项全过；名册覆盖核对：`find ~/Documents -maxdepth 7 -name .git` 找到 45 个，名册列了 45 个，没有漏的、没有多的；`progress_data.py --date 2026-10-26` 改前改后只差时间戳和本仓库自己的未提交文件数；`dispatch.project()` 5 个活跃项目都能取到。改前名册和两份输出在 `evidence/M3-B1-20261026/`。
+- 本轮新坑：无。
+- 遗留：① `inventory` 里 `baby-care-workbench`（10-24 还有提交，GitHub 上的 little-steps-private 可能是它的远端）去留待常浩定。② `get-index`、`思维模型库` 是否并入知识库归 M4。③ 共享笔记里计划写的“43 个 `.git`”实为 45 个，“launchd 指向 `Codex/`”不对，实际只指向 `AI 项目/` 和 `work/`；已在笔记里改正。
+- 下一步：批 2（目录整理）和批 3（GitHub）可以并行。批 3 要对外推送，每个仓库推之前单独问常浩。
+
 ## 2026-10-26 · M4 知识库系统：计划确认，批 1 基线进行中
 
 - **计划**（常浩 22:5x 确认）：批 1 F3 基线（只读）→ 批 2 C1 + C4 规则收口（Vault AGENTS v1.6，≤5 个文件）→ 批 3 Hermes 接 vault-read、新技能 `vault`、重建 USER/MEMORY 为摘要 + 指针 → 批 4 C2 按基线缺口补厚“你”（每轮 ≤5 页）→ 批 5 F3 正式验收（常浩本人问 5 题）→ 批 6 F7 每周日 20:00 写 3～7 条候选，周五 `/kb-digest` 定去向、`/kb-weekly` 记采纳率，连续 2 周 ≥ 50%。批 2、3 可与批 1 并行；Vault 侧改动等 10-30 周五例行跑完再动。

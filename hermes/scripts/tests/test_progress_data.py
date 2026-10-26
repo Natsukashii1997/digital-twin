@@ -120,6 +120,20 @@ class ProgressDataTests(unittest.TestCase):
         self.assertEqual(miss.returncode, 1)
         self.assertIn("取数失败", miss.stdout)
 
+    def test_inventory_not_reported(self):
+        a = repo(self.root, "a")
+        b = repo(self.root, "b")
+        sh(b, "commit", "-q", "--allow-empty", "-m", "盘点仓库今天")
+        self.add("a", a)
+        roster = self.root / "projects.json"
+        roster.write_text(json.dumps({"projects": self.projects, "inventory": [{"path": str(b), "category": "沙盒"}]},
+                                     ensure_ascii=False), encoding="utf-8")
+        env = {**os.environ, "DT_ROSTER": str(roster), "DT_DISPATCH": str(self.dispatch)}
+        r = subprocess.run([sys.executable, "-B", str(SCRIPT), "--date", DAY], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0)
+        self.assertNotIn("盘点仓库今天", r.stdout)
+        self.assertNotIn(str(b), r.stdout)
+
     def test_bad_roster_fails(self):
         roster = self.root / "projects.json"
         roster.write_text("不是 JSON", encoding="utf-8")

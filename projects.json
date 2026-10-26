@@ -1,66 +1,346 @@
 {
-  "version": "v0 · 2026-10-26",
-  "note": "Hermes 只往这里登记的仓库派单。worktree 按所属主仓库匹配。M3 项目库工程化时会重排目录、统一 GitHub，届时更新本文件。",
+  "version": "v1 · 2026-10-26",
+  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；github 为 null 的在 M3 批 3 建私有远端。",
   "projects": [
     {
       "id": "work-desk",
       "name": "牛马之家",
-      "aliases": ["牛马之家", "work-desk", "工作台"],
+      "aliases": [
+        "牛马之家",
+        "work-desk",
+        "工作台"
+      ],
       "path": "~/Documents/ChatGPT/个人/work/work-desk",
       "main": "main",
       "agents": "AGENTS.md",
       "test": "npm test",
       "default_worker": null,
       "write_allowed": true,
-      "notes": "正式服务 5280 由 launchd 常驻；发布只能在常浩同意后，在 main 执行 scripts/release-app.sh。测试自动用临时数据目录，不碰 data/。"
+      "notes": "正式服务 5280 由 launchd 常驻；发布只能在常浩同意后，在 main 执行 scripts/release-app.sh。测试自动用临时数据目录，不碰 data/。",
+      "category": "活跃",
+      "github": null
     },
     {
       "id": "personal-ai-workbench",
       "name": "个人 AI 工作台（数码世界）",
-      "aliases": ["数码世界", "个人AI工作台", "personal-ai-workbench", "工作台5178"],
+      "aliases": [
+        "数码世界",
+        "个人AI工作台",
+        "personal-ai-workbench",
+        "工作台5178"
+      ],
       "path": "~/Documents/ChatGPT/个人/work/personal-ai-workbench",
       "main": "main",
       "agents": "AGENTS.md",
       "test": "npm test",
       "default_worker": null,
       "write_allowed": true,
-      "notes": "PRD 决定已收缩为看板和资产库，调度、接力、提醒类功能不再做。"
+      "notes": "PRD 决定已收缩为看板和资产库，调度、接力、提醒类功能不再做。",
+      "category": "活跃",
+      "github": "Natsukashii1997/personal-ai-workbench"
     },
     {
       "id": "agent-kit",
       "name": "agent-kit",
-      "aliases": ["agent-kit", "全局坑", "LESSONS"],
+      "aliases": [
+        "agent-kit",
+        "全局坑",
+        "LESSONS"
+      ],
       "path": "~/Documents/ChatGPT/个人/work/agent-kit",
       "main": "main",
       "agents": "README.md",
       "test": null,
       "default_worker": null,
       "write_allowed": true,
-      "notes": "Claude 和 Codex 共用的全局 LESSONS 与 project-starter。改 LESSONS 只出提案，常浩批准才写。"
+      "notes": "Claude 和 Codex 共用的全局 LESSONS 与 project-starter。改 LESSONS 只出提案，常浩批准才写。",
+      "category": "活跃",
+      "github": null
     },
     {
       "id": "github-center",
       "name": "GitHub 快速中心",
-      "aliases": ["github-center", "GitHub 快速中心"],
+      "aliases": [
+        "github-center",
+        "GitHub 快速中心"
+      ],
       "path": "~/Documents/ChatGPT/个人/work/github-center",
       "main": "codex/bootstrap",
       "agents": "AGENTS.md",
       "test": "npm test",
       "default_worker": null,
       "write_allowed": true,
-      "notes": "没有 main 分支，远端默认分支是 codex/bootstrap，当前检出 claude/v1；分支规范待 M3 整理。远端在另一个 GitHub 账号 Natsukashii1997 下。"
+      "notes": "远端默认分支是 codex/bootstrap，当前检出 claude/v1；M3 批 3 建 main 指向 claude/v1 并改默认分支（M3-Q6）。远端账号就是 Natsukashii1997，不用迁。",
+      "category": "活跃",
+      "github": "Natsukashii1997/github-center"
     },
     {
       "id": "digital-twin",
       "name": "数字分身",
-      "aliases": ["数字分身", "digital-twin", "Hermes 项目"],
+      "aliases": [
+        "数字分身",
+        "digital-twin",
+        "Hermes 项目"
+      ],
       "path": "~/Documents/ChatGPT/个人/work/digital-twin",
       "main": "main",
       "agents": "AGENTS.md",
       "test": null,
       "default_worker": null,
       "write_allowed": true,
-      "notes": "本项目。改了脚本和技能要同步到安装位置（见 AGENTS.md）。"
+      "notes": "本项目。改了脚本和技能要同步到安装位置（见 AGENTS.md）。",
+      "category": "活跃",
+      "github": null
+    }
+  ],
+  "categories": {
+    "活跃": "在 projects 里，可派单",
+    "只登记": "原地不动，不在 M3 处理；todo 写由谁定",
+    "沙盒": "第三方克隆、探针；M3 批 2 移到 ~/Sandbox/",
+    "拆外壳": "空仓库或套着别的仓库的外层仓库；M3 批 2 把 .git 移到 ~/Archive/repos/，文件原地保留",
+    "待删": "空目录；M3 批 2 移到 ~/Archive/repos/，真正删除由常浩动手",
+    "常浩自删": "营销战役相关，常浩整体删除，本计划不处理"
+  },
+  "inventory": [
+    {
+      "path": "~/Documents/ChatGPT/个人/work/work-desk-ui-bitmap",
+      "category": "活跃",
+      "todo": "—",
+      "why": "牛马之家的 worktree（分支 ui-v4），跟主仓库走"
+    },
+    {
+      "path": "~/Documents/ChatGPT/个人/work/get-index",
+      "category": "只登记",
+      "todo": "M4 定",
+      "why": "GET NOTES 索引工具，09-16 后没动；和 C3 消化流程相关"
+    },
+    {
+      "path": "~/Documents/ChatGPT/个人",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "外层仓库套着 work/ 下全部项目，只跟踪旧「Codex-Hermes 项目监工 v0.1」"
+    },
+    {
+      "path": "~/Documents/Obsidian Vault",
+      "category": "只登记",
+      "todo": "M4",
+      "why": "正式知识库，含受限内容，不推 GitHub"
+    },
+    {
+      "path": "~/Documents/Obsidian Second Brain",
+      "category": "只登记",
+      "todo": "M4 已定：停用，整目录移到 ~/Archive/（M4 执行）",
+      "why": "知识库搭建项目，10-09 建、没有提交，基于已停用的 wiki.py 门禁"
+    },
+    {
+      "path": "~/Documents/AI 项目",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "外层仓库没有提交，里面套着 5 个仓库"
+    },
+    {
+      "path": "~/Documents/AI 项目/outputs/管培生带教-AI协同",
+      "category": "只登记",
+      "todo": "M5",
+      "why": "launchd ai.trainee-collab.worker.codex 在用；M5 迁飞书身份时定"
+    },
+    {
+      "path": "~/Documents/AI 项目/outputs/公司战略系统/robot-cards",
+      "category": "只登记",
+      "todo": "M5",
+      "why": "launchd ai.strategy-cards.worker.codex 指向这里；M5 定"
+    },
+    {
+      "path": "~/Documents/AI 项目/baby-care-workbench",
+      "category": "只登记",
+      "todo": "常浩定",
+      "why": "Little Steps，10-24 还有提交；GitHub 上的 little-steps-private 可能是它的远端"
+    },
+    {
+      "path": "~/Documents/AI 项目/营销战役AI协同MVP",
+      "category": "常浩自删",
+      "todo": "—",
+      "why": "营销战役项目，launchd 还在用"
+    },
+    {
+      "path": "~/Documents/AI 项目/marketing-campaign-card-gateway",
+      "category": "常浩自删",
+      "todo": "—",
+      "why": "营销战役卡片网关，远端在飞书妙搭"
+    },
+    {
+      "path": "~/Documents/ChatGPT/Fmode-销售侧壁栏",
+      "category": "只登记",
+      "todo": "—",
+      "why": "远端在 git.fmode.cn，保留（M3-Q4）"
+    },
+    {
+      "path": "~/Documents/ChatGPT/Fmode-销售案例库",
+      "category": "只登记",
+      "todo": "—",
+      "why": "远端在 git.fmode.cn，保留（M3-Q4）"
+    },
+    {
+      "path": "~/Documents/ChatGPT/Fmode-用户案例库",
+      "category": "只登记",
+      "todo": "—",
+      "why": "Fmode 项目，没有远端"
+    },
+    {
+      "path": "~/Documents/ChatGPT/Fmode-用户案例库/docs/share-site",
+      "category": "只登记",
+      "todo": "—",
+      "why": "Fmode 用户案例库的分享站点，跟着它走"
+    },
+    {
+      "path": "~/Documents/AI实验室 2",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "空仓库（没有提交），里面是促销方案和 Claude 数据分析文档"
+    },
+    {
+      "path": "~/Documents/ChatGPT/杂活",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "空仓库，零散产出"
+    },
+    {
+      "path": "~/Documents/ChatGPT/自动化推送",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "空仓库，里面有 PPT 技能测试和 Hermes 配置审查产出"
+    },
+    {
+      "path": "~/Documents/ChatGPT/自动化推送/outputs/hermes-config-review-20261022/foreground-skill-notices/test-checkout",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "hermes-agent 的测试克隆"
+    },
+    {
+      "path": "~/Documents/ChatGPT/自动化推送/outputs/hermes-config-review-20261022/foreground-skill-notices/worktree",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "hermes-agent 的 worktree，和 test-checkout 一起挪"
+    },
+    {
+      "path": "~/Documents/思维模型库",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "空仓库，8 篇思维模型文档；是否并入 Vault 由 M4 定"
+    },
+    {
+      "path": "~/Documents/私域营销",
+      "category": "拆外壳",
+      "todo": "M3 批 2",
+      "why": "空仓库，飞书文档产出"
+    },
+    {
+      "path": "~/Documents/ChatGPT/AI管培生",
+      "category": "待删",
+      "todo": "M3 批 2",
+      "why": "空目录、空仓库"
+    },
+    {
+      "path": "~/Documents/答疑解惑",
+      "category": "待删",
+      "todo": "M3 批 2",
+      "why": "空目录、空仓库"
+    },
+    {
+      "path": "~/Documents/GitHub/claude-desktop-zh-cn",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 javaht/claude-desktop-zh-cn"
+    },
+    {
+      "path": "~/Documents/Codex/2026-06-18/langkonzil-codex-traffic-light-mxp-git/work/codex-traffic-light-mxp",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 langkonzil/codex-traffic-light-mxp"
+    },
+    {
+      "path": "~/Documents/Codex/2026-07-23/wo-g/work/lark-coding-agent-bridge",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 zarazhangrui/lark-coding-agent-bridge"
+    },
+    {
+      "path": "~/Documents/Codex/2026-08-23/https-github-com-mattpocock-skills-git/skills",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 mattpocock/skills"
+    },
+    {
+      "path": "~/Documents/Codex/2026-09-09/agents-md-skill-md-workflow-gpt/work/agents-behavior/scope-repo",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "AGENTS 行为探针"
+    },
+    {
+      "path": "~/Documents/Codex/2026-09-20/new-chat/work/awesome-llm-apps-stage.duX2tO/repo",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 Shubhamsaboo/awesome-llm-apps"
+    },
+    {
+      "path": "~/Documents/Codex/2026-09-21/codex-hermes-t01-probe",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "Codex × Hermes 探针，空仓库"
+    },
+    {
+      "path": "~/Documents/Codex/2026-09-21/codex-hermes-t03-probe",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "Codex × Hermes 探针，空仓库"
+    },
+    {
+      "path": "~/Documents/Codex/2026-09-21/codex-hermes-t03-probe-2",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "Codex × Hermes 探针，空仓库"
+    },
+    {
+      "path": "~/Documents/Codex/2026-09-28/https-github-com-lijigang-ljg-skills/work/ljg-skills-review",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 lijigang/ljg-skills"
+    },
+    {
+      "path": "~/Documents/Codex/2026-10-06/https-github-com-graphify-labs-graphify/work/graphify-source",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 Graphify-Labs/graphify"
+    },
+    {
+      "path": "~/Documents/Codex/2026-10-06/https-github-com-zhaoxuya520-reverse-skill/work/reverse-analysis/source",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 zhaoxuya520/reverse-skill"
+    },
+    {
+      "path": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-image",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 fmodecn/skill-image"
+    },
+    {
+      "path": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-listen",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 fmodecn/skill-listen"
+    },
+    {
+      "path": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-vision",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 fmodecn/skill-vision"
+    },
+    {
+      "path": "~/Documents/Codex/2026-10-16/https-github-com-multica-ai-multica/work/multica-source",
+      "category": "沙盒",
+      "todo": "M3 批 2",
+      "why": "第三方克隆 multica-ai/multica"
     }
   ]
 }

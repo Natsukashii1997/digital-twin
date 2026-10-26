@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 日期 | 2026-10-26（v1.1：重写第 8 节信息边界；模型、巡检、退役、授权按常浩反馈定稿） |
-| 状态 | 已拍板（2026-10-26，第 12 节全部按推荐定），M1 开工；M2 完成（2026-10-26，F5、F6 验收通过；F6.2 并入晨报待 T1） |
+| 状态 | 已拍板（2026-10-26，第 12 节全部按推荐定），M1 开工；M2 完成（2026-10-26，F5、F6 验收通过；F6.2 并入晨报待 T1）；M3 计划已定（12.1），批 1 完成 |
 | 负责人 | 常浩（唯一用户、唯一决策人） |
 | 执行方 | Claude Code / Codex，按每轮授权；上线后部分由 Hermes 自己执行 |
 | 位置 | `~/Documents/ChatGPT/个人/work/digital-twin/PRD.md`（项目目录规范定下后可迁移） |
@@ -220,7 +220,10 @@
 | 同事个人（单聊、代你发消息） | ✅ 需确认 | ✅ 每次确认 | ❌ | ❌ |
 | 群聊 / 团队文档 | ✅ 需确认 | ✅ 每次确认 | ❌ | ❌ |
 | 外部（公开网页、公开仓库、第三方服务） | ✅ 每次确认 | ❌ | ❌ | ❌ |
+| 本人 GitHub 私有仓库（代码托管） | ✅ | ✅ | ❌ | ❌ |
 | 模型提供方（Codex、DeepSeek、Claude 的推理调用） | ✅ | ✅ | ✅ 这是“读”，不算发 | ❌ 发送前脱敏 |
+
+私有仓库一行是 2026-10-26 M3-Q2 加的：仓库第一次推送前，逐个查受限和机密内容，查到的移出仓库或加进 `.gitignore`，清单给你确认后再推；之后提交照常推送，不再逐次确认。
 
 ### 8.3 用而不露
 
@@ -310,9 +313,24 @@
 | Q1 | D4、D5 两处修改是否同意 | 同意 |
 | Q2 | 第 8 节信息边界，以及 8.0 还原的三条顾虑，是否同意 | 同意 |
 | Q3 | 你的飞书是公司租户吗？（决定受限内容能否以原文形式留在私聊里） | 无论是不是，都先按“用而不露”执行 |
-| Q4 | GitHub 统一到哪个账号 | `abdoulaziznafiou03-creator`（本机 git 当前用户），github-center 迁过来 |
+| Q4 | GitHub 统一到哪个账号 `abdoulaziznafiou03-creator`（本机 git 当前用户），github-center 迁过来。**2026-10-26 改正**：这个账号已改名为 `Natsukashii1997`，github-center 本来就在它名下，不用迁（见 12.1 M3-Q1） |
 | Q5 | personal-ai-workbench 收缩到什么程度 | 保留看板和资产库，冻结调度、接力、提醒相关的路线图 |
-| Q6 | 本项目（digital-twin）放哪 | 先放当前位置；B2 目录规范定下后迁移 |
+| Q6 | 本项目（digital-twin）放哪 | 先放当前位置；B2 目录规范定下后迁移。M3-Q3 定项目根就是 `work/`，本项目不用迁 |
+
+### 12.1 M3 拍板（2026-10-26，全部按推荐定）
+
+| # | 问题 | 结论 |
+|---|---|---|
+| M3-Q1 | GitHub 统一到哪个账号 | `Natsukashii1997`：就是原来的 `abdoulaziznafiou03-creator`，同一账号改了名（旧名查询 404，`gh api user` 返回新名）。github-center 不迁；personal-ai-workbench 远端改成新名 |
+| M3-Q2 | 私有 GitHub 仓库在信息边界里算哪一档 | 8.2 加一行：普通、内部 ✅，受限、机密 ❌；首次推送前逐个仓库清查 |
+| M3-Q3 | 统一项目根目录 | 就用 `~/Documents/ChatGPT/个人/work/`，活跃项目不搬；拆掉外层 `个人` 仓库；沙盒定为 `~/Sandbox/`，每月巡检列出超过 30 天的，只提醒、不自动删 |
+| M3-Q4 | 活跃项目 | 先只认名册里的 5 个；管培生带教、公司战略系统等 M5 再定；Obsidian 两个库归 M4，只登记、不推 GitHub；Fmode 三个留在 Fmode 远端，只登记 |
+| M3-Q5 | 删除类怎么处理 | 只移到 `~/Archive/repos/`，附清单和恢复办法；真正删除由你动手 |
+| M3-Q6 | github-center 主分支 | 建 `main` 指向 `claude/v1`，远端默认分支改 main，旧分支保留 |
+| M3-Q7 | issue 看板 | 活跃项目都用各自仓库的 GitHub Issues；牛马之家旧的 `docs/tasks/T*.md` 不迁，新活开 issue；数码世界从本地 markdown 切到 Issues |
+| M3-Q8 | 流程轻重 | 大活走全套 `to-spec` → `to-tickets` → `implement` / `tdd` → `code-review` → PR；小改（一张 issue、一天内做完）跳过 to-spec |
+| M3-Q9 | 哪些可以不走 PR | 代码和配置一律走 PR，squash 合并，你说“合并”后由 Hermes 执行；CURRENT、交接记录这类纯文档可以直接提交到 main 并推送 |
+| M3-Q10 | 分支命名 | `claude/<issue号>-<短名>`、`codex/<issue号>-<短名>`；Hermes 派单保留 `hermes/<单号>`，PR 描述写单号和 issue 号 |
 
 ## 13. 风险
 
@@ -330,6 +348,6 @@
 - Hermes 能力：`hermes cron create` 支持 `--script`、`--no-agent`、`--monitor-script`、notepad；`config.py` 支持 `fallback_model`；内置 `openai-codex`、`anthropic` 等提供方；自带 `claude-code`、`codex` 技能
 - 日报接口：牛马之家 `GET /api/reports`，156 篇；日报分六段，周报分五个模块（模块五为“你对我的深度理解更新”）
 - Claude 会员条款：<https://code.claude.com/docs/en/legal-and-compliance>（禁止第三方使用 Pro / Max 凭证；官方 `claude -p` 个人使用不受影响）
-- 项目库：`~/Documents` 下 36 个 git 仓库，本人 GitHub 上 2 个（分属两个账号）
+- 项目库：`~/Documents` 下 36 个 git 仓库，本人 GitHub 上 2 个（分属两个账号）。M3 批 1 复核：共 45 个 `.git`（含 1 个牛马之家 worktree），去留见 `projects.json` 的 `inventory`；“两个账号”其实是同一个账号改名，GitHub 上共 4 个私有仓库
 - 知识库：`~/Documents/Obsidian Vault` 1172 篇（GET NOTES 911、30 知识 139、个人上下文 6、决定 4、领域 8、项目 1）；另有 `~/Documents/Obsidian Second Brain`
 - 本机睡眠：`pmset sleep 0`
