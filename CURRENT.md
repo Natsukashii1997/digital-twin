@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-26 · M3 批 2（B2 目录整理）
+
+- **决定**（常浩）：按清单搬，规则和巡检按方案改。和计划不同的两处，常浩看过清单后同意：Hermes 配置审查里的 `test-checkout`、`worktree` 原地不动（worktree 登记在 `~/.hermes/hermes-agent` 里）；`~/Documents/Codex` 的 60 个按日期建的目录不整体搬（Codex 旧对话和 `~/.codex/config.toml` 还指着它们），只搬出里面的仓库。
+- **搬移**（只用 `mv`，同一块磁盘内改名）：25 项。沙盒 16 个 → `~/Sandbox/<日期>-<名>/`；拆外壳 7 个，只把 `.git` 移到 `~/Archive/repos/拆外壳/`（`个人`、`AI 项目`、`AI实验室 2`、`杂活`、`自动化推送`、`思维模型库`、`私域营销`），文件原地保留；待删 2 个空目录 → `~/Archive/repos/待删/`。脚本、`done.json`、恢复脚本 `restore.sh` 都在 `evidence/M3-B2-20261026/`。
+- **规则**：`~/.claude/CLAUDE.md` 加第 8 节「项目目录」，`~/.codex/AGENTS.md`「软件项目」一节加一条，内容相同：正式项目在 `work/<项目>/`、临时探索和第三方克隆放 `~/Sandbox/<日期>-<主题>/`、不在仓库里再建仓库。改前备份在证据目录。
+- **巡检**：`ops/health_check.py` 加沙盒检查。每月 1 号列出 `~/Sandbox`、`~/Documents/Codex` 里顶层超过 30 天没动的目录，用猛鬼兽单独发一条提醒，只提醒、不删；`--sandbox` 可以不等 1 号就查。原有告警逻辑没变，只把发消息那段抽成 `send()`。已同步到 `~/Library/Application Support/DigitalTwin/bin/`（同步前确认安装副本和旧源文件一致，旧副本已备份）。
+- **名册**：搬过的条目改成新路径，原路径记在 `from`；拆外壳的条目记了 `.git` 的去处；Hermes 那两项改为「只登记」。
+- 测试：launchd 服务搬前搬后逐项一致（`launchd-before.txt` / `launchd-after.txt`）；5 个活跃仓库和牛马之家 worktree 的 HEAD、未提交文件数搬前搬后一致；`~/Documents` 剩 20 个仓库，仓库套仓库只剩 Fmode 用户案例库的 share-site（登记为保留）；`~/Documents` 和 `~/Sandbox` 里共 36 个仓库，和名册逐个对得上；巡检 `--dry-run --sandbox` 列出 48 项（9 个在 Sandbox、39 个在 Codex 旧目录），`--dry-run` 不到 1 号时不查沙盒；源文件和安装副本都跑过；自测 20 项全过。
+- 本轮新坑：无。
+- 遗留：① `~/Documents/Codex` 下 39 个旧目录要不要清理，等 11-01 第一次沙盒提醒时常浩再定；Codex 桌面版还会继续在这里按日期建目录，规则管不住。② `~/Documents/GitHub` 已空，留着没删。③ `~/Archive/repos/待删/` 的两个空目录由常浩自己删。
+- 下一步：批 3（GitHub）。要对外推送，每个仓库推之前先给常浩看检查清单。
+
 ## 2026-10-26 · M3 项目工程化：计划定稿与批 1（B1 盘点 + 名册 v1）
 
 - **决定**（常浩）：M3 分 6 批（批 1 → 批 2、批 3 并行 → 批 4 → 批 5 → 批 6），10 个问题全按推荐定，写进 PRD 12.1。要点：GitHub 统一用 `Natsukashii1997`（就是原来的 `abdoulaziznafiou03-creator`，改了名）；8.2 加上「本人 GitHub 私有仓库」一行（普通、内部可以放）；项目根就是 `work/`，活跃项目不搬，沙盒定为 `~/Sandbox/`；删除类只移到 `~/Archive/repos/`。计划全文在会话共享笔记 `M3-项目工程化-分批计划.md`。

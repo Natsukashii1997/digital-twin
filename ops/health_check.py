@@ -1,7 +1,7 @@
 """Hermes 每日巡检：纯脚本、不调用模型。正常时只写日志，有异常才用猛鬼兽机器人身份发飞书私聊。
 
-用法：/usr/bin/python3 health_check.py [--dry-run]   （--dry-run 只打印，不发消息）
-由 launchd 任务 cn.digital-twin.health 每天 09:45 调用。
+用法：/usr/bin/python3 health_check.py [--dry-run] [--sandbox]   （--dry-run 只打印，不发消息；--sandbox 不是 1 号也查沙盒）
+由 launchd 任务 cn.digital-twin.health 每天 09:45 调用。每月 1 号另查沙盒，有超过 30 天没动的就单独发一条提醒，只提醒、不删。
 """
 import datetime as dt
 import json
@@ -17,6 +17,8 @@ LOG_DIR = HOME / "Library/Application Support/DigitalTwin/evidence/health"
 LARK_PROFILE = "cli_a96f5f9ac63adcd4"             # 猛鬼兽
 DM_CHAT = "oc_ce2cbf195f8de9f80bc505a00cb4456d"   # 猛鬼兽和常浩的私聊
 HEARTBEAT_STALE_MIN = 10
+SANDBOX_DIRS = [HOME / "Sandbox", HOME / "Documents/Codex"]   # M3-Q3：沙盒和 Codex 按日期建的旧目录
+SANDBOX_STALE_DAYS = 30
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
 
@@ -76,6 +78,20 @@ def check_cron():
     return [f"定时任务有未处理的失败记录：{text.splitlines()[0][:120]}"]
 
 
+def check_sandbox():
+    """顶层目录按自身修改时间算；返回超过 30 天没动的路径。"""
+    cutoff = dt.datetime.now().timestamp() - SANDBOX_STALE_DAYS * 86400
+    return [p for d in SANDBOX_DIRS if d.is_dir() for p in sorted(d.iterdir())
+            if not p.name.startswith(".") and p.stat().st_mtime < cutoff]
+
+
+def send(msg, key, now):
+    r = run(["lark-cli", "--profile", LARK_PROFILE, "im", "+messages-send", "--as", "bot",
+             "--chat-id", DM_CHAT, "--text", msg, "--idempotency-key", key])
+    with open(LOG_DIR / f"{now[:7]}.log", "a") as f:
+        f.write(f"{now} {key} 发送 {'成功' if r.returncode == 0 else '失败：' + (r.stderr or r.stdout)[:200]}\n")
+
+
 def main():
     dry = "--dry-run" in sys.argv
     issues = check_gateway() + check_fallback() + check_cron()
@@ -85,16 +101,27 @@ def main():
         f.write(f"{now} {'OK' if not issues else 'ISSUES: ' + ' | '.join(issues)}\n")
     if not issues:
         print(f"{now} 巡检正常")
+    else:
+        msg = "🩺 Hermes 巡检发现问题\n" + "\n".join(f"- {i}" for i in issues) + \
+              "\n处理：重启网关 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`；详情见 ~/.hermes/logs"
+        print(msg)
+        if not dry:
+            send(msg, f"health-{now}", now)
+    if dt.date.today().day != 1 and "--sandbox" not in sys.argv:
         return
-    msg = "🩺 Hermes 巡检发现问题\n" + "\n".join(f"- {i}" for i in issues) + \
-          "\n处理：重启网关 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`；详情见 ~/.hermes/logs"
-    print(msg)
-    if dry:
-        return
-    r = run(["lark-cli", "--profile", LARK_PROFILE, "im", "+messages-send", "--as", "bot",
-             "--chat-id", DM_CHAT, "--text", msg, "--idempotency-key", f"health-{now}"])
+    stale = check_sandbox()
     with open(LOG_DIR / f"{now[:7]}.log", "a") as f:
-        f.write(f"{now} 告警发送 {'成功' if r.returncode == 0 else '失败：' + (r.stderr or r.stdout)[:200]}\n")
+        f.write(f"{now} 沙盒超过 {SANDBOX_STALE_DAYS} 天：{len(stale)} 项\n")
+    if not stale:
+        return
+    home = str(HOME)
+    msg = (f"🧹 沙盒提醒（每月 1 号）：~/Sandbox 和 ~/Documents/Codex 里有 {len(stale)} 项超过 {SANDBOX_STALE_DAYS} 天没动\n"
+           + "\n".join(f"- {str(p).replace(home, '~')}" for p in stale[:10])
+           + (f"\n- ……另有 {len(stale) - 10} 项" if len(stale) > 10 else "")
+           + "\n只是提醒，不会自动删；要清理就让 Claude 或 Codex 列清单给你定。")
+    print(msg)
+    if not dry:
+        send(msg, f"sandbox-{now[:7]}", now)
 
 
 if __name__ == "__main__":

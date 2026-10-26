@@ -96,9 +96,9 @@
   "categories": {
     "活跃": "在 projects 里，可派单",
     "只登记": "原地不动，不在 M3 处理；todo 写由谁定",
-    "沙盒": "第三方克隆、探针；M3 批 2 移到 ~/Sandbox/",
-    "拆外壳": "空仓库或套着别的仓库的外层仓库；M3 批 2 把 .git 移到 ~/Archive/repos/，文件原地保留",
-    "待删": "空目录；M3 批 2 移到 ~/Archive/repos/，真正删除由常浩动手",
+    "沙盒": "第三方克隆、探针；已移到 ~/Sandbox/，每月 1 号巡检提醒超过 30 天的",
+    "拆外壳": "空仓库或套着别的仓库的外层仓库；.git 已移到 ~/Archive/repos/拆外壳/，文件原地保留",
+    "待删": "空目录；已移到 ~/Archive/repos/待删/，真正删除由常浩动手",
     "常浩自删": "营销战役相关，常浩整体删除，本计划不处理"
   },
   "inventory": [
@@ -117,7 +117,7 @@
     {
       "path": "~/Documents/ChatGPT/个人",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/个人.git",
       "why": "外层仓库套着 work/ 下全部项目，只跟踪旧「Codex-Hermes 项目监工 v0.1」"
     },
     {
@@ -135,7 +135,7 @@
     {
       "path": "~/Documents/AI 项目",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/AI项目.git",
       "why": "外层仓库没有提交，里面套着 5 个仓库"
     },
     {
@@ -195,152 +195,170 @@
     {
       "path": "~/Documents/AI实验室 2",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/AI实验室2.git",
       "why": "空仓库（没有提交），里面是促销方案和 Claude 数据分析文档"
     },
     {
       "path": "~/Documents/ChatGPT/杂活",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/杂活.git",
       "why": "空仓库，零散产出"
     },
     {
       "path": "~/Documents/ChatGPT/自动化推送",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/自动化推送.git",
       "why": "空仓库，里面有 PPT 技能测试和 Hermes 配置审查产出"
     },
     {
       "path": "~/Documents/ChatGPT/自动化推送/outputs/hermes-config-review-20261022/foreground-skill-notices/test-checkout",
-      "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "hermes-agent 的测试克隆"
+      "category": "只登记",
+      "todo": "—",
+      "why": "hermes-agent 的测试克隆；worktree 登记在 ~/.hermes/hermes-agent 里，M3 批 2 决定原地不动"
     },
     {
       "path": "~/Documents/ChatGPT/自动化推送/outputs/hermes-config-review-20261022/foreground-skill-notices/worktree",
-      "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "hermes-agent 的 worktree，和 test-checkout 一起挪"
+      "category": "只登记",
+      "todo": "—",
+      "why": "hermes-agent 的 worktree，和 test-checkout 一起挪；worktree 登记在 ~/.hermes/hermes-agent 里，M3 批 2 决定原地不动"
     },
     {
       "path": "~/Documents/思维模型库",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/思维模型库.git",
       "why": "空仓库，8 篇思维模型文档；是否并入 Vault 由 M4 定"
     },
     {
       "path": "~/Documents/私域营销",
       "category": "拆外壳",
-      "todo": "M3 批 2",
+      "todo": "已拆（M3 批 2）：.git 在 ~/Archive/repos/拆外壳/私域营销.git",
       "why": "空仓库，飞书文档产出"
     },
     {
-      "path": "~/Documents/ChatGPT/AI管培生",
+      "path": "~/Archive/repos/待删/AI管培生",
       "category": "待删",
-      "todo": "M3 批 2",
-      "why": "空目录、空仓库"
+      "todo": "已移到归档（M3 批 2），待常浩删除",
+      "why": "空目录、空仓库",
+      "from": "~/Documents/ChatGPT/AI管培生"
     },
     {
-      "path": "~/Documents/答疑解惑",
+      "path": "~/Archive/repos/待删/答疑解惑",
       "category": "待删",
-      "todo": "M3 批 2",
-      "why": "空目录、空仓库"
+      "todo": "已移到归档（M3 批 2），待常浩删除",
+      "why": "空目录、空仓库",
+      "from": "~/Documents/答疑解惑"
     },
     {
-      "path": "~/Documents/GitHub/claude-desktop-zh-cn",
+      "path": "~/Sandbox/claude-desktop-zh-cn",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 javaht/claude-desktop-zh-cn"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 javaht/claude-desktop-zh-cn",
+      "from": "~/Documents/GitHub/claude-desktop-zh-cn"
     },
     {
-      "path": "~/Documents/Codex/2026-06-18/langkonzil-codex-traffic-light-mxp-git/work/codex-traffic-light-mxp",
+      "path": "~/Sandbox/2026-06-18-codex-traffic-light-mxp",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 langkonzil/codex-traffic-light-mxp"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 langkonzil/codex-traffic-light-mxp",
+      "from": "~/Documents/Codex/2026-06-18/langkonzil-codex-traffic-light-mxp-git/work/codex-traffic-light-mxp"
     },
     {
-      "path": "~/Documents/Codex/2026-07-23/wo-g/work/lark-coding-agent-bridge",
+      "path": "~/Sandbox/2026-07-23-lark-coding-agent-bridge",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 zarazhangrui/lark-coding-agent-bridge"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 zarazhangrui/lark-coding-agent-bridge",
+      "from": "~/Documents/Codex/2026-07-23/wo-g/work/lark-coding-agent-bridge"
     },
     {
-      "path": "~/Documents/Codex/2026-08-23/https-github-com-mattpocock-skills-git/skills",
+      "path": "~/Sandbox/2026-08-23-mattpocock-skills",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 mattpocock/skills"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 mattpocock/skills",
+      "from": "~/Documents/Codex/2026-08-23/https-github-com-mattpocock-skills-git/skills"
     },
     {
-      "path": "~/Documents/Codex/2026-09-09/agents-md-skill-md-workflow-gpt/work/agents-behavior/scope-repo",
+      "path": "~/Sandbox/2026-09-09-agents-behavior-scope-repo",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "AGENTS 行为探针"
+      "todo": "已移（M3 批 2）",
+      "why": "AGENTS 行为探针",
+      "from": "~/Documents/Codex/2026-09-09/agents-md-skill-md-workflow-gpt/work/agents-behavior/scope-repo"
     },
     {
-      "path": "~/Documents/Codex/2026-09-20/new-chat/work/awesome-llm-apps-stage.duX2tO/repo",
+      "path": "~/Sandbox/2026-09-20-awesome-llm-apps",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 Shubhamsaboo/awesome-llm-apps"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 Shubhamsaboo/awesome-llm-apps",
+      "from": "~/Documents/Codex/2026-09-20/new-chat/work/awesome-llm-apps-stage.duX2tO/repo"
     },
     {
-      "path": "~/Documents/Codex/2026-09-21/codex-hermes-t01-probe",
+      "path": "~/Sandbox/2026-09-21-codex-hermes-t01-probe",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "Codex × Hermes 探针，空仓库"
+      "todo": "已移（M3 批 2）",
+      "why": "Codex × Hermes 探针，空仓库",
+      "from": "~/Documents/Codex/2026-09-21/codex-hermes-t01-probe"
     },
     {
-      "path": "~/Documents/Codex/2026-09-21/codex-hermes-t03-probe",
+      "path": "~/Sandbox/2026-09-21-codex-hermes-t03-probe",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "Codex × Hermes 探针，空仓库"
+      "todo": "已移（M3 批 2）",
+      "why": "Codex × Hermes 探针，空仓库",
+      "from": "~/Documents/Codex/2026-09-21/codex-hermes-t03-probe"
     },
     {
-      "path": "~/Documents/Codex/2026-09-21/codex-hermes-t03-probe-2",
+      "path": "~/Sandbox/2026-09-21-codex-hermes-t03-probe-2",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "Codex × Hermes 探针，空仓库"
+      "todo": "已移（M3 批 2）",
+      "why": "Codex × Hermes 探针，空仓库",
+      "from": "~/Documents/Codex/2026-09-21/codex-hermes-t03-probe-2"
     },
     {
-      "path": "~/Documents/Codex/2026-09-28/https-github-com-lijigang-ljg-skills/work/ljg-skills-review",
+      "path": "~/Sandbox/2026-09-28-ljg-skills",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 lijigang/ljg-skills"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 lijigang/ljg-skills",
+      "from": "~/Documents/Codex/2026-09-28/https-github-com-lijigang-ljg-skills/work/ljg-skills-review"
     },
     {
-      "path": "~/Documents/Codex/2026-10-06/https-github-com-graphify-labs-graphify/work/graphify-source",
+      "path": "~/Sandbox/2026-10-06-graphify",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 Graphify-Labs/graphify"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 Graphify-Labs/graphify",
+      "from": "~/Documents/Codex/2026-10-06/https-github-com-graphify-labs-graphify/work/graphify-source"
     },
     {
-      "path": "~/Documents/Codex/2026-10-06/https-github-com-zhaoxuya520-reverse-skill/work/reverse-analysis/source",
+      "path": "~/Sandbox/2026-10-06-reverse-skill",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 zhaoxuya520/reverse-skill"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 zhaoxuya520/reverse-skill",
+      "from": "~/Documents/Codex/2026-10-06/https-github-com-zhaoxuya520-reverse-skill/work/reverse-analysis/source"
     },
     {
-      "path": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-image",
+      "path": "~/Sandbox/2026-10-10-fmode-skill-image",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 fmodecn/skill-image"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 fmodecn/skill-image",
+      "from": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-image"
     },
     {
-      "path": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-listen",
+      "path": "~/Sandbox/2026-10-10-fmode-skill-listen",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 fmodecn/skill-listen"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 fmodecn/skill-listen",
+      "from": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-listen"
     },
     {
-      "path": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-vision",
+      "path": "~/Sandbox/2026-10-10-fmode-skill-vision",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 fmodecn/skill-vision"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 fmodecn/skill-vision",
+      "from": "~/Documents/Codex/2026-10-10/https-github-com-fmodecn-skill-listen/work/stage/skill-vision"
     },
     {
-      "path": "~/Documents/Codex/2026-10-16/https-github-com-multica-ai-multica/work/multica-source",
+      "path": "~/Sandbox/2026-10-16-multica",
       "category": "沙盒",
-      "todo": "M3 批 2",
-      "why": "第三方克隆 multica-ai/multica"
+      "todo": "已移（M3 批 2）",
+      "why": "第三方克隆 multica-ai/multica",
+      "from": "~/Documents/Codex/2026-10-16/https-github-com-multica-ai-multica/work/multica-source"
     }
   ]
 }
