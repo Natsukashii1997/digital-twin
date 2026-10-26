@@ -85,7 +85,7 @@
       "path": "~/Documents/ChatGPT/个人/work/digital-twin",
       "main": "main",
       "agents": "AGENTS.md",
-      "test": null,
+      "test": "python3 -B -m unittest discover -s hermes/scripts/tests",
       "default_worker": null,
       "write_allowed": true,
       "notes": "本项目。改了脚本和技能要同步到安装位置（见 AGENTS.md）。",

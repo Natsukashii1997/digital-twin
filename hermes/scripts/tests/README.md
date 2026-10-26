@@ -1,5 +1,7 @@
 # hermes/scripts 自测
 
+名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`python3 -B -m unittest discover -s hermes/scripts/tests`。
+
 ## 派单续跑回执（test_dispatch_followup.py）
 
 只需要 Python 3.8 或以上版本的标准库，无需安装依赖。在仓库根目录执行：
