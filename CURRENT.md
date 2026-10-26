@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-27 · M3 批 4 合并
+
+- **决定**（常浩）：合并批 4 的 4 个 PR，顺序是 先推本地 main → 变基 → squash 合并 → 主目录 pull。
+- **推本地 main**：合并前查了 4 个仓库本地 main 比远端多出的提交。只有数码世界多 2 个（`dac9073` 便签样式、`c27af8f` 发布记录，内部级），已推送。
+- **合并**：PR 分支都变基到最新的远端 main 后再 squash 合并，关联的 issue 都已自动关闭。
+  - work-desk#2 → `0702fb6`
+  - personal-ai-workbench#3 → `aa4f4dc`（只含本次的 5 个文件）
+  - agent-kit#2 → `d4617f2`
+  - digital-twin#2 → `a7b5627`
+- **主目录**：4 个主目录都 `git pull --ff-only` 到了远端 main。agent-kit 先把没跟踪的 `skills/` 挪到 `evidence/M3-B4-20261027/agent-kit-untracked/`，拉下来后核对：只多了本次的改动。`~/.agents/skills/project-starter` 已经是两层版本。未提交文件数和合并前一样：牛马之家 4 个，数码世界 65 个（另有别人新建的一个未跟踪交接文件），agent-kit 只剩 LESSONS.md 的 G-12。
+- **清理**：4 个 worktree 和本地分支已删除，远端分支合并时已自动删除，`~/Sandbox/worktrees` 已清空。
+- 测试：合并前，digital-twin 变基后自测 20 项通过；其余 3 个仓库变基没有带进新内容，沿用开 PR 时的测试结果（见上一节）。合并后 4 个远端 main 和本地 main 一致。
+- 本轮新坑：无。
+- 遗留：① GitHub 上两个旧仓库待常浩删除。② agent-kit 证据目录里那份旧 `skills/` 可以删，留着备查。
+- 下一步：批 5（B6 交替规矩 + Hermes 接 GitHub）：《工程流程》文档和 PR 模板；`dispatch.py` 写入单改成推分支、开 PR，常浩说“合并”时按本轮顺序执行，推本地 main 前先查 `origin/main..main` 里有没有受限内容；`progress_data.py` 加 PR 和 issue（F6.3）。
+
 ## 2026-10-27 · M3 批 4（B4 + B5）：开 PR，重建 digital-twin 远端
 
 - **决定**（常浩）：批 4 按草稿做，开 issue、在 worktree 里写、开 PR，合并前等他说。发现受限内容被推上 GitHub 后，又定了：删掉 GitHub 上的 digital-twin 重建，M4 那 3 个提交改成只写指针和结论；71fe99e、5dc6df7 里引用个人上下文页内容的句子也一起改成页名指针。
