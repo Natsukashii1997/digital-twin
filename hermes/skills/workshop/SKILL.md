@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.4.0
+version: 0.4.1
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -35,7 +35,6 @@ metadata:
    验收：…
    边界：…
    回复「可以」开跑，或者直接说要改哪里。
-   想把这张单的进展收进一个话题：在这条消息上点「回复」，选「在话题中回复」再回「可以」。
    ```
    只有常浩回复“可以 / 行 / 跑吧”等明确同意，才开跑。他要改，就改任务文件（`~/.hermes/dispatch/<单号>/task.md`）后再发一次确认；他说不要了，执行 `D clean <单号>`。
 
