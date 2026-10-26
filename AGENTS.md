@@ -42,6 +42,8 @@ ops/
 
 single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见 `docs/agents/domain.md`。
 
+改动怎么走、分支怎么起名、交接写在哪、怎么合并：见 `/Users/nat/Documents/ChatGPT/个人/work/agent-kit/工程流程.md`。
+
 ## 规则
 
 - **改了源文件要同步到安装位置**，并在 CURRENT 里写明。Hermes 的技能、SOUL 改了要重启网关：`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`。
