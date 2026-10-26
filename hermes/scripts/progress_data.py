@@ -2,14 +2,16 @@
 
 用法：python3 progress_data.py [--date YYYY-MM-DD] [--project 项目id或别名]
 读：每个仓库当天的提交（所有本地分支，按分支归）、主分支停在哪、主目录未提交文件数、
-    CURRENT 最上面一节的标题和“下一步”、当天的派单台账（~/.hermes/dispatch）。
-输出：Markdown 到 stdout。某个仓库读不了只标在该项目下；名册读不了输出「取数失败」，退出码 1。
+    CURRENT 最上面一节的标题和“下一步”、当天的派单台账（~/.hermes/dispatch），
+    名册里有 github 的项目再用 gh 取当天新开、合并、关闭的 PR 和新开、关闭的 issue。
+输出：Markdown 到 stdout。某个仓库或它的 GitHub 读不了只标在该项目下；名册读不了输出「取数失败」，退出码 1。
 """
 import argparse
 import datetime as dt
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +44,49 @@ def commits(path, main, day):
                 seen.add(h)
                 out.setdefault(b, []).append(f"{t} `{h}` {s}")
     return out
+
+
+class GitHub:
+    """用 gh 取当天的 PR 和 issue。连不上一次后，后面的项目不再等超时，直接标同一个原因。"""
+    def __init__(self, day):
+        self.day, self.down = day, None
+        self.exe = shutil.which("gh", path=os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin"]))
+
+    def _list(self, repo, kind, fields):
+        since = self.day - dt.timedelta(days=1)  # GitHub 按 UTC 算日期，往前放一天再按北京时间筛
+        r = subprocess.run([self.exe, kind, "list", "-R", repo, "--state", "all", "--limit", "100",
+                            "--search", f"updated:>={since}", "--json", fields],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            msg = (r.stderr or r.stdout).strip()
+            raise RuntimeError(msg.splitlines()[-1][:150] if msg else f"gh 退出码 {r.returncode}")
+        return json.loads(r.stdout)
+
+    def on_day(self, ts):
+        return bool(ts) and dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date() == self.day
+
+    def activity(self, repo):
+        """返回 [(类别, ["#号 标题", ...]), ...]，只含有内容的类别；取不到抛 RuntimeError。"""
+        if self.down:
+            raise RuntimeError(self.down)
+        try:
+            if not self.exe:
+                raise RuntimeError("找不到 gh 命令")
+            prs = self._list(repo, "pr", "number,title,createdAt,mergedAt,closedAt")
+            issues = self._list(repo, "issue", "number,title,createdAt,closedAt")
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as e:
+            self.down = str(e) or type(e).__name__
+            raise RuntimeError(self.down)
+        def pick(items, test):
+            return [f"#{x['number']} {x['title']}" for x in sorted(items, key=lambda x: x["number"]) if test(x)]
+        groups = [
+            ("PR 新开", pick(prs, lambda x: self.on_day(x.get("createdAt")))),
+            ("PR 合并", pick(prs, lambda x: self.on_day(x.get("mergedAt")))),
+            ("PR 关闭（未合并）", pick(prs, lambda x: not x.get("mergedAt") and self.on_day(x.get("closedAt")))),
+            ("issue 新开", pick(issues, lambda x: self.on_day(x.get("createdAt")))),
+            ("issue 关闭", pick(issues, lambda x: self.on_day(x.get("closedAt")))),
+        ]
+        return [(k, v) for k, v in groups if v]
 
 
 def plain(s, clip=CLIP):
@@ -104,6 +149,7 @@ def main():
             sys.exit(1)
 
     todays = orders(day)
+    hub = GitHub(day)
     print(f"# 项目进展 · {day}（{'截至 ' + dt.datetime.now().strftime('%H:%M') if day == dt.date.today() else '全天'}）")
     quiet = []
     for p in projects:
@@ -118,8 +164,14 @@ def main():
             print(f"\n## {p['name']}（{p['id']}）\n\n- 读不了这个仓库：{e}")
             continue
         cur = current(path, day)
-        if not cm and not mine and not (cur and cur[2]):
-            quiet.append(p["name"])
+        gh_items, gh_down = [], None
+        if p.get("github"):
+            try:
+                gh_items = hub.activity(p["github"])
+            except RuntimeError as e:
+                gh_down = str(e)
+        if not cm and not mine and not gh_items and not (cur and cur[2]):
+            quiet.append(p["name"] + ("（GitHub 取不到）" if gh_down else ""))
             continue
         print(f"\n## {p['name']}（{p['id']}）\n")
         n = sum(len(v) for v in cm.values())
@@ -137,9 +189,15 @@ def main():
             print("- 无 CURRENT")
         for o in mine:
             print(f"- 派单 {o['no']}：{o.get('tool')} · {'写入' if o.get('mode') == 'write' else '只读'} · {o.get('status')}")
+        if gh_down:
+            print(f"- GitHub 取不到：{gh_down}")
+        elif p.get("github"):
+            print("- 今天 PR 和 issue：" + ("" if gh_items else "没有"))
+            for k, v in gh_items:
+                print(f"  - {k}：{'；'.join(v)}")
     if quiet:
         print(f"\n## 今天没动静\n\n- {'、'.join(quiet)}：没有提交、没有派单、CURRENT 没改")
-    print(f"\n来源：本机 git 与 {DISPATCH}；未读 GitHub（PR、issue 等 M3 统一 GitHub 后再加）")
+    print(f"\n来源：本机 git、派单台账 {DISPATCH} 与 GitHub（gh）")
 
 
 if __name__ == "__main__":

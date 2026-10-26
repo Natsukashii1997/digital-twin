@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.4.1
+version: 0.5.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -12,7 +12,7 @@ metadata:
 
 # 车间：派 Claude Code / Codex 跑单
 
-常浩让你“叫 Claude / Codex 去做……”“让车间改一下……”时用这个技能。**一律通过派单脚本 `~/.hermes/scripts/dispatch.py`**，不要直接敲 `claude`、`codex`、`git worktree`、`git merge`。需求总纲见 `~/Documents/ChatGPT/个人/work/digital-twin/PRD.md` 的 F5、F6。脚本每条命令最后输出一行 JSON：`ok` 表示成败，`msg` 是可以直接转给常浩的一句话。
+常浩让你“叫 Claude / Codex 去做……”“让车间改一下……”时用这个技能。**一律通过派单脚本 `~/.hermes/scripts/dispatch.py`**，不要直接敲 `claude`、`codex`、`git worktree`、`git merge`。需求总纲见 `~/Documents/ChatGPT/个人/work/digital-twin/PRD.md` 的 F5、F6；改动从 issue 到合并怎么走见 `~/Documents/ChatGPT/个人/work/agent-kit/工程流程.md`。脚本每条命令最后输出一行 JSON：`ok` 表示成败，`msg` 是可以直接转给常浩的一句话。
 
 下面用 `D` 代表 `/usr/bin/python3 ~/.hermes/scripts/dispatch.py`。
 
@@ -25,7 +25,7 @@ metadata:
 
 ## 2. 开单和确认门
 
-1. 先开单拿到单号：`D new --project <id> --tool <claude|codex> --mode <read|write> --task-file <任务文件>`。写入单会自动建 worktree（`~/.hermes/worktrees/<项目>/<单号>`）和分支 `hermes/<单号>`。
+1. 先开单拿到单号：`D new --project <id> --tool <claude|codex> --mode <read|write> --task-file <任务文件>`。写入单会自动建 worktree（`~/.hermes/worktrees/<项目>/<单号>`）和分支 `hermes/<单号>`；名册里有 `github` 的项目，分支从 GitHub 上的主分支拉出，并自动建一张 issue（`msg` 里会带 issue 号；建不成也照常开单，`msg` 会说明）。
 2. **只读单不用确认**，直接开跑（第 3 节）。
 3. **写入单先发给常浩确认**，格式：
    ```
@@ -45,13 +45,16 @@ metadata:
 
 ## 4. 回报
 
-跑完后读 `~/.hermes/dispatch/<单号>/out/receipt.json`，在飞书回报：
+写入单跑完、状态是 done 时，先执行 `D pr <单号>`：推分支、开 PR，返回 `pr_url`。`ok: false` 时（提交里像有密钥、推不上去、PR 没开成）把 `msg` 原样写进回报，不要重试。续跑后再跑完，同样执行一次，新提交会推到原来的 PR。
+
+然后读 `~/.hermes/dispatch/<单号>/out/receipt.json`，在飞书回报：
 - 第一行：✅/❌/⚠️ 单号 · 交给谁 · 用时
 - 车间总结（取 `summary` 的要点，不整段照贴）
-- 写入单再加三项：分支、提交了哪些文件（`committed_files`）、有没有未提交的改动（`uncommitted`）；最后问“合并吗？”
+- 写入单再加四项：PR 链接（`pr_url`，常浩可以在手机 GitHub 上看改动）、分支、提交了哪些文件（`committed_files`）、有没有未提交的改动（`uncommitted`）；最后问“合并吗？”
 - 有 `need_decision` 时，把问题原样转给常浩
 - `guard_main_changed` 或 `guard_remote_changed` 只要有一个是 true，第一行用 ⚠️，说明车间把提交弄进了主分支或动了远端，不要重试
-- `note_main_moved` 不为空：主分支在此期间被别的会话正常更新了，末尾提一句即可，不算告警
+- `guard_remote_changed` 只看本单分支在远端有没有出现或变化（车间自己 push 了）
+- `note_main_moved` 或 `note_remote_moved` 不为空：主分支或别的远端引用在此期间被别的会话正常更新了，末尾提一句即可，不算告警
 
 ## 5. 车间卡住了（need_decision）
 
@@ -66,9 +69,15 @@ metadata:
 
 ## 7. 合并和清理
 
-- 只有常浩明确说“合并”才执行 `D merge <单号>`。脚本会依次检查：worktree 是否干净、主仓库是否在主分支上；然后把分支变基到最新的主分支，跑名册里的测试命令，测试通过才快进合并。**不会 push。**
-- 合并失败（冲突、测试没过、主仓库未提交的改动和本单改了同一批文件）就把 `msg` 原样转给常浩，问他怎么处理，不要自己改代码硬合。
-- 合并成功后执行 `D clean <单号>` 删掉 worktree 和分支。常浩说“不要了 / 放弃”时也执行 `D clean <单号>`。
+- 只有常浩明确说“合并”才执行 `D merge <单号>`。脚本会依次检查：worktree 是否干净、主仓库是否在主分支上。名册里有 `github` 的项目接着走 GitHub：
+  1. 推送前检查：本地主分支有没推到 GitHub 的提交（多半是别的会话的）时，返回 `need_confirm: true`，`msg` 里列出这些提交的标题。把 `msg` 原样转给常浩，问“这些提交能推吗？”。他明确回“推”后，执行 `D merge <单号> --push-main <返回的 push_main>`；他不同意就停下，不合并。
+  2. 推本地主分支（只有上一步确认过才推）；本地和 GitHub 分叉时停下来报告。
+  3. 分支变基到最新的主分支，跑名册里的测试命令，测试过了才推分支。
+  4. 在 GitHub 上 squash 合并 PR，关联的 issue 自动关闭。
+  5. 主目录拉齐。拉不下来时 `ok` 仍是 true、`synced: false`：GitHub 上已经合并了，把 `msg` 转给常浩，说明本地主目录要人工处理。
+- 名册没有 `github` 的项目照旧：变基、测试、本地快进合并，不 push。
+- 合并失败（要确认没推的提交、分叉、冲突、测试没过、推不上去、GitHub 合并失败）就把 `msg` 原样转给常浩，问他怎么处理，不要自己改代码硬合，不要自己加 `--push-main`。
+- 合并成功后执行 `D clean <单号>` 删掉 worktree 和分支（走 GitHub 的单会先确认 PR 是 MERGED）。常浩说“不要了 / 放弃”时也执行 `D clean <单号>`，有 PR 和 issue 的会一起关掉。
 - 想看还有哪些单没收尾：`D list`。
 
 ## 失败信号
@@ -78,4 +87,4 @@ metadata:
 
 ## 验收方式
 
-常浩在飞书说“让 Claude 在 digital-twin 里改……”：你先开单、发待确认派单 → 他回“可以”（可能在话题里回） → 开跑 → 车间卡住时把问题转给他、他答复后续跑 → 回报分支和改动 → 他说“合并”就合并并清理，说“不要了”就清理。
+常浩在飞书说“让 Claude 在 digital-twin 里改……”：你先开单、发待确认派单 → 他回“可以”（可能在话题里回） → 开跑 → 车间卡住时把问题转给他、他答复后续跑 → 开 PR、回报 PR 链接和改动 → 他说“合并”就合并（有没推的提交先问他）并清理，说“不要了”就清理。

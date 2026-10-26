@@ -14,7 +14,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项，共 20 项），末尾显示 `Ran 20 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项，共 37 项），末尾显示 `Ran 37 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -35,3 +35,17 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ## 项目进展取数（test_progress_data.py）
 
 用临时 git 仓库、临时名册（`DT_ROSTER`）和临时台账（`DT_DISPATCH`）跑 `progress_data.py --date 2000-01-02`，不碰真实仓库和 `~/.hermes`。覆盖：当天提交按分支归、主分支优先、同一提交不重复、别的日子不算；CURRENT“下一步”的三种写法（列表、表格行、标题）且不误认说明文字；没动静的项目并成一行；只列当天的派单；读不了的仓库只标该项目；`--project` 按别名筛选、找不到报「取数失败」；名册 `inventory` 里的盘点仓库不现查；名册坏了退出码 1。
+
+## 派单接 GitHub（test_dispatch_github.py）
+
+用临时裸仓库当 GitHub 背后的远端、临时主仓库、临时名册和台账；PATH 最前面放假 `gh`（`fake_gh.py`，不联网，按状态目录里的文件回话、记下每次调用，`pr merge` 在裸仓库上做 squash 合并并删分支）。git 用临时全局配置，不读本机的。覆盖：
+
+- `new`：写入单从 origin 的主分支拉分支，本地主分支没推的提交不进本单；建 issue（标题取“目标”、带 `ready-for-agent`、正文含五要素）；只读单不调 gh；issue 建不成照常开单并在 `msg` 说明。
+- `pr`：只推本单分支（本地主分支没推的提交不上去），PR 正文 `Closes #7`、车间总结、提交的文件；提交里像有密钥时不推、`msg` 不带出密钥本身。
+- `merge`：本地主分支有没推的提交时先列出、不合并；`--push-main` 确认后推主分支、变基、squash 合并、主目录拉齐；确认之后本地又有新提交时拒绝；分叉时停；测试不过不合并；GitHub 已合并但主目录有重叠的未提交改动时报 `synced: false`，不动这些改动。
+- `clean`：PR 不是 MERGED 时不清理；确认 MERGED 后 `branch -D`；放弃时关 PR、关 issue、删远端分支。
+- 车间远端护栏（`run_worker.remote_guard`）：写入单只有本单分支在远端出现或变化才算违规，其他远端引用变化只记 note；只读单不算违规。
+
+## 进展里的 PR 和 issue（test_progress_github.py）
+
+假 `gh` 喂固定的 PR 和 issue，时区固定北京时间。覆盖：按北京时间算当天的 PR 新开、合并、未合并关闭和 issue 新开、关闭，前后一天的不算；只有 GitHub 上有动静的项目也列出来；gh 连不上时只在该项目下写「GitHub 取不到」，没动静的项目在「今天没动静」里带标记，连不上一次后不再逐个等超时；名册没有 `github` 的项目不调 gh。

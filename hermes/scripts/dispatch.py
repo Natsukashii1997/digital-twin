@@ -2,13 +2,17 @@
 
   python3 dispatch.py new   --project ID --tool claude|codex --mode read|write --task-file F
   python3 dispatch.py run   单号 [--followup 追加说明文件]   （放在后台跑；结束后读 out/receipt.json）
-  python3 dispatch.py merge 单号     （常浩说“合并”后才调用）
+  python3 dispatch.py pr    单号     （写入单跑完、回报前调用：推分支、开 PR）
+  python3 dispatch.py merge 单号 [--push-main 提交号]   （常浩说“合并”后才调用）
   python3 dispatch.py clean 单号     （合并后或放弃时，删 worktree 和分支）
   python3 dispatch.py list [--all]
 
 每张单一个目录 ~/.hermes/dispatch/<单号>/：order.json（台账）、task.md、out/。
 续跑前把已有回执归档为 out/receipt-N.json；out/receipt.json 仍是最新回执。
-写入单在 ~/.hermes/worktrees/<项目>/<单号> 建 worktree，分支 hermes/<单号>，从名册里的主分支拉出。
+写入单在 ~/.hermes/worktrees/<项目>/<单号> 建 worktree，分支 hermes/<单号>。
+名册里有 github 的项目（工程流程见 agent-kit/工程流程.md）：分支从 origin 的主分支拉出，开单时建 issue，
+跑完用 pr 开 PR，merge 走 GitHub squash 合并再拉齐主目录；本地主分支有没推的提交时先列给常浩，
+他确认后带 --push-main 再合。没有 github 的项目照旧从本地主分支拉出、本地快进合并。
 并发：同时最多 2 张单在跑；同一个仓库同一时间只跑 1 张。
 每条命令最后输出一行 JSON，字段 ok 表示成败、msg 是给常浩看的一句话。
 """
@@ -29,6 +33,11 @@ WT_ROOT = HOME / ".hermes/worktrees"
 WORKER = HOME / ".hermes/scripts/run_worker.py"
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
 MAX_RUNNING = 2
+# 推送前检查只查密钥和 Token（M3 B5-3）；受限内容靠规矩防
+SECRET = re.compile(
+    r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_\w{30,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{10,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY"
+    r"|(?i:app_?secret|client_secret|api[_-]?key|access_token|refresh_token|password|passwd|secret)[\"' ]*[:=][\"' ]*[A-Za-z0-9_./+-]{16,}")
 
 
 def done(ok, msg, **kw):
@@ -41,6 +50,48 @@ def git(cwd, *args, check=False):
     if check and r.returncode != 0:
         done(False, f"git {' '.join(args)} 失败：{(r.stderr or r.stdout).strip()[:300]}")
     return r
+
+
+def gh(*args):
+    """调用 GitHub CLI；找不到 gh 或超时也按失败返回，由调用方决定停不停。"""
+    exe = shutil.which("gh", path=os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin"]))
+    if not exe:
+        return subprocess.CompletedProcess(["gh"], 127, "", "找不到 gh 命令")
+    try:
+        return subprocess.run([exe, *args], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(["gh"], 124, "", "gh 超时")
+
+
+def gh_err(r):
+    return (r.stderr or r.stdout).strip()[:300]
+
+
+def secret_hits(cwd, rng):
+    """要推的提交里新增的行有没有像密钥的；只报文件和开头几个字符，不把密钥本身转出去。"""
+    log = git(cwd, "log", "-p", "--no-color", "--format=commit %h", rng).stdout
+    hits, file = [], None
+    for line in log.splitlines():
+        if line.startswith("+++ b/"):
+            file = line[6:]
+        elif line.startswith("+") and not line.startswith("+++"):
+            hits += [f"{file}：{m.group(0)[:6]}…" for m in SECRET.finditer(line)]
+    return hits[:5]
+
+
+def task_title(text, no):
+    """issue 和 PR 的标题：取任务说明里的“目标”，没有就取第一行。"""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for i, l in enumerate(lines):
+        if m := re.match(r"^[#*\-\s]*目标[*\s]*[：:]\s*(.+)", l):
+            return f"{m[1].strip('* ')[:80]}（派单 {no}）"
+        if re.fullmatch(r"#+\s*目标\s*", l) and i + 1 < len(lines):
+            return f"{lines[i + 1].strip('#*- ')[:80]}（派单 {no}）"
+    return f"{(lines[0].strip('#*- ') if lines else 'Hermes 派单')[:80]}（派单 {no}）"
+
+
+def issue_body(text, no, tool):
+    return f"{text.strip()}\n\n---\nHermes 派单 {no} · 车间 {tool} · 分支 `hermes/{no}`。跑完开 PR，交接写在 PR 里。"
 
 
 def project(pid):
@@ -76,22 +127,38 @@ def cmd_new(a):
     p = project(a.project)
     if a.mode == "write" and not p.get("write_allowed"):
         done(False, f"名册不允许往 {p['name']} 写入")
+    hub = a.mode == "write" and p.get("github")
+    if hub:  # 从 origin 的主分支拉：本地主分支上别的会话没推的提交不会混进 PR
+        git(p["path"], "fetch", "origin", p["main"], check=True)
     no = next_no()
     d = ROOT / no
     d.mkdir(parents=True)
     shutil.copy(a.task_file, d / "task.md")
     o = {"no": no, "project": p["id"], "tool": a.tool, "mode": a.mode, "status": "new",
          "created": dt.datetime.now().isoformat(timespec="seconds"), "cwd": p["path"]}
+    note = ""
     if a.mode == "write":
         wt = WT_ROOT / p["id"] / no
         wt.parent.mkdir(parents=True, exist_ok=True)
-        git(p["path"], "worktree", "add", "-b", f"hermes/{no}", str(wt), f"refs/heads/{p['main']}", check=True)
+        start = f"refs/remotes/origin/{p['main']}" if hub else f"refs/heads/{p['main']}"
+        git(p["path"], "worktree", "add", "--no-track", "-b", f"hermes/{no}", str(wt), start, check=True)
         # 依赖不进 git：主仓库有 node_modules 就链接过去，车间能直接跑测试
         if (Path(p["path"]) / "node_modules").is_dir() and not (wt / "node_modules").exists():
             (wt / "node_modules").symlink_to(Path(p["path"]) / "node_modules")
-        o.update(cwd=str(wt), branch=f"hermes/{no}", base=git(p["path"], "rev-parse", f"refs/heads/{p['main']}").stdout.strip())
+        o.update(cwd=str(wt), branch=f"hermes/{no}", base=git(p["path"], "rev-parse", start).stdout.strip())
+    if hub:  # 写入单自动建 issue（M3 B5-1）；建不成不拦开单，回报里说明
+        text = (d / "task.md").read_text(encoding="utf-8")
+        r = gh("issue", "create", "-R", p["github"], "-t", task_title(text, no), "-b", issue_body(text, no, a.tool),
+               "-l", "ready-for-agent")
+        m = re.search(r"/issues/(\d+)", r.stdout)
+        if r.returncode == 0 and m:
+            o.update(issue=int(m[1]), issue_url=m.string[:m.end()].split()[-1])
+            note = f"，issue #{o['issue']}"
+        else:
+            o["issue_error"] = gh_err(r)
+            note = f"，issue 没建成：{o['issue_error']}"
     save(o)
-    done(True, f"已开单 {no}（{p['name']} · {a.tool} · {'写入' if a.mode == 'write' else '只读'}）", order=o)
+    done(True, f"已开单 {no}（{p['name']} · {a.tool} · {'写入' if a.mode == 'write' else '只读'}）{note}", order=o)
 
 
 def archive_receipt(receipt, content):
@@ -140,6 +207,10 @@ def cmd_run(a):
                 archive_receipt(receipt, previous)
         except (OSError, ValueError) as e:
             done(False, f"{a.no} 续跑前读取或归档回执失败，未启动车间：{e}")
+    if o.get("issue") and not a.followup:  # 确认门里改过任务的话，让 issue 跟上开跑时的版本；失败不拦
+        r = gh("issue", "edit", str(o["issue"]), "-R", project(o["project"])["github"],
+               "-b", issue_body(task.read_text(encoding="utf-8"), o["no"], o["tool"]))
+        o["issue_sync_error"] = gh_err(r) if r.returncode else None
     o["status"] = "running"
     save(o)
     cmd = [sys.executable, str(WORKER), "--tool", o["tool"], "--cwd", o["cwd"], "--task-file", str(task),
@@ -155,6 +226,115 @@ def cmd_run(a):
          stderr_tail=r.stderr[-500:] if r.returncode else "")
 
 
+def pr_body(o, p, files, summary):
+    listed = "\n".join(f"- `{f}`" for f in files) or "- （没有）"
+    return f"""{f"Closes #{o['issue']}" if o.get("issue") else "（没有关联 issue）"}
+
+Hermes 派单 {o['no']} · 车间 {o['tool']} · 分支 `{o['branch']}`
+
+## 做了什么
+{summary.strip() or "（回执里没有车间总结）"}
+
+## 提交的文件
+{listed}
+
+## 测试
+- 车间自报见上面的总结；合并时脚本会在变基后再跑名册里的测试命令（{p.get("test") or "名册没写测试命令"}）。
+
+## 遗留 / 范围外发现
+- 见上面的总结。
+
+## 要常浩定的事
+- 合并吗？在飞书回“合并”。
+"""
+
+
+def cmd_pr(a):
+    o = load(a.no)
+    p = project(o["project"])
+    if o["mode"] != "write" or o["status"] != "done" or not p.get("github"):
+        done(False, f"{a.no} 不是已完成、有 GitHub 远端的写入单（状态 {o['status']}），不开 PR")
+    wt, remote = o["cwd"], f"refs/remotes/origin/{p['main']}"
+    if git(wt, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        done(False, f"{a.no} 的 worktree 还有没提交的改动，先处理再开 PR")
+    if git(wt, "rev-parse", "HEAD").stdout.strip() == o.get("base"):
+        done(False, f"{a.no} 没有任何提交，不开 PR")
+    git(wt, "fetch", "origin", p["main"], check=True)
+    if hits := secret_hits(wt, f"{remote}..HEAD"):
+        done(False, f"{a.no} 的提交里像有密钥或 Token，没有推送：{'；'.join(hits)}", secret_hits=hits)
+    r = git(wt, "push", "--force-with-lease", "-u", "origin", f"HEAD:refs/heads/{o['branch']}")
+    if r.returncode != 0:
+        done(False, f"{a.no} 推分支失败：{(r.stderr or r.stdout).strip()[:300]}")
+    if o.get("pr"):
+        done(True, f"{a.no} 已把新提交推到 PR #{o['pr']}：{o['pr_url']}", pr_url=o["pr_url"])
+    rc_file = ROOT / a.no / "out/receipt.json"
+    summary = (json.loads(rc_file.read_text()).get("summary") or "") if rc_file.exists() else ""
+    files = git(wt, "diff", "--name-only", f"{remote}...HEAD").stdout.split()
+    text = (ROOT / a.no / "task.md").read_text(encoding="utf-8")
+    r = gh("pr", "create", "-R", p["github"], "-B", p["main"], "-H", o["branch"],
+           "-t", task_title(text, a.no), "-b", pr_body(o, p, files, summary))
+    m = re.search(r"https://\S+/pull/(\d+)", r.stdout)
+    if r.returncode != 0 or not m:
+        done(False, f"{a.no} 分支已推送，PR 没开成：{gh_err(r)}")
+    o.update(pr=int(m[1]), pr_url=m[0])
+    save(o)
+    done(True, f"{a.no} 已开 PR：{o['pr_url']}", pr_url=o["pr_url"])
+
+
+def merge_github(a, o, p):
+    """常浩说“合并”后：推送前检查 → 变基 → 测试 → GitHub squash 合并 → 主目录拉齐（工程流程第 5 节）。"""
+    repo, wt, main = p["path"], o["cwd"], p["main"]
+    local, remote = f"refs/heads/{main}", f"refs/remotes/origin/{main}"
+    if not o.get("pr"):
+        done(False, f"{a.no} 还没开 PR，先执行 pr {a.no}")
+    git(repo, "fetch", "origin", main, check=True)
+    ahead = git(repo, "log", "--format=%h %s", f"{remote}..{local}").stdout.splitlines()
+    behind = git(repo, "rev-list", f"{local}..{remote}").stdout.split()
+    if ahead and behind:  # M3 B5-4：分叉不自动处理
+        done(False, f"{p['name']} 本地 {main} 和 GitHub 分叉了（本地多 {len(ahead)} 个、远端多 {len(behind)} 个提交），"
+             "没有合并，请人工处理", unpushed=ahead)
+    if ahead:  # 多半是别的会话提交了没推：列给常浩，他回“推”后带 --push-main 再来
+        tip = git(repo, "rev-parse", local).stdout.strip()
+        if not (a.push_main and len(a.push_main) >= 7 and tip.startswith(a.push_main)):
+            why = "你确认之后本地又有了新提交，" if a.push_main else ""
+            done(False, f"{why}{p['name']} 本地 {main} 有 {len(ahead)} 个没推到 GitHub 的提交：{'；'.join(ahead[:10])}。"
+                 f"确认能推，再执行 merge {a.no} --push-main {tip[:12]}",
+                 unpushed=ahead, push_main=tip[:12], need_confirm=True)
+        if hits := secret_hits(repo, f"{remote}..{local}"):
+            done(False, f"{p['name']} 本地 {main} 没推的提交里像有密钥或 Token，没有推送：{'；'.join(hits)}", secret_hits=hits)
+        r = git(repo, "push", "origin", f"{local}:refs/heads/{main}")
+        if r.returncode != 0:
+            done(False, f"推本地 {main} 失败，没有合并：{(r.stderr or r.stdout).strip()[:300]}")
+    r = git(wt, "rebase", remote)
+    if r.returncode != 0:
+        git(wt, "rebase", "--abort")
+        done(False, f"{a.no} 和最新 {main} 有冲突，变基失败，已撤回变基。需要人工处理或派单解决冲突")
+    if p.get("test"):
+        t = subprocess.run(p["test"], shell=True, cwd=wt, capture_output=True, text=True, timeout=1800)
+        (ROOT / a.no / "merge-test.log").write_text(t.stdout + t.stderr)
+        if t.returncode != 0:
+            done(False, f"{a.no} 合并前测试没过（{p['test']}），没有合并。日志：{ROOT / a.no / 'merge-test.log'}")
+    r = git(wt, "push", "--force-with-lease", "origin", f"HEAD:refs/heads/{o['branch']}")
+    if r.returncode != 0:
+        done(False, f"{a.no} 变基后推分支失败，没有合并：{(r.stderr or r.stdout).strip()[:300]}")
+    head = git(wt, "rev-parse", "HEAD").stdout.strip()
+    r = gh("pr", "merge", str(o["pr"]), "-R", p["github"], "--squash", "--match-head-commit", head)
+    if r.returncode != 0:
+        done(False, f"{a.no} 在 GitHub 上合并 PR #{o['pr']} 失败：{gh_err(r)}")
+    o["status"] = "merged"
+    save(o)
+    git(repo, "fetch", "origin", main)
+    o["merged_to"] = git(repo, "rev-parse", remote).stdout.strip()
+    save(o)
+    r = git(repo, "merge", "--ff-only", remote)
+    if r.returncode != 0:
+        done(True, f"{a.no} 已在 GitHub 合并进 {main}（{o['merged_to'][:7]}），但本地主目录没拉下来"
+             f"（多半和未提交的改动重叠）：{(r.stderr or r.stdout).strip()[:200]}。没有 stash、没有 reset，请人工处理",
+             synced=False, tested=bool(p.get("test")))
+    done(True, f"{a.no} 已 squash 合并进 {p['name']} 的 {main}（{o['merged_to'][:7]}），主目录已拉齐",
+         synced=True, tested=bool(p.get("test")))
+
+
 def cmd_merge(a):
     o = load(a.no)
     if o["mode"] != "write" or o["status"] != "done":
@@ -168,6 +348,8 @@ def cmd_merge(a):
     # 主仓库有别的未提交改动不拦：快进合并只在这些改动和本单改的文件重叠时才会失败，交给 git 判断
     if git(wt, "rev-parse", "HEAD").stdout.strip() == o.get("base"):
         done(False, f"{a.no} 没有任何提交，没东西可合并")
+    if p.get("github"):
+        merge_github(a, o, p)
     # 主分支在跑单期间前进了：先把单的分支变基到最新主分支上
     r = git(wt, "rebase", f"refs/heads/{main}")
     if r.returncode != 0:
@@ -195,9 +377,19 @@ def cmd_clean(a):
     if o["status"] == "running":
         done(False, f"{a.no} 还在跑，不能清理")
     p = project(o["project"])
+    if o["status"] == "merged" and o.get("pr"):  # squash 合并后本地分支不算已合并，先确认 PR 真的合了
+        r = gh("pr", "view", str(o["pr"]), "-R", p["github"], "--json", "state", "-q", ".state")
+        if r.returncode != 0 or r.stdout.strip() != "MERGED":
+            done(False, f"{a.no} 的 PR #{o['pr']} 状态不是 MERGED（{r.stdout.strip() or gh_err(r)}），没有清理")
     git(p["path"], "worktree", "remove", "--force", o["cwd"])
-    # 已合并的用 -d；没合并（放弃）的用 -D
-    git(p["path"], "branch", "-d" if o["status"] == "merged" else "-D", o["branch"])
+    # 本地快进合并的用 -d；GitHub squash 合并的（上面已确认 MERGED）和放弃的用 -D
+    git(p["path"], "branch", "-d" if o["status"] == "merged" and not o.get("pr") else "-D", o["branch"])
+    if o["status"] != "merged" and p.get("github"):  # 放弃：关掉 PR 和 issue，删远端分支
+        if o.get("pr"):
+            gh("pr", "close", str(o["pr"]), "-R", p["github"], "-c", f"派单 {a.no} 已放弃。")
+            git(p["path"], "push", "origin", "--delete", o["branch"])
+        if o.get("issue"):
+            gh("issue", "close", str(o["issue"]), "-R", p["github"], "-r", "not planned", "-c", f"派单 {a.no} 已放弃。")
     o["status"] = "cleaned" if o["status"] == "merged" else "abandoned"
     save(o)
     done(True, f"{a.no} 的 worktree 和分支已清理（{o['status']}）")
@@ -205,7 +397,7 @@ def cmd_clean(a):
 
 def cmd_list(a):
     rows = [x for x in orders() if a.all or x["status"] not in ("cleaned", "abandoned")]
-    done(True, f"{len(rows)} 张单", orders=[{k: x.get(k) for k in ("no", "project", "tool", "mode", "status", "branch")} for x in rows])
+    done(True, f"{len(rows)} 张单", orders=[{k: x.get(k) for k in ("no", "project", "tool", "mode", "status", "branch", "issue", "pr_url")} for x in rows])
 
 
 def main():
@@ -221,11 +413,14 @@ def main():
     s.add_argument("no")
     s.add_argument("--followup")
     s.add_argument("--timeout", type=int, default=3600)
-    for name in ("merge", "clean"):
+    s = sub.add_parser("merge")
+    s.add_argument("no")
+    s.add_argument("--push-main", help="常浩确认可以推的本地主分支提交号（merge 列出没推的提交时给出）")
+    for name in ("pr", "clean"):
         sub.add_parser(name).add_argument("no")
     sub.add_parser("list").add_argument("--all", action="store_true")
     a = ap.parse_args()
-    {"new": cmd_new, "run": cmd_run, "merge": cmd_merge, "clean": cmd_clean, "list": cmd_list}[a.cmd](a)
+    {"new": cmd_new, "run": cmd_run, "pr": cmd_pr, "merge": cmd_merge, "clean": cmd_clean, "list": cmd_list}[a.cmd](a)
 
 
 if __name__ == "__main__":

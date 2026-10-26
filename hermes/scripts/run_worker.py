@@ -7,8 +7,9 @@
 做的事：
 - 设置代理（本机 claude 不走系统代理，直连会 403），清掉第三方 Anthropic 变量
 - read 模式只读；write 模式放开权限（PRD M2 决定：边界靠独立 worktree + 下面的护栏 + 合并须常浩确认）
-- 跑完写 结果目录/receipt.json，并检查护栏：车间有没有把东西弄进主分支、远端分支有没有变（有没有 push）。
-  主分支被别的会话正常更新（例如另一个 Claude 会话合并了自己的分支）不算违规，只记在 note_main_moved。
+- 跑完写 结果目录/receipt.json，并检查护栏：车间有没有把东西弄进主分支、本单分支在远端有没有出现或变化（有没有 push）。
+  主分支被别的会话正常更新（例如另一个 Claude 会话合并了自己的分支）不算违规，只记在 note_main_moved；
+  别的远端引用变化（别的会话 push、fetch）也不算违规，只记在 note_remote_moved。
 - 只接项目名册（digital-twin/projects.json）里登记的仓库；worktree 按所属主仓库匹配
 退出码：0 正常；1 车间失败或超时；2 护栏被触发（主分支或远端被动过）；3 不在名册里或名册不允许写入。
 """
@@ -49,6 +50,18 @@ def snapshot(cwd, main):
         "main": git(cwd, "rev-parse", f"refs/heads/{main}"),
         "remotes": git(cwd, "for-each-ref", "refs/remotes", "--format=%(refname) %(objectname)"),
     }
+
+
+def remote_guard(before, after, mode):
+    """写入单：本单分支在任一远端出现或变化才算违规；其他远端引用的变化只记下来。只读单没有写权限，只记。"""
+    def refs(s):
+        return dict(l.split(" ", 1) for l in s.splitlines() if " " in l)
+    b, c = refs(before["remotes"]), refs(after["remotes"])
+    moved = sorted(r for r in b.keys() | c.keys() if b.get(r) != c.get(r))
+    mine = {before["branch"], after["branch"]} - {""} if mode == "write" else set()
+    own = [r for r in moved if r.split("/", 3)[-1] in mine]
+    others = [r for r in moved if r not in own]
+    return bool(own), (f"{len(others)} 个远端引用有变化（别的会话 push 或 fetch，非本单）：" + "、".join(others[:5])) if others else None
 
 
 def roster_lookup(cwd):
@@ -174,6 +187,7 @@ def main():
         or (worker_committed and subprocess.run(
             ["git", "-C", a.cwd, "merge-base", "--is-ancestor", after["head"], f"refs/heads/{a.main}"]
         ).returncode == 0))
+    remote_violation, remote_note = remote_guard(before, after, a.mode)
     sid, text, err = parse(a.tool, stdout, out)
     decision = next((l.split(":", 1)[1].strip() for l in text.splitlines()[::-1]
                      if l.strip().startswith("NEED_DECISION:")), None)
@@ -188,7 +202,8 @@ def main():
         "uncommitted": [l for l in git(a.cwd, "status", "--porcelain").splitlines() if l],
         "guard_main_changed": main_violation,
         "note_main_moved": f"{before['main'][:7]} → {after['main'][:7]}（别的会话更新，非本单）" if main_moved and not main_violation else None,
-        "guard_remote_changed": before["remotes"] != after["remotes"],
+        "guard_remote_changed": remote_violation,
+        "note_remote_moved": remote_note,
         "summary": text[-3000:],
     }
     (out / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
