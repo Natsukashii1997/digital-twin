@@ -1,42 +1,70 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.2.0
+version: 0.3.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
   hermes:
     tags: [Coding-Agent, Claude, Codex, Dispatch]
-    related_skills: [claude-code, codex]
+    related_skills: []
 ---
 
 # 车间：派 Claude Code / Codex 跑单
 
-常浩让你“叫 Claude / Codex 去做……”“让车间看一下……”时用这个技能。**一律通过包装脚本调用**，不要直接敲 `claude -p` 或 `codex exec`：网关环境没有代理，直接调用 claude 会 403；包装脚本还负责护栏和回执。需求总纲见 `~/Documents/ChatGPT/个人/work/digital-twin/PRD.md` 的 F5、F6。
+常浩让你“叫 Claude / Codex 去做……”“让车间改一下……”时用这个技能。**一律通过派单脚本 `~/.hermes/scripts/dispatch.py`**，不要直接敲 `claude`、`codex`、`git worktree`、`git merge`。需求总纲见 `~/Documents/ChatGPT/个人/work/digital-twin/PRD.md` 的 F5、F6。脚本每条命令最后输出一行 JSON：`ok` 表示成败，`msg` 是可以直接转给常浩的一句话。
 
-## 当前阶段（M2 批 B）
+下面用 `D` 代表 `/usr/bin/python3 ~/.hermes/scripts/dispatch.py`。
 
-- **只接只读单**（读代码、读文档、总结、查问题、给方案），`--mode read`。
-- 写入单（改代码、提交）要等派单技能 `dispatch` 上线（M2 批 C），在那之前常浩要写入就告诉他“写入单还没开通”。
-- 只能在**项目名册**登记的仓库里跑：`~/Documents/ChatGPT/个人/work/digital-twin/projects.json`。每次派单前先读名册，按 `name` 和 `aliases` 匹配常浩说的项目，用 `path` 作为 `--cwd`。主分支由包装脚本自动从名册里取。名册里没有的项目，直接告诉常浩“不在名册里”，并问他要不要加进名册，不要自己猜路径去跑（包装脚本也会拒绝，退出码 3）。
-- 匹配到多个项目、或者匹配不上时，先问常浩，不要自己挑。
+## 1. 整理成派单
 
-## 步骤
+1. **项目**：先读名册 `~/Documents/ChatGPT/个人/work/digital-twin/projects.json`，按 `name` 和 `aliases` 匹配，取 `id`。匹配不上，告诉常浩“不在名册里”，问要不要加进去；匹配到多个，先问。不要自己去读名册外的项目来代替派单。
+2. **只读还是写入**：要改代码、改文档、提交的就是写入单；看、查、总结、出方案的是只读单。
+3. **交给谁**：常浩点名就听他的；没点名时，读代码、查问题、改后端默认 Codex，写文档、梳理方案、改界面默认 Claude，在回复里说一句为什么。
+4. **任务说明**写进一个临时文件，必须包含五要素：目标、交付物、验收标准（怎么算做完）、边界（哪些不做）、交给谁。车间看不到你和常浩的对话，要写清楚。
 
-1. 确定 **项目**（从名册里匹配）和 **交给谁**：常浩点名就听他的；没点名时，读代码、查资料类默认 Codex，写文档、梳理方案类默认 Claude，在回复里说一句为什么。
-2. 生成单号 `D` + 年月日 + `-` + 当天序号，例如 `D20261026-1`。建目录 `~/.hermes/dispatch/<单号>/`，把任务写进 `task.md`：要做什么、交付什么、哪些不做。写清楚，车间看不到你和常浩的对话。
-3. 用 terminal 工具**后台**运行（`background=true`），并告诉常浩“已派给 X，单号 …”：
-   ```
-   /usr/bin/python3 ~/.hermes/scripts/run_worker.py --tool <claude|codex> --cwd <仓库路径> --task-file ~/.hermes/dispatch/<单号>/task.md --out ~/.hermes/dispatch/<单号>/out --mode read --timeout 1800
-   ```
-4. 运行结束后读 `~/.hermes/dispatch/<单号>/out/receipt.json`，在飞书回报：
-   - 第一行：✅/❌ 单号 · 交给谁 · 用时
-   - 车间总结（取 `summary` 的要点，不整段照贴）
-   - 有 `need_decision` 时，把问题原样转给常浩
-   - 护栏：`guard_main_changed` 或 `guard_remote_changed` 只要有一个是 true，**第一行就改成 ⚠️**，并说明是车间把提交弄进了主分支，或者远端被动过
-   - `note_main_moved` 不为空时，说明跑单期间主分支被别的会话正常更新了（不是车间干的），在回报末尾提一句即可，**不算告警**
-5. 失败信号：退出码 3 是不在名册里或名册不允许写入，照实告诉常浩；退出码 1（车间失败或超时）就看 `out/stderr.log` 的最后几行，说明原因；退出码 2 是护栏被触发，立刻报告，不要重试。同一张单最多重试一次。
+## 2. 确认门
+
+- **只读单不用确认**，直接开单开跑。
+- **写入单先发给常浩确认**，格式：
+  ```
+  📝 待确认派单
+  项目：xx　车间：Claude/Codex　类型：写入
+  目标：…
+  验收：…
+  边界：…
+  回复「可以」开跑，或者直接说要改哪里。
+  ```
+  只有常浩回复“可以 / 行 / 跑吧”等明确同意，才开单。改了要求就改完再发一次。
+
+## 3. 开单和开跑
+
+1. `D new --project <id> --tool <claude|codex> --mode <read|write> --task-file <任务文件>`。写入单会自动建 worktree（`~/.hermes/worktrees/<项目>/<单号>`）和分支 `hermes/<单号>`。
+2. 用 terminal 工具**后台**运行（`background=true`）：`D run <单号>`，并告诉常浩“已派给 X，单号 …”。
+3. 返回 `busy: true` 表示在排队（同时最多 2 张单，同一个仓库一次只跑 1 张）：告诉常浩“排队中”，等手上的单跑完收到通知后，再对排队的单执行 `D run <单号>`。
+
+## 4. 回报
+
+跑完后读 `~/.hermes/dispatch/<单号>/out/receipt.json`，在飞书回报：
+- 第一行：✅/❌/⚠️ 单号 · 交给谁 · 用时
+- 车间总结（取 `summary` 的要点，不整段照贴）
+- 写入单再加三项：分支、提交了哪些文件（`committed_files`）、有没有未提交的改动（`uncommitted`）；最后问“合并吗？”
+- 有 `need_decision` 时，把问题原样转给常浩
+- `guard_main_changed` 或 `guard_remote_changed` 只要有一个是 true，第一行用 ⚠️，说明车间把提交弄进了主分支或动了远端，不要重试
+- `note_main_moved` 不为空：主分支在此期间被别的会话正常更新了，末尾提一句即可，不算告警
+
+## 5. 合并和清理
+
+- 只有常浩明确说“合并”才执行 `D merge <单号>`。脚本会依次检查：worktree 是否干净、主仓库是否在主分支上且干净；然后把分支变基到最新的主分支，跑名册里的测试命令，测试通过才快进合并。**不会 push。**
+- 合并失败（冲突、测试没过、主仓库不干净）就把 `msg` 原样转给常浩，问他怎么处理，不要自己改代码硬合。
+- 合并成功后执行 `D clean <单号>` 删掉 worktree 和分支。常浩说“不要了 / 放弃”时也执行 `D clean <单号>`。
+- 想看还有哪些单没收尾：`D list`。
+
+## 失败信号
+
+- `run` 返回 `ok: false` 且不是 `busy`：看 `stderr_tail` 和 `~/.hermes/dispatch/<单号>/out/stderr.log` 的最后几行，说明原因。同一张单最多重试一次。
+- 护栏被触发（单的状态是 `guard`）：立刻报告，不重试，也不合并。
 
 ## 验收方式
 
-常浩在飞书说“让 Claude/Codex 看一下 xx 仓库……”，你能派出去、等它跑完，并按上面的格式回报。
+常浩在飞书说“让 Claude 在 digital-twin 里改……”：你先发待确认派单 → 他回“可以” → 开单开跑 → 回报分支和改动 → 他说“合并” → 合并并清理 → 回报合并结果。
