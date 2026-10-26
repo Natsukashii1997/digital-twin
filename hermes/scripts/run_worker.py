@@ -29,8 +29,11 @@ PREAMBLE = """你是被常浩的数字分身 Hermes 派来干活的车间。规�
 - 只在当前目录和当前分支干活：不要切换到主分支，不要合并，不要 push，不要删除分支。
 - 需要常浩拍板才能继续时，停下来，在最后单独一行输出：NEED_DECISION: <问题和可选项>
 - 结束时用简体中文写：做了什么、改了哪些文件、测试或检查结果、还剩什么。
-
-任务：
+"""
+WRITE_RULES = """- 这是写入单：你在一个独立的 worktree 和分支里。改完先跑项目的测试或检查，再在当前分支提交（git commit，提交信息写清楚改了什么）；不要留下未提交的改动。
+- 依赖目录 node_modules 可能是链接到主仓库的，不要在这里重装或修改依赖；需要新增依赖时停下来，用 NEED_DECISION 问常浩。
+"""
+READ_RULES = """- 这是只读单：不要修改任何文件。
 """
 
 
@@ -142,7 +145,7 @@ def main():
     a.main = a.main or proj["main"]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    task = PREAMBLE + Path(a.task_file).read_text()
+    task = PREAMBLE + (WRITE_RULES if a.mode == "write" else READ_RULES) + "\n任务：\n" + Path(a.task_file).read_text()
     before = snapshot(a.cwd, a.main)
     cmd = claude_cmd(a, task) if a.tool == "claude" else codex_cmd(a, task, out)
     if not cmd[0]:
