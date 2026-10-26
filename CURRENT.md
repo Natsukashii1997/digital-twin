@@ -6,6 +6,31 @@
 
 ---
 
+## 2026-10-27 · M3 批 4（B4 + B5）：开 PR，重建 digital-twin 远端
+
+- **决定**（常浩）：批 4 按草稿做，开 issue、在 worktree 里写、开 PR，合并前等他说。发现受限内容被推上 GitHub 后，又定了：删掉 GitHub 上的 digital-twin 重建，M4 那 3 个提交改成只写指针和结论；71fe99e、5dc6df7 里引用个人上下文页内容的句子也一起改成页名指针。
+- **PR**（都在 `~/Sandbox/worktrees/m3-b4-*`，主目录没动）：
+  - 牛马之家 work-desk#2：`npm test` 739/739 通过。
+  - 数码世界 personal-ai-workbench#3：1551 项中 2 项失败，都是 worktree 环境造成的（缺 `dist/`，找不到上级目录的 `wiki-local`）；补上构建、链上 wiki-local 后，这两个测试文件 19/19 通过。
+  - agent-kit#2：project-starter 原样收进仓库，再改成两层一起铺；临时目录试铺通过，骨架自带测试 4/4、规则检查通过。
+  - digital-twin#2：自测 20 项通过。
+  - 每个 PR 关联一张 issue，都打了 `ready-for-agent`。内容见共享笔记 `M3-批4-待写内容.md`。
+- **Codex 实测**：0.160.1 会读 `~/.agents/skills`；to-spec 这类只在点名时加载，点名 `$to-spec` 后能读到正文。
+- **受限内容外泄与重建**：digital-twin 的 PR 分支是从本地 main 拉的，把 M4 那 3 个没推的提交（含常浩的个人决定）带上了 GitHub。处理经过：
+  1. 把旧远端改名为 `digital-twin-old-to-delete`。
+  2. 新建了空仓库，但 T1 刚好在这时推送，新仓库也带上了旧提交，于是又改名为 `digital-twin-old-to-delete-2`。
+  3. 请 T1 暂停推送；M4 改写了自己的提交，Claude 又补改了 vault 0.1.0 里两处引用页面内容的句子。
+  4. 核对全部历史，按关键词扫，命中 0。最终文件树和 M4 改写后的版本一字不差。
+  5. 第三次新建 `Natsukashii1997/digital-twin`，推 main `ff800e3`；设置和 5 个标签已回读，issue #1 和 PR #2 已重开。
+  - 改写前的本地历史打成 bundle 存在 `evidence/M3-B4-20261027/`（权限 600）。
+- 测试：见上面各 PR；digital-twin 重建后本地 main 自测 20 项通过；新远端 main 和本地一致。
+- 本轮新坑：无（教训记在下面的遗留里，批 5 写进合并流程）。
+- 遗留：
+  1. GitHub 上两个旧仓库 `digital-twin-old-to-delete`、`digital-twin-old-to-delete-2` 要常浩在网页上删除，本机 `gh` 没有 `delete_repo` 权限。
+  2. 4 个 PR 等常浩说“合并”。
+  3. 教训：从本地 main 拉分支推送，会把别人没推的提交一起带上去。批 5 的合并流程要先检查 `origin/main..main` 里有没有受限内容，再推。
+- 下一步：常浩说“合并”后按 先推本地 main → 变基 → squash 合并 → 主目录 `git pull --ff-only` 合并 4 个 PR；之后进批 5。
+
 ## 2026-10-27 · M5 T1：日报和周报结构重设计（已拍板）
 
 - 时间：开工 00:02
