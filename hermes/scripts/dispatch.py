@@ -133,8 +133,7 @@ def cmd_merge(a):
         done(False, f"{a.no} 的 worktree 还有没提交的改动，先处理再合并")
     if git(repo, "branch", "--show-current").stdout.strip() != main:
         done(False, f"{p['name']} 主仓库当前不在 {main} 分支上，不能自动合并，请手动处理")
-    if git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        done(False, f"{p['name']} 主仓库有未提交的改动，不能自动合并")
+    # 主仓库有别的未提交改动不拦：快进合并只在这些改动和本单改的文件重叠时才会失败，交给 git 判断
     if git(wt, "rev-parse", "HEAD").stdout.strip() == o.get("base"):
         done(False, f"{a.no} 没有任何提交，没东西可合并")
     # 主分支在跑单期间前进了：先把单的分支变基到最新主分支上
@@ -149,7 +148,7 @@ def cmd_merge(a):
             done(False, f"{a.no} 合并前测试没过（{p['test']}），没有合并。日志：{ROOT / a.no / 'merge-test.log'}")
     r = git(repo, "merge", "--ff-only", o["branch"])
     if r.returncode != 0:
-        done(False, f"快进合并失败：{(r.stderr or r.stdout).strip()[:300]}")
+        done(False, f"快进合并失败（多半是主仓库里有未提交的改动和本单改了同一批文件）：{(r.stderr or r.stdout).strip()[:300]}")
     o["status"] = "merged"
     o["merged_to"] = git(repo, "rev-parse", "HEAD").stdout.strip()
     save(o)
