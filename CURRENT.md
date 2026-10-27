@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-27 · Hermes 辅助任务改回 Codex（修 M2 批 E 遗留②）
+
+- 时间：开工 11:00
+- **根因**：10-26 16:57 那次回退测试用了不存在的模型 `gpt-nonexistent-test`，Hermes 在 `auth.json` 的 Codex 凭证 `openai-codex-oauth-1` 下记了一条到 2027-10-26 的模型冷却。主对话取凭证时带模型名，不受影响；辅助任务（标题生成、压缩）不带模型名，按代码规则任何一条没过期的冷却都会挡住整条凭证（`agent/credential_pool_model_cooldowns.py` 的 `model_cooldown_until`），于是报 “no Codex OAuth token found”。标题生成回退到 deepseek-flash，压缩直接失败（这就是遗留②）。首条报错 16:57:12，冷却写入 16:57:00；令牌本身有效到 11-05。
+- **另一件事**：10-27 巡检报的 8 次主对话回退，是 10-26 20:00～20:02 Codex 连续 `ConnectTimeout` 后正常回退，不是这个 bug。
+- **修法**（常浩确认，未改 hermes-agent 源码，未改 `config.yaml`）：先备份 `auth.json`、`config.yaml` 到 `evidence/hermes-aux-codex-20261027/`；`hermes auth reset openai-codex` 清掉冷却（令牌指纹改前改后都是 `428fa523…`）；11:05:50 重启 `ai.hermes.gateway`。
+- 测试：
+  - 本机 `hermes -z`：会话 `20261027_110617_6a5b39` 的主对话和 title_generation 都记在 openai-codex / gpt-6.1-sol。
+  - 飞书（常浩自己发）：「嗨bro」走 openai-codex；`/compress` 日志 “Auxiliary compression: using openai-codex (gpt-6-luna)”，50 → 48 条，committed。手动压缩不写 `session_model_usage`，以日志 telemetry 为准（`aux_provider=openai-codex`）。
+  - 回退：`hermes -z` 时让 chatgpt.com 走不通的代理 127.0.0.1:9、DeepSeek 直连，会话 `20261027_113100_eebd7e` 回退到 deepseek-flash；测完 Codex 凭证没有新冷却，紧接着 `20261027_113115_8b1c34` 又全走 openai-codex。
+  - 11:05:50 之后 `agent.log` 里 “no Codex OAuth token found”、“main provider unavailable” 各 0 条。巡检排除 oneshot，回退测试不会让明天 9:45 报警。
+- 本轮新坑：回退测试别用假模型名。Hermes 会把它记成凭证的模型冷却（一年），辅助任务不带模型名、会被整条挡住。测回退改用“只让 Codex 连不上”（单条命令设不通的代理、DeepSeek 直连），测完回读 `auth.json` 的 `model_cooldowns`。已提议提升为 agent-kit 全局坑，待常浩批准。
+- 遗留：
+  1. 巡检只查主对话回退，辅助任务回退（如标题生成走 DeepSeek）查不到，这次就是靠日志才发现的。要不要加，待常浩定。
+  2. 能不能“第二天不再报”还取决于 Codex 当天有没有网络超时；超时回退是正常行为。
+- 下一步：明天 9:45 巡检结果确认没有回退告警；之后回到 M3 批 6。
+
 ## 2026-10-27 · M3 批 5（B6 交替规矩 + Hermes 接 GitHub）完成
 
 - **决定**（常浩）：分批计划照做。另外补了一条：写入单从 `origin/main` 拉分支；合并时本地 main 有没推的提交，先把标题列给常浩，他回“推”才推（`merge --push-main <提交号>`）。批 5 的 6 个 PR 一次说“合并”全合；数码世界本地 main 上没推的 2 个提交（`1d25104`、`a38bc37`）同意推。
