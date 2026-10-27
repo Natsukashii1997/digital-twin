@@ -11,7 +11,7 @@
 - 时间：开工 11:55
 - **决定**（常浩）：分批计划照做，3 个问题按推荐定：交替接手用 digital-twin；其余 4 个项目不各跑真实单，用自检证明派单前提、例外写明；github-center 主目录切到 main。
 - **只读核对**：5 个远端都是私有，默认 main，只允许 squash，合并后自动删分支，Issues 打开，5 个分流标签齐全；远端 main 上都有 PR 模板和《工程流程》指针；名册的 `github`、`main` 和实际一致。
-- **github-center**：主目录从 `claude/v1` 切到 `main`，快进 1 个提交，`claude/v1` 没有独有提交，保留不删；那个没跟踪的文件 `design/candidates/pages/index.html` 原样留着。launchd 里没有任务指向这个仓库。名册说明的改动走 PR #18（issue #17），等合并。
+- **github-center**：主目录从 `claude/v1` 切到 `main`，快进 1 个提交，`claude/v1` 没有独有提交，保留不删；那个没跟踪的文件 `design/candidates/pages/index.html` 原样留着。launchd 里没有任务指向这个仓库。名册说明的改动走 PR #18（issue #17），已合并 `15b91af`。
 - **交替接手**（都用 `dispatch.py` 直接派，就是 Hermes 用的那个脚本，没经飞书；飞书全流程批 5 的 D20261027-1 已走通）：
   - D20261027-2 · Claude：开单建 issue #11 → 车间 3 分钟做完 → PR #13 → 常浩说“合并” → squash `9c5dd53` → 清理。新增只读自检 `ops/check_repos.py`。车间自己拿了 3 处主意（按名册 `agents` 字段查指针、本地落后只算提示、补正测试总数），都写在 PR 里。
   - D20261027-3 · Codex：任务说明只写了“接着 issue #11 / PR #13 做”，背景没写。Codex 自己从 issue、PR 和仓库里读懂了自检的输出格式，以及失败和提示的区别，接进每日巡检：每月 1 号跑，`--repos` 可手动触发，只把失败项按月提醒一次。开单建 issue #14 → 车间 5 分钟 → PR #16 → squash `29a833b` → 清理。
@@ -35,7 +35,7 @@
   2. 代码直推 main 的情况还在发生，和 M3-Q9 不一致：digital-twin 的 `d4701f3`（巡检加辅助任务回退检查）已经推上去了；牛马之家本地 main 上的 `ca6464b`（培养路径）和数码世界本地 main 上的 2 个提交还没推。都由各自的会话处理，本轮没动。
   3. 车间按 AGENTS 在 CURRENT 顶部写交接，别的会话同时写 CURRENT 时，`merge` 变基会停下。B6 的约定是交接写进 PR 或 issue：要不要让派单的车间只写 PR、不写 CURRENT，待常浩定。
   4. 数码世界 `reverse-ai-process.test.mjs` 偶发失败，已开 personal-ai-workbench#6。
-  5. PR #18（名册说明）等常浩说“合并”。
+  5. ~~PR #18（名册说明）等合并~~：已 squash 合并为 `15b91af`，issue #17 已关闭。
 - 下一步：M3 完成。之后按里程碑做 M4、M5（T7 进行中）；下个月 1 号巡检会第一次跑仓库自检。
 
 ## 2026-10-27 · D20261027-3：仓库自检接入每月巡检（已合并 `29a833b`、已安装，见上一节）
