@@ -1,7 +1,9 @@
 """Hermes 每日巡检：纯脚本、不调用模型。正常时只写日志，有异常才用猛鬼兽机器人身份发飞书私聊。
 
-用法：/usr/bin/python3 health_check.py [--dry-run] [--sandbox]   （--dry-run 只打印，不发消息；--sandbox 不是 1 号也查沙盒）
-由 launchd 任务 cn.digital-twin.health 每天 09:45 调用。每月 1 号另查沙盒，有超过 30 天没动的就单独发一条提醒，只提醒、不删。
+用法：/usr/bin/python3 health_check.py [--dry-run] [--sandbox] [--repos]
+--dry-run 只打印，不发消息；--sandbox / --repos 不是 1 号也分别查沙盒 / 名册仓库。
+由 launchd 任务 cn.digital-twin.health 每天 09:45 调用。每月 1 号另查沙盒和名册仓库：沙盒超过 30 天没动、仓库自检有失败项时各发一条按月去重的提醒，仓库提示不发。只提醒、不修改。
+安装时 health_check.py 和 check_repos.py 放在同一目录。
 """
 import datetime as dt
 import json
@@ -19,11 +21,13 @@ DM_CHAT = "oc_ce2cbf195f8de9f80bc505a00cb4456d"   # 猛鬼兽和常浩的私聊
 HEARTBEAT_STALE_MIN = 10
 SANDBOX_DIRS = [HOME / "Sandbox", HOME / "Documents/Codex"]   # M3-Q3：沙盒和 Codex 按日期建的旧目录
 SANDBOX_STALE_DAYS = 30
+CHECK_REPOS_SCRIPT = Path(__file__).with_name("check_repos.py")
+CHECK_REPOS_TIMEOUT = 600   # 名册有多个项目，每个项目会执行多次 gh / git 查询
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
 
-def run(cmd):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+def run(cmd, timeout=60):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                           env={**os.environ, "PATH": PATH})
 
 
@@ -115,6 +119,29 @@ def check_sandbox():
             if not p.name.startswith(".") and p.stat().st_mtime < cutoff]
 
 
+def check_repos():
+    """读取只读自检的末行 JSON，只返回失败项；未拿到完整结果也要提醒。"""
+    try:
+        r = run([sys.executable, "-B", str(CHECK_REPOS_SCRIPT)], timeout=CHECK_REPOS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return [f"仓库自检未完成（超过 {CHECK_REPOS_TIMEOUT} 秒）"]
+    except OSError as e:
+        return [f"仓库自检未完成（无法启动：{e}）"]
+    if r.returncode not in (0, 1):
+        return [f"仓库自检未完成（退出码 {r.returncode}）"]
+    try:
+        result = json.loads(r.stdout.strip().splitlines()[-1])
+        if (not isinstance(result, dict)
+                or not isinstance(result.get("failed"), list)
+                or not all(isinstance(item, str) for item in result["failed"])
+                or result.get("ok") is not (not result["failed"])
+                or r.returncode != int(bool(result["failed"]))):
+            raise ValueError("结果字段或退出码不一致")
+    except (ValueError, IndexError):
+        return ["仓库自检未完成（末行 JSON 缺失、无效或与退出码不一致）"]
+    return result["failed"]
+
+
 def send(msg, key, now):
     r = run(["lark-cli", "--profile", LARK_PROFILE, "im", "+messages-send", "--as", "bot",
              "--chat-id", DM_CHAT, "--text", msg, "--idempotency-key", key])
@@ -137,21 +164,29 @@ def main():
         print(msg)
         if not dry:
             send(msg, f"health-{now}", now)
-    if dt.date.today().day != 1 and "--sandbox" not in sys.argv:
-        return
-    stale = check_sandbox()
-    with open(LOG_DIR / f"{now[:7]}.log", "a") as f:
-        f.write(f"{now} 沙盒超过 {SANDBOX_STALE_DAYS} 天：{len(stale)} 项\n")
-    if not stale:
-        return
-    home = str(HOME)
-    msg = (f"🧹 沙盒提醒（每月 1 号）：~/Sandbox 和 ~/Documents/Codex 里有 {len(stale)} 项超过 {SANDBOX_STALE_DAYS} 天没动\n"
-           + "\n".join(f"- {str(p).replace(home, '~')}" for p in stale[:10])
-           + (f"\n- ……另有 {len(stale) - 10} 项" if len(stale) > 10 else "")
-           + "\n只是提醒，不会自动删；要清理就让 Claude 或 Codex 列清单给你定。")
-    print(msg)
-    if not dry:
-        send(msg, f"sandbox-{now[:7]}", now)
+    monthly = now[8:10] == "01"
+    if monthly or "--sandbox" in sys.argv:
+        stale = check_sandbox()
+        with open(LOG_DIR / f"{now[:7]}.log", "a") as f:
+            f.write(f"{now} 沙盒超过 {SANDBOX_STALE_DAYS} 天：{len(stale)} 项\n")
+        if stale:
+            home = str(HOME)
+            msg = (f"🧹 沙盒提醒（每月 1 号）：~/Sandbox 和 ~/Documents/Codex 里有 {len(stale)} 项超过 {SANDBOX_STALE_DAYS} 天没动\n"
+                   + "\n".join(f"- {str(p).replace(home, '~')}" for p in stale[:10])
+                   + (f"\n- ……另有 {len(stale) - 10} 项" if len(stale) > 10 else "")
+                   + "\n只是提醒，不会自动删；要清理就让 Claude 或 Codex 列清单给你定。")
+            print(msg)
+            if not dry:
+                send(msg, f"sandbox-{now[:7]}", now)
+    if monthly or "--repos" in sys.argv:
+        failed = check_repos()
+        with open(LOG_DIR / f"{now[:7]}.log", "a") as f:
+            f.write(f"{now} 仓库自检：{'OK' if not failed else 'ISSUES: ' + ' | '.join(failed)}\n")
+        if failed:
+            msg = "📦 仓库自检提醒（每月 1 号）\n" + "\n".join(f"- {item}" for item in failed)
+            print(msg)
+            if not dry:
+                send(msg, f"repos-{now[:7]}", now)
 
 
 if __name__ == "__main__":

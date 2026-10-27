@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 6 项 + 仓库自检 5 项，共 48 项），末尾显示 `Ran 48 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 20 项 + 仓库自检 5 项，共 62 项），末尾显示 `Ran 62 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -51,6 +51,18 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ## 进展里的 PR 和 issue（test_progress_github.py）
 
 假 `gh` 喂固定的 PR 和 issue，时区固定北京时间。覆盖：按北京时间算当天的 PR 新开、合并、未合并关闭和 issue 新开、关闭，前后一天的不算；只有 GitHub 上有动静的项目也列出来；gh 连不上时只在该项目下写「GitHub 取不到」，没动静的项目在「今天没动静」里带标记，连不上一次后不再逐个等超时；名册没有 `github` 的项目不调 gh。
+
+## 每日巡检（test_health_check.py）
+
+用临时目录造假的 `state.db` 和 `agent.log` 检查主对话 / 辅助任务回退、oneshot 排除、日期过滤、日志计数和缺失日志处理（原有 6 项）。新增月度仓库自检 14 项：固定日期、临时日志目录、模拟日常检查和沙盒结果，在 `subprocess.run` 层拦住自检与 `lark-cli`，保留真实的巡检入口、JSON 解析和 `send()` 调用链，不联网、不碰真实仓库、`~/.hermes` 或安装副本、不真的发消息。覆盖：
+
+- 每月 1 号同时查沙盒和仓库，沙盒无陈旧项也继续自检；其他日期默认都跳过；`--sandbox` / `--repos` 各自手动触发，也可一起用。
+- 自检中文正文之后的末行 JSON（允许结尾空行）：退出码 1 的合法失败只发送 `failed`；全部通过或只有 `warnings` 不发送。
+- 日常异常、沙盒和仓库各发一条；仓库使用 `repos-YYYY-MM`，同月同键、跨年换月换键；沿用原有 bot 身份、目标私聊和发送日志。幂等行为验证到传给 `lark-cli` 的键，未调用真实服务。
+- 自动及手动触发配合 `--dry-run` 均打印但不发送；空输出、损坏 / 不一致的 JSON、意外退出码、启动失败和超时都记为“仓库自检未完成”，不会误报通过。
+- 自检使用当前 Python 和同目录的 `check_repos.py`，继承 `DT_ROSTER`，单独给 600 秒超时。
+
+单跑巡检测试：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_health_check.py -v`。合并后需将 `health_check.py` 与 `check_repos.py` 一起放到安装目录；本次只改仓库，未同步安装副本或验证 launchd 实际运行。
 
 ## 仓库自检（test_check_repos.py）
 
