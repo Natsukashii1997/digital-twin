@@ -17,7 +17,7 @@
   - 飞书（常浩自己发）：「嗨bro」走 openai-codex；`/compress` 日志 “Auxiliary compression: using openai-codex (gpt-6-luna)”，50 → 48 条，committed。手动压缩不写 `session_model_usage`，以日志 telemetry 为准（`aux_provider=openai-codex`）。
   - 回退：`hermes -z` 时让 chatgpt.com 走不通的代理 127.0.0.1:9、DeepSeek 直连，会话 `20261027_113100_eebd7e` 回退到 deepseek-flash；测完 Codex 凭证没有新冷却，紧接着 `20261027_113115_8b1c34` 又全走 openai-codex。
   - 11:05:50 之后 `agent.log` 里 “no Codex OAuth token found”、“main provider unavailable” 各 0 条。巡检排除 oneshot，回退测试不会让明天 9:45 报警。
-- 本轮新坑：回退测试别用假模型名。Hermes 会把它记成凭证的模型冷却（一年），辅助任务不带模型名、会被整条挡住。测回退改用“只让 Codex 连不上”（单条命令设不通的代理、DeepSeek 直连），测完回读 `auth.json` 的 `model_cooldowns`。已提议提升为 agent-kit 全局坑，待常浩批准。
+- 本轮新坑：回退测试别用假模型名。Hermes 会把它记成凭证的模型冷却（一年），辅助任务不带模型名、会被整条挡住。测回退改用“只让 Codex 连不上”（单条命令设不通的代理、DeepSeek 直连），测完回读 `auth.json` 的 `model_cooldowns`。提升：常浩批准，已提升为全局 G-13（2026-10-27，agent-kit `6d78a63`）。
 - 遗留：
   1. 巡检只查主对话回退，辅助任务回退（如标题生成走 DeepSeek）查不到，这次就是靠日志才发现的。要不要加，待常浩定。
   2. 能不能“第二天不再报”还取决于 Codex 当天有没有网络超时；超时回退是正常行为。
