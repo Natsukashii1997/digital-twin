@@ -14,6 +14,7 @@
   - `check_fallback()` 按任务分组：主对话那句告警原样不动；辅助任务另报一句“昨天辅助任务走了回退模型 deepseek-flash：title_generation N 次…”，同样排除 oneshot。
   - 新增 `check_aux_errors()`：读 `~/.hermes/logs/agent.log` 里昨天日期开头的行，数 “Failed to generate context summary”（压缩失败，这类不进会话库）和 “no Codex OAuth token found”（取不到 Codex 凭证）。这两句是 Hermes 源码里写死的日志原文，Hermes 升级改了措辞这项会失效，注释里已写明。
   - 两个检查都加了可选参数 `day`（默认昨天），方便测试和回放。
+  - 安装副本 `~/Library/Application Support/DigitalTwin/bin/health_check.py`（launchd 实际跑的这份）覆盖前和改前的仓库版本一致，旧副本备份在 `evidence/hermes-aux-codex-20261027/health_check.py.before`；同步后用 `/usr/bin/python3` 回放 10-27，结果同上。
 - 测试：`python3 -B -m unittest discover -s hermes/scripts/tests` 43 项 OK（原有 37 项 + 新增 `test_health_check.py` 6 项，临时目录造假库和假日志）；变异检查 2 处（去掉 oneshot 排除、不按日期过滤日志）都被抓到。真实数据只读回放：10-26 报 4 条（主对话回退 8 次、title_generation 回退 2 次、压缩失败 8 次、取不到凭证 69 次）；10-27 报 2 条（title_generation 回退 1 次、取不到凭证 7 次），都在 11:05 修复之前，修复后两类日志都是 0 条。
 - 本轮新坑：无。
 - 注意：明天（10-28）9:45 的巡检查的是 10-27 全天，**会报上面 10-27 那 2 条辅助任务告警**，这是修复前留下的，不是复发；主对话回退那句不该出现。10-29 那次应完全干净。
