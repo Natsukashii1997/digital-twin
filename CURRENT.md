@@ -21,7 +21,8 @@
   - 网关探针 `92287fb372f0`（带模型、只跑一次、只存本地，已自动清掉）：按 SOUL 写法跑 `lark-cli`，appId `cli_a96f5f9ac63adcd4`、user 身份 `valid`、私聊读取成功（读到 1 条 13:32 的文本消息，证据只记 ID 和时间、不记正文）。
   - 证据在 `evidence/lark-profile-20261027/`（复现输出、旧配置备份、探针汇总）。
 - 本轮新坑：Hermes（OpenClaw、lark-channel 同理）换飞书应用后，要重新跑 `lark-cli config bind`，否则对话里的 `lark-cli` 还在用旧应用；`config bind` 是一次性同步，不会自动跟着变。并进上一节那条，一起提议提升为全局坑，等常浩批。
-- 没做：没在飞书私聊里让常浩亲自问猛鬼兽；没开 issue / PR（常浩定的）。
+  - 常浩 14:23 在飞书私聊里亲自问猛鬼兽读一段昨天的私聊：会话库里两次业务调用都带 `--profile cli_a96f5f9ac63adcd4 --as user`（`contact +search-user`、`im +chat-messages-list`），都 `ok: true`、`exit_code: 0`，回复 493 字。
+- 没做：没开 issue / PR（常浩定的）。
 - 下一步：不变，见下一节（明早 07:30 日报首跑后回读）。
 
 ## 2026-10-27 · M5 T7 批 2：Hermes 按新结构写日报、周报（定时任务已建，明早首跑）
