@@ -14,11 +14,13 @@ hermes/
     run_worker.py      车间包装：统一调用 Claude / Codex，写回执、查护栏
     brief_data.py      晨报取数（第 4 批挂起中）
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
+    report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口
+    report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
     workshop/          车间派单（F5）
     progress/          项目进展现查（F6）
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
-  prompts/             定时任务等用的提示词
+  prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   samples/             样稿
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 ops/
