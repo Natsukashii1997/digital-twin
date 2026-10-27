@@ -53,9 +53,28 @@
       "test": null,
       "default_worker": null,
       "write_allowed": true,
-      "notes": "Claude 和 Codex 共用的全局 LESSONS 与 project-starter。改 LESSONS 只出提案，常浩批准才写。",
+      "notes": "Claude 和 Codex 共用的全局 LESSONS 与《工程流程》；project-starter 2026-10-27 已迁到 my-skills。改 LESSONS 只出提案，常浩批准才写。",
       "category": "活跃",
       "github": "Natsukashii1997/agent-kit"
+    },
+    {
+      "id": "my-skills",
+      "name": "自建技能库",
+      "aliases": [
+        "my-skills",
+        "自建技能库",
+        "自建 skill",
+        "自建skill"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/my-skills",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "test": null,
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "常浩自建的 Claude / Codex skill 唯一存放处，2026-10-27 开通；工具目录里放指向这里的软链接（links.tsv + scripts/link.sh），改这里马上生效。第三方安装的 skill 不放这里。",
+      "category": "活跃",
+      "github": "Natsukashii1997/my-skills"
     },
     {
       "id": "github-center",
