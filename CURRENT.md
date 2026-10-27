@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-10-27 · D20261027-3：仓库自检接入每月巡检（待合并、待安装）
+
+- 承接 issue #11 / PR #13，改动在 `hermes/D20261027-3`：每月 1 号与沙盒检查一起运行 `check_repos.py`；其他日期用 `--repos` 手动触发，与 `--sandbox` 独立。
+- 自检只读取末行 JSON 的 `failed`，通过项和 `warnings` 不发；有失败时复用巡检的 `send()` 单独提醒，幂等键 `repos-YYYY-MM`。`--dry-run` 打印但不发消息。启动失败、超时或结果无效均报“仓库自检未完成”。
+- 改动：`ops/health_check.py`、`hermes/scripts/tests/test_health_check.py`、测试 README、AGENTS 的巡检说明及本记录；未改自检规则、名册或其他仓库。
+- 验证：新增 14 项隔离测试；`python3 -B -m unittest discover -s hermes/scripts/tests` 共 62 项 OK；`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests -p test_health_check.py` 共 20 项 OK；`git diff --check` 通过；独立静态审查无阻塞项。测试未联网、未碰真实仓库或发消息。
+- 安装副本**未同步**（本单明确排除仓库外操作）；未验证 launchd 实际运行或真实消息投递。巡检通过同目录路径调用自检，安装时须将两份脚本一起放到 `~/Library/Application Support/DigitalTwin/bin/`。
+- 下一步：Hermes 按车间流程接回本分支；获准合并后由后续执行方同步两份安装副本，并验证实际运行。
+
 ## 2026-10-27 · M5 T7 批 1：并跑文档、台账初稿、项目词表（等常浩确认）
 
 - 时间：开工 11:55
