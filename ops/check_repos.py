@@ -1,10 +1,11 @@
-"""名册活跃项目自检：GitHub 设置和派单前提一次查完。只读：不改远端、不 fetch、不切分支、不写文件。
+"""名册活跃项目自检：GitHub 设置、派单前提和 Vault 项目卡一次查完。只读：不改远端、不 fetch、不切分支、不写文件。
 
-用法：python3 ops/check_repos.py   （名册路径可用环境变量 DT_ROSTER 覆盖，和 dispatch.py 一致）
+用法：python3 ops/check_repos.py   （名册路径可用环境变量 DT_ROSTER 覆盖，和 dispatch.py 一致；Vault 路径用 DT_VAULT）
 只查名册 projects 里有 github 字段的项目。每个项目一段中文，最后一行一行 JSON：{"ok", "failed", "warnings"}；有失败退出码 1。
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,7 @@ ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digit
 LABELS = ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"]   # docs/agents/triage-labels.md
 PR_TEMPLATE = ".github/pull_request_template.md"
 FLOW_WORD = "工程流程"
+VAULT = Path(os.environ.get("DT_VAULT", "~/Documents/Obsidian Vault")).expanduser()
 
 
 def git(cwd, *args):
@@ -117,6 +119,20 @@ def check_local(p):
     return res
 
 
+def check_card(p):
+    """返回 [(通过, 说明)]：名册 card 指向的 Vault 项目卡在不在、是不是有效。"""
+    card = p.get("card")
+    if not card:
+        return [(False, "名册没写项目卡（card）")]
+    try:
+        head = (VAULT / card).read_text(encoding="utf-8").split("\n---", 1)[0]
+    except OSError:
+        return [(False, f"项目卡不存在：{card}")]
+    m = re.search(r"^status:\s*(\S+)", head, re.M)
+    status = m.group(1) if m else "没写 status"
+    return [(True, f"有项目卡 {card}")] if status == "有效" else [(None, f"项目卡 {card} 状态是 {status}，不是有效")]
+
+
 def main():
     try:
         projects = json.loads(ROSTER.read_text(encoding="utf-8"))["projects"]
@@ -128,7 +144,7 @@ def main():
     for p in projects:
         if not p.get("github"):
             continue
-        res = check_remote(p) + check_local(p)
+        res = check_remote(p) + check_local(p) + check_card(p)
         if not p.get("test"):
             res.append((None, "名册没写 test，合并前不跑测试"))
         print(f"【{p['id']}】{p.get('name', '')}（{p['github']}）")
