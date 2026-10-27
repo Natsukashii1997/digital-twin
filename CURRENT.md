@@ -14,6 +14,8 @@
 - 测试：未做（只改文档）。
 - 本轮新坑：无。
 - 下一步：批 7 起草 7 张项目卡（写进 Vault `10 项目/`，`status: 草稿`），常浩一次过目后改为有效；之后 progress 技能改为先读项目卡、仓库自检加一项（走 PR）。
+- **批 7 进展**（同日 17:30～18:10）：两个子代理分头起草 7 张卡，Vault 提交 `dd48aa7`（草稿）。常浩看过，冲突按推荐定（飞书统一猛鬼兽、CarvoMOTO 不例外；数码世界以收缩后的看板 + 资产库为准；agent-kit、自建技能库不补 CURRENT；GitHub 快速中心日报由 Hermes 发），改后转为有效，Vault 提交 `d51cf83`。接 Hermes 走 issue #19 → [PR #20](https://github.com/Natsukashii1997/digital-twin/pull/20)：名册加 `card`、progress 技能 0.3.0 先读项目卡、`check_repos.py` 查项目卡；76 项自测通过，真实名册 6 张卡全过。**等常浩说“合并”**，合并后同步安装副本（安装版现与 main 一致，可直接覆盖）并重启网关，再在飞书问一次单个项目验收。
+- 范围外：自检报 work-desk 本地 main 多 8 个提交、personal-ai-workbench 多 14 个没推；CarvoMOTO 仓库 D18 和 GitHub 快速中心需求文档里的飞书说法待各自仓库更新。
 
 ---
 
