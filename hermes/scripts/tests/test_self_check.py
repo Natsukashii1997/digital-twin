@@ -1,0 +1,316 @@
+"""隔离自测：ops/self_check.py（安装副本漂移、每月沙盒和仓库自检）。
+
+漂移检查用临时 git 仓库当 DT_REPO、临时目录当 HERMES_HOME 和 DT_BIN，HOME 也换成临时目录；git 用临时全局配置。
+仓库自检的子进程打桩或用空名册跑真的 check_repos.py。不联网，不碰真实仓库、~/.hermes、安装副本和 Vault。
+"""
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).parents[3] / "ops/self_check.py"
+spec = importlib.util.spec_from_file_location("self_check", SCRIPT)
+sc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sc)
+
+# 仓库路径 → 安装路径（相对临时 HOME：hermes 是 HERMES_HOME，bin 是 DT_BIN）；None 表示不安装
+SOURCES = {
+    "hermes/scripts/a.py": "hermes/scripts/a.py",
+    "hermes/scripts/notes.md": None,
+    "hermes/scripts/tests/test_a.py": None,
+    "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
+    "hermes/skills/workshop/references/r.md": "hermes/skills/autonomous-ai-agents/workshop/references/r.md",
+    "hermes/prompts/p.md": "hermes/prompts/p.md",
+    "ops/health_check.py": "bin/health_check.py",
+    "ops/check_repos.py": "bin/check_repos.py",
+    "ops/self_check.py": "hermes/scripts/self_check.py",
+    "ops/other.py": None,
+}
+
+
+def sh(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout
+
+
+class ScriptTest(unittest.TestCase):
+    """跑真实入口：python3 self_check.py。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="digital-twin-self-check-test-")
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name).resolve()
+        self.repo = self.home / "repo"
+        gitconfig = self.home / "gitconfig"
+        gitconfig.write_text("[init]\n\tdefaultBranch = main\n")
+        self.env = {**os.environ, "HOME": str(self.home), "DT_REPO": str(self.repo),
+                    "HERMES_HOME": str(self.home / "hermes"), "DT_BIN": str(self.home / "bin"),
+                    "DT_TODAY": "2000-01-02", "DT_ROSTER": str(self.home / "projects.json"),
+                    "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1",
+                    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        p = patch.dict(os.environ, self.env)
+        p.start()
+        self.addCleanup(p.stop)
+        self.repo.mkdir()
+        sh(self.repo, "init", "-q", "-b", "main")
+        for src, dst in SOURCES.items():
+            self.write(self.repo / src, f"源 {src}\n")
+            if dst:
+                self.write(self.home / dst, f"源 {src}\n")
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-q", "-m", "起步")
+        self.write(self.home / "hermes/scripts/check_repos.py", "源 ops/check_repos.py\n")   # check_repos.py 装两处
+        self.write(self.home / "hermes/scripts/安装处多出的.py", "不管\n")
+
+    @staticmethod
+    def write(path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def run_script(self, *args, **env):
+        r = subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True,
+                           env={**self.env, **env}, timeout=60)
+        self.assertEqual((r.returncode, r.stderr), (0, ""), r.stdout)
+        return r.stdout
+
+    def test_all_consistent_prints_nothing(self):
+        self.assertEqual(self.run_script(), "")
+
+    def test_missing_installed_files_listed_by_path(self):
+        for dst in ("hermes/skills/autonomous-ai-agents/workshop/references/r.md", "bin/health_check.py",
+                    "hermes/scripts/self_check.py"):
+            (self.home / dst).unlink()
+        out = self.run_script()
+        self.assertEqual(out.splitlines()[:3], ["🔧 工程自检", "", "🔁 安装副本不一致：3 项和仓库 main 对不上"])
+        self.assertIn("- ~/bin/health_check.py 缺失（源：ops/health_check.py）", out)
+        self.assertIn("- ~/hermes/skills/autonomous-ai-agents/workshop/references/r.md 缺失"
+                      "（源：hermes/skills/workshop/references/r.md）", out)
+        self.assertIn("- ~/hermes/scripts/self_check.py 缺失（源：ops/self_check.py）", out)
+        self.assertNotIn("多出", out)
+
+    def test_check_repos_checked_in_both_install_places(self):
+        (self.home / "hermes/scripts/check_repos.py").unlink()
+        self.assertIn("- ~/hermes/scripts/check_repos.py 缺失（源：ops/check_repos.py）", self.run_script())
+
+    def test_changed_content_reports_path_not_content(self):
+        self.write(self.home / "hermes/prompts/p.md", "改过的秘密内容\n")
+        self.write(self.home / "hermes/scripts/a.py", "源 hermes/scripts/a.py\n\n")
+        out = self.run_script()
+        self.assertIn("- ~/hermes/prompts/p.md 和 hermes/prompts/p.md 内容不同", out)
+        self.assertIn("- ~/hermes/scripts/a.py 和 hermes/scripts/a.py 内容不同", out)
+        self.assertNotIn("秘密", out)
+
+    def test_uncommitted_repo_changes_are_not_drift(self):
+        self.write(self.repo / "hermes/scripts/a.py", "工作区改了没提交\n")
+        self.write(self.repo / "hermes/prompts/新提示词.md", "没跟踪\n")
+        sh(self.repo, "checkout", "-q", "-b", "dev")
+        self.write(self.repo / "hermes/skills/workshop/SKILL.md", "别的分支提交了\n")
+        sh(self.repo, "commit", "-qam", "dev 上的改动")
+        self.assertEqual(self.run_script(), "")
+
+    def test_unreadable_repo_is_one_issue(self):
+        for repo in (self.home / "没有这个仓库", self.home / "hermes"):
+            with self.subTest(repo=repo):
+                out = self.run_script(DT_REPO=str(repo))
+                lines = out.splitlines()
+                self.assertEqual(lines[2], "🔁 安装副本不一致：1 项和仓库 main 对不上")
+                self.assertTrue(lines[3].startswith(f"- 取不到仓库 main（~/{repo.name}："), out)
+
+    def test_other_days_skip_monthly(self):
+        self.write(self.home / "Sandbox/旧目录/x", "")
+        os.utime(self.home / "Sandbox/旧目录", (0, 0))
+        self.assertEqual(self.run_script(), "")
+
+    def test_monthly_end_to_end_with_real_check_repos(self):
+        self.write(self.home / "Sandbox/旧目录/x", "")
+        os.utime(self.home / "Sandbox/旧目录", (0, 0))
+        self.write(self.home / "projects.json", json.dumps({"projects": []}))
+        for args, env in ((["--monthly"], {}), ([], {"DT_TODAY": "2000-02-01"})):
+            with self.subTest(args=args, env=env):
+                out = self.run_script(*args, **env)
+                self.assertEqual(out.splitlines(), [
+                    "🔧 工程自检", "",
+                    "🧹 沙盒提醒（每月 1 号）：~/Sandbox 和 ~/Documents/Codex 里有 1 项超过 30 天没动",
+                    "- ~/Sandbox/旧目录",
+                    "只是提醒，不会自动删；要清理就让 Claude 或 Codex 列清单给你定。"])
+
+    def test_monthly_reports_broken_roster(self):
+        out = self.run_script("--monthly")
+        self.assertIn("📦 仓库自检提醒（每月 1 号）\n- 读不了名册（", out)
+
+
+class SandboxTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="digital-twin-sandbox-test-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.sandbox, self.codex = self.root / "Sandbox", self.root / "Codex"
+        p = patch.object(sc, "SANDBOX_DIRS", [self.sandbox, self.codex])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def make(self, path, old):
+        path.mkdir(parents=True)
+        if old:
+            os.utime(path, (0, 0))
+
+    def test_only_old_visible_top_level_entries(self):
+        self.make(self.sandbox / "旧", True)
+        self.make(self.sandbox / "新", False)
+        self.make(self.sandbox / ".隐藏", True)
+        self.assertEqual(sc.check_sandbox(), ([self.sandbox / "旧"], []))
+
+    @unittest.skipIf(os.geteuid() == 0, "root 不受目录权限限制")
+    def test_unscannable_dir_is_an_issue_not_a_crash(self):
+        self.make(self.sandbox, False)
+        self.make(self.codex / "旧", True)
+        self.sandbox.chmod(0)
+        self.addCleanup(self.sandbox.chmod, 0o755)
+        stale, errors = sc.check_sandbox()
+        self.assertEqual(stale, [self.codex / "旧"])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith(f"扫不了 {self.sandbox}（"), errors)
+
+
+class MonthlyGateTest(unittest.TestCase):
+    """main() 的日期判断和输出拼装；三项检查都打桩。"""
+
+    def setUp(self):
+        self.drift = self.patch("check_drift", return_value=[])
+        self.sandbox = self.patch("check_sandbox", return_value=([], []))
+        self.repos = self.patch("check_repos", return_value=[])
+
+    def patch(self, name, **kwargs):
+        p = patch.object(sc, name, **kwargs)
+        self.addCleanup(p.stop)
+        return p.start()
+
+    def main(self, day="2000-01-02", *args):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"DT_TODAY": day}), \
+                patch.object(sys, "argv", [str(SCRIPT), *args]), redirect_stdout(output):
+            sc.main()
+        return output.getvalue()
+
+    def test_other_days_only_check_drift(self):
+        self.assertEqual(self.main(), "")
+        self.drift.assert_called_once_with()
+        self.sandbox.assert_not_called()
+        self.repos.assert_not_called()
+
+    def test_first_of_month_or_flag_runs_both_monthly_checks(self):
+        for day, args in (("2000-01-01", ()), ("2000-12-01", ()), ("2000-01-15", ("--monthly",))):
+            with self.subTest(day=day, args=args):
+                self.sandbox.reset_mock()
+                self.repos.reset_mock()
+                self.assertEqual(self.main(day, *args), "")
+                self.sandbox.assert_called_once_with()
+                self.repos.assert_called_once_with()
+
+    def test_sections_and_truncation(self):
+        self.drift.return_value = [f"漂移{i}" for i in range(12)]
+        self.sandbox.return_value = ([], ["扫不了 ~/Documents/Codex（Operation not permitted）"])
+        self.repos.return_value = ["a：不是私有仓库"]
+        out = self.main("2000-01-01")
+        self.assertEqual(out.split("\n\n"), [
+            "🔧 工程自检",
+            "\n".join(["🔁 安装副本不一致：12 项和仓库 main 对不上", *[f"- 漂移{i}" for i in range(10)],
+                       "- ……另有 2 项", "处理：从仓库 main 复制到安装位置；技能、提示词改了要重启网关。"]),
+            "🧹 沙盒提醒（每月 1 号）\n- 扫不了 ~/Documents/Codex（Operation not permitted）",
+            "📦 仓库自检提醒（每月 1 号）\n- a：不是私有仓库\n",
+        ])
+
+    def test_sandbox_stale_keeps_original_wording_and_limit(self):
+        self.sandbox.return_value = ([Path(f"/虚构沙盒/目录{i:02}") for i in range(11)], [])
+        out = self.main("2000-01-01")
+        self.assertIn("🧹 沙盒提醒（每月 1 号）：~/Sandbox 和 ~/Documents/Codex 里有 11 项超过 30 天没动\n"
+                      "- /虚构沙盒/目录00\n", out)
+        self.assertIn("- /虚构沙盒/目录09\n- ……另有 1 项\n只是提醒，不会自动删；要清理就让 Claude 或 Codex 列清单给你定。", out)
+        self.assertNotIn("目录10", out)
+
+
+class RepoCheckTest(unittest.TestCase):
+    """从 test_health_check.py 迁来：check_repos() 解析同目录 check_repos.py 的末行 JSON。"""
+
+    def setUp(self):
+        self.failed = ["a：不是私有仓库", "b：主目录检出的是 dev，不是 main"]
+        self.warnings = ["a：名册没写 test，合并前不跑测试"]
+        self.result(self.failed, self.warnings)
+        self.repo_error = None
+        p = patch.object(sc.subprocess, "run", side_effect=self.fake_process)
+        self.process = p.start()
+        self.addCleanup(p.stop)
+
+    def result(self, failed, warnings):
+        summary = {"ok": not failed, "failed": failed, "warnings": warnings}
+        self.repo_result = subprocess.CompletedProcess(
+            [], int(bool(failed)),
+            "【a】虚构项目\n  通过  有 PR 模板\n  提示  不应发送的说明\n\n"
+            + json.dumps(summary, ensure_ascii=False) + "\n\n", "")
+
+    def fake_process(self, cmd, **kwargs):
+        if cmd == [sys.executable, "-B", str(sc.CHECK_REPOS_SCRIPT)]:
+            if self.repo_error:
+                raise self.repo_error
+            return self.repo_result
+        raise AssertionError(f"不允许执行外部命令：{cmd}")
+
+    def test_only_failures_returned(self):
+        self.assertEqual(sc.check_repos(), self.failed)
+
+    def test_all_pass_or_warnings_only_return_nothing(self):
+        for warnings in ([], self.warnings):
+            with self.subTest(warnings=warnings):
+                self.result([], warnings)
+                self.assertEqual(sc.check_repos(), [])
+
+    def test_child_uses_sibling_script_same_python_and_longer_timeout(self):
+        with patch.dict(sc.os.environ, {"DT_ROSTER": "/虚构名册/projects.json"}):
+            self.assertEqual(sc.check_repos(), self.failed)
+        call = self.process.call_args
+        self.assertEqual(call.args[0], [sys.executable, "-B", str(SCRIPT.with_name("check_repos.py"))])
+        self.assertEqual(call.kwargs["timeout"], sc.CHECK_REPOS_TIMEOUT)
+        self.assertGreater(call.kwargs["timeout"], 60)
+        self.assertEqual(call.kwargs["env"]["DT_ROSTER"], "/虚构名册/projects.json")
+        self.assertEqual(call.kwargs["env"]["PATH"], sc.PATH)
+
+    def test_empty_invalid_or_inconsistent_summary_is_not_success(self):
+        cases = [(0, ""), (1, "Traceback: fake"), (0, "null"), (0, "[]"), (0, "{}"),
+                 (0, '{"ok":true,"failed":"不是列表"}'),
+                 (1, '{"ok":false,"failed":[1]}'),
+                 (0, '{"ok":false,"failed":[]}'),
+                 (1, '{"ok":true,"failed":[]}'),
+                 (0, '{"ok":false,"failed":["失败项"]}'),
+                 (0, '{"ok":true,"failed":[]}\n其他尾行')]
+        for code, output in cases:
+            with self.subTest(code=code, output=output):
+                self.repo_result = subprocess.CompletedProcess([], code, output, "fake traceback")
+                issues = sc.check_repos()
+                self.assertEqual(len(issues), 1)
+                self.assertIn("仓库自检未完成", issues[0])
+                self.assertNotIn("fake traceback", issues[0])
+
+    def test_unexpected_exit_code_is_not_success_even_with_valid_json(self):
+        self.result([], [])
+        self.repo_result.returncode = 2  # Python 找不到脚本等执行失败
+        self.assertEqual(sc.check_repos(), ["仓库自检未完成（退出码 2）"])
+
+    def test_timeout_and_launch_error_are_reported(self):
+        for error, detail in ((subprocess.TimeoutExpired("fake", sc.CHECK_REPOS_TIMEOUT), "超过"),
+                              (FileNotFoundError("fake python"), "无法启动")):
+            with self.subTest(error=error):
+                self.repo_error = error
+                issues = sc.check_repos()
+                self.assertEqual(len(issues), 1)
+                self.assertIn("仓库自检未完成", issues[0])
+                self.assertIn(detail, issues[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

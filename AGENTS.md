@@ -24,9 +24,10 @@ hermes/
   samples/             样稿
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 ops/
-  health_check.py      每日巡检；每月 1 号查沙盒和仓库（--sandbox / --repos 可手动触发），仓库仅失败项按月提醒；安装时与 check_repos.py 同放 ~/Library/Application Support/DigitalTwin/bin/
+  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、回退模型、定时任务；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
+  self_check.py        工程自检（Hermes 无模型定时任务 09:50，stdout 直接发、空输出不发）：每天比对仓库 main 和安装副本；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
-  check_repos.py       名册活跃项目自检（只读）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
+  check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
 
 ## Agent skills

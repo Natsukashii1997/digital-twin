@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 20 项 + 仓库自检 5 项，共 62 项），末尾显示 `Ran 62 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 9 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项，共 86 项），末尾显示 `Ran 86 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -54,15 +54,20 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 
 ## 每日巡检（test_health_check.py）
 
-用临时目录造假的 `state.db` 和 `agent.log` 检查主对话 / 辅助任务回退、oneshot 排除、日期过滤、日志计数和缺失日志处理（原有 6 项）。新增月度仓库自检 14 项：固定日期、临时日志目录、模拟日常检查和沙盒结果，在 `subprocess.run` 层拦住自检与 `lark-cli`，保留真实的巡检入口、JSON 解析和 `send()` 调用链，不联网、不碰真实仓库、`~/.hermes` 或安装副本、不真的发消息。覆盖：
+用临时目录造假的 `state.db` 和 `agent.log` 检查主对话 / 辅助任务回退、oneshot 排除、日期过滤、日志计数和缺失日志处理（6 项）。另 3 项固定日期、临时日志目录，在 `subprocess.run` 层拦住 `lark-cli`：日常异常发一条、沿用 bot 身份和私聊、幂等键 `health-日期 时间`；`--dry-run` 只打印不发；1 号也不再查沙盒和仓库（每月部分已搬到 `self_check.py`）。不联网、不碰 `~/.hermes`、不真的发消息。
 
-- 每月 1 号同时查沙盒和仓库，沙盒无陈旧项也继续自检；其他日期默认都跳过；`--sandbox` / `--repos` 各自手动触发，也可一起用。
-- 自检中文正文之后的末行 JSON（允许结尾空行）：退出码 1 的合法失败只发送 `failed`；全部通过或只有 `warnings` 不发送。
-- 日常异常、沙盒和仓库各发一条；仓库使用 `repos-YYYY-MM`，同月同键、跨年换月换键；沿用原有 bot 身份、目标私聊和发送日志。幂等行为验证到传给 `lark-cli` 的键，未调用真实服务。
-- 自动及手动触发配合 `--dry-run` 均打印但不发送；空输出、损坏 / 不一致的 JSON、意外退出码、启动失败和超时都记为“仓库自检未完成”，不会误报通过。
-- 自检使用当前 Python 和同目录的 `check_repos.py`，继承 `DT_ROSTER`，单独给 600 秒超时。
+单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_health_check.py -v`。
 
-单跑巡检测试：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_health_check.py -v`。合并后需将 `health_check.py` 与 `check_repos.py` 一起放到安装目录；本次只改仓库，未同步安装副本或验证 launchd 实际运行。
+## 工程自检（test_self_check.py）
+
+测的是 `ops/self_check.py`。漂移检查跑真实入口：临时 git 仓库当 `DT_REPO`，临时目录当 `HERMES_HOME`、`DT_BIN` 和 `HOME`，`DT_TODAY` 固定日期；git 用临时全局配置。覆盖：
+
+- 漂移：全部一致时无输出；安装缺文件、内容不同只报路径不报内容；`check_repos.py` 两处安装都查；`hermes/scripts/tests/`、非 `.py` 脚本、安装处多出的文件不管；工作区未提交改动和别的分支的提交不算漂移；仓库不在或不是 git 仓库记一条「取不到仓库 main」。
+- 日期：非 1 号只查漂移；1 号或 `--monthly` 才查沙盒和仓库；端到端用空名册跑真的 `check_repos.py`，名册读不了报失败项。
+- 沙盒（从巡检迁来）：只算顶层、非隐藏、超过 30 天没动的；目录扫不了记一条「扫不了」，不崩。文案和「另有 N 项」截断不变。
+- 仓库自检（从巡检迁来，打桩 `subprocess.run`）：只返回失败项，全通过或只有提示返回空；用当前 Python 和同目录 `check_repos.py`、继承 `DT_ROSTER`、600 秒超时；空输出、损坏 / 不一致的 JSON、意外退出码、启动失败和超时都记「仓库自检未完成」，不带出 traceback。
+
+不联网，不碰真实仓库、`~/.hermes`、安装副本和 Vault。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_self_check.py -v`。
 
 ## 仓库自检（test_check_repos.py）
 
