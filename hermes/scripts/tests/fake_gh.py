@@ -7,6 +7,8 @@ state 目录里的文件：
   pr_state      pr view 返回的状态，默认 OPEN；pr merge 成功后写成 MERGED
   merge_fail    有这个文件时 pr merge 失败
   pr_list.json / issue_list.json   pr list / issue list 返回的 JSON
+  api.json      gh api <路径> 的回话：{路径: 回话}，回话是字符串就原样输出，否则输出 JSON；路径不在里面按 404 失败
+  fail_match    参数里含这个文件内容的调用失败（模拟只有某个仓库连不上）
 """
 import json
 import os
@@ -41,7 +43,20 @@ def main(args):
     if (state / "fail").exists():
         sys.stderr.write((state / "fail").read_text())
         return 1
+    f = state / "fail_match"
+    if f.exists() and any(f.read_text().strip() in a for a in args):
+        sys.stderr.write("error connecting to api.github.com\n")
+        return 1
     kind, verb = args[0], args[1]
+    if kind == "api":
+        f = state / "api.json"
+        api = json.loads(f.read_text()) if f.exists() else {}
+        if verb not in api:
+            sys.stderr.write("gh: Not Found (HTTP 404)\n")
+            return 1
+        out = api[verb]
+        print(out if isinstance(out, str) else json.dumps(out, ensure_ascii=False))
+        return 0
     if (kind, verb) == ("issue", "create"):
         print("https://github.com/o/fx/issues/7")
     elif (kind, verb) == ("pr", "create"):

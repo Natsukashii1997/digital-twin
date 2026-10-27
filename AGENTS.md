@@ -24,6 +24,7 @@ docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标
 ops/
   health_check.py      每日巡检（源文件）；安装副本在 ~/Library/Application Support/DigitalTwin/bin/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
+  check_repos.py       名册活跃项目自检（只读）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
 
 ## Agent skills

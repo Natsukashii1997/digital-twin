@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项，共 37 项），末尾显示 `Ran 37 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 6 项 + 仓库自检 5 项，共 48 项），末尾显示 `Ran 48 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -51,3 +51,7 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ## 进展里的 PR 和 issue（test_progress_github.py）
 
 假 `gh` 喂固定的 PR 和 issue，时区固定北京时间。覆盖：按北京时间算当天的 PR 新开、合并、未合并关闭和 issue 新开、关闭，前后一天的不算；只有 GitHub 上有动静的项目也列出来；gh 连不上时只在该项目下写「GitHub 取不到」，没动静的项目在「今天没动静」里带标记，连不上一次后不再逐个等超时；名册没有 `github` 的项目不调 gh。
+
+## 仓库自检（test_check_repos.py）
+
+测的是 `ops/check_repos.py`。每个项目一个临时裸仓库当远端、一个临时主目录，临时名册（`DT_ROSTER`）；假 `gh` 从状态目录的 `api.json` 回 `gh api` 的仓库设置、标签和文件内容，路径不在里面按 404；`fail_match` 让只含某个仓库名的调用失败。git 用临时全局配置。覆盖：全部合规时 `ok: true`、退出码 0，没有 `github` 的项目不查，跑完本地引用不变（不 fetch）；远端不私有、默认分支不对、rebase 没关、不自动删分支、Issues 没开、缺标签、没有 PR 模板、入口文档没有「工程流程」逐项记失败，名册 `test` 为空只记提示；主目录不在主分支记失败且不切分支；本地主分支多出没推的提交记失败，远端有本地没有的提交记「本地落后，需拉取」提示；某个项目 gh 连不上只把该项目标失败、不再逐项调 gh，其他项目照查。
