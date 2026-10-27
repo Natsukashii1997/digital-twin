@@ -6,6 +6,24 @@
 
 ---
 
+## 2026-10-27 · Hermes 对话里读飞书改用猛鬼兽用户身份（已生效）
+
+- 时间：开工 13:32
+- **决定**（常浩）：Hermes 工作区改绑到猛鬼兽，复用 12:16 那次授权；亚古兽不要了；验收用 `hermes cron` 只跑一次的探针；只记 CURRENT，不开 PR（这次只改本机配置，仓库代码没动）。
+- **原因**：`lark-cli` 检测到 Hermes 环境就读 `~/.lark-cli/hermes/config.json`。这份配置 8-11 绑的是旧机器人「亚古兽-Hermes」`cli_a965c429ef785bd3`，Hermes 换成猛鬼兽 `cli_a96f5f9ac63adcd4` 后没有重新绑定。亚古兽的用户刷新令牌 10-27 18:37 到期。`LARKSUITE_CLI_CONFIG_DIR` 只换配置根目录，Hermes 环境下仍会拼上 `/hermes/`，绕不开检测。
+- **做了什么**（只改本机配置）：
+  - 备份旧配置到证据目录，跑 `HERMES_HOME=~/.hermes lark-cli config bind --source hermes --identity user-default`：Hermes 工作区换成猛鬼兽（`replaced: true`）。
+  - 绑定后用户列表为空，手动补上常浩在猛鬼兽下的用户条目 `ou_5ad2…`。令牌存储 `~/Library/Application Support/lark-cli/<appId>_<openId>.enc` 各工作区共用，所以直接复用已有授权，不用扫码。
+  - SOUL 第 24 行原来的写法不用改。默认配置 `~/.lark-cli/config.json` 没动，里面亚古兽那份留着不删。T7 脚本去掉环境变量的处理保留，不影响。
+- 测试：
+  - 改绑前复现：`hermes chat --oneshot` 里 `--profile cli_a96f5f9ac63adcd4` 报 profile not found，不带 profile 用的是 `cli_a965…`。
+  - 改绑后在 Hermes 环境下：`auth status` user 身份 `valid`，`authen/v1/user_info --as user` 返回常浩 `ou_5ad2…`；默认配置下猛鬼兽仍 `valid`。
+  - 网关探针 `92287fb372f0`（带模型、只跑一次、只存本地，已自动清掉）：按 SOUL 写法跑 `lark-cli`，appId `cli_a96f5f9ac63adcd4`、user 身份 `valid`、私聊读取成功（读到 1 条 13:32 的文本消息，证据只记 ID 和时间、不记正文）。
+  - 证据在 `evidence/lark-profile-20261027/`（复现输出、旧配置备份、探针汇总）。
+- 本轮新坑：Hermes（OpenClaw、lark-channel 同理）换飞书应用后，要重新跑 `lark-cli config bind`，否则对话里的 `lark-cli` 还在用旧应用；`config bind` 是一次性同步，不会自动跟着变。并进上一节那条，一起提议提升为全局坑，等常浩批。
+- 没做：没在飞书私聊里让常浩亲自问猛鬼兽；没开 issue / PR（常浩定的）。
+- 下一步：不变，见下一节（明早 07:30 日报首跑后回读）。
+
 ## 2026-10-27 · M5 T7 批 2：Hermes 按新结构写日报、周报（定时任务已建，明早首跑）
 
 - 时间：开工 12:20
