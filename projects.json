@@ -91,6 +91,26 @@
       "notes": "本项目。改了脚本和技能要同步到安装位置（见 AGENTS.md）。",
       "category": "活跃",
       "github": "Natsukashii1997/digital-twin"
+    },
+    {
+      "id": "carvomoto",
+      "name": "CarvoMOTO-汽配",
+      "aliases": [
+        "CarvoMOTO-汽配",
+        "CarvoMOTO",
+        "carvomoto",
+        "汽配",
+        "汽配出海"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/carvomoto",
+      "main": "main",
+      "agents": "README.md",
+      "test": null,
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "出海项目（ATV/UTV 汽配，首批美国 B2B）。2026-10-27 开通，只有本地仓库、没有远端；原 carvomoto-leads 并入 leads/，客户名单与令牌不进仓库。协作骨架待 project-starter 补。",
+      "category": "活跃",
+      "github": null
     }
   ],
   "categories": {
