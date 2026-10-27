@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-27 · 按独立评审对齐三处配置（#2 #3 #12，已生效）
+
+- 时间：开工 16:45
+- **来由**：Fable 5.1 独立重梳并对比评审，报告 [docs/reviews/2026-10-27-独立重梳与对比评审.md](docs/reviews/2026-10-27-独立重梳与对比评审.md)（13 条建议）。**决定**（常浩）：先做 #2 #3 #12；飞书只认常浩，群里不听别人；报告提交进仓库。第 11 条（日报加“常浩自己写一句”）和常浩原话“了解我的一天不需要通过诉说”相反，不采纳。
+- **做了什么**（只改本机安装，仓库代码没动）：
+  - **#2 SOUL 日报来源**：「信息从哪来」第一条改为以 Hermes 自己写的新日报、周报两份飞书文档为准，5280 接口只作日报机器人的旧日报历史。
+  - **#3 凭据借用**：`hermes config set auth.adopt_external_logins false`。Hermes 自己有 `openai-codex` 登录（device_code），不再去读、刷新 Codex CLI 和 Claude Code 的登录，避免把那边顶掉线。
+  - **#3 飞书准入**：`~/.hermes/.env` 加 `FEISHU_ALLOWED_USERS=ou_5ad2…`（常浩在猛鬼兽下的 open_id，即配对表里唯一一位）和 `FEISHU_GROUP_POLICY=allowlist`。私聊只放常浩；群里只有常浩 @ 它才处理，其他人一律丢弃。`FEISHU_ALLOW_ALL_USERS` 本来就是 false。
+  - **#12**：删掉 9 个已完成的一次性探针 cron，只剩日报、周报两条。
+  - 重启网关一次。
+- 测试：回读 `config.yaml` 为 `adopt_external_logins: false`，`hermes auth list` 提示不再借用外部登录；网关日志 16:50:50 `✓ feishu connected`；`hermes cron list --all` 只剩两条 active，`cron status` 显示网关在跑。常浩私聊能否照常收发还没由常浩亲自发一条验证。
+- 证据：`evidence/config-align-20261027/`（SOUL、.env、config.yaml、cron 列表的改前备份）。
+- 范围外：`hermes gateway status` 提示「launchd 服务定义比当前安装旧，建议 `hermes gateway start`」，没处理。评审其余建议（#4 台账脚本化最急）未做。
+- 本轮新坑：无。
+
+---
+
 ## 2026-10-27 · Hermes 对话里读飞书改用猛鬼兽用户身份（已生效）
 
 - 时间：开工 13:32
