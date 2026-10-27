@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-27 · 每月自检搬到 Hermes 无模型定时任务（PR #22 待合并）
+
+- 时间：开工 18:12
+- **发现**：launchd 起的 `/usr/bin/python3` 读不了 `~/Documents`。一次性 launchd 任务跑安装版 `check_repos.py`，报「读不了名册（Operation not permitted）」；沙盒检查扫 `~/Documents/Codex` 也会抛错。11-01 的每月仓库自检和项目卡检查会失败（12:27 那次是终端手动跑的，没暴露）。一次性无模型 Hermes cron 探针（18:18，已删）能读名册、Vault 项目卡和仓库 git。
+- **决定**（常浩）：每月部分搬到 Hermes 无模型定时任务，顺带加安装副本漂移检查（独立评审 #9）；走 PR，合并前问。
+- **做了什么**：issue #21 → [PR #22](https://github.com/Natsukashii1997/digital-twin/pull/22)（子代理在 worktree 实现，Claude 审过）：新增 `ops/self_check.py`（每天漂移检查，每月 1 号加沙盒和仓库自检，有问题才输出）；`health_check.py` 只留每日部分。
+- 测试：变基后 `python3 -B -m unittest discover -s hermes/scripts/tests` 86 项 OK；真实环境只读跑 self_check 报 3 项安装缺失（prompts 下 README、morning_brief，`~/.hermes/scripts/check_repos.py`），其余一致。
+- 本轮新坑：无（TCC 那条 LESSONS 里已有：launchd 起的 python 读不了 Documents）。
+- 下一步：常浩说“合并”后安装、建 Hermes 定时任务（每天 09:50，发私聊），只跑一次的任务实测。
+
+---
+
 ## 2026-10-27 · M4 补入 C3 与项目卡（PRD 12.3 拍板，批 7 开工）
 
 - 时间：开工 17:20
