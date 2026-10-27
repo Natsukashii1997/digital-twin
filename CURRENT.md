@@ -16,7 +16,7 @@
   - **#3 飞书准入**：`~/.hermes/.env` 加 `FEISHU_ALLOWED_USERS=ou_5ad2…`（常浩在猛鬼兽下的 open_id，即配对表里唯一一位）和 `FEISHU_GROUP_POLICY=allowlist`。私聊只放常浩；群里只有常浩 @ 它才处理，其他人一律丢弃。`FEISHU_ALLOW_ALL_USERS` 本来就是 false。
   - **#12**：删掉 9 个已完成的一次性探针 cron，只剩日报、周报两条。
   - 重启网关一次。
-- 测试：回读 `config.yaml` 为 `adopt_external_logins: false`，`hermes auth list` 提示不再借用外部登录；网关日志 16:50:50 `✓ feishu connected`；`hermes cron list --all` 只剩两条 active，`cron status` 显示网关在跑。常浩私聊能否照常收发还没由常浩亲自发一条验证。
+- 测试：回读 `config.yaml` 为 `adopt_external_logins: false`，`hermes auth list` 提示不再借用外部登录；网关日志 16:50:50 `✓ feishu connected`；`hermes cron list --all` 只剩两条 active，`cron status` 显示网关在跑。17:06 常浩在私聊亲自发了一句：网关日志记为 `Inbound dm message`，发送人 `ou_5ad2…` 放行，主模型 `gpt-6.1-sol`（openai-codex）8 秒回复，`content_delivered=True`；重启后没有 `policy_rejected` 记录。
 - 证据：`evidence/config-align-20261027/`（SOUL、.env、config.yaml、cron 列表的改前备份）。
 - 范围外：`hermes gateway status` 提示「launchd 服务定义比当前安装旧，建议 `hermes gateway start`」，没处理。评审其余建议（#4 台账脚本化最急）未做。
 - 本轮新坑：无。
