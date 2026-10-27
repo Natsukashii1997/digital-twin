@@ -70,7 +70,7 @@
       "test": "npm test",
       "default_worker": null,
       "write_allowed": true,
-      "notes": "M3 批 3 建了 main（指向 claude/v1），远端默认分支已改成 main；codex/bootstrap、claude/v1 保留，主目录仍检出 claude/v1。",
+      "notes": "M3 批 3 建了 main（指向 claude/v1），远端默认分支已改成 main；codex/bootstrap、claude/v1 保留；M3 批 6（2026-10-27）主目录已切到 main。",
       "category": "活跃",
       "github": "Natsukashii1997/github-center"
     },
