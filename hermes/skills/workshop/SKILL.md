@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.5.0
+version: 0.5.1
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
