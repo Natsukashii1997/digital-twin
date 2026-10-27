@@ -6,6 +6,32 @@
 
 ---
 
+## 2026-10-27 · M3 批 5（B6 交替规矩 + Hermes 接 GitHub）完成
+
+- **决定**（常浩）：分批计划照做。另外补了一条：写入单从 `origin/main` 拉分支；合并时本地 main 有没推的提交，先把标题列给常浩，他回“推”才推（`merge --push-main <提交号>`）。批 5 的 6 个 PR 一次说“合并”全合；数码世界本地 main 上没推的 2 个提交（`1d25104`、`a38bc37`）同意推。
+- **6 个 PR**（每个先建 issue，分支都从 `origin/main` 拉，只含本 PR 的提交）：
+  - agent-kit#4 → `5868ae8`：新建 `工程流程.md`；README「分层」加指针；本仓库和 project-starter 骨架加 PR 模板、AGENTS 指针。
+  - work-desk#4 → `ce7a2c5`、personal-ai-workbench#5 → `b352c0f`、github-center#20 → `5a48892`、digital-twin#4 → `0ec3ea4`：加 `.github/pull_request_template.md`，AGENTS「Agent skills」末尾加《工程流程》指针。
+  - digital-twin#6 → `454171b`：
+    - `dispatch.py`：写入单开单建 issue；新增 `pr`；`merge` 走推送前检查 → 变基 → 测试 → `gh pr merge --squash` → 主目录拉齐；`clean` 确认 MERGED 后 `branch -D`，放弃时关 PR 和 issue。
+    - `run_worker.py`：远端护栏只看本单分支，其他远端变化记进 `note_remote_moved`。
+    - `progress_data.py`：加当天的 PR 和 issue，GitHub 取不到只标在该项目下。
+    - 技能：workshop 升 0.5.0，progress 升 0.2.0。progress 不在原计划里，但它写着“没读 GitHub”，F6.3 要用，所以一起改了。
+  - 6 张 issue 都已自动关闭；worktree、本地分支和远端分支都已清理。主目录都已拉齐：github-center 用 `fetch origin main:main`，仍检出 `claude/v1`。各主目录里别人没提交的改动没动。
+- **安装与网关**：三个脚本直接用 main 上的版本覆盖（覆盖前和改前的仓库版本一致）。workshop、progress 两个安装副本已被 Hermes 自己加过规矩，和仓库版本不同，所以用三方合并把批 5 的改动叠上去，保留 Hermes 自己加的内容，没有直接覆盖。旧副本和装上的版本在 `evidence/M3-B5-20261027/`。05:24 重启 `ai.hermes.gateway`，飞书重连正常。
+- **飞书验收**（常浩授权，Claude 用 `lark-cli --profile codex --as user` 代发，每条都先给常浩看过）：
+  - 派单 D20261027-1（Claude · 写入 · digital-twin：名册给 digital-twin 填 `test`，tests/README 补一句）。开单时自动建了 issue #7（`ready-for-agent`）。核对待确认派单和原单一致后回了“可以”；车间用时 53 秒，自动开了 PR #8（`Closes #7`）。回报里有 PR 链接，回执两条护栏都是 false，只提交了指定的两个文件。车间在 README 那句后面补了命令，并在 PR 里说明了，常浩看过 PR 后同意。
+  - 常浩说“合并”：PR #8 squash 合并为 `c44180d`，主目录已拉齐，issue #7 已关闭，单子已 cleaned。合并时 `tested: false`（名册里的测试命令正是这一单才加上的），Hermes 照实说明，合并前后各自跑了一遍，都是 37 项全过。
+  - 问“今天各项目怎么样”：5 个项目的回答里都有当天 PR 和 issue 的数目，digital-twin 是 PR #2、#4、#6、#8 和 issue #1、#3、#5、#7，和 GitHub 一致。**F6.3 通过。**
+- 测试：digital-twin 自测 `python3 -B -m unittest discover -s hermes/scripts/tests` 共 37 项 OK（原有 20 项 + 新增 17 项：假 `gh` + 临时裸仓库；变异检查 3 处都被抓到）。work-desk `npm test` 739/739；github-center 140/140；agent-kit 骨架自测改前改后都是 4 项过 3 项（没过的是 CURRENT 占位）；数码世界 1551 项过 1549，没过的 2 项是缺 `dist/` 和 `wiki-local` 的已知环境问题。变基后整套重跑时，`reverse-ai-process.test.mjs` 的“忽略 TERM 的孙进程”失败一次，留下子进程让整套测试卡住；单独重跑这个文件 11/11 通过，判断是并发负载下偶发失败。
+- 本轮新坑：无。
+- 遗留：
+  1. GitHub 上两个旧仓库仍待常浩删除。
+  2. `merge` 仍要求主目录检出主分支：github-center 主目录在 `claude/v1`，Hermes 合并这个项目的单会停下报告。
+  3. 仓库里的 workshop / progress 技能落后于安装副本（Hermes 自己加的规矩没回写仓库）。下次改技能前先把安装副本回写到仓库。
+  4. 数码世界 `reverse-ai-process.test.mjs` 在负载下偶发失败、会卡住整套测试，记给数码世界处理。
+- 下一步：M3 批 6（总验收）。
+
 ## 2026-10-27 · M3 批 5 计划定稿（未开工）
 
 - **决定**（常浩，5 条都按推荐定）：
