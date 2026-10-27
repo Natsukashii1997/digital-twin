@@ -37,7 +37,9 @@ class Fail(Exception):
 
 
 def lark(*args):
-    r = subprocess.run([LARK, "--profile", PROFILE, *args, "--as", "user"], capture_output=True, text=True, timeout=180)
+    # 环境里有 HERMES_HOME 时 lark-cli 会改读 ~/.lark-cli/hermes/ 那套配置（里面没有猛鬼兽），这里去掉它，读默认配置
+    env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+    r = subprocess.run([LARK, "--profile", PROFILE, *args, "--as", "user"], capture_output=True, text=True, timeout=180, env=env)
     try:
         d = json.loads(r.stdout)
     except ValueError:

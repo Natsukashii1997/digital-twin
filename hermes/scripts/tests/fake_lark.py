@@ -13,7 +13,7 @@ root = Path(os.environ["FAKE_LARK_DIR"])
 state = json.loads((root / "state.json").read_text(encoding="utf-8"))
 args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
-    f.write(json.dumps(args, ensure_ascii=False) + "\n")
+    f.write(json.dumps({"args": args, "HERMES_HOME": os.environ.get("HERMES_HOME")}, ensure_ascii=False) + "\n")
 
 
 def opt(name):
