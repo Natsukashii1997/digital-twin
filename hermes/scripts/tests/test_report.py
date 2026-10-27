@@ -189,6 +189,13 @@ class Publish(Base):
         self.assertLess(doc.index("2026-10-27"), doc.index("2026-10-26"))
         self.assertTrue(any((self.root / "evidence").iterdir()))
 
+    def test_project_label_gets_blank_lines(self):
+        text = DAILY_OK.replace("### 一、今天的变化\n", "### 一、今天的变化\n**中台**\n").replace(
+            "依据：私聊 某某 10:00「好」\n", "依据：私聊 某某 10:00「好」\n**管培生**\n- ⏩ [A1021-1] 推进\n")
+        r = self.run_py(PUBLISH, "daily", self.write(text))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("「好」\n\n**管培生**\n\n- ⏩", self.doc(DAILY))
+
     def test_publish_refuses_duplicate(self):
         self.state({}, daily=INTRO + "\n" + DAILY_OK)
         r = self.run_py(PUBLISH, "daily", self.write(DAILY_OK))

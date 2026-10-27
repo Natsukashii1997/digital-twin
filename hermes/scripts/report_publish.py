@@ -56,6 +56,8 @@ def main():
     doc = rd.DAILY_DOC if kind == "daily" else rd.WEEKLY_DOC
     try:
         text = path.read_text(encoding="utf-8").strip() + "\n"
+        # 项目名粗体行紧跟在列表后面时，飞书会把它并进上一条；前后补空行
+        text = re.sub(r"\n+(\*\*[^*\n]+\*\*)\n+", r"\n\n\1\n\n", text)
         title = check(kind, text)
         if title in rd.fetch_doc(doc).splitlines():
             raise ValueError(f"文档里已经有「{title}」，不重写")
