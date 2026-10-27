@@ -28,7 +28,7 @@
 - 遗留：
   1. GitHub 上两个旧仓库仍待常浩删除。
   2. `merge` 仍要求主目录检出主分支：github-center 主目录在 `claude/v1`，Hermes 合并这个项目的单会停下报告。
-  3. 仓库里的 workshop / progress 技能落后于安装副本（Hermes 自己加的规矩没回写仓库）。下次改技能前先把安装副本回写到仓库。
+  3. ~~仓库里的 workshop / progress 技能落后于安装副本~~：已回写（digital-twin#10 → `6cb05c9`，workshop 升 0.5.1，已同步回安装位置，旧副本在 `evidence/M3-B5-20261027/before-0.5.1/`）。
   4. 数码世界 `reverse-ai-process.test.mjs` 在负载下偶发失败、会卡住整套测试，记给数码世界处理。
 - 下一步：M3 批 6（总验收）。
 
