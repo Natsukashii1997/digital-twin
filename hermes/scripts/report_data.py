@@ -19,6 +19,7 @@ from pathlib import Path
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
 PROFILE = "cli_a96f5f9ac63adcd4"              # 猛鬼兽应用，常浩的用户身份
+AGENT_ENV = ("HERMES", "OPENCLAW", "LARK_CHANNEL")
 ME = "ou_5ad2ac4359de95dc41b5e89edd68ae6a"     # 常浩
 HERMES_BOT = "ou_12bf9332a4a8c513c2b30777ca9def28"  # 和猛鬼兽的私聊不算材料
 DAILY_DOC = os.environ.get("DT_DAILY_DOC", "WZyhdQdM0oMk2jxSlOTcJPVKnQg")
@@ -37,8 +38,9 @@ class Fail(Exception):
 
 
 def lark(*args):
-    # 环境里有 HERMES_HOME 时 lark-cli 会改读 ~/.lark-cli/hermes/ 那套配置（里面没有猛鬼兽），这里去掉它，读默认配置
-    env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+    # lark-cli 看到 Hermes / OpenClaw 的环境变量会改读 ~/.lark-cli/hermes/ 等另一套配置（里面没有猛鬼兽），
+    # 这里把这些变量都去掉，读默认配置
+    env = {k: v for k, v in os.environ.items() if not k.lstrip("_").startswith(AGENT_ENV)}
     r = subprocess.run([LARK, "--profile", PROFILE, *args, "--as", "user"], capture_output=True, text=True, timeout=180, env=env)
     try:
         d = json.loads(r.stdout)

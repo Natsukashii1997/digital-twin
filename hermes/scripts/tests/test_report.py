@@ -125,13 +125,14 @@ class DailyData(Base):
         self.assertNotIn("远期我的", out)
         self.assertNotIn("别人负责", out)
 
-    def test_lark_called_without_hermes_home(self):
-        self.env["HERMES_HOME"] = "/tmp/fake-hermes-home"   # 网关里有这个变量
+    def test_lark_called_without_agent_env(self):
+        for k in ("HERMES_HOME", "HERMES_QUIET", "HERMES_EXEC_ASK", "_HERMES_GATEWAY", "OPENCLAW_HOME"):
+            self.env[k] = "1"   # 网关里有这些变量，lark-cli 见了会换配置目录
         self.state({"im": [msg("oc_p2p", "p2p", "ou_x", "hi", partner="ou_x")]})
         self.assertEqual(self.run_py(DATA, "daily", "--date", "2026-10-27").returncode, 0)
         calls = [json.loads(x) for x in (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertTrue(calls)
-        self.assertTrue(all(c["HERMES_HOME"] is None for c in calls))
+        self.assertTrue(all(c["agent_env"] == [] for c in calls), calls[0])
 
     def test_prior_daily_ledger_used(self):
         daily = INTRO + "\n## 📅 2026-10-26（周一）\n\n### 二、还开着的事（1 件）\n- [A1026-9] 文档里的事\n\n### 三、卡点\n无\n"
