@@ -99,6 +99,34 @@ class HealthCheckTest(unittest.TestCase):
         self.assertTrue(issues[0].startswith("读不了 Hermes 日志"))
 
 
+class CronIncidentTest(unittest.TestCase):
+    """只算 detected、alerted；已 ack（closed）的不再告警。"""
+
+    NONE = "No cron failure incidents recorded.\n  (filtered by state '{}')\n"
+    ONE = ("  abc_123  detected\n    Job:        abc\n    Type:       config\n"
+           "    Error:      Script exited with code 1 stdout: 取数失败\n")
+
+    def run_with(self, outputs):
+        calls = []
+
+        def fake(cmd, timeout=60):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, outputs.get(cmd[-1], self.NONE.format(cmd[-1])), "")
+        with patch.object(hc, "run", side_effect=fake):
+            return hc.check_cron(), calls
+
+    def test_no_open_incidents(self):
+        issues, calls = self.run_with({})
+        self.assertEqual(issues, [])
+        self.assertEqual([c[-2:] for c in calls], [["--state", "detected"], ["--state", "alerted"]])
+
+    def test_open_incident_reported_with_error(self):
+        issues, _ = self.run_with({"detected": self.ONE})
+        self.assertEqual(len(issues), 1)
+        self.assertIn("1 条未处理的失败记录", issues[0])
+        self.assertIn("Script exited with code 1", issues[0])
+
+
 class DailySendTest(unittest.TestCase):
     """每月部分已搬到 self_check.py：巡检只发日常异常，哪天跑都不再起别的子进程。"""
 

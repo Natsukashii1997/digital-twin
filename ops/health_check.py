@@ -101,11 +101,21 @@ def check_aux_errors(day=None):
 
 
 def check_cron():
-    r = run(["hermes", "cron", "incidents"])
-    text = (r.stdout + r.stderr).strip()
-    if r.returncode != 0 or not text or "no " in text.lower()[:40] or "没有" in text[:20]:
+    """只看还没处理的失败记录（detected、alerted）；已 ack 或已解决的不算。"""
+    ids, first = [], ""
+    for state in ("detected", "alerted"):
+        r = run(["hermes", "cron", "incidents", "--state", state])
+        if r.returncode != 0:
+            continue
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == state:
+                ids.append(parts[0])
+            elif not first and line.strip().startswith("Error:"):
+                first = line.split("Error:", 1)[1].strip()[:80]
+    if not ids:
         return []
-    return [f"定时任务有未处理的失败记录：{text.splitlines()[0][:120]}"]
+    return [f"定时任务有 {len(ids)} 条未处理的失败记录（{first or ids[0]}）；看 `hermes cron incidents`，处理完 ack"]
 
 
 def send(msg, key, now):
