@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-10-28 · 首日运行核对；巡检定时任务误报修复（PR #24 待合并）
+
+- 时间：开工 09:42
+- **首日运行**：
+  - 07:33 日报（新结构·并跑）首跑 ok，主模型 gpt-6.1-sol，回复「日报已写入：📅 2026-10-27（周二）（20 件开着，1 件今天关闭）」。
+  - 09:45 launchd 巡检报 3 条，逐条核对都是修复前遗留：辅助任务回退 1 次、7 次「no Codex OAuth token found」都在 10-27 05:30 之前（假冷却修好前）；「定时任务有未处理的失败记录」是 10-27 中午两个已删 T7 探针留下的 incident，已 `hermes cron incidents ack`（closed）。
+  - 09:50 工程自检 `f3388d53ce97` 跑完，`empty stdout — silent run`，没发消息（安装副本全部一致）。
+- **发现**：`check_cron()` 跑不带参数的 `hermes cron incidents`，closed 的也算，明天还会误报；告警文字取的是表格边框行。
+- **做了什么**（常浩：修，走 PR）：issue #23 → [PR #24](https://github.com/Natsukashii1997/digital-twin/pull/24)：只查 `--state detected`、`--state alerted`，按条数报并附报错摘要；自测 +2。
+- 测试：`python3 -B -m unittest discover -s hermes/scripts/tests` 88 项 OK；真实环境新 `check_cron()` 返回 `[]`。
+- 本轮新坑：无。
+- 下一步：常浩说“合并”后合并、同步 `health_check.py` 到 Application Support bin。
+
 ## 2026-10-27 · 每月自检搬到 Hermes 无模型定时任务（已上线）
 
 - 时间：开工 18:12
