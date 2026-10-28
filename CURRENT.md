@@ -6,7 +6,7 @@
 
 ---
 
-## 2026-10-28 · 首日运行核对；巡检定时任务误报修复（PR #24 待合并）
+## 2026-10-28 · 首日运行核对；巡检定时任务误报修复（已上线）
 
 - 时间：开工 09:42
 - **首日运行**：
@@ -17,7 +17,8 @@
 - **做了什么**（常浩：修，走 PR）：issue #23 → [PR #24](https://github.com/Natsukashii1997/digital-twin/pull/24)：只查 `--state detected`、`--state alerted`，按条数报并附报错摘要；自测 +2。
 - 测试：`python3 -B -m unittest discover -s hermes/scripts/tests` 88 项 OK；真实环境新 `check_cron()` 返回 `[]`。
 - 本轮新坑：无。
-- 下一步：常浩说“合并”后合并、同步 `health_check.py` 到 Application Support bin。
+- **合并与安装**（常浩说“合并”）：变基复跑 88 项 OK，squash 合并为 `38a8b7e`，issue #23 关闭，worktree 和分支已删；`health_check.py` 同步到 Application Support bin（`cmp` 一致，旧版备份 `evidence/self-check-20261027/health_check.py.before-pr24`）；终端跑 self_check 无输出。
+- 下一步：10-29 09:45 巡检应只剩真实问题（预计无告警），09:50 工程自检应静默。
 
 ---
 
