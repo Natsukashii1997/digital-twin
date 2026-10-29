@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """假 lark-cli：不联网。按 FAKE_LARK_DIR 里的 state.json 回话，每次调用记进 calls.jsonl。
 
-state.json：{"docs": {token: markdown}, "im": [消息], "vc": [], "minutes": [], "agenda": [], "tasks": []}
+state.json：{"docs": {token: markdown}, "im": [消息], "mget": {message_id: 消息}, "vc": [], "minutes": [], "agenda": [], "tasks": []}
 docs +update 的 block_insert_after 会把内容插到文档第一段说明之后，供写后回读。
 """
 import json
@@ -41,6 +41,10 @@ elif cmd == "docs +update":
     state["docs"][opt("--doc")] = f"{head}\n\n{intro}\n\n{opt('--content').strip()}\n\n{tail}".rstrip() + "\n"
     (root / "state.json").write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     out({"result": "success"})
+elif cmd == "im +messages-mget":
+    ids = [i for i in (opt("--message-ids") or "").split(",") if i]
+    found = [state.get("mget", {})[i] for i in ids if i in state.get("mget", {})]
+    out({"messages": found, "total": len(found)})
 elif cmd == "im +messages-search":
     out({"messages": state.get("im", []), "has_more": False})
 elif cmd == "vc +search":

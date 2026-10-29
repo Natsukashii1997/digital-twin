@@ -8,6 +8,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -84,7 +85,24 @@ class Base(unittest.TestCase):
         self.assertEqual(r.returncode, 0 if ok else 1, r.stdout + r.stderr)
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(out["ok"], ok)
+        for secret in ("ou_test_owner", "ou_env_owner", "ou_someone_else", "oc_test_chat"):
+            self.assertNotIn(secret, r.stdout + r.stderr)      # 身份值不进输出
         return out
+
+    def lark_env(self, env, messages):
+        """假 lark-cli（fake_lark.py）：messages = {message_id: 发送者 open_id}，都在常浩和 Hermes 的私聊里、时间是现在；
+        私聊 chat_id 写进临时的 600 配置文件。B2.1 起 --by user 只认这样回读核实过的消息。"""
+        fake = self.root / "fake-lark"
+        fake.mkdir(exist_ok=True)
+        now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        state = {"mget": {mid: {"chat_id": "oc_test_chat", "content": "{}", "create_time": now, "deleted": False, "message_id": mid,
+                                "msg_type": "text", "sender": {"id": sender, "id_type": "open_id", "sender_type": "user"},
+                                "updated": False} for mid, sender in messages.items()}}
+        (fake / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        chat = self.root / "owner_chat_id"
+        chat.write_text("oc_test_chat\n", encoding="utf-8")
+        chat.chmod(0o600)
+        return {**env, "DT_LARK_CLI": str(HERE / "fake_lark.py"), "FAKE_LARK_DIR": str(fake), "DT_OWNER_CHAT_FILE": str(chat)}
 
 
 class AcceptanceTests(Base):
@@ -864,12 +882,14 @@ class FinalFixTests(Base):
             self.assertEqual(ts.owner_open_id(), None)
             os.environ["DT_OWNER_OPEN_ID"] = "ou_env_owner"
             self.assertEqual(ts.owner_open_id(), "ou_env_owner")            # 环境变量优先
-        # 命令行：没配置时 --by user 一律拒绝并提示怎么配；配好后只认配置里的那个
-        env = {k: v for k, v in os.environ.items() if k != "DT_OWNER_OPEN_ID"}
+        # 命令行：没配置时 --by user 一律拒绝并提示怎么配；配好后只认配置里的那个——而且身份只从飞书回读来（B2.1 T03）
+        env = {k: v for k, v in os.environ.items() if k not in ("DT_OWNER_OPEN_ID", "HERMES_SESSION_MESSAGE_ID")}
         env.update(DT_STATE_DB=str(self.db), DT_DISPATCH=str(self.root / "no-dispatch"), DT_OWNER_FILE=str(self.root / "nowhere"))
+        env = self.lark_env(env, {"om_testowner0001": "ou_test_owner", "om_testowner0002": "ou_test_owner",
+                                  "om_envowner00001": "ou_env_owner", "om_someoneelse01": "ou_someone_else"})
         self.store.close()
         new = ("goal-new", "--title", "x", "--by", "user", "--status", "authorized")
-        out = self.cli(env, *new, "--sender", "ou_test_owner", ok=False)
+        out = self.cli(env, *new, "--message-id", "om_testowner0001", ok=False)
         self.assertEqual(out["error"], "NotAuthorized")
         self.assertIn("DT_OWNER_OPEN_ID", out["msg"])
         self.assertIn("owner_open_id", out["msg"])
@@ -877,14 +897,16 @@ class FinalFixTests(Base):
         f.write_text("ou_test_owner\n", encoding="utf-8")
         f.chmod(0o644)
         env["DT_OWNER_FILE"] = str(f)
-        self.assertIn("600", self.cli(env, *new, "--sender", "ou_test_owner", ok=False)["msg"])
+        self.assertIn("600", self.cli(env, *new, "--message-id", "om_testowner0001", ok=False)["msg"])
         f.chmod(0o600)
-        self.assertEqual(self.cli(env, *new, "--sender", "ou_test_owner")["goal"]["status"], "authorized")
-        self.assertEqual(self.cli(env, *new, "--sender", "ou_someone_else", ok=False)["error"], "NotAuthorized")
-        self.assertEqual(self.cli(env, *new, ok=False)["error"], "NotAuthorized")                   # 不带 --sender 也不行
+        self.assertEqual(self.cli(env, *new, "--message-id", "om_testowner0001")["goal"]["status"], "authorized")
+        self.assertEqual(self.cli(env, *new, "--message-id", "om_someoneelse01", ok=False)["error"], "NotAuthorized")
+        no_mid = self.cli(env, *new, ok=False)                                                      # 不指向消息也不行
+        self.assertEqual(no_mid["error"], "NotAuthorized")
+        self.assertIn("--message-id", no_mid["msg"])
         env["DT_OWNER_OPEN_ID"] = "ou_env_owner"
-        self.assertEqual(self.cli(env, *new, "--sender", "ou_env_owner")["goal"]["status"], "authorized")
-        self.assertEqual(self.cli(env, *new, "--sender", "ou_test_owner", ok=False)["error"], "NotAuthorized")
+        self.assertEqual(self.cli(env, *new, "--message-id", "om_envowner00001")["goal"]["status"], "authorized")   # 环境变量优先
+        self.assertEqual(self.cli(env, *new, "--message-id", "om_testowner0002", ok=False)["error"], "NotAuthorized")
         with ts.Store(self.db) as s:
             self.assertEqual(len(s.list_goals()), 2)
 
@@ -1031,23 +1053,33 @@ class MoreTests(Base):
         owner = self.root / "owner_open_id"                       # 常浩的 open_id 从本机受控配置来，测试用临时文件
         owner.write_text("ou_test_owner\n", encoding="utf-8")
         owner.chmod(0o600)
-        env = {k: v for k, v in os.environ.items() if k != "DT_OWNER_OPEN_ID"}
+        env = {k: v for k, v in os.environ.items() if k not in ("DT_OWNER_OPEN_ID", "HERMES_SESSION_MESSAGE_ID")}
         env.update(DT_STATE_DB=str(self.db), DT_DISPATCH=str(self.root / "no-dispatch"), DT_OWNER_FILE=str(owner))
-        me = ["--sender", "ou_test_owner"]
+        env = self.lark_env(env, {"om_cli000001": "ou_test_owner", "om_cli000002": "ou_test_owner", "om_cli000003": "ou_test_owner",
+                                  "om_other00001": "ou_someone_else"})
 
         def cli(*args, ok=True):
             return self.cli(env, *args, ok=ok)
 
         self.store.close()
-        self.assertEqual(cli("init")["schema_version"], 1)
-        # --by user 必须带常浩本人的 open_id；角色名不是身份
-        no_sender = cli("goal-new", "--title", "x", "--by", "user", "--status", "authorized", ok=False)
-        self.assertEqual(no_sender["error"], "NotAuthorized")
-        self.assertIn("--sender", no_sender["msg"])
-        self.assertEqual(cli("goal-new", "--title", "x", "--by", "user", "--sender", "ou_someone_else", ok=False)["error"], "NotAuthorized")
+        self.assertEqual(cli("init")["schema_version"], 2)
+        # --by user 必须指向常浩本人最近在私聊里发的一条飞书消息（回读核实）；角色名和参数都不是身份
+        no_mid = cli("goal-new", "--title", "x", "--by", "user", "--status", "authorized", ok=False)
+        self.assertEqual(no_mid["error"], "NotAuthorized")
+        self.assertIn("--message-id", no_mid["msg"])
+        self.assertEqual(cli("goal-new", "--title", "x", "--by", "user", "--message-id", "om_other00001", ok=False)["error"], "NotAuthorized")
+        self.assertEqual(cli("goal-new", "--title", "x", "--by", "user", "--message-id", "om_nobody00001", ok=False)["error"], "NotAuthorized")
         self.assertIn("只有常浩本人能授权", cli("goal-new", "--title", "x", "--by", "hermes", "--status", "authorized", ok=False)["msg"])
+        me = ["--message-id", "om_cli000001"]
         g = cli("goal-new", "--title", "命令行目标", "--by", "user", *me, "--status", "authorized")["goal"]
-        t = cli("task-new", "--goal", g["id"], "--title", "命令行任务", "--by", "hermes", "--acceptance", "能跑")["task"]
+        # 一条消息只换一次动作；命令没成功时占用退回，同一条消息还能用
+        replay = cli("task-new", "--goal", g["id"], "--title", "重放", "--by", "user", *me, ok=False)
+        self.assertEqual(replay["error"], "NotAuthorized")
+        self.assertIn("已经用过", replay["msg"])
+        self.assertEqual(cli("goal-authorize", "G19990101-9", "--by", "user", "--message-id", "om_cli000002", ok=False)["error"], "NotFound")
+        env["HERMES_SESSION_MESSAGE_ID"] = "om_cli000003"             # Hermes 会话里的指针：可省略 --message-id，真值仍从飞书回读
+        t = cli("task-new", "--goal", g["id"], "--title", "命令行任务", "--by", "user", "--acceptance", "能跑")["task"]
+        env.pop("HERMES_SESSION_MESSAGE_ID")
         self.assertEqual(cli("task-ready", t["id"], "--by", "hermes")["status"], "ready")
         r = cli("run-start", "--task", t["id"], "--agent", "claude", "--by", "hermes", "--order", "D20000101-7", "--key", "k1")
         self.assertTrue(r["applied"])
@@ -1072,7 +1104,10 @@ class MoreTests(Base):
         self.assertIn("没有这个对象", cli("show", "T19990101-1", ok=False)["msg"])
         self.assertEqual(len(cli("list")["tasks"]), 1)
         self.assertGreater(len(cli("events", t["id"])["events"]), 3)
-        self.assertEqual(cli("goal-complete", g["id"], "--by", "user", *me)["status"], "completed")
+        self.assertEqual(cli("goal-complete", g["id"], "--by", "user", "--message-id", "om_cli000002")["status"], "completed")
+        q = cli("queue")
+        self.assertEqual((q["msg"], q["counts"]["review"], q["ledger"]), ("没有待推进的对象", 0, "missing"))
+        self.assertEqual(cli("reconcile")["ledger"], "missing")
         rec = cli("recover")
         self.assertEqual((rec["msg"], rec["ledger"], rec["synced"]["ledger"]), ("恢复完成（台账 missing）：没有需要处理的", "missing", "missing"))
         self.assertIn("--yes", cli("restore", "--from", str(receipt), ok=False)["msg"])
@@ -1082,6 +1117,91 @@ class MoreTests(Base):
         with ts.Store(self.db) as s:
             self.assertEqual(s.get_task(t["id"])["status"], "completed")
             self.assertEqual(s.get_goal(g["id"])["status"], "completed")
+
+
+class IdentityStoreTests(Base):
+    """B2.1 T03：飞书消息占用登记与 v1 → v2 迁移。"""
+
+    def test_v1_db_migrates_to_v2_with_identity_uses(self):
+        self.store.close()
+        self.db.unlink()
+        conn = sqlite3.connect(str(self.db))
+        conn.executescript(ts.MIGRATIONS[0])
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+        conn.commit()
+        conn.close()
+        with self.open_store() as s:
+            self.assertEqual(s.version(), 2)
+            self.assertTrue(s.claim_message("om_a", "test")["claimed"])
+
+    def test_claim_once_release_then_reuse(self):
+        s = self.store
+        s.claim_message("om_x", "goal.authorize")
+        with self.assertRaisesRegex(ts.NotAuthorized, "已经用过"):
+            s.claim_message("om_x", "task.create")
+        self.assertEqual(s.release_message("om_x"), 1)
+        self.assertTrue(s.claim_message("om_x")["claimed"])
+        self.assertEqual(s.release_message("om_never"), 0)
+
+
+class QueueTests(Base):
+    """B2.1 T05：调度消费查询只读分桶。"""
+
+    def test_buckets(self):
+        self.ledger.mkdir()                                                   # 台账存在但空：有工单号的 Run 查不到
+        g = self.goal()
+        a = self.ready_task(g["id"], title="A 可派")
+        b = self.store.create_task(g["id"], "B 等 A", by="hermes", acceptance="x", depends_on=[a["id"]])
+        self.store.set_ready(b["id"], by="hermes")                             # 依赖没完成 → blocked(dependency)
+        d, d_run = self.running_task(goal_id=g["id"], title="D 等决定")
+        self.store.receive_receipt(d_run["id"], {**OK_RECEIPT, "need_decision": "删不删旧表"})
+        e = self.ready_task(g["id"], title="E 等外部")
+        self.store.block_task(e["id"], by="hermes", kind="external", reason="等 GitHub 恢复")
+        f, f_run = self.running_task(goal_id=g["id"], title="F 失败一次")
+        self.store.receive_receipt(f_run["id"], FAIL_RECEIPT)
+        h, h_run = self.reviewed_task(goal_id=g["id"], title="H 待验收")
+        k, k_run = self.running_task(goal_id=g["id"], title="K 在跑")        # 工单在台账里找不到 → unsafe
+        c, c_run = self.running_task(goal_id=g["id"], title="C 撤销中")
+        self.store.cancel_task(c["id"], by="user", reason="不要了")
+        g2 = self.goal()
+        stuck = self.ready_task(g2["id"], title="G 失败到上限")
+        for i in range(3):
+            r = self.store.start_run(stuck["id"], "claude", by="hermes", order_no=f"D20000101-9{i}")["run"]
+            self.store.receive_receipt(r["id"], FAIL_RECEIPT)
+            if i < 2:
+                self.store.retry_task(stuck["id"], by="hermes")
+        self.store.check_ref("task", a["id"], "github_pr", "26", probe=lambda kind, ref: None)   # 外部来源不可达
+        write_order(self.ledger, "D20000101-77", order("cleaned", OK_RECEIPT, merged_to="main"))
+        self.store.sync_orders()
+        write_order(self.ledger, "D20000101-77", order("running", OK_RECEIPT))
+        self.assertEqual(self.store.sync_orders()["conflicts"], ["D20000101-77"])
+
+        q = self.store.queue()
+        ids = {k: [x["id"] for x in q[k]] for k in ts.QUEUE_BUCKETS}
+        self.assertEqual(ids["ready"], [a["id"]])
+        self.assertEqual(ids["waiting_deps"], [b["id"]])
+        self.assertEqual(q["waiting_deps"][0]["depends_on"], [a["id"]])
+        self.assertEqual(ids["blocked_decision"], [d["id"]])
+        self.assertEqual(ids["blocked_external"], [e["id"]])
+        self.assertEqual(ids["blocked_technical"], [f["id"], stuck["id"]])
+        self.assertEqual([(x["retryable"], x["needs_human"]) for x in q["blocked_technical"]], [(True, False), (False, True)])
+        self.assertEqual(ids["review"], [h["id"]])
+        self.assertEqual((q["review"][0]["has_receipt"], q["review"][0]["verdict"]), (True, None))
+        self.assertEqual(ids["cancel_pending"], [c_run["id"]])
+        self.assertEqual(ids["unsafe"], [a["id"], k["id"], self.store.get_run("D20000101-77")["id"]])
+        self.assertIn("不可达", q["unsafe"][0]["why"])
+        self.assertIn("找不到", q["unsafe"][1]["why"])
+        self.assertEqual((q["unsafe"][2]["why"], q["unsafe"][2]["order_no"]), ("台账冲突没有处理：run.conflict", "D20000101-77"))
+        self.assertEqual(q["ledger"], "ok")
+        self.assertEqual(self.store.summary()["tasks"]["running"], 1)        # 查询不改状态
+
+    def test_ledger_missing_marks_running_task_unsafe(self):
+        t, r = self.running_task()
+        q = self.store.queue()
+        self.assertEqual((q["ledger"], [x["id"] for x in q["unsafe"]]), ("missing", [t["id"]]))
+        self.assertIn("missing", q["unsafe"][0]["why"])
+        t2, r2 = self.running_task(with_order=False)
+        self.assertEqual([x["id"] for x in self.store.queue()["unsafe"]], [t["id"]])   # 没工单号的 Run 不查台账
 
 
 def order(status, receipt=None, **extra):
