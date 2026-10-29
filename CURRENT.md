@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 正式库接入与运行中体征验证（G4）：正式库已建、三次对账、观测单 alive，调度仍关闭
+
+- 时间：开工 23:30
+- **来由**：常浩说「批准 G4：建正式库（init、backup、两次 reconcile）和一张只读观测单」，看过施工计划后「按推荐开工」：观测单跑完再对账一次导入它；D6 的 G4 行直接提交 main。G5–G7 未批。
+- **做了什么**（全部用 `/usr/bin/python3` 与安装版脚本；SQLite 3.54.0）：
+  - 开工前：四个脚本与 main 一致、自检静默；正式库与 `backups/` 都不存在（直接建 v3，无迁移）；没有活动单与相关进程；`.env` 无 `DT_SCHED_ENABLE` / `DT_STATE_NOTIFY`；cron 只有原有日报、周报、09:50 自检。先在会话临时目录的隔离库上用真实派单目录预演，得到预期数。
+  - `twin_state.py init` → `~/Library/Application Support/DigitalTwin/twin-state.db`，schema v3、WAL，库文件 600、目录 700；随即 `backup`（`backups/twin-state-20261029-233242.db`，sha256 `0b19c82f1c85…`）。
+  - `reconcile --dispatch ~/.hermes/dispatch` 两次：第一次补上 16 单（created 16）、3 个没有 order.json 的目录 ignored、0 冲突；第二次 16 单 unchanged、created 0、0 冲突，与预演一致。之后再 `backup`（`…-233254.db`，`5380b8dba315…`）。库里 16 条 Run（abandoned 4、cleaned 8、done 4），目标 / 任务 / 预留均为 0。
+  - 观测单 `D20261029-2`（数字分身 · claude · 只读，任务同 G3）：脚本后台跑单，跑单期间每秒只读 `twin_scheduler.py observe` 正式库，约 20 秒内 16 次全部返回该单、`vital = alive`（“车间进程在，身份都对上”），`worker` / `dispatch` 核对均为 `match`，车间 pid `98740` 与 `worker.json` 的 `pid = pgid = sid` 一致；跑单 `done`、退出码 0，回执 `head_before = head_after = 4949a4c`、无提交与改动。跑完再观测：“没有活动的单”。
+  - 第三次 `reconcile`：补上 1 单（观测单）、16 单 unchanged、0 冲突；`backup`（`…-233421.db`，`1648fb25930e…`）。库里 17 条 Run。`plan`：没有未收尾的任务；`queue`：8 个分桶全为 0。
+  - 只读核对：`observe / plan / queue` 之后库文件 sha 变了（SQLite 页头 / 检查点），但与第三次对账后的备份逐行导出比对逻辑差异 0 行。
+  - D6 的 G4 行补上“首项必测”。
+- 测试：未改代码，未跑单元测试；验证即上面的命令输出。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-g4-20261029/`（`00-precheck.txt` 至 `13-queue.json`、`g4_observe_run.py`、`task.md`）。
+- 本轮新坑：无。（事实：WAL 库的 `-shm` 由 SQLite 按 644 建，靠所在目录 700 挡住别的用户；对 WAL 库做的备份文件也带 WAL 标记，用 `mode=ro` 直接打开会因建不了 `-shm` 失败，核对时先复制再开。）
+- 没做（照实）：`DT_STATE_NOTIFY` 未开（手工派单不写库，库靠手动对账更新）、`DT_SCHED_ENABLE` 未开、没建 cron、没自动开单、没自动确认报告、没发真实取消信号；`owner_chat_id` 未配；网关 / 技能 / SOUL / config 未改。D6 第一张表“当前正式状态”一行仍是 B2.1 时的描述，以本文件为准。
+- 回退：删除 `twin-state.db`、`-wal`、`-shm` 与 `backups/` 回到无库；或 `twin_state.py restore --from <备份> --yes`。派单目录未受影响。
+- 下一步：G4 执行记录交 ChatGPT 复核；通过后 G5（报告投递，须可信送达确认与端到端测试）待常浩单独批准，G6、G7 仍关闭。
+
+---
+
 ## 2026-10-29 晚 · B2.2 G1–G3 独立复核：G1 / G2 通过，G3 有条件通过，停在 G3
 
 - 时间：开工 23:20
