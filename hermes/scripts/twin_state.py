@@ -1519,9 +1519,22 @@ def notify_order(order_dir, db=None, by="system"):
 
 
 # ---------- 命令行 ----------
+class _Done(BaseException):
+    """命令行结果（P1-1）：done() 抛它、不直接退出，run_cli 据 ok 决定提交还是回滚，main() 顶层打印并退出。
+    继承 BaseException：中间任何 except Exception 都接不到它。"""
+
+    def __init__(self, ok, msg, kw):
+        super().__init__(msg)
+        self.ok, self.msg, self.kw = ok, msg, kw
+
+
 def done(ok, msg, **kw):
-    print(json.dumps({"ok": ok, "msg": msg, **kw}, ensure_ascii=False, default=str))
-    sys.exit(0 if ok else 1)
+    raise _Done(ok, msg, kw)
+
+
+def _exit(d):
+    print(json.dumps({"ok": d.ok, "msg": d.msg, **d.kw}, ensure_ascii=False, default=str))
+    sys.exit(0 if d.ok else 1)
 
 
 def _by(a):
@@ -1532,10 +1545,10 @@ def _by(a):
     return a.by
 
 
-def _user_turn(s, a):
+def _user_turn(a):
     """--by user 的准入（B2.1 T03）：必须给 --message-id（Hermes 会话里可省略，读 HERMES_SESSION_MESSAGE_ID——只是指针），
-    用猛鬼兽 bot 身份回读飞书核实这条消息是常浩本人最近在私聊里发的，再在状态库登记占用（一条消息只换一次动作）。
-    任何一步不过都拒绝；成功返回 message_id，命令没成功时由 run_cli 把占用退回去。"""
+    用猛鬼兽 bot 身份回读飞书核实这条消息是常浩本人最近在私聊里发的。这里只核实、不碰库；占用登记（一条消息只换一次动作）
+    由 run_cli 和业务动作放进同一个事务（P1-1）。任何一步不过都拒绝；成功返回 message_id。"""
     if getattr(a, "by", None) != "user":
         return None
     mid = getattr(a, "message_id", None) or os.environ.get("HERMES_SESSION_MESSAGE_ID")
@@ -1553,10 +1566,6 @@ def _user_turn(s, a):
     v = twin_identity.verify_message(mid, owner, owner_chat_id=chat)
     if not v["ok"]:
         done(False, f"身份核实不通过：{v['reason']}", error="NotAuthorized", message_id=mid)
-    try:
-        s.claim_message(mid, purpose=a.cmd)
-    except StateError as e:
-        done(False, str(e), error="NotAuthorized", message_id=mid)
     return mid
 
 
@@ -1611,15 +1620,35 @@ COMMANDS = {
 }
 
 
+def _run(s, a, turn):
+    """跑一条命令，把结果收成 _Done（不抛 StateError）：--by user 时先登记消息占用，再做动作，二者同一事务由 run_cli 保证。"""
+    try:
+        if turn:
+            s.claim_message(turn, purpose=a.cmd)
+        _commands(s, a)
+        return _Done(False, f"命令 {a.cmd} 没有给出结果", {"error": "Internal"})
+    except _Done as d:
+        return d
+    except StateError as e:
+        kw = {"error": type(e).__name__}
+        if turn:
+            kw["message_id"] = turn
+        return _Done(False, str(e), kw)
+
+
 def run_cli(a):
+    """P1-1：--by user 的网络核实放在事务之前；消息占用和业务动作放在同一个 _tx 里，只有 _Done(ok=True) 才提交——
+    拒绝、StateError、进程中途被杀（任何 BaseException）都整体回滚，占用和半截动作一起退，常浩不用再说一遍。"""
     with Store(a.db) as s:
-        turn = _user_turn(s, a)
-        try:
-            _commands(s, a)
-        except BaseException as e:   # noqa: BLE001 —— 命令没成功（拒绝、出错、非零退出）就把消息占用退回去，常浩不用再说一遍
-            if turn and not (isinstance(e, SystemExit) and e.code == 0):
-                s.release_message(turn)
-            raise
+        turn = _user_turn(a)
+        if not turn:
+            d = _run(s, a, None)
+        else:
+            with s._tx():
+                d = _run(s, a, turn)
+                if not d.ok:
+                    raise d          # _tx 回滚后继续往上抛，main 打印
+    raise d
 
 
 def _commands(s, a):
@@ -1726,8 +1755,10 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         run_cli(a)
+    except _Done as d:
+        _exit(d)
     except StateError as e:
-        done(False, str(e), error=type(e).__name__)
+        _exit(_Done(False, str(e), {"error": type(e).__name__}))
 
 
 if __name__ == "__main__":

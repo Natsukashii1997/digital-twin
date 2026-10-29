@@ -1119,6 +1119,92 @@ class MoreTests(Base):
             self.assertEqual(s.get_goal(g["id"])["status"], "completed")
 
 
+class CliTransactionTests(Base):
+    """P1-1（ChatGPT 评审 2026-10-29）：命令行 --by user 的消息占用与业务动作必须在同一个事务里——
+    成功一起提交；拒绝、StateError、进程中途被杀（BaseException）都一起回滚，不靠 finally 清理；重复调用同一条消息被拒且不再产生对象。
+    进程内跑 main()，飞书回读用假的 verify_message 顶掉（身份核实本身在 test_twin_identity 里测）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.store.close()
+        owner = self.root / "owner_open_id"
+        owner.write_text("ou_test_owner\n", encoding="utf-8")
+        owner.chmod(0o600)
+        chat = self.root / "owner_chat_id"
+        chat.write_text("oc_test_chat\n", encoding="utf-8")
+        chat.chmod(0o600)
+        self.env = {"DT_OWNER_FILE": str(owner), "DT_OWNER_CHAT_FILE": str(chat), "DT_STATE_DB": str(self.db)}
+        for k in ("DT_OWNER_OPEN_ID", "DT_OWNER_CHAT_ID", "HERMES_SESSION_MESSAGE_ID"):
+            os.environ.pop(k, None)
+        sys.path.insert(0, str(HERE.parent))
+        import twin_identity
+        self.ti = twin_identity
+
+    def run_main(self, *args, verify=None, raises=SystemExit):
+        """进程内跑 main；verify 顶掉飞书回读（默认通过）。返回 (退出码或异常, 末行 JSON)。"""
+        import contextlib
+        import io
+        buf = io.StringIO()
+        passed = verify or (lambda mid, owner, **kw: {"ok": True, "method": "feishu_message", "message_id": mid, "age_s": 1, "chat": "p2p"})
+        with mock.patch.dict(os.environ, self.env), mock.patch.object(self.ti, "verify_message", side_effect=passed), \
+                contextlib.redirect_stdout(buf), self.assertRaises(raises) as cm:
+            ts.main(["--db", str(self.db), *args])
+        lines = buf.getvalue().strip().splitlines()
+        out = json.loads(lines[-1]) if lines else {}
+        for secret in ("ou_test_owner", "oc_test_chat"):
+            self.assertNotIn(secret, buf.getvalue())
+        return (cm.exception.code if raises is SystemExit else cm.exception), out
+
+    def uses(self):
+        with ts.Store(self.db) as s:
+            return [r[0] for r in s.conn.execute("SELECT message_id FROM identity_uses ORDER BY message_id")]
+
+    def goals(self):
+        with ts.Store(self.db) as s:
+            return s.conn.execute("SELECT COUNT(*) FROM goals").fetchone()[0]
+
+    def test_success_commits_claim_with_action_and_blocks_replay(self):
+        self.run_main("init")
+        code, out = self.run_main("goal-new", "--title", "甲", "--by", "user", "--message-id", "om_tx000001", "--status", "authorized")
+        self.assertEqual((code, out["goal"]["status"]), (0, "authorized"))
+        self.assertEqual((self.uses(), self.goals()), (["om_tx000001"], 1))
+        code, out = self.run_main("goal-new", "--title", "乙", "--by", "user", "--message-id", "om_tx000001", "--status", "authorized")
+        self.assertEqual((code, out["error"]), (1, "NotAuthorized"))
+        self.assertIn("已经用过", out["msg"])
+        self.assertEqual((self.uses(), self.goals()), (["om_tx000001"], 1))      # 重放：没有第二个目标
+
+    def test_rejection_and_state_error_roll_back_claim(self):
+        self.run_main("init")
+        code, out = self.run_main("goal-authorize", "G19990101-9", "--by", "user", "--message-id", "om_tx000002")
+        self.assertEqual((code, out["error"], out.get("message_id")), (1, "NotFound", "om_tx000002"))
+        self.assertEqual(self.uses(), [])
+        code, out = self.run_main("task-new", "--goal", "G19990101-9", "--title", "x", "--by", "user", "--message-id", "om_tx000002")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.uses(), [])
+        bad = lambda mid, owner, **kw: {"ok": False, "method": "feishu_message", "message_id": mid, "reason": "发送者不是常浩本人"}
+        code, out = self.run_main("goal-new", "--title", "丙", "--by", "user", "--message-id", "om_tx000003", verify=bad)
+        self.assertEqual((code, out["error"]), (1, "NotAuthorized"))
+        self.assertIn("不是常浩本人", out["msg"])
+        self.assertEqual((self.uses(), self.goals()), ([], 0))
+        # 被拒的消息还能用
+        code, out = self.run_main("goal-new", "--title", "丁", "--by", "user", "--message-id", "om_tx000002", "--status", "authorized")
+        self.assertEqual((code, self.uses(), self.goals()), (0, ["om_tx000002"], 1))
+
+    def test_crash_between_claim_and_action_leaves_nothing_behind(self):
+        self.run_main("init")
+
+        def crash(s, a):
+            s.create_goal("半截", by="hermes")      # 动作写了一半
+            raise KeyboardInterrupt                   # 进程在提交前被杀
+
+        with mock.patch.object(ts, "_commands", side_effect=crash):
+            exc, out = self.run_main("goal-new", "--title", "戊", "--by", "user", "--message-id", "om_tx000004", raises=KeyboardInterrupt)
+        self.assertIsInstance(exc, KeyboardInterrupt)
+        self.assertEqual((self.uses(), self.goals()), ([], 0))       # 占用和半截动作都没留下
+        code, out = self.run_main("goal-new", "--title", "戊", "--by", "user", "--message-id", "om_tx000004", "--status", "authorized")
+        self.assertEqual((code, self.uses(), self.goals()), (0, ["om_tx000004"], 1))   # 同一条消息重来一次就成
+
+
 class IdentityStoreTests(Base):
     """B2.1 T03：飞书消息占用登记与 v1 → v2 迁移。"""
 
