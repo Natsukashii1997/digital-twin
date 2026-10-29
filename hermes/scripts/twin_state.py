@@ -1249,9 +1249,25 @@ class Store:
             self._sync_one(o, by, stats)
         return stats
 
+    def trusted_order_dir(self, order_dir):
+        """P1-3（ChatGPT 评审 2026-10-29）：只认派单根目录（self.dispatch_dir）的直接子目录——实路径比对、目录本身不能是符号链接。
+        信封里 source="dispatch" 的字符串不算来源证明，路径边界才算。不合规抛 NotAuthorized。返回实路径。"""
+        d = Path(order_dir).expanduser()
+        if d.is_symlink():
+            raise NotAuthorized(f"工单目录是符号链接，不同步：{d.name}")
+        root = Path(self.dispatch_dir).expanduser().resolve()
+        real = d.resolve()
+        if real.parent != root:
+            raise NotAuthorized(f"工单目录不在派单根目录之内（必须是 {root.name}/ 下的直接子目录），不同步")
+        return real
+
     def sync_order(self, order_dir, by="system"):
-        """只同步一张单（B2.1 T04：dispatch.py 写入台账后的通知走这里）。和 sync_orders 用同一个幂等键，两条路互相去重。"""
-        o, err = self.read_order(order_dir)
+        """只同步一张单（B2.1 T04：dispatch.py 写入台账后的通知走这里）。和 sync_orders 用同一个幂等键，两条路互相去重。
+        order_dir 必须通过 trusted_order_dir，且目录名等于 order.json 的 no（P1-3）。"""
+        real = self.trusted_order_dir(order_dir)
+        o, err = self.read_order(real)
+        if o and o["no"] != real.name:
+            raise NotAuthorized(f"工单目录名 {real.name} 与 order.json 的单号不一致，不同步")
         stats = self._stats("ok" if o else "missing", [err] if err else [], 0 if (o or err) else 1)
         if o:
             self._sync_one(o, by, stats)
@@ -1504,15 +1520,16 @@ class Store:
         return out
 
 
-def notify_order(order_dir, db=None, by="system"):
+def notify_order(order_dir, db=None, by="system", dispatch_dir=None):
     """B2.1 T04：派单台账写入后的通知入口（dispatch.py 的 save() 调）。状态库文件不存在就跳过、绝不建库
-    （正式库只由 init 建）；存在才同步这一张单。返回和 sync_orders 同形状的统计。"""
+    （正式库只由 init 建）；存在才同步这一张单。dispatch_dir 是调用方自己的派单根目录（dispatch.py 传 ROOT），
+    order_dir 必须在它之内（P1-3）。返回和 sync_orders 同形状的统计。"""
     path = Path(db or os.environ.get("DT_STATE_DB", DEFAULT_DB)).expanduser()
     if not path.exists():
         out = Store._stats("skipped", [f"状态库 {path} 不存在，没有同步（不自动建库）"])
         out["db"] = str(path)
         return out
-    with Store(path) as s:
+    with Store(path, dispatch_dir=dispatch_dir) as s:
         out = s.sync_order(order_dir, by)
     out["db"] = str(path)
     return out

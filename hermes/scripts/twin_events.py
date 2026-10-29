@@ -143,6 +143,11 @@ def normalize(env):
     typ = e.get("type")
     if typ not in TYPES:
         raise EventError(f"type 不认识：{typ!r}；可用：{', '.join(TYPES)}")
+    for k in ("identity", "payload"):          # P2：类型不对给结构化拒绝，不漏 AttributeError / TypeError
+        if e.get(k) is not None and not isinstance(e[k], dict):
+            raise EventError(f"{k} 要是 JSON 对象")
+    if e.get("refs") is not None and (not isinstance(e["refs"], list) or not all(isinstance(r, dict) for r in e["refs"])):
+        raise EventError("refs 要是对象数组（每项 kind / ref / url / note）")
     ident = {k: v for k, v in (e.get("identity") or {}).items() if k not in DROP_IDENTITY}
     role = ident.get("role") or DEFAULT_ROLE[source]
     if role not in T.ACTORS:
@@ -203,9 +208,21 @@ def _reject(reason):
     return handler
 
 
+REJECTED_BEFORE_HINT = "这个 event_id 先前已被拒绝并留痕，不能复用：要重新授权，请常浩再发一条新的消息、用新的 event_id"
+
+
+def _retryable(e, key, reason):
+    """P1-2 临时失败：不记事件、不占消息，同一 event_id 稍后可以原样重试。"""
+    return {"ok": False, "type": e["type"], "event_key": key, "applied": False, "retryable": True, "recorded": False, "reason": reason}
+
+
 def ingest(store, env, fetch=None, now=None, owner=None, owner_chat_id=None):
     """接入一个信封。重复（同一幂等键）直接按重复记、不再核实身份；user 事件先回读飞书核实并在同一事务里占用消息，
     再执行动作；动作被 Store 拒绝时事件记为 applied=0 并保留原因，状态和消息占用一起回滚。
+    三种结果（P1-2，ChatGPT 评审 2026-10-29）：
+    · 临时失败（本机配置缺失、回读飞书失败 / 出错）：不记事件，返回 retryable=True，同一 event_id 可重试；
+    · 永久拒绝（不是本人、群聊、过时、重放、Store 拒绝）：记 applied=0，返回 rejected；
+    · 同一 event_id 再来：返回 duplicate_of；若首次是被拒绝的，另带 rejected_before=True 与 hint——不再核实、不执行，要新消息。
     fetch / now / owner / owner_chat_id 只给测试注入；生产走 twin_identity.lark_fetch 与本机受控配置。"""
     e = normalize(env)
     if e["type"] == "order.sync":
@@ -222,19 +239,22 @@ def ingest(store, env, fetch=None, now=None, owner=None, owner_chat_id=None):
     seen = store.conn.execute("SELECT 1 FROM events WHERE idem_key=?", (key,)).fetchone()
     if seen:
         out = store.ingest_event(e["db_source"], "in." + e["type"], key, **common)   # 只计一次重复，不调 handler、不核实身份
+        if not out.get("first_applied"):
+            out["rejected_before"] = True
+            out["hint"] = REJECTED_BEFORE_HINT
         return {"ok": True, "type": e["type"], "event_key": key, **out}
     if by == "user":
         try:
             owner = owner if owner is not None else T.owner_open_id()
             chat = owner_chat_id if owner_chat_id is not None else T.owner_chat_id()
         except T.StateError as err:
-            out = store.ingest_event(e["db_source"], "in." + e["type"], key, handler=_reject(str(err)), **common)
-            return {"ok": True, "type": e["type"], "event_key": key, **out}
+            return _retryable(e, key, f"本机配置读不了：{err}")
         if not owner:
-            out = store.ingest_event(e["db_source"], "in." + e["type"], key, handler=_reject(T.OWNER_HINT), **common)
-            return {"ok": True, "type": e["type"], "event_key": key, **out}
+            return _retryable(e, key, T.OWNER_HINT)
         v = I.verify_message(ident["message_id"], owner, fetch=fetch, now=now, owner_chat_id=chat)
         if not v["ok"]:
+            if v.get("retryable"):
+                return _retryable(e, key, f"身份核实暂时做不了：{v['reason']}")
             out = store.ingest_event(e["db_source"], "in." + e["type"], key, handler=_reject(f"身份核实不通过：{v['reason']}"), **common)
             return {"ok": True, "type": e["type"], "event_key": key, **out}
         record["identity"]["verified"] = {"method": v["method"], "age_s": v["age_s"], "chat": v["chat"]}
@@ -290,9 +310,14 @@ def main(argv=None):
         with T.Store(a.db) as s:
             out = ingest(s, env)
         rest = {k: v for k, v in out.items() if k != "ok"}
+        if out.get("retryable"):
+            done(False, f"暂时失败，事件没有记录，可重试（同一 event_id 原样再来即可）：{out['reason']}", **rest)
         if out.get("rejected"):
-            done(False, f"事件已留痕但被拒绝：{out['rejected']}", **rest)
+            done(False, f"事件已留痕但被拒绝（永久）：{out['rejected']}；这个 event_id 不能再用，重新授权要新的消息和新的 event_id", **rest)
         if not out.get("applied") and out.get("duplicate_of"):
+            if out.get("rejected_before"):
+                done(False, f"同一 event_id 先前已被拒绝，这次不再核实、不执行（原因：{out.get('result')}）；要重新授权请用新的消息和新的 event_id",
+                     **rest)
             done(True, "同一事件已处理过，不重复应用", **rest)
         done(True, f"事件已接入：{out['type']}", **rest)
     except T.StateError as e:

@@ -110,6 +110,16 @@ class NormalizeTests(Base):
         self.bad({"source": "agent", "type": "order.sync", "identity": {"role": "claude"}, "payload": {"order_dir": "/x"}}, "source=dispatch")
         self.bad("not an object", "JSON 对象")
 
+    def test_non_object_identity_payload_refs_rejected_structurally(self):
+        # P2（ChatGPT 评审 2026-10-29）：类型不对给 EventError，不漏 AttributeError / TypeError
+        base = {"source": "agent", "type": "note", "event_id": "n", "payload": {"what": "x"}, "identity": {"role": "claude"}}
+        for k, bad in (("identity", "claude"), ("identity", ["claude"]), ("payload", [1]), ("payload", "x"), ("refs", "pr"),
+                       ("refs", {"kind": "x"}), ("refs", [1, "x"])):
+            with self.assertRaisesRegex(E.EventError, k):
+                E.normalize({**base, k: bad})
+        self.assertEqual(E.normalize({**base, "refs": None})["refs"], [])
+        self.assertEqual(E.normalize({**base, "payload": None})["payload"], {})
+
     def test_body_dropped_and_self_declared_identity_ignored(self):
         e = E.normalize({"source": "user", "type": "goal.authorize", "event_id": "e1", "goal_id": "G1", "text": "绝密内容",
                          "payload": {"content": "也是正文", "note": "留"},
@@ -269,6 +279,136 @@ class IngestTests(Base):
         self.assertEqual(self.store.get_goal(g["id"])["status"], "authorized")
 
 
+class RetryPolicyTests(Base):
+    """P1-2（ChatGPT 评审 2026-10-29）：临时失败（回读失败 / 出错、本机配置缺失）不记事件、同一 event_id 可重试；
+    永久拒绝（不是本人、群聊、过时、重放、Store 拒绝）记 applied=0，同一 event_id 再来返回 duplicate_of + rejected_before，
+    不重新核实、不执行动作，要重新授权必须是新的消息和新的 event_id。"""
+
+    def rejected_events(self):
+        return [e for e in self.store.events() if not e["applied"]]
+
+    def test_missing_local_config_is_retryable_then_same_event_applies(self):
+        env = self.user_env("goal.create", "r1", "om_retry00001", payload={"title": "x", "status": "authorized"})
+        out = E.ingest(self.store, env, fetch=self.fetch, now=self.t, owner=OWNER, owner_chat_id="")    # 还没配 owner_chat_id
+        self.assertEqual((out["ok"], out["applied"], out["retryable"], out["recorded"]), (False, False, True, False))
+        self.assertIn("owner_chat_id", out["reason"])
+        self.assertEqual((self.store.events(), self.uses(), self.store.list_goals()), ([], [], []))
+        out = E.ingest(self.store, env, fetch=self.fetch, now=self.t, owner="", owner_chat_id=CHAT)      # 还没配 owner_open_id
+        self.assertEqual((out["retryable"], out["recorded"]), (True, False))
+        self.assertEqual(self.store.events(), [])
+        out = self.ingest(env)                                                                            # 配好了：同一 event_id 重试成功
+        self.assertTrue(out["applied"], out)
+        self.assertEqual(len(self.store.list_goals()), 1)
+        self.assertEqual(len(self.uses()), 1)
+
+    def test_fetch_failure_is_retryable_then_same_event_applies(self):
+        env = self.user_env("goal.create", "r2", "om_retry00002", payload={"title": "x", "status": "authorized"})
+
+        def down(_mid):
+            raise E.I.IdentityError("回读失败：timeout")
+
+        def crash(_mid):
+            raise RuntimeError("socket")
+
+        for fetch in (down, crash):
+            out = E.ingest(self.store, env, fetch=fetch, now=self.t, owner=OWNER, owner_chat_id=CHAT)
+            self.assertEqual((out["applied"], out["retryable"], out["recorded"]), (False, True, False), out)
+            self.assertIn("回读飞书", out["reason"])
+        self.assertEqual((self.store.events(), self.uses()), ([], []))
+        self.assertTrue(self.ingest(env)["applied"])
+        self.assertEqual(len(self.store.list_goals()), 1)
+
+    def test_permanent_rejection_locks_event_id_even_after_fix(self):
+        self.messages["om_bad000002"] = feishu("om_bad000002", sender="ou_someone_else")
+        env = self.user_env("goal.create", "p1", "om_bad000002", payload={"title": "x", "status": "authorized"})
+        out = self.ingest(env)
+        self.assertEqual((out["applied"], out.get("retryable", False)), (False, False))
+        self.assertIn("不是常浩本人", out["rejected"])
+        self.assertEqual(len(self.rejected_events()), 1)
+        self.messages["om_bad000002"] = feishu("om_bad000002")          # 哪怕现在回读变成本人
+        calls = self.fetch_calls
+        again = self.ingest(env)
+        self.assertEqual((again["applied"], again["rejected_before"], again["duplicate_of"]), (False, True, out["event_id"]))
+        self.assertIn("新", again["hint"])                                # 要新的消息和新的 event_id
+        self.assertEqual(self.fetch_calls, calls)                          # 不再回读
+        self.assertEqual((self.store.list_goals(), self.uses()), ([], []))
+        self.assertEqual(self.rejected_events()[0]["dup_count"], 1)
+        # 新消息 + 新 event_id 才能重新授权
+        ok = self.ingest(self.user_env("goal.create", "p2", "om_good00002", payload={"title": "x", "status": "authorized"}))
+        self.assertTrue(ok["applied"])
+
+    def test_store_rejection_is_permanent_too(self):
+        t, r = self.running_task()
+        env = self.user_env("task.unblock", "p3", "om_msg000009", task_id=t["id"])
+        out = self.ingest(env)
+        self.assertFalse(out["applied"])
+        self.assertNotIn("retryable", out)
+        again = self.ingest(env)
+        self.assertEqual((again["applied"], again["rejected_before"]), (False, True))
+        dup_ok = self.ingest(self.user_env("goal.create", "p4", "om_msg000010", payload={"title": "x", "status": "authorized"}))
+        twice = self.ingest(self.user_env("goal.create", "p4", "om_msg000010", payload={"title": "x", "status": "authorized"}))
+        self.assertEqual((dup_ok["applied"], twice["applied"], twice["first_applied"]), (True, False, True))
+        self.assertNotIn("rejected_before", twice)                         # 成功事件的重复不是“先前被拒”
+
+
+class OrderDirBoundaryTests(Base):
+    """P1-3（ChatGPT 评审 2026-10-29）：order.sync 的 order_dir 必须是派单根目录的直接子目录（实路径）、本身不是符号链接、
+    目录名等于 order.json 的 no；source="dispatch" 字符串本身不算来源证明。"""
+
+    def order_env(self, d):
+        return {"source": "dispatch", "type": "order.sync", "payload": {"order_dir": str(d)}}
+
+    def runs(self):
+        return [r[0] for r in self.store.conn.execute("SELECT order_no FROM runs ORDER BY order_no")]
+
+    def test_outside_root_rejected(self):
+        outside = self.root / "elsewhere" / "D20000101-9"
+        (outside / "out").mkdir(parents=True)
+        (outside / "order.json").write_text(json.dumps({"no": "D20000101-9", "status": "done"}), encoding="utf-8")
+        with self.assertRaisesRegex(T.NotAuthorized, "派单根目录"):
+            self.ingest(self.order_env(outside))
+        with self.assertRaisesRegex(T.NotAuthorized, "派单根目录"):
+            self.store.sync_order(outside)
+        self.assertEqual((self.runs(), self.store.events()), ([], []))
+
+    def test_symlink_rejected(self):
+        self.ledger.mkdir(parents=True, exist_ok=True)
+        real = self.root / "elsewhere" / "D20000101-8"
+        (real / "out").mkdir(parents=True)
+        (real / "order.json").write_text(json.dumps({"no": "D20000101-8", "status": "done"}), encoding="utf-8")
+        (self.ledger / "D20000101-8").symlink_to(real, target_is_directory=True)
+        with self.assertRaisesRegex(T.NotAuthorized, "符号链接"):
+            self.ingest(self.order_env(self.ledger / "D20000101-8"))
+        legit = self.write_order("D20000101-7", "done")
+        (self.ledger / "D20000101-6").symlink_to(legit, target_is_directory=True)       # 根目录内的链接也不认
+        with self.assertRaisesRegex(T.NotAuthorized, "符号链接"):
+            self.ingest(self.order_env(self.ledger / "D20000101-6"))
+        self.assertEqual(self.runs(), [])
+
+    def test_dir_name_must_match_order_no(self):
+        d = self.write_order("D20000101-5", "done")
+        o = json.loads((d / "order.json").read_text(encoding="utf-8"))
+        (d / "order.json").write_text(json.dumps({**o, "no": "D20000101-6"}), encoding="utf-8")
+        with self.assertRaisesRegex(T.NotAuthorized, "单号"):
+            self.ingest(self.order_env(d))
+        self.assertEqual(self.runs(), [])
+        with self.assertRaisesRegex(T.NotAuthorized, "派单根目录"):                         # 根目录本身也不是工单目录
+            self.ingest(self.order_env(self.ledger))
+        with self.assertRaisesRegex(T.NotAuthorized, "派单根目录"):                         # 子目录再往下也不行
+            self.ingest(self.order_env(d / "out"))
+
+    def test_legit_dir_and_notify_order_still_work(self):
+        d = self.write_order("D20000101-4", "done")
+        self.assertEqual(self.ingest(self.order_env(d))["created"], 1)
+        self.assertEqual(self.ingest(self.order_env(str(d) + "/"))["unchanged"], 1)       # 写法差异不影响
+        self.store.close()
+        self.write_order("D20000101-3", "done")
+        out = T.notify_order(self.ledger / "D20000101-3", db=self.db, dispatch_dir=self.ledger)   # dispatch.py 的内部通知传自己的 ROOT
+        self.assertEqual(out["created"], 1)
+        missing = T.notify_order(self.ledger / "D20000101-2", db=self.db, dispatch_dir=self.ledger)
+        self.assertEqual((missing["created"], missing["ignored"]), (0, 1))
+
+
 class CliTests(Base):
     def setUp(self):
         super().setUp()
@@ -320,6 +460,36 @@ class CliTests(Base):
         with T.Store(self.db) as s:
             self.assertEqual(s.get_goal(gid)["status"], "authorized")
             self.assertEqual(s.list_tasks(), [])
+
+    def test_cli_distinguishes_retryable_rejected_and_needs_new_message(self):
+        # P1-2：命令行三种文案——暂时失败可重试 / 已留痕被拒绝 / 先前被拒需要新消息
+        self.cli("twin_state.py", "init")
+        state = json.loads((self.fake / "state.json").read_text(encoding="utf-8"))
+        state["mget"]["om_fixturecli0002"] = {**state["mget"]["om_fixturecli0001"], "message_id": "om_fixturecli0002",
+                                              "sender": {"id": "ou_other_0009", "id_type": "open_id", "sender_type": "user"}}
+        (self.fake / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        env = {"source": "user", "source_ref": "feishu:om_fixturecli0001", "event_id": "cli-r1", "type": "goal.create",
+               "payload": {"title": "命令行目标", "status": "authorized"},
+               "identity": {"role": "user", "method": "feishu_message", "message_id": "om_fixturecli0001"}}
+        f = self.root / "env.json"
+        f.write_text(json.dumps(env, ensure_ascii=False), encoding="utf-8")
+        chat_file = self.env["DT_OWNER_CHAT_FILE"]
+        self.env["DT_OWNER_CHAT_FILE"] = str(self.root / "missing")                         # 本机配置缺失 → 临时失败
+        out = self.cli("twin_events.py", "ingest", "--file", str(f), ok=False)
+        self.assertEqual((out["retryable"], out["recorded"]), (True, False))
+        self.assertIn("可重试", out["msg"])
+        self.env["DT_OWNER_CHAT_FILE"] = chat_file
+        self.assertTrue(self.cli("twin_events.py", "ingest", "--file", str(f))["applied"])    # 同一 event_id 重试成功
+        bad = {**env, "event_id": "cli-p1", "identity": {**env["identity"], "message_id": "om_fixturecli0002"}}
+        f.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+        out = self.cli("twin_events.py", "ingest", "--file", str(f), ok=False)
+        self.assertIn("已留痕", out["msg"])
+        self.assertIn("不能再用", out["msg"])
+        out = self.cli("twin_events.py", "ingest", "--file", str(f), ok=False)
+        self.assertEqual(out["rejected_before"], True)
+        self.assertIn("新的消息", out["msg"])
+        with T.Store(self.db) as s:
+            self.assertEqual(len(s.list_goals()), 1)
 
 
 if __name__ == "__main__":

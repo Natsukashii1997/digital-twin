@@ -126,7 +126,7 @@ def notify_state(no):
         if here not in sys.path:
             sys.path.insert(0, here)
         import twin_state   # 同目录（安装副本在 ~/.hermes/scripts/）
-        out = twin_state.notify_order(ROOT / no)
+        out = twin_state.notify_order(ROOT / no, dispatch_dir=ROOT)    # 内部可信通知：根目录是自己的 ROOT，不是信封说的
         if out.get("conflicts"):
             _notify_log(f"{no} 台账与状态库冲突，没有应用，请人工核对：{'、'.join(out['conflicts'])}")
         if out.get("skipped"):

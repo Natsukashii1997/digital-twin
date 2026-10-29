@@ -158,19 +158,21 @@ def verify_message(message_id, owner, fetch=None, now=None, max_age=MAX_AGE, own
     fetch = fetch or lark_fetch
     now = now or dt.datetime.now().astimezone()
 
-    def fail(reason):
-        return {"ok": False, "method": METHOD, "message_id": message_id, "reason": reason}
+    def fail(reason, retryable=False):
+        """retryable=True 是临时失败（本机配置缺失、回读失败 / 出错）：调用方可以不记事件、稍后用同一事件重试（P1-2）；
+        其余是永久拒绝。"""
+        return {"ok": False, "method": METHOD, "message_id": message_id, "reason": reason, "retryable": retryable}
 
     if not owner:
-        return fail("还没配置常浩的 open_id（owner_open_id）")
+        return fail("还没配置常浩的 open_id（owner_open_id）", retryable=True)
     if not MESSAGE_ID.match(message_id or ""):
         return fail("message_id 不是飞书消息 id（om_ 开头）")
     try:
         m = fetch(message_id)
     except IdentityError as e:
-        return fail(f"回读飞书失败：{e}")
+        return fail(f"回读飞书失败：{e}", retryable=True)
     except Exception as e:  # noqa: BLE001 —— 回读环节任何意外都按不通过，不带出细节
-        return fail(f"回读飞书出错：{type(e).__name__}")
+        return fail(f"回读飞书出错：{type(e).__name__}", retryable=True)
     if not m:
         return fail("飞书查不到这条消息（id 不存在，或机器人看不到）")
     if m.get("message_id") != message_id:
@@ -182,7 +184,7 @@ def verify_message(message_id, owner, fetch=None, now=None, max_age=MAX_AGE, own
     if not m.get("sender_open_id") or m["sender_open_id"] != owner:
         return fail("发送者不是常浩本人")
     if not owner_chat_id:
-        return fail("还没配置 owner_chat_id，不能确认是常浩和 Hermes 的私聊（回读带 p2p 标志也不算）")
+        return fail("还没配置 owner_chat_id，不能确认是常浩和 Hermes 的私聊（回读带 p2p 标志也不算）", retryable=True)
     kind = str(m.get("chat_type") or "").lower()
     if kind and kind != "p2p":
         return fail("回读显示这不是私聊（群聊 / 话题群）")
