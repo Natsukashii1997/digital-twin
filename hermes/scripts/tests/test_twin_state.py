@@ -1,9 +1,9 @@
-"""隔离自测：持久任务状态与事件底座（twin_state.py），覆盖任务书 B1.5 的十项验收和 B1.3 的必处理情形。
+"""隔离自测：持久任务状态与事件底座（twin_state.py），覆盖任务书 B1.5 的十项验收、B1.3 的必处理情形，
+以及 2026-10-29 独立评审返修要求（R1～R4 与工程契约）的负向用例。
 
 每项测试用独立临时目录里的状态库、固定时钟和虚构的派单台账；不碰 ~/.hermes、不碰真实工单、不调用模型或外部服务。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_state.py -v
 """
-import contextlib
 import datetime as dt
 import importlib.util
 import json
@@ -24,9 +24,11 @@ SPEC.loader.exec_module(ts)
 TZ = dt.timezone(dt.timedelta(hours=8))
 T0 = dt.datetime(2000, 1, 1, 9, 0, tzinfo=TZ)
 OK_RECEIPT = {"exit_code": 0, "timed_out": False, "worker_error": False, "session_id": "sess-1",
+              "started": "2000-01-01T09:00:00", "ended": "2000-01-01T09:30:00",
               "branch": "hermes/D20000101-1", "head_before": "aaa", "head_after": "bbb",
               "committed_files": ["hermes/scripts/x.py"], "uncommitted": [], "guard_main_changed": False,
               "guard_remote_changed": False, "need_decision": None, "summary": "改好了。"}
+FAIL_RECEIPT = {**OK_RECEIPT, "exit_code": 1, "worker_error": "claude 退出码 1"}
 
 
 class Base(unittest.TestCase):
@@ -35,10 +37,14 @@ class Base(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.db = self.root / "state" / "twin-state.db"
+        self.ledger = self.root / "dispatch"   # 默认不存在：台账“缺失”
         self.t = T0
         self.orders = 0
-        self.store = ts.Store(self.db, clock=lambda: self.t).open()
-        self.addCleanup(self.store.close)
+        self.store = self.open_store()
+        self.addCleanup(lambda: self.store.close())
+
+    def open_store(self):
+        return ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()
 
     def tick(self, **delta):
         self.t += dt.timedelta(**delta)
@@ -54,11 +60,20 @@ class Base(unittest.TestCase):
         self.store.set_ready(t["id"], by="hermes")
         return self.store.get_task(t["id"])
 
-    def running_task(self, **kw):
+    def running_task(self, with_order=True, agent="claude", **kw):
         t = self.ready_task(**kw)
         self.orders += 1
-        r = self.store.start_run(t["id"], "claude", by="hermes", order_no=f"D20000101-{self.orders}")["run"]
+        order_no = f"D20000101-{self.orders}" if with_order else None
+        r = self.store.start_run(t["id"], agent, by="hermes", order_no=order_no)["run"]
         return self.store.get_task(t["id"]), r
+
+    def reviewed_task(self, **kw):
+        t, r = self.running_task(**kw)
+        self.store.receive_receipt(r["id"], OK_RECEIPT)
+        return self.store.get_task(t["id"]), r
+
+    def accepted(self, task_id, run_id, by="codex"):
+        return self.store.accept_task(task_id, by=by, basis="回执与提交核对无误", cites=[run_id])
 
     def kinds(self, obj_id):
         return [e["kind"] for e in self.store.events(object_id=obj_id)]
@@ -83,8 +98,10 @@ class AcceptanceTests(Base):
             self.store.create_task("G20000101-9", "没有的目标", by="hermes")
         with self.assertRaises(ts.NotFound):
             self.store.create_task(g["id"], "依赖不存在", by="hermes", depends_on=["T20000101-9"])
-        # 目标一天内编号递增，换一天重新计数
-        self.assertEqual(self.store.create_goal("目标乙", by="hermes")["id"], "G20000101-2")
+        other = self.store.create_goal("目标乙", by="hermes")
+        with self.assertRaisesRegex(ts.StateError, "不能跨目标依赖"):
+            self.store.create_task(other["id"], "跨目标依赖", by="hermes", depends_on=[t["id"]])
+        self.assertEqual(other["id"], "G20000101-2")  # 同一天编号递增，换一天重新计数
         self.tick(days=1)
         self.assertEqual(self.store.create_goal("目标丙", by="hermes")["id"], "G20000102-1")
 
@@ -101,37 +118,32 @@ class AcceptanceTests(Base):
             self.store.create_goal("直接授权", by="claude", status="authorized")
         self.assertEqual(self.store.get_task(t["id"])["status"], "observed")
         self.assertEqual(self.store.list_runs(), [])
-        # 常浩授权后才能推进；撤销后又不能
         self.store.authorize_goal(g["id"], by="user")
         self.assertEqual(self.store.set_ready(t["id"], by="hermes")["status"], "ready")
         self.store.cancel_goal(g["id"], by="user", reason="不做了")
         self.assertEqual(self.store.get_task(t["id"])["status"], "canceled")
         with self.assertRaises(ts.IllegalTransition):
             self.store.start_run(t["id"], "claude", by="hermes")
-        t3 = self.store.create_task(self.goal()["id"], "另一个目标的任务", by="hermes")
-        self.store.set_ready(t3["id"], by="hermes")
-        self.store.cancel_goal(t3["goal_id"], by="user")
-        with self.assertRaises(ts.IllegalTransition):  # 目标撤销时任务已一起撤销
-            self.store.start_run(t3["id"], "claude", by="hermes")
 
     def test_03_task_links_multiple_runs(self):
         t, r1 = self.running_task()
         with self.assertRaisesRegex(ts.IllegalTransition, "已有进行中的 Run"):
             self.store.start_run(t["id"], "codex", by="hermes")
-        self.store.receive_receipt(r1["id"], {**OK_RECEIPT, "exit_code": 1, "worker_error": True})
+        self.store.receive_receipt(r1["id"], FAIL_RECEIPT)
         self.assertEqual(self.store.get_task(t["id"])["status"], "blocked")
         self.assertEqual(self.store.retry_task(t["id"], by="hermes")["retries"], 1)
         r2 = self.store.start_run(t["id"], "codex", by="hermes", order_no="D20000101-2")["run"]
         self.store.receive_receipt(r2["id"], OK_RECEIPT)
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
-        # 既有工单（未关联）也能挂到同一任务上
-        self.store.sync_orders(make_dispatch(self.root / "dispatch", {"D20000101-3": order("done")}))
+        # 既有工单（未关联、已结束）也能挂到同一任务上作证据
+        self.store.sync_orders(make_dispatch(self.ledger, {"D20000101-3": order("done", receipt=OK_RECEIPT)}))
         self.assertEqual(self.store.link_run("D20000101-3", t["id"], by="hermes")["applied"], True)
         runs = self.store.list_runs(t["id"])
         self.assertEqual([r["order_no"] for r in runs], ["D20000101-1", "D20000101-2", "D20000101-3"])
         self.assertEqual([r["status"] for r in runs], ["failed", "done", "done"])
         self.assertEqual([r["agent"] for r in runs], ["claude", "codex", "claude"])
         self.assertEqual(self.store.get_run("D20000101-2")["session_id"], "sess-1")
+        self.assertEqual(self.store.current_run(t["id"])["order_no"], "D20000101-3")
         with self.assertRaisesRegex(ts.StateError, "已关联任务"):
             self.store.link_run("D20000101-3", self.ready_task(title="别的任务")["id"], by="hermes")
 
@@ -142,11 +154,12 @@ class AcceptanceTests(Base):
         self.assertEqual(self.store.get_run(r["id"])["status"], "done")
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
         self.assertEqual(self.store.get_goal(t["goal_id"])["status"], "authorized")
-        # 台账后续 merged / cleaned 也只改 Run，不动任务和目标
+        # 台账后续 merged / cleaned 只改 Run，不动任务和目标
         self.store.update_run(r["id"], "merged", by="hermes", evidence={"merged_to": "abc1234"})
         self.store.update_run(r["id"], "cleaned", by="hermes")
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
         self.assertEqual(self.store.get_run(r["id"])["evidence"]["merged_to"], "abc1234")
+        self.accepted(t["id"], r["id"])
         self.assertEqual(self.store.complete_task(t["id"], by="hermes")["status"], "completed")
         self.assertEqual(self.store.get_goal(t["goal_id"])["status"], "authorized")
         with self.assertRaisesRegex(ts.NotAuthorized, "只有常浩本人能把目标标为完成"):
@@ -175,11 +188,9 @@ class AcceptanceTests(Base):
         self.assertEqual(self.kinds(rid).count("run.done"), 1)
         self.assertEqual(self.kinds(t["id"]).count("task.review"), 1)
         self.assertEqual(self.store.events(kind="run.finish")[0]["dup_count"], 3)
-        # 回执变了但 Run 已到终态：拒绝，不改状态
         with self.assertRaisesRegex(ts.IllegalTransition, "已是 done"):
-            self.store.receive_receipt(rid, {**OK_RECEIPT, "exit_code": 1})
+            self.store.receive_receipt(rid, FAIL_RECEIPT)
         self.assertEqual(self.store.get_run(rid)["status"], "done")
-        # 通用入口：同一个幂等键的 handler 只跑一次
         calls = []
         for _ in range(2):
             self.store.ingest_event("user", "message", "feishu:om_456", "user", {"text": "可以"},
@@ -189,33 +200,32 @@ class AcceptanceTests(Base):
             self.store.ingest_event("user", "message", "", "user")
 
     def test_06_state_survives_restart_and_recovers(self):
-        t, r = self.running_task()
+        t, r = self.running_task(with_order=False)   # 没有工单号：只能按心跳判过期
         dep = self.store.create_task(t["goal_id"], "等前一个做完", by="hermes", depends_on=[t["id"]])
         self.assertEqual(self.store.set_ready(dep["id"], by="hermes")["status"], "blocked")
         self.assertEqual(self.store.get_task(dep["id"])["blocked_kind"], "dependency")
         self.store.close()
         self.tick(hours=1)
-        reopened = ts.Store(self.db, clock=lambda: self.t).open()
-        self.addCleanup(reopened.close)
-        self.store = reopened
+        self.store = self.open_store()
         self.assertEqual(self.store.summary()["tasks"], {"running": 1, "blocked": 1})
         self.assertEqual(self.store.get_run(r["id"])["status"], "running")
-        # 一小时内有心跳：保留
-        self.assertEqual(self.store.recover()["kept"], [r["id"]])
-        # 超过 stale_after 没心跳：Run 过期，任务转技术阻塞并写明原因
+        self.assertEqual(self.store.recover()["kept"], [r["id"]])          # 一小时内有心跳：保留
         self.tick(hours=3)
-        out = self.store.recover()
-        self.assertEqual(out["stale"], [r["id"]])
+        out = self.store.recover()                                           # 超过 stale_after 没心跳：过期
+        self.assertEqual((out["ledger"], out["stale"]), ("missing", [r["id"]]))
         task = self.store.get_task(t["id"])
         self.assertEqual((task["status"], task["blocked_kind"]), ("blocked", "technical"))
         self.assertIn("没有心跳", task["blocked_reason"])
-        # 台账后来说它其实跑完了：stale → done，任务进 review；再把它完成，依赖它的任务被条件恢复放行
+        # 迟来的成功结果：Run 自己记为 done，任务已不在 running，不回写（留事件）
         self.store.finish_run(r["id"], "done", by="hermes", receipt=OK_RECEIPT)
-        self.assertEqual(self.store.get_task(t["id"])["status"], "blocked")  # 任务已不在 running，Run 结果不回写
-        self.store.unblock_task(t["id"], by="hermes", note="Run 实际已完成")
-        self.store.rework_task  # noqa: B018 —— 只是确认接口存在
-        t2 = self.store.start_run(t["id"], "claude", by="hermes")["run"]
-        self.store.receive_receipt(t2["id"], OK_RECEIPT)
+        self.assertEqual(self.store.get_run(r["id"])["status"], "done")
+        self.assertEqual(self.store.get_task(t["id"])["status"], "blocked")
+        self.assertIn("run.result_not_applied", self.kinds(r["id"]))
+        # Hermes 解技术阻塞算一次重试；第二个 Run 跑完、验收、完成后，依赖它的任务被条件恢复放行
+        self.assertEqual(self.store.unblock_task(t["id"], by="hermes")["retries"], 1)
+        r2 = self.store.start_run(t["id"], "claude", by="hermes")["run"]
+        self.store.receive_receipt(r2["id"], OK_RECEIPT)
+        self.accepted(t["id"], r2["id"])
         self.store.complete_task(t["id"], by="hermes")
         self.assertEqual(self.store.recover()["released"], [dep["id"]])
         self.assertEqual(self.store.get_task(dep["id"])["status"], "ready")
@@ -238,27 +248,26 @@ class AcceptanceTests(Base):
             self.store.ingest_event("agent", "receipt", "receipt:crash", "hermes", handler=crash)
         self.assertEqual((self.store.summary(), self.store.get_task(t["id"])), before)
         self.assertEqual(self.store.events(kind="receipt"), [])
-        # 同一个键再来一次，这次正常处理：说明失败的那次没有留下“已处理”的痕迹
         self.assertTrue(self.store.ingest_event("agent", "receipt", "receipt:crash", "hermes",
                                                 handler=lambda s: s.receive_receipt(r["id"], OK_RECEIPT))["applied"])
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
 
     def test_07_failure_and_block_reasons_are_recorded(self):
         t, r = self.running_task()
-        self.store.receive_receipt(r["id"], {**OK_RECEIPT, "exit_code": 1, "worker_error": "claude 退出码 1", "timed_out": False})
+        self.store.receive_receipt(r["id"], FAIL_RECEIPT)
         task = self.store.get_task(t["id"])
         self.assertEqual((task["status"], task["blocked_kind"]), ("blocked", "technical"))
         self.assertIn("claude 退出码 1", task["blocked_reason"])
         self.assertEqual(self.store.get_run(r["id"])["evidence"]["worker_error"], "claude 退出码 1")
         self.assertEqual(self.store.events(object_id=t["id"], kind="task.blocked")[-1]["payload"]["reason"], task["blocked_reason"])
-        self.store.block_task(t["id"], by="hermes", kind="external", reason="飞书任务接口 502")
-        self.assertEqual(self.store.get_task(t["id"])["blocked_reason"], "飞书任务接口 502")
-        self.assertEqual(self.store.block_task(t["id"], by="hermes", kind="external", reason="飞书任务接口 502")["applied"], False)
+        # 同类更新原因可以；重复设置是空操作
+        self.store.block_task(t["id"], by="hermes", kind="technical", reason="重跑还是报错，怀疑依赖没装")
+        self.assertEqual(self.store.get_task(t["id"])["blocked_reason"], "重跑还是报错，怀疑依赖没装")
+        self.assertEqual(self.store.block_task(t["id"], by="hermes", kind="technical", reason="重跑还是报错，怀疑依赖没装")["applied"], False)
         with self.assertRaisesRegex(ts.StateError, "写明类型"):
             self.store.block_task(self.ready_task(title="没原因")["id"], by="hermes", kind="technical", reason="")
         with self.assertRaises(ts.StateError):
             self.store.block_task(self.ready_task(title="类型不对")["id"], by="hermes", kind="whatever", reason="x")
-        # 超时、护栏、车间要决定：各自的原因
         t2, r2 = self.running_task(title="超时的")
         self.store.receive_receipt(r2["id"], {**OK_RECEIPT, "exit_code": -1, "timed_out": True})
         self.assertRegex(self.store.get_task(t2["id"])["blocked_reason"], "超时")
@@ -281,30 +290,28 @@ class AcceptanceTests(Base):
                 self.store.unblock_task(t["id"], by=who)
         with self.assertRaises(ts.IllegalTransition):
             self.store.start_run(t["id"], "claude", by="hermes")
-        # 走事件入口的自动重试同样被拒，且拒绝有记录
         out = self.store.ingest_event("system", "cron.retry", "cron:retry:1", "hermes",
                                       handler=lambda s: s.retry_task(t["id"], by="hermes"))
         self.assertEqual(out["applied"], False)
         self.assertIn("不能用技术重试绕过", out["rejected"])
         self.assertEqual(self.store.events(kind="cron.retry")[0]["applied"], 0)
-        self.assertEqual(self.store.get_task(t["id"])["status"], "blocked")
-        self.assertEqual(self.store.get_task(t["id"])["retries"], 0)
-        # 只有常浩能解；解开后回到 ready
+        self.assertEqual((self.store.get_task(t["id"])["status"], self.store.get_task(t["id"])["retries"]), ("blocked", 0))
         self.assertEqual(self.store.unblock_task(t["id"], by="user", note="先放着，继续")["status"], "ready")
         # technical 阻塞可以自动重试，但有上限
         t2, r2 = self.running_task(title="技术失败")
         for i in range(ts.MAX_RETRIES):
-            self.store.receive_receipt(r2["id"], {**OK_RECEIPT, "exit_code": 1, "worker_error": f"第 {i} 次失败"})
+            self.store.receive_receipt(r2["id"], {**FAIL_RECEIPT, "worker_error": f"第 {i} 次失败"})
             self.assertEqual(self.store.retry_task(t2["id"], by="hermes")["retries"], i + 1)
             r2 = self.store.start_run(t2["id"], "claude", by="hermes")["run"]
-        self.store.receive_receipt(r2["id"], {**OK_RECEIPT, "exit_code": 1, "worker_error": "又失败"})
+        self.store.receive_receipt(r2["id"], {**FAIL_RECEIPT, "worker_error": "又失败"})
         with self.assertRaisesRegex(ts.StateError, "超过上限"):
             self.store.retry_task(t2["id"], by="hermes")
+        with self.assertRaisesRegex(ts.StateError, "超过上限"):
+            self.store.unblock_task(t2["id"], by="hermes")   # 解技术阻塞和重试共用同一个上限
         self.assertEqual(self.store.get_task(t2["id"])["status"], "blocked")
 
     def test_09_unreachable_external_source_never_completes_task(self):
-        t, r = self.running_task()
-        self.store.receive_receipt(r["id"], {**OK_RECEIPT, "committed_files": []})
+        t, r = self.reviewed_task()
         self.store.add_ref("task", t["id"], "github_pr", "26", "https://github.com/o/r/pull/26")
 
         def down(kind, ref):
@@ -319,20 +326,17 @@ class AcceptanceTests(Base):
         self.assertEqual([e["kind"] for e in self.store.events(object_id=t["id"])][-2:], ["ref.unreachable", "ref.unreachable"])
         ok = self.store.check_ref("task", t["id"], "github_pr", "26", probe=lambda k, r: {"state": "MERGED"})
         self.assertEqual(ok, {"reachable": True, "seen": {"state": "MERGED"}})
-        self.assertEqual(self.store.get_task(t["id"])["status"], "review")  # 核对到也不自动完成
-        # 恢复时探针连不上：Run 不动
+        self.assertEqual(self.store.get_task(t["id"])["status"], "review")   # 核对到也不自动完成
+        # 恢复时探针坏了、台账缺失：Run 不动，列进 unknown
         t2, r2 = self.running_task(title="探针坏了")
         out = self.store.recover(probe=lambda run: (_ for _ in ()).throw(OSError("探针坏了")))
-        self.assertEqual((out["kept"], out["settled"]), ([r2["id"]], []))
+        self.assertEqual((out["unknown"], out["stale"], out["settled"]), ([r2["id"]], [], []))
+        self.assertEqual(self.store.recover()["unknown"], [r2["id"]])      # 台账目录不存在：同样不下判断
         self.assertEqual(self.store.get_task(t2["id"])["status"], "running")
-        # 没有证据的任务不能标完成
-        t3, r3 = self.running_task(title="没证据")
-        with self.store._tx():
-            self.store.conn.execute("UPDATE tasks SET status='review' WHERE id=?", (t3["id"],))
-            self.store.conn.execute("UPDATE runs SET status='abandoned' WHERE id=?", (r3["id"],))
-        with self.assertRaisesRegex(ts.EvidenceMissing, "没有证据"):
-            self.store.complete_task(t3["id"], by="hermes")
-        self.assertEqual(self.store.get_task(t3["id"])["status"], "review")
+        # 没有验收结论的任务不能标完成，哪怕有 PR 引用和成功的 Run
+        with self.assertRaisesRegex(ts.EvidenceMissing, "还没有通过的验收结论"):
+            self.store.complete_task(t["id"], by="hermes")
+        self.assertEqual(self.store.get_task(t["id"])["status"], "review")
 
     def test_10_existing_dispatch_orders_stay_compatible(self):
         orders = {
@@ -344,49 +348,342 @@ class AcceptanceTests(Base):
             "D20000101-5": order("done", issue=11, issue_url="https://github.com/o/r/issues/11", pr=13,
                                  pr_url="https://github.com/o/r/pull/13", receipt=OK_RECEIPT),
         }
-        root = make_dispatch(self.root / "dispatch", orders)
+        root = make_dispatch(self.ledger, orders)
         (root / "D20000101-9").mkdir()
         (root / "D20000101-9" / "order.json").write_text("{坏掉的", encoding="utf-8")
         (root / "D20000101-5" / "out" / "receipt.json").write_text("[]", encoding="utf-8")  # 回执不是对象：当没有
-        stats = self.store.sync_orders(root)
-        self.assertEqual({k: stats[k] for k in ("seen", "created", "updated", "unchanged")},
-                         {"seen": 5, "created": 5, "updated": 0, "unchanged": 0})
-        self.assertEqual(self.store.summary()["goals"], {})
-        self.assertEqual(self.store.summary()["tasks"], {})
+        stats = self.store.sync_orders()
+        self.assertEqual({k: stats[k] for k in ("ledger", "seen", "created", "updated", "unchanged", "conflicts")},
+                         {"ledger": "ok", "seen": 5, "created": 5, "updated": 0, "unchanged": 0, "conflicts": []})
+        self.assertEqual(stats["skipped"], ["D20000101-9：JSONDecodeError"])
+        self.assertEqual((self.store.summary()["goals"], self.store.summary()["tasks"]), ({}, {}))
         runs = {r["order_no"]: r for r in self.store.list_runs(unlinked=True)}
         self.assertEqual(sorted(runs), sorted(orders))
-        self.assertEqual({k: v["status"] for k, v in runs.items()},
-                         {k: v["status"] for k, v in orders.items()})
+        self.assertEqual({k: v["status"] for k, v in runs.items()}, {k: v["status"] for k, v in orders.items()})
         self.assertEqual(runs["D20000101-1"]["evidence"]["merged_to"], "1234567abcd")
         self.assertEqual(runs["D20000101-1"]["session_id"], "sess-1")
         self.assertEqual(runs["D20000101-5"]["evidence"]["pr_url"], "https://github.com/o/r/pull/13")
         self.assertEqual(runs["D20000101-5"]["receipt"], {})
         self.assertEqual(runs["D20000101-3"]["agent"], "codex")
         self.assertEqual(runs["D20000101-4"]["ended_at"], None)
-        # 再同步一遍：什么都不变
-        stats = self.store.sync_orders(root)
+        stats = self.store.sync_orders()                                   # 再同步一遍：什么都不变
         self.assertEqual((stats["created"], stats["updated"], stats["unchanged"]), (0, 0, 5))
         self.assertEqual(self.store.events(kind="order.sync")[0]["dup_count"], 1)
         # 关联到任务后，台账跑完才反映到任务上；台账跳过中间状态也能跟上
         t = self.ready_task()
         self.assertEqual(self.store.link_run("D20000101-4", t["id"], by="hermes")["task_status"], "running")
-        self.assertEqual(self.store.get_task(t["id"])["status"], "running")
         write_order(root, "D20000101-4", order("done", issue=7, updated="2000-01-01T11:00:00", receipt=OK_RECEIPT))
-        stats = self.store.sync_orders(root)
+        stats = self.store.sync_orders()
         self.assertEqual((stats["updated"], stats["unchanged"]), (1, 4))
         self.assertEqual(self.store.get_run("D20000101-4")["status"], "done")
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
         write_order(root, "D20000101-4", order("cleaned", issue=7, updated="2000-01-01T12:00:00", merged_to="deadbeef0"))
-        self.store.sync_orders(root)
+        self.store.sync_orders()
         self.assertEqual(self.store.get_run("D20000101-4")["status"], "cleaned")
-        self.assertEqual(self.store.events(object_id="D20000101-4", kind="order.sync")[-1]["payload"]["status"], "cleaned")
         self.assertEqual([e["kind"] for e in self.store.events(object_id=self.store.get_run("D20000101-4")["id"])],
                          ["run.import", "run.link", "run.done", "run.resync"])
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
-        # 台账目录不存在 / 空：不报错
-        self.assertEqual(self.store.sync_orders(self.root / "nowhere")["seen"], 0)
-        # 老台账文件没被动过
-        self.assertEqual(json.loads((root / "D20000101-1" / "order.json").read_text())["status"], "cleaned")
+        # 台账目录不存在：不是“没有工单”，是“缺失”
+        missing = self.store.sync_orders(self.root / "nowhere")
+        self.assertEqual((missing["ledger"], missing["seen"]), ("missing", 0))
+        self.assertEqual(json.loads((root / "D20000101-1" / "order.json").read_text())["status"], "cleaned")  # 老台账原样
+
+
+class ReviewFixTests(Base):
+    """2026-10-29 独立评审的返修项：R1～R4 与工程契约，每项先有能复现问题的用例。"""
+
+    def test_r1_decision_block_cannot_be_downgraded_then_retried(self):
+        t, r = self.running_task()
+        self.store.receive_receipt(r["id"], {**OK_RECEIPT, "need_decision": "合并还是先放着？"})
+        self.assertEqual(self.store.get_task(t["id"])["blocked_kind"], "decision")
+        for who in ("hermes", "claude", "codex", "system"):
+            with self.assertRaisesRegex(ts.NotAuthorized, "不能改成 technical 类阻塞"):
+                self.store.block_task(t["id"], by=who, kind="technical", reason="当成技术问题重跑")
+            for kind in ("external", "dependency"):
+                with self.assertRaises(ts.NotAuthorized):
+                    self.store.block_task(t["id"], by=who, kind=kind, reason="换个类型")
+        self.assertEqual(self.store.get_task(t["id"])["blocked_kind"], "decision")
+        with self.assertRaises(ts.NotAuthorized):
+            self.store.retry_task(t["id"], by="hermes")
+        # 非 user 可以补充原因（类型不变），也可以把别的类型升级成 decision；都不能降级
+        self.store.block_task(t["id"], by="hermes", kind="decision", reason="合并还是先放着？常浩还没回")
+        self.assertEqual(self.store.get_task(t["id"])["blocked_reason"], "合并还是先放着？常浩还没回")
+        t2, r2 = self.running_task(title="技术失败")
+        self.store.receive_receipt(r2["id"], FAIL_RECEIPT)
+        with self.assertRaisesRegex(ts.NotAuthorized, "只能把阻塞升级成 decision"):
+            self.store.block_task(t2["id"], by="hermes", kind="external", reason="改成外部")
+        self.store.block_task(t2["id"], by="hermes", kind="decision", reason="重跑两次都挂，要常浩定")
+        with self.assertRaises(ts.NotAuthorized):
+            self.store.retry_task(t2["id"], by="hermes")
+        # 已阻塞任务改类型时非法类型、空原因同样被拒
+        with self.assertRaises(ts.StateError):
+            self.store.block_task(t2["id"], by="user", kind="whatever", reason="x")
+        with self.assertRaises(ts.StateError):
+            self.store.block_task(t2["id"], by="user", kind="technical", reason="")
+        # 常浩可以改类型；改成 technical 后 Hermes 才能重试
+        self.store.block_task(t2["id"], by="user", kind="technical", reason="是环境问题，让它再试")
+        self.assertEqual(self.store.events(object_id=t2["id"], kind="task.block.update")[-1]["payload"]["from"], "decision")
+        self.assertEqual(self.store.retry_task(t2["id"], by="hermes")["status"], "ready")
+
+    def test_r2_late_result_of_old_run_does_not_override_current_run(self):
+        t, a = self.running_task(with_order=False)
+        self.tick(hours=3)
+        self.assertEqual(self.store.recover()["stale"], [a["id"]])
+        self.store.retry_task(t["id"], by="hermes")
+        b = self.store.start_run(t["id"], "claude", by="hermes")["run"]
+        self.assertEqual(self.store.get_task(t["id"])["status"], "running")
+        # A 迟到的成功回执：A 自己变 done，任务仍由 B 推进
+        out = self.store.receive_receipt(a["id"], OK_RECEIPT)
+        self.assertEqual((out["applied"], out["result"]["task_status"]), (True, "late"))
+        self.assertEqual(self.store.get_run(a["id"])["status"], "done")
+        self.assertEqual(self.store.get_task(t["id"])["status"], "running")
+        late = self.store.events(object_id=a["id"], kind="run.late_result")[-1]["payload"]
+        self.assertEqual((late["current_run"], late["status"]), (b["id"], "done"))
+        # 再来一个过期 + 迟到失败的：同样不碰任务
+        self.store.receive_receipt(b["id"], FAIL_RECEIPT)
+        self.store.retry_task(t["id"], by="hermes")
+        c = self.store.start_run(t["id"], "codex", by="hermes")["run"]
+        with self.store._tx():  # 把 B 人为退回 stale，模拟“B 过期后又迟到失败”
+            self.store.conn.execute("UPDATE runs SET status='stale' WHERE id=?", (b["id"],))
+        self.store.finish_run(b["id"], "failed", by="hermes", receipt={**FAIL_RECEIPT, "worker_error": "迟到的失败"})
+        self.assertEqual(self.store.get_run(b["id"])["status"], "failed")
+        self.assertEqual(self.store.get_task(t["id"])["status"], "running")
+        self.assertEqual(self.store.current_run(t["id"])["id"], c["id"])
+        # 台账路径一样：旧工单失败后任务换了新 Run，旧工单再续跑、再跑完，都只改它自己
+        self.store.sync_orders(make_dispatch(self.ledger, {"D20000101-7": order("running")}))
+        t3 = self.ready_task(title="台账任务")["id"]
+        self.assertEqual(self.store.link_run("D20000101-7", t3, by="hermes")["task_status"], "running")
+        write_order(self.ledger, "D20000101-7", order("failed", updated="2000-01-01T15:00:00", receipt=FAIL_RECEIPT))
+        self.store.sync_orders()
+        self.assertEqual(self.store.get_task(t3)["blocked_kind"], "technical")
+        self.store.retry_task(t3, by="hermes")
+        b3 = self.store.start_run(t3, "claude", by="hermes")["run"]
+        write_order(self.ledger, "D20000101-7", order("running", updated="2000-01-01T15:30:00"))
+        self.store.sync_orders()                                         # 旧工单续跑：不是当前 Run，任务不动
+        self.assertEqual(self.store.get_run("D20000101-7")["status"], "running")
+        self.assertEqual(self.kinds(self.store.get_run("D20000101-7")["id"])[-1], "run.resume_conflict")
+        write_order(self.ledger, "D20000101-7", order("done", updated="2000-01-01T16:00:00", receipt=OK_RECEIPT))
+        self.store.sync_orders()                                         # 旧工单跑完：迟到结果，任务不动
+        self.assertEqual(self.store.get_run("D20000101-7")["status"], "done")
+        self.assertIn("run.late_result", self.kinds(self.store.get_run("D20000101-7")["id"]))
+        self.assertEqual((self.store.get_task(t3)["status"], self.store.current_run(t3)["id"]), ("running", b3["id"]))
+
+    def test_r3_execution_result_is_not_acceptance(self):
+        # 空回执、缺字段、exit_code 不是整数：都不算成功
+        for bad, why in (({}, "缺 exit_code、ended"), ({"exit_code": 0}, "缺 ended"),
+                         ({"exit_code": "0", "ended": "x"}, "不是整数"), ({"exit_code": None, "ended": "x"}, "不是整数")):
+            t, r = self.running_task()
+            out = self.store.receive_receipt(r["id"], bad)
+            self.assertEqual(out["result"]["status"], "failed", bad)
+            task = self.store.get_task(t["id"])
+            self.assertEqual((task["status"], task["blocked_kind"]), ("blocked", "technical"), bad)
+            self.assertIn(why, self.store.get_run(r["id"])["note"])
+            self.assertIn(why, task["blocked_reason"])
+        self.assertEqual(ts.classify_receipt({"exit_code": True, "ended": "x"})[0], "failed")
+        self.assertEqual(ts.classify_receipt({"exit_code": 0, "ended": "x", "guard_remote_changed": True})[0], "guard")
+        # 只有 PR 引用、只有成功 Run：都不等于验收通过
+        t, r = self.reviewed_task()
+        self.store.add_ref("task", t["id"], "github_pr", "26", "https://github.com/o/r/pull/26")
+        with self.assertRaisesRegex(ts.EvidenceMissing, "有证据不等于验收通过"):
+            self.store.complete_task(t["id"], by="user")
+        self.assertEqual(self.store.task_evidence(t["id"]), {"refs": ["github_pr:26"], "runs": [r["id"]]})
+        # 验收结论必须写依据、引用本任务已有的证据；执行方不能自验
+        with self.assertRaisesRegex(ts.EvidenceMissing, "引用至少一项证据"):
+            self.store.accept_task(t["id"], by="codex", basis="看过了", cites=[])
+        with self.assertRaisesRegex(ts.EvidenceMissing, "不在任务"):
+            self.store.accept_task(t["id"], by="codex", basis="看过了", cites=["github_pr:99"])
+        with self.assertRaisesRegex(ts.NotAuthorized, "执行方"):
+            self.store.accept_task(t["id"], by="claude", basis="我自己测过", cites=[r["id"]])
+        with self.assertRaises(ts.NotAuthorized):
+            self.store.accept_task(t["id"], by="system", basis="定时任务", cites=[r["id"]])
+        self.assertEqual(self.store.get_task(t["id"])["verdict"], None)
+        # 验收不通过 = 退回 ready；验收通过后才能完成；通过后续跑会清掉结论
+        self.assertEqual(self.store.accept_task(t["id"], by="codex", basis="测试没跑", cites=[r["id"]], passed=False)["status"], "ready")
+        self.assertEqual(self.store.resume_run(r["id"], by="hermes")["task_status"], "running")
+        self.store.receive_receipt(r["id"], {**OK_RECEIPT, "ended": "2000-01-01T10:00:00"})
+        out = self.store.accept_task(t["id"], by="codex", basis="105 项测试通过，PR #26 与回执一致", cites=[r["id"], "github_pr:26"])
+        self.assertEqual((out["verdict"], self.store.get_task(t["id"])["verdict_by"]), ("passed", "codex"))
+        self.store.resume_run(r["id"], by="hermes")                       # 又续跑：结论作废
+        self.assertEqual(self.store.get_task(t["id"])["verdict"], None)
+        self.store.receive_receipt(r["id"], {**OK_RECEIPT, "ended": "2000-01-01T10:30:00"})
+        with self.assertRaises(ts.EvidenceMissing):
+            self.store.complete_task(t["id"], by="hermes")
+        self.store.accept_task(t["id"], by="user", basis="我看过 PR", cites=["github_pr:26"])
+        done = self.store.complete_task(t["id"], by="hermes")
+        self.assertEqual((done["status"], done["verdict_by"], done["cites"]), ("completed", "user", ["github_pr:26"]))
+        # 常浩自己可以给自己执行的任务下结论（他不是车间）；当前 Run 还在跑时不能完成
+        t2, r2 = self.reviewed_task(title="还在跑")
+        self.store.accept_task(t2["id"], by="user", basis="看过", cites=[r2["id"]])
+        with self.store._tx():
+            self.store.conn.execute("UPDATE runs SET status='running' WHERE id=?", (r2["id"],))
+        with self.assertRaisesRegex(ts.IllegalTransition, "还在 running"):
+            self.store.complete_task(t2["id"], by="hermes")
+
+    def test_r4_link_and_cancel_consistency(self):
+        g = self.goal(project="digital-twin")
+        self.store.sync_orders(make_dispatch(self.ledger, {
+            "D20000101-1": order("running"), "D20000101-2": order("running"), "D20000101-3": order("done", receipt=OK_RECEIPT),
+            "D20000101-4": order("running", project="work-desk")}))
+        observed = self.store.create_task(g["id"], "未授权", by="hermes")
+        with self.assertRaisesRegex(ts.IllegalTransition, "只能关联 ready 的任务"):
+            self.store.link_run("D20000101-1", observed["id"], by="hermes")
+        unauthorized = self.store.create_task(self.goal(authorized=False)["id"], "目标未授权", by="hermes")
+        with self.assertRaises(ts.IllegalTransition):
+            self.store.link_run("D20000101-1", unauthorized["id"], by="hermes")
+        done_task, _ = self.reviewed_task(goal_id=g["id"], title="已验收", with_order=False)
+        self.accepted(done_task["id"], self.store.current_run(done_task["id"])["id"])
+        self.store.complete_task(done_task["id"], by="hermes")
+        canceled = self.store.create_task(g["id"], "撤销的", by="hermes")
+        self.store.cancel_task(canceled["id"], by="user")
+        for bad in (done_task["id"], canceled["id"]):
+            with self.assertRaisesRegex(ts.IllegalTransition, "不能再关联 Run"):
+                self.store.link_run("D20000101-1", bad, by="hermes")
+            with self.assertRaisesRegex(ts.IllegalTransition, "不能再关联 Run"):
+                self.store.link_run("D20000101-3", bad, by="hermes")     # 已结束的 Run 也不能挂到终态任务
+        reviewing, _ = self.reviewed_task(goal_id=g["id"], title="在 review", with_order=False)
+        with self.assertRaises(ts.IllegalTransition):
+            self.store.link_run("D20000101-1", reviewing["id"], by="hermes")
+        running, _ = self.running_task(goal_id=g["id"], title="已有活动 Run", with_order=False)
+        with self.assertRaisesRegex(ts.IllegalTransition, "只能关联 ready 的任务"):
+            self.store.link_run("D20000101-1", running["id"], by="hermes")
+        ready = self.ready_task(g["id"], title="项目对不上")
+        with self.assertRaisesRegex(ts.StateError, "不能关联"):
+            self.store.link_run("D20000101-4", ready["id"], by="hermes")
+        self.assertEqual(self.store.link_run("D20000101-1", ready["id"], by="hermes")["task_status"], "running")
+        with self.assertRaisesRegex(ts.IllegalTransition, "只能关联 ready 的任务"):
+            self.store.link_run("D20000101-2", ready["id"], by="hermes")  # 不会形成两个活动 Run
+        self.assertEqual(len([r for r in self.store.list_runs(ready["id"]) if r["status"] in ts.RUN_ACTIVE]), 1)
+        # 已结束的 Run 可以挂到 review 的任务上作证据，但不能挂到终态任务
+        self.assertEqual(self.store.link_run("D20000101-3", reviewing["id"], by="hermes")["task_status"], "review")
+        # 请求取消 ≠ 已终止：Run 仍 running、带取消标记；执行层真正停下来后结果只记事件
+        out = self.store.cancel_task(ready["id"], by="user", reason="方向变了")
+        rid = self.store.get_run("D20000101-1")["id"]
+        self.assertEqual(out["cancel_pending"], [rid])
+        run = self.store.get_run(rid)
+        self.assertEqual((run["status"], run["cancel_requested_by"]), ("running", "user"))
+        self.assertEqual([r["id"] for r in self.store.list_runs(cancel_pending=True)], [rid])
+        write_order(self.ledger, "D20000101-1", order("abandoned", updated="2000-01-01T12:00:00"))
+        self.store.sync_orders()
+        self.assertEqual(self.store.get_run(rid)["status"], "abandoned")
+        self.assertEqual(self.store.list_runs(cancel_pending=True), [])
+        self.assertEqual(self.store.events(object_id=rid, kind="run.result_not_applied")[-1]["payload"]["task_status"], "canceled")
+        # 撤销目标时还在跑的工单：一并记“已请求取消”，不留无解释的运行中 Run
+        t2, r2 = self.running_task(goal_id=g["id"], title="目标撤销时在跑", with_order=False)
+        out = self.store.cancel_goal(g["id"], by="user", reason="整个方向不做了")
+        still_running = self.store.current_run(running["id"])["id"]            # 上面那个“已有活动 Run”的任务也在这个目标下
+        self.assertEqual(sorted(out["cancel_pending"]), sorted([still_running, r2["id"]]))
+        for rid in out["cancel_pending"]:
+            self.assertEqual(self.store.get_run(rid)["status"], "running")
+            self.assertEqual(self.kinds(rid)[-1], "run.cancel_requested")
+        self.assertEqual({t["status"] for t in self.store.list_tasks(g["id"])}, {"completed", "canceled"})
+
+    def test_create_with_duplicate_idempotent_key_returns_existing(self):
+        g1 = self.store.create_goal("目标", by="hermes", idem_key="feishu:om_1")
+        g2 = self.store.create_goal("目标（重发）", by="hermes", idem_key="feishu:om_1")
+        self.assertEqual((g1["id"], g2["id"], g2["title"]), ("G20000101-1", "G20000101-1", "目标"))
+        self.assertEqual(len(self.store.list_goals()), 1)
+        t1 = self.store.create_task(g1["id"], "任务", by="hermes", idem_key="feishu:om_2")
+        t2 = self.store.create_task(g1["id"], "任务（重发）", by="hermes", idem_key="feishu:om_2")
+        self.assertEqual((t1["id"], t2["id"]), ("T20000101-1", "T20000101-1"))
+        self.assertEqual(self.store.events(kind="task.create")[0]["dup_count"], 1)
+        self.assertEqual(len(self.store.list_tasks()), 1)
+
+    def test_ledger_regressions_are_conflicts_not_applied(self):
+        root = make_dispatch(self.ledger, {"D20000101-1": order("cleaned"), "D20000101-2": order("guard"),
+                                           "D20000101-3": order("done", receipt=OK_RECEIPT), "D20000101-4": order("abandoned")})
+        self.store.sync_orders()
+        cases = {"D20000101-1": "running", "D20000101-2": "merged", "D20000101-4": "done"}   # 终态回退、护栏降级、放弃后又完成
+        for no, back in cases.items():
+            write_order(root, no, order(back, updated=f"2000-01-01T13:00:00+{no}"))
+        stats = self.store.sync_orders()
+        self.assertEqual(sorted(stats["conflicts"]), sorted(cases))
+        self.assertEqual({no: self.store.get_run(no)["status"] for no in cases},
+                         {"D20000101-1": "cleaned", "D20000101-2": "guard", "D20000101-4": "abandoned"})
+        for no in cases:
+            ev = self.store.events(object_id=self.store.get_run(no)["id"], kind="run.conflict")[-1]["payload"]
+            self.assertEqual(ev["ledger"], cases[no])
+        # 护栏后的续跑不自动应用；done 之后的续跑是正常的 followup；done → cleaned 是允许的跳过
+        write_order(root, "D20000101-2", order("running", updated="2000-01-01T14:00:00"))
+        write_order(root, "D20000101-3", order("running", updated="2000-01-01T14:00:00"))
+        stats = self.store.sync_orders()
+        self.assertEqual(stats["conflicts"], ["D20000101-2"])
+        self.assertEqual((self.store.get_run("D20000101-2")["status"], self.store.get_run("D20000101-3")["status"]), ("guard", "running"))
+        self.assertEqual(self.kinds(self.store.get_run("D20000101-3")["id"])[-1], "run.followup")
+        write_order(root, "D20000101-3", order("cleaned", updated="2000-01-01T15:00:00"))
+        self.store.sync_orders()
+        self.assertEqual(self.store.get_run("D20000101-3")["status"], "cleaned")
+        # 同一台账状态再变（updated 变了但状态没变）：只刷新证据，不算冲突
+        write_order(root, "D20000101-3", order("cleaned", updated="2000-01-01T16:00:00", merged_to="abc"))
+        stats = self.store.sync_orders()
+        self.assertEqual((stats["updated"], stats["conflicts"]), (1, []))
+        self.assertEqual(self.store.get_run("D20000101-3")["evidence"]["merged_to"], "abc")
+
+    def test_followup_resume_rules(self):
+        t, r = self.reviewed_task()
+        self.assertEqual(self.store.resume_run(r["id"], by="hermes")["task_status"], "running")   # review → running
+        self.assertEqual((self.store.get_run(r["id"])["status"], self.store.get_task(t["id"])["status"]), ("running", "running"))
+        self.assertEqual(self.store.resume_run(r["id"], by="hermes")["applied"], False)
+        self.store.receive_receipt(r["id"], FAIL_RECEIPT)
+        self.assertEqual(self.store.resume_run(r["id"], by="hermes")["task_status"], "running")   # failed 续跑算一次重试
+        self.assertEqual(self.store.get_task(t["id"])["retries"], 1)
+        self.store.receive_receipt(r["id"], {**FAIL_RECEIPT, "ended": "2000-01-01T11:00:00"})
+        self.store.resume_run(r["id"], by="hermes")
+        self.store.receive_receipt(r["id"], {**FAIL_RECEIPT, "ended": "2000-01-01T12:00:00"})
+        out = self.store.resume_run(r["id"], by="hermes")                                        # 第三次：Run 续跑了，任务不动
+        self.assertEqual((out["status"], out["task_status"]), ("running", "conflict"))
+        self.assertEqual(self.store.get_task(t["id"])["status"], "blocked")
+        # guard 的续跑只有常浩能定；decision 阻塞的任务靠台账续跑解不开
+        t2, r2 = self.running_task(title="护栏")
+        self.store.receive_receipt(r2["id"], {**OK_RECEIPT, "guard_main_changed": True})
+        with self.assertRaisesRegex(ts.NotAuthorized, "续跑要常浩定"):
+            self.store.resume_run(r2["id"], by="hermes")
+        self.assertEqual(self.store.resume_run(r2["id"], by="user")["task_status"], "running")
+        t3, r3 = self.running_task(title="等决定")
+        self.store.receive_receipt(r3["id"], {**OK_RECEIPT, "need_decision": "要不要？"})
+        out = self.store.resume_run(r3["id"], by="hermes")
+        self.assertEqual((out["status"], out["task_status"]), ("running", "conflict"))
+        self.assertEqual(self.store.get_task(t3["id"])["status"], "blocked")
+        self.assertEqual(self.kinds(r3["id"])[-1], "run.resume_conflict")
+        done_run = self.reviewed_task(title="已完成")[1]
+        self.store.update_run(done_run["id"], "merged", by="hermes")
+        with self.assertRaisesRegex(ts.IllegalTransition, "不能续跑"):
+            self.store.resume_run(done_run["id"], by="user")
+
+    def test_recover_uses_ledger_before_time(self):
+        root = make_dispatch(self.ledger, {"D20000101-1": order("running"), "D20000101-2": order("running")})
+        self.store.sync_orders()
+        t1 = self.ready_task(title="一"), self.ready_task(title="二")
+        self.store.link_run("D20000101-1", t1[0]["id"], by="hermes")
+        self.store.link_run("D20000101-2", t1[1]["id"], by="hermes")
+        self.tick(hours=3)
+        out = self.store.recover()                      # 台账说还在跑：不按时间判过期，只列 suspect
+        self.assertEqual((out["ledger"], out["stale"], sorted(out["suspect"])),
+                         ("ok", [], sorted([self.store.get_run("D20000101-1")["id"], self.store.get_run("D20000101-2")["id"]])))
+        self.assertEqual({t["status"] for t in self.store.list_tasks()}, {"running"})
+        write_order(root, "D20000101-1", order("done", updated="2000-01-01T13:00:00", receipt=OK_RECEIPT))
+        write_order(root, "D20000101-2", order("failed", updated="2000-01-01T13:00:00", receipt=FAIL_RECEIPT))
+        out = self.store.recover()                      # 台账给了结果：按同步规则结算
+        self.assertEqual(sorted(out["settled"]), sorted([f"{self.store.get_run('D20000101-1')['id']}→done",
+                                                         f"{self.store.get_run('D20000101-2')['id']}→failed"]))
+        self.assertEqual((self.store.get_task(t1[0]["id"])["status"], self.store.get_task(t1[1]["id"])["status"]), ("review", "blocked"))
+        # 台账读不了：不下判断
+        for f in root.glob("D*/order.json"):
+            f.write_text("{坏", encoding="utf-8")
+        t3 = self.ready_task(title="台账坏了")
+        r3 = self.store.start_run(t3["id"], "claude", by="hermes", order_no="D20000101-9")["run"]
+        self.tick(hours=5)
+        out = self.store.recover()
+        self.assertEqual((out["ledger"], out["unknown"], out["stale"]), ("unreadable", [r3["id"]], []))
+        self.assertEqual(self.store.get_task(t3["id"])["status"], "running")
+
+    def test_receipt_whitelist(self):
+        t, r = self.running_task()
+        self.store.receive_receipt(r["id"], {**OK_RECEIPT, "summary": "x" * 5000, "env": {"TOKEN": "不该进库"}, "raw_stdout": "…"})
+        rc = self.store.get_run(r["id"])["receipt"]
+        self.assertNotIn("env", rc)
+        self.assertNotIn("raw_stdout", rc)
+        self.assertEqual(len(rc["summary"]), ts.SUMMARY_CLIP)
+        self.assertEqual(ts.clip_receipt("不是对象"), {})
 
 
 class MoreTests(Base):
@@ -396,28 +693,30 @@ class MoreTests(Base):
         t = self.ready_task()
         g = self.store.get_goal(t["goal_id"])
         with self.assertRaises(ts.IllegalTransition):
-            self.store.complete_task(t["id"], by="user")  # ready → completed 不行
+            self.store.complete_task(t["id"], by="user")   # ready → completed 不行
         with self.assertRaises(ts.IllegalTransition):
-            self.store.unblock_task(t["id"], by="user")  # 没阻塞
+            self.store.unblock_task(t["id"], by="user")    # 没阻塞
         with self.assertRaises(ts.IllegalTransition):
-            self.store.rework_task(t["id"], by="user", note="x")  # 不在 review
+            self.store.rework_task(t["id"], by="user", note="x")
+        with self.assertRaises(ts.IllegalTransition):
+            self.store.accept_task(t["id"], by="user", basis="x", cites=["a"])
         self.store.cancel_task(t["id"], by="user")
         with self.assertRaises(ts.IllegalTransition):
-            self.store.set_ready(t["id"], by="user")  # 终态不能再动
-        self.assertEqual(self.store.cancel_task(t["id"], by="user")["applied"], False)  # 重复撤销是空操作
-        self.assertEqual(self.store.authorize_goal(g["id"], by="user")["applied"], False)  # 已授权：空操作
+            self.store.set_ready(t["id"], by="user")       # 终态不能再动
+        self.assertEqual(self.store.cancel_task(t["id"], by="user")["applied"], False)
+        self.assertEqual(self.store.authorize_goal(g["id"], by="user")["applied"], False)
         with self.assertRaises(ts.IllegalTransition):
             self.store.cancel_goal(self.completed_goal()["id"], by="user")
         with self.assertRaises(ts.StateError):
             self.store.create_goal("状态不对", by="user", status="completed")
         with self.assertRaises(ts.StateError):
-            self.store.update_task(t["id"], by="user", status="ready")  # 不能绕过状态机改状态
+            self.store.update_task(t["id"], by="user", status="ready")
         with self.assertRaises(ts.StateError):
             self.store.start_run(self.ready_task(title="y")["id"], "claude", by="hermes", status="done")
 
     def completed_goal(self):
-        t, r = self.running_task(title="z")
-        self.store.receive_receipt(r["id"], OK_RECEIPT)
+        t, r = self.reviewed_task(title="z")
+        self.accepted(t["id"], r["id"])
         self.store.complete_task(t["id"], by="hermes")
         self.store.complete_goal(t["goal_id"], by="user")
         return self.store.get_goal(t["goal_id"])
@@ -425,24 +724,23 @@ class MoreTests(Base):
     def test_cancel_rules(self):
         g = self.goal()
         t = self.store.create_task(g["id"], "刚发现的", by="hermes")
-        self.assertEqual(self.store.cancel_task(t["id"], by="hermes")["status"], "canceled")  # observed 的 Hermes 可撤
+        self.assertEqual(self.store.cancel_task(t["id"], by="hermes")["status"], "canceled")
         t2 = self.ready_task(g["id"], title="已授权的")
         with self.assertRaisesRegex(ts.NotAuthorized, "只有常浩能撤销"):
             self.store.cancel_task(t2["id"], by="hermes")
         r = self.store.start_run(t2["id"], "claude", by="hermes")["run"]
-        self.store.cancel_task(t2["id"], by="user", reason="方向变了")
-        self.assertEqual(self.store.get_run(r["id"])["status"], "abandoned")
+        self.assertEqual(self.store.cancel_task(t2["id"], by="user", reason="方向变了")["cancel_pending"], [r["id"]])
+        self.assertEqual(self.store.get_run(r["id"])["status"], "running")   # 只是请求取消，进程可能还在跑
         with self.assertRaises(ts.NotAuthorized):
             self.store.cancel_goal(g["id"], by="hermes")
 
     def test_rework_and_update(self):
-        t, r = self.running_task()
-        self.store.receive_receipt(r["id"], OK_RECEIPT)
+        t, r = self.reviewed_task()
         self.assertEqual(self.store.rework_task(t["id"], by="user", note="测试没过")["status"], "ready")
         self.assertEqual(self.store.update_task(t["id"], by="hermes", next_step="补测试")["next_step"], "补测试")
         r2 = self.store.start_run(t["id"], "claude", by="hermes")["run"]
         with self.assertRaises(ts.IllegalTransition):
-            self.store.heartbeat(r["id"])  # 旧 Run 已结束
+            self.store.heartbeat(r["id"])   # 旧 Run 已结束
         self.tick(minutes=5)
         self.store.heartbeat(r2["id"])
         self.assertEqual(self.store.get_run(r2["id"])["heartbeat_at"], self.t.isoformat(timespec="seconds"))
@@ -455,6 +753,7 @@ class MoreTests(Base):
         t, r = self.running_task()
         backup = self.store.backup()
         self.assertEqual(backup.parent, self.db.parent / "backups")
+        self.assertEqual(self.store.backup().name, backup.stem + "-2.db")   # 同一秒再备份不覆盖
         self.store.receive_receipt(r["id"], OK_RECEIPT)
         self.assertEqual(self.store.get_task(t["id"])["status"], "review")
         self.store.restore(backup)
@@ -462,12 +761,24 @@ class MoreTests(Base):
         self.assertEqual(self.store.version(), ts.SCHEMA_VERSION)
         with self.assertRaises(ts.NotFound):
             self.store.restore(self.root / "nope.db")
+        junk = self.root / "junk.db"
+        junk.write_text("不是 SQLite", encoding="utf-8")
+        with self.assertRaisesRegex(ts.StateError, "不是可用的状态库"):
+            self.store.restore(junk)
+        other = self.root / "other.db"
+        import sqlite3
+        sqlite3.connect(str(other)).execute("CREATE TABLE x(y)").connection.close()
+        with self.assertRaisesRegex(ts.StateError, "没有 schema_version"):
+            self.store.restore(other)
+        self.assertEqual(self.store.get_task(t["id"])["status"], "running")   # 失败的恢复不改当前库
         newer = self.root / "newer.db"
         with ts.Store(newer) as s:
             with s._tx():
                 s.conn.execute("UPDATE meta SET value='99' WHERE key='schema_version'")
         with self.assertRaisesRegex(ts.StateError, "比程序支持的"):
             ts.Store(newer).open()
+        with self.assertRaisesRegex(ts.StateError, "比程序支持的"):
+            self.store.restore(newer)
 
     @unittest.skipUnless(os.name == "posix", "只在 POSIX 上查权限")
     def test_file_permissions(self):
@@ -476,6 +787,7 @@ class MoreTests(Base):
 
     def test_cli_roundtrip(self):
         env = {**os.environ, "DT_STATE_DB": str(self.db), "DT_DISPATCH": str(self.root / "no-dispatch")}
+        me = ["--sender", ts.OWNER_OPEN_ID]
 
         def cli(*args, ok=True):
             r = subprocess.run([sys.executable, "-B", str(MODULE), *args], capture_output=True, text=True, env=env)
@@ -486,8 +798,13 @@ class MoreTests(Base):
 
         self.store.close()
         self.assertEqual(cli("init")["schema_version"], 1)
-        g = cli("goal-new", "--title", "命令行目标", "--by", "user", "--status", "authorized")["goal"]
+        # --by user 必须带常浩本人的 open_id；角色名不是身份
+        no_sender = cli("goal-new", "--title", "x", "--by", "user", "--status", "authorized", ok=False)
+        self.assertEqual(no_sender["error"], "NotAuthorized")
+        self.assertIn("--sender", no_sender["msg"])
+        self.assertEqual(cli("goal-new", "--title", "x", "--by", "user", "--sender", "ou_someone_else", ok=False)["error"], "NotAuthorized")
         self.assertIn("只有常浩本人能授权", cli("goal-new", "--title", "x", "--by", "hermes", "--status", "authorized", ok=False)["msg"])
+        g = cli("goal-new", "--title", "命令行目标", "--by", "user", *me, "--status", "authorized")["goal"]
         t = cli("task-new", "--goal", g["id"], "--title", "命令行任务", "--by", "hermes", "--acceptance", "能跑")["task"]
         self.assertEqual(cli("task-ready", t["id"], "--by", "hermes")["status"], "ready")
         r = cli("run-start", "--task", t["id"], "--agent", "claude", "--by", "hermes", "--order", "D20000101-7", "--key", "k1")
@@ -499,16 +816,19 @@ class MoreTests(Base):
         self.assertEqual(cli("run-receipt", r["run"]["id"], "--receipt", str(receipt))["result"]["task_status"], "review")
         self.assertEqual(cli("run-receipt", r["run"]["id"], "--receipt", str(receipt))["applied"], False)
         cli("ref-add", "--type", "task", "--id", t["id"], "--kind", "github_pr", "--ref", "26")
+        self.assertIn("还没有通过的验收结论", cli("task-complete", t["id"], "--by", "hermes", ok=False)["msg"])
+        self.assertIn("执行方", cli("task-accept", t["id"], "--by", "claude", "--basis", "自测", "--cites", r["run"]["id"], ok=False)["msg"])
+        self.assertEqual(cli("task-accept", t["id"], "--by", "codex", "--basis", "核对过", "--cites", f"{r['run']['id']},github_pr:26")["verdict"], "passed")
         self.assertEqual(cli("task-complete", t["id"], "--by", "hermes")["status"], "completed")
-        self.assertEqual(cli("show", t["id"])["object"]["status"], "completed")
+        self.assertEqual(cli("show", t["id"])["object"]["verdict_by"], "codex")
         self.assertEqual(cli("show", "D20000101-7")["object"]["status"], "done")
         self.assertEqual(len(cli("show", t["id"])["refs"]), 1)
         self.assertIn("没有这个对象", cli("show", "T19990101-1", ok=False)["msg"])
         self.assertEqual(len(cli("list")["tasks"]), 1)
         self.assertGreater(len(cli("events", t["id"])["events"]), 3)
-        self.assertEqual(cli("goal-complete", g["id"], "--by", "user")["status"], "completed")
+        self.assertEqual(cli("goal-complete", g["id"], "--by", "user", *me)["status"], "completed")
         rec = cli("recover")
-        self.assertEqual((rec["msg"], rec["synced"]["seen"], rec["kept"]), ("恢复完成：没有需要处理的", 0, []))
+        self.assertEqual((rec["msg"], rec["ledger"], rec["synced"]["ledger"]), ("恢复完成（台账 missing）：没有需要处理的", "missing", "missing"))
         self.assertIn("--yes", cli("restore", "--from", str(receipt), ok=False)["msg"])
         bak = cli("backup", "--to", str(self.root / "b.db"))
         self.assertIn("b.db", bak["msg"])

@@ -6,6 +6,24 @@
 
 ---
 
+## 2026-10-29 · B0/B1 独立评审返修（PR #26 继续，待第二轮评审）
+
+- 时间：开工 10:20
+- **来由**：ChatGPT 对 PR #26 的独立评审「有条件通过」（B0 认可，B1 四项 P0、六项 P1 待修；暂不合并、不安装、不进 B2）。按源码逐条核对，四项 P0 都属实。
+- **做了什么**（同一分支 `claude/25-state-store`，不改派单系统）：
+  - R1 `block_task` 改阻塞类型过权限：非 user 只能把类型升级成 decision，decision 类只有常浩能改；解 technical 阻塞与重试共用上限。
+  - R2 任务有“当前 Run”（最后登记的那个）：旧 Run 的迟到结果只改它自己，记 `run.late_result`，不动任务；任务不在 running 时结果只记 `run.result_not_applied`。
+  - R3 回执缺 `exit_code` / `ended` 或 exit_code 不是整数一律算失败并写明原因；新增 `accept_task` 验收结论（必须写依据、引用本任务证据，执行方不能自验，B3 的 Codex 审查接这里），`complete_task` 只认通过的结论，有 PR 引用或成功 Run 不等于验收通过；续跑 / 返工清结论。
+  - R4 `link_run` 全量校验（活动 Run 只挂 ready 且目标已授权、无其他活动 Run 的任务，终态任务不挂，项目对不上不挂）；撤销任务 / 目标改为“已请求取消”（`cancel_requested_at`，Run 仍 running，`list_runs(cancel_pending=True)` 可查），不再直接写 abandoned。
+  - 工程契约：`by=user` 明确为内部可信调用约定，命令行 `--by user` 必须带 `--sender` 且等于常浩 open_id；新建目标 / 任务重复幂等键返回既有对象；台账回退、护栏降级、终态再变记 `run.conflict` 不应用，done / failed 之后的 running 按续跑处理（`resume_run`）；回执只存白名单字段；`max_retries` 可配，注明是临时保护；恢复先看台账（缺失 / 读不了 / 没这张单记 unknown，台账说在跑只列 suspect），只有没台账的 Run 才按时间判过期；备份同秒不覆盖，恢复前查完整性和版本。
+  - 文档：设计文档补事实归属、角色 ≠ 身份、验收依据、迟到结果与冲突、B2 方向（事件通知为主、定时对账兜底）、B1 边界与安全接入前置条件；返修说明 `docs/reviews/2026-10-29-B0B1-返修说明.md`。
+- 测试：新增 9 项、改写 17 项，`test_twin_state.py` 共 26 项；先把新用例跑在返修前的模块（`690dadb`）上确认 R1～R4 等 12 项会失败，再在返修后跑：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14）`Ran 114 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 114 tests` `OK`。原 88 项不变。
+- 本轮新坑：无（台账里的时间是本机 naive 字符串，不拿来当心跳，已在代码里注明）。
+- 没做：仍未合并、未安装、未改技能和 Hermes 配置；真实身份映射、事件通知钩子、进程终止留 B2。
+- 下一步：把返修说明交 ChatGPT 第二轮评审；通过后常浩批准“合并 + 安装副本 + 自检复核”一次收尾，再按设计文档第 7 节进 B2。
+
+---
+
 ## 2026-10-29 · 七层架构 B0 复核 + B1 持久状态底座（PR 待合并）
 
 - 时间：开工 09:10
