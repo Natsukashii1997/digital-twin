@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 35 项 + 飞书身份桥接 17 项 + 统一事件接入 16 项 + 派单状态通知 10 项，共 166 项），末尾显示 `Ran 166 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项，共 188 项），末尾显示 `Ran 188 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -91,11 +91,11 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 
 ## 飞书可信身份桥接（test_twin_identity.py）
 
-测的是 `twin_identity.py`（B2.1 T03）。纯函数 `verify_message` 用注入的回读结果和固定时钟；`lark_fetch` 打桩 `subprocess.run`；命令行走假 lark-cli（`fake_lark.py` 的 `im +messages-mget`）和临时的 600 配置文件。覆盖：常浩本人、私聊、时效内才通过；别人、应用消息、群聊或没有会话信息、没配 `owner_chat_id`、过时效、未来时间、已撤回、回读失败、查不到、message_id 格式不对、没配 owner 一律拒绝且输出不带身份值；分钟级时间与偏差；回读固定用猛鬼兽 profile 的 bot 身份并去掉 HERMES / OPENCLAW 环境变量；`verify` 与 `setup-chat`（预览不写、`--write` 写 600 文件、别人的消息不认）。17 项。
+测的是 `twin_identity.py`（B2.1 T03）。纯函数 `verify_message` 用注入的回读结果和固定时钟；`lark_fetch` 打桩 `subprocess.run`；命令行走假 lark-cli（`fake_lark.py` 的 `im +messages-mget`）和临时的 600 配置文件。覆盖：常浩本人、私聊、时效内才通过；别人、应用消息、群聊或没有会话信息、没配 `owner_chat_id`、过时效、未来时间、已撤回、回读失败、查不到、message_id 格式不对、没配 owner 一律拒绝且输出不带身份值；分钟级时间与偏差；回读固定用猛鬼兽 profile 的 bot 身份并去掉 HERMES / OPENCLAW 环境变量；`verify` 与 `setup-chat`（预览不写、`--write` 写 600 文件、别人的消息不认）。2026-10-29 评审返修加：p2p 标志不能绕过 `owner_chat_id`、chat_id 不同拒、回读 message_id 不一致拒、`sender_type` 缺失拒、话题群拒、真实 mget 形状（无会话类型）配好 chat_id 通过；`lark_fetch` 回读不止一条 / 不是这条 / 字段不全抛错；`lark_chat_mode` 用 bot 身份裸 API；`setup-chat` 群聊拒、拿不到会话类型 fail closed、写入失败保留原文件且不留临时文件。26 项。
 
 ## 统一事件接入（test_twin_events.py）
 
-测的是 `twin_events.py`（B2.1 T02）。临时库、固定时钟、注入的飞书回读。覆盖：信封缺字段 / 来源与角色不配 / 正文当身份都拒；正文只留 sha1，信封自带的 verified / open_id 丢掉；user 事件经核实才应用并占用消息，别人、群聊、查不到的消息拒绝并留痕（applied=0）；一条消息只换一次动作，重复事件不再回读飞书、只计 dup_count；被 Store 拒绝的动作不消耗消息；Agent 回执重复只应用一次并记引用；旧 Run 的迟到回执只记 `run.late_result`；台账回退是冲突、证据不变；`order.sync` 用内容哈希键（同秒连写不漏）、没有 order.json 的目录只计 ignored、对账补漏；note 只留痕；Store 的授权规则经信封照常生效；命令行 ingest / validate / types。16 项。
+测的是 `twin_events.py`（B2.1 T02）。临时库、固定时钟、注入的飞书回读。覆盖：信封缺字段 / 来源与角色不配 / 正文当身份都拒；正文只留 sha1，信封自带的 verified / open_id 丢掉；user 事件经核实才应用并占用消息，别人、群聊、查不到的消息拒绝并留痕（applied=0）；一条消息只换一次动作，重复事件不再回读飞书、只计 dup_count；被 Store 拒绝的动作不消耗消息；Agent 回执重复只应用一次并记引用；旧 Run 的迟到回执只记 `run.late_result`；台账回退是冲突、证据不变；`order.sync` 用内容哈希键（同秒连写不漏）、没有 order.json 的目录只计 ignored、对账补漏；note 只留痕；Store 的授权规则经信封照常生效；命令行 ingest / validate / types。2026-10-29 评审返修加：`identity / payload / refs` 非对象给 EventError；临时失败（配置缺失、回读失败 / 出错）不记事件、同一 event_id 重试成功；永久拒绝（别人、Store 拒绝）锁住 event_id，再来返回 `rejected_before`、不回读；`order.sync` 越界 / 符号链接 / 单号不匹配拒绝，合法目录与 `notify_order(dispatch_dir=…)` 照常；命令行三种文案。26 项。
 
 ## 派单状态通知（test_dispatch_notify.py）
 

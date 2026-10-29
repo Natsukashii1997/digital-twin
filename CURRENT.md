@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-29 晚 · B2.1 定向返修（ChatGPT 评审 P0-1 / P0-2 / P1-1 / P1-2 / P1-3 + P2 一条；[PR #28](https://github.com/Natsukashii1997/digital-twin/pull/28) 同一分支，待复核）
+
+- 时间：开工 16:40
+- **来由**：ChatGPT 对 PR #28 独立评审「有条件通过」（原文 [docs/reviews/2026-10-29-ChatGPT-B2.1评审原文.md](docs/reviews/2026-10-29-ChatGPT-B2.1评审原文.md)）：P0 两条身份闭环、P1 三条事务 / 重试 / 来源边界要在同一分支定向返修。按源码逐条核实属实；常浩确认三项取舍（事务化命令行；配置缺失算临时失败；bot 身份裸 API `chat_mode` 判私聊）后开工。
+- **做了什么**（每条先写失败用例跑红再改，三个提交 `51b9248` → `73754ea` → `060de51`，详见 [docs/reviews/2026-10-29-B2.1-返修说明.md](docs/reviews/2026-10-29-B2.1-返修说明.md)）：
+  - P0-1 `twin_identity.verify_message`：回读 message_id 必须一致、`sender_type` 必须明确 `user`、`owner_chat_id` 必配且 `chat_id` 必须相等，p2p 标志只作附加证据；`lark_fetch` 要求恰好一条、就是这条、字段齐。
+  - P0-2 `setup-chat`：bot 身份 `GET /open-apis/im/v1/chats/{chat_id}` 取 `chat_mode`，只有 `p2p` 才写，群聊拒、拿不到 fail closed 给手工说明；`--write` 临时文件 + 原子替换，失败保留原文件。真实只读探针确认私聊返回 `chat_mode=p2p`（打码证据 `evidence/b2.1-rework-20261029/probe-chat.masked.json`）。
+  - P1-1 `twin_state` 命令行：`done()` 改抛 `_Done`，占用与动作同一事务，只有成功才提交；崩溃 / 拒绝 / `StateError` 整体回滚。
+  - P1-2 `twin_events`：临时失败不记事件可重试；永久拒绝锁住 event_id，再来返回 `rejected_before` 要新消息；命令行三种文案。
+  - P1-3 `Store.trusted_order_dir`：`order_dir` 必须是派单根目录的直接子目录、非符号链接、目录名等于单号；`dispatch.py` 通知传自己的 `ROOT`。
+  - P2 `normalize` 对 `identity / payload / refs` 非对象给 `EventError`。
+  - 文档：协议 1.4 / 1.6 / 2.1 / 2.4 / 2.5 / 3、接入清单步骤 3、tests README。
+- 测试：新用例先在 `9d5a363` 上跑红（身份 5 FAIL；再 4 FAIL + 1 ERROR；状态库 2 FAIL；事件 3 FAIL + 7 ERROR，证据 `*-red.txt`）；改后 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 188 tests` `OK` 退出码 0；`/usr/bin/python3 …`（3.9.6）`Ran 188 tests` `OK` 退出码 0（`full-regression.txt`）。原 166 项保留（1 项按评审反转）。真实环境只读（一次 bot 身份查会话信息）。
+- 本轮新坑：无。（事实：飞书 `GET /im/v1/chats/{chat_id}` 用 bot 身份对私聊返回 `chat_mode=p2p`，可作私聊判定；Python `Path.resolve()` 在 macOS 把 `/var` 解析到 `/private/var`，边界比对两边都要 resolve。）
+- 没做：未合并、未安装、未建正式库、未配 `owner_chat_id`、未改 `.env` / 技能 / SOUL / cron / 网关、未发真实派单。**技术基建完成 ≠ 正式可信自主授权可启用**：网关可信凭据、动作级确认仍留 B2.x。
+- 下一步：推送后 Issue #27 留评、返修说明交 ChatGPT 复核；复核通过后进入 PR #28 的最终技术合并审批，合并 / 安装与 `owner_chat_id` 配置、正式启用仍按接入清单第 2 节逐步单独批。
+
+---
+
 ## 2026-10-29 · B2.1 状态、事件与可信身份接入（[PR #28](https://github.com/Natsukashii1997/digital-twin/pull/28) 待评审，未合并、未安装）
 
 - 时间：开工 15:00
