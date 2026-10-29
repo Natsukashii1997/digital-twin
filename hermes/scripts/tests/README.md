@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项，共 88 项），末尾显示 `Ran 88 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 17 项，共 105 项），末尾显示 `Ran 105 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -76,3 +76,12 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ## 日报周报取数和写回（test_report.py）
 
 PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联网，按临时目录里的 state.json 回话，`docs +update` 会真的改假文档以便回读）；项目进展、台账种子、证据目录都换成临时路径。覆盖：私聊全收、和猛鬼兽的私聊不收、自己给自己的备忘收、群只收常浩发言或被 @ 的；飞书任务只收常浩负责、近期到期或当天新建的；前一篇台账优先于种子；同一天已写过、周末没动静输出 SKIP；lark-cli 失败退出码 1；周报只取本周日报、按日期排；写回插在说明段之后、同一标题不重写、星期 / 缺段 / 表格 / 标题格式 / 周号不对时拒绝且不调用写入。
+
+## 持久状态底座（test_twin_state.py）
+
+测的是 `twin_state.py`（B1：Goal / Task / Run / Event / Ref）。每项测试用独立临时目录里的状态库（`Store(path, clock=…)`，固定时钟 2000-01-01 09:00+08:00）和虚构的派单台账目录；不碰 `~/.hermes`、真实工单、安装副本，不调用模型或外部服务。覆盖：
+
+- 任务书 B1.5 十项验收，按编号 `test_01` ～ `test_10`：建目标与任务；未授权不能进 ready / 不能开跑、Hermes 不能授权、目标撤销连带任务；一个任务多次 Run（失败 → 重试 → 成功，再挂一张既有工单）；Run 成功只到 review，merged / cleaned 不动任务，目标完成只有常浩能定；同一幂等键的开跑 / 回执 / 通用事件只处理一次（`dup_count` 计数），终态后的不同回执被拒；关库重开状态不变，过期 Run 标 stale、任务转技术阻塞，依赖完成自动放行，running 却没 Run 的任务转阻塞，handler 中途抛异常整体回滚、同键可重来；失败 / 超时 / 护栏 / need_decision 各自的阻塞类型和原因；decision 类阻塞对 hermes / claude / codex / system 的重试与解阻塞一律拒绝且留痕，technical 重试有上限；外部探针抛异常或返回空只记 `ref.unreachable`、任务不动，核对到也不自动完成，没证据不能完成；台账同步只建未关联的 Run、不建目标和任务，坏文件跳过、重同步无变化、关联后台账跑完才反映到任务、台账跳状态也跟得上、旧台账文件原样。
+- 其余：非法转换与绕过状态机改状态；撤销规则；返工、心跳、引用；备份 / 恢复 / 库版本护栏；库文件 600、目录 700；命令行往返（init、goal-new、task-new、task-ready、run-start 带幂等键、run-receipt、ref-add、task-complete、show、list、events、goal-complete、recover、backup、restore --yes）以及拒绝时 `ok: false`、退出码 1。
+
+系统 `/usr/bin/python3`（3.9.6）和 `python3`（3.14）都要能通过：模块只用 3.9 有的语法和标准库。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_state.py -v`。

@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-29 · 七层架构 B0 复核 + B1 持久状态底座（PR 待合并）
+
+- 时间：开工 09:10
+- **来由**：常浩《Hermes Digital Twin · 七层架构基建工程启动任务书 V1.0》，本轮只做 B0 + B1，隔离分支提交、开 PR、不合并、不安装、不动运行中的 Hermes。
+- **B0 复核**：任务书 9 条“已知现状”逐条核实都成立（源码与安装副本一致、88 项测试 OK、15 张真实工单、三个技能版本）；没有和七层目标冲突的正式需求；Hermes 自带 `kanban.db` 不拿来当长期状态。七层映射、对象关系、状态机、授权边界、三个事件入口、交接协议、文件清单、取舍、回退都在 [docs/B0-七层架构复核与状态底座设计.md](docs/B0-七层架构复核与状态底座设计.md)。
+- **B1 做了什么**：issue #25 → [PR #26](https://github.com/Natsukashii1997/digital-twin/pull/26)，分支 `claude/25-state-store`（worktree `~/Sandbox/worktrees/digital-twin-25-state-store`）：
+  - 新增 `hermes/scripts/twin_state.py`（只用标准库，兼容系统 Python 3.9）：Goal / Task / Run / Event / Ref 五张表，SQLite 在 `~/Library/Application Support/DigitalTwin/twin-state.db`（`DT_STATE_DB` 可改，700/600，WAL，版本迁移，在线备份 / 恢复）；任务状态 `observed / ready / running / blocked / review / completed / canceled` 查表转换；Run 沿用台账状态词另加 `stale`；授权、解 decision 阻塞、完成 / 撤销目标只认 `by=user`；事件幂等键 + `dup_count`，状态和事件同一事务；`recover()` 处理过期 Run、孤儿任务、依赖放行；`sync_orders()` 只读同步 `~/.hermes/dispatch` 台账为未关联 Run，不建目标；命令行每条末行 JSON，和 `dispatch.py` 一致。
+  - 新增 `hermes/scripts/tests/test_twin_state.py` 17 项：任务书 B1.5 十项验收各一项（编号对应），加非法转换、撤销规则、返工心跳、备份恢复、权限、命令行往返。
+  - 没改 `dispatch.py`、`run_worker.py`、技能、`ops/*`、任何安装副本和 Hermes 配置；台账写入钩子留到 B2。
+- 测试：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14）`Ran 105 tests` `OK`；`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 105 tests` `OK`。主目录 `main` 改动前基线 88 项 OK。真实环境只读核对，没有写入。
+- 本轮新坑：系统 Python 3.9 自带的 SQLite 用 `file:…?mode=ro` 打不开 WAL 库（`unable to open database file`），3.14 可以；读备份文件加 `immutable=1`。只记在这里，还没到提升为全局坑的程度。
+- 没做：没安装到 `~/.hermes/scripts/`（合并后另需授权；装之前 `self_check` 每天会报安装缺文件）；没给 `dispatch.py` 加写入钩子；没改技能读状态库。
+- 范围外：`hermes gateway status` 仍提示 launchd 服务定义比安装旧（旧记录已有）。
+- 下一步：常浩看 PR #26；说“合并”后变基复跑 105 项、squash 合并、安装 `twin_state.py` 到 `~/.hermes/scripts/`（不用重启网关）；然后按设计文档第 7 节进 B2（先用 cron 跑 `recover`，技能改读状态库）。
+
+---
+
 ## 2026-10-28 · 首日运行核对；巡检定时任务误报修复（已上线）
 
 - 时间：开工 09:42

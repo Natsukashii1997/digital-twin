@@ -16,6 +16,7 @@ hermes/
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
     report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
+    twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
     workshop/          车间派单（F5）
     progress/          项目进展现查（F6）
