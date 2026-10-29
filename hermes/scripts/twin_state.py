@@ -30,10 +30,14 @@ blocked（有明确阻塞：decision / dependency / external / technical）；ca
 
 授权边界（程序校验）：只有 by="user" 能授权目标、解开 decision 类阻塞、完成或撤销目标、把 decision 类阻塞改成别的类型；
 Hermes 只能在已授权目标范围内推进任务。**by="user" 是内部可信调用约定，不是身份认证**：调用方（Hermes 技能）必须先核实
-发言人是常浩本人（飞书 open_id），命令行上 --by user 还要带 --sender 并与 OWNER_OPEN_ID 一致。
+发言人是常浩本人（飞书 open_id），命令行上 --by user 还要带 --sender 并与本机受控配置里的 open_id 一致（环境变量
+DT_OWNER_OPEN_ID，或文件 DT_OWNER_FILE，默认 ~/Library/Application Support/DigitalTwin/owner_open_id，单行、权限 600；
+两处都没配置时 --by user 一律拒绝）。个人身份标识不写进仓库源码；真正的身份桥接留 B2。
 执行完成 ≠ 验收通过：Run done 只把任务送到 review；complete_task 要先有 accept_task 记下的验收结论（执行方不能自验，
 结论必须引用证据）。旧 Run 的迟到结果只记在它自己身上，不改当前 Run 正在推进的任务。
 旧工单只读同步（sync_orders）：order.json 变成未关联的 Run，不自动推断成长期任务；要关联用 link_run。
+当前 Run 记在 tasks.current_run_id（start_run 开出来的、或 link_run 关联进来的进行中的 Run）；后关联的历史 Run 只作证据。
+审查 Run（start_run(purpose="review")，B3）只对 review 里的任务开，任务状态不变、不成为当前 Run，回执只作证据。
 """
 import argparse
 import contextlib
@@ -42,12 +46,15 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 
 DEFAULT_DB = "~/Library/Application Support/DigitalTwin/twin-state.db"
 DEFAULT_DISPATCH = "~/.hermes/dispatch"
-OWNER_OPEN_ID = "ou_5ad2ac4359de95dc41b5e89edd68ae6a"   # 常浩在猛鬼兽下的 open_id（同 report_data.ME）；命令行 --by user 时核对
+DEFAULT_OWNER_FILE = "~/Library/Application Support/DigitalTwin/owner_open_id"   # 常浩的飞书 open_id 只放本机受控配置，不进仓库
+OWNER_HINT = ("还没配置常浩的 open_id：设环境变量 DT_OWNER_OPEN_ID，或把 open_id 单行写进 "
+              f"{DEFAULT_OWNER_FILE}（chmod 600；路径可用 DT_OWNER_FILE 改）；配置前 --by user 一律拒绝")
 SCHEMA_VERSION = 1
 
 GOAL_STATUSES = ("observed", "authorized", "completed", "canceled")
@@ -58,6 +65,7 @@ RUN_ACTIVE = ("new", "queued", "running")
 RUN_RESULT = ("done", "guard", "failed", "stale", "abandoned")       # 这些状态算“一次执行的结果”，会反映到任务
 RUN_SUCCESS = ("done", "merged", "cleaned")
 RUN_FINAL = ("cleaned", "abandoned")                                 # 台账里不会再变的终态
+RUN_PURPOSES = ("execute", "review")   # execute：执行任务的 Run；review：对 review 里的任务开的只读审查 Run（B3），只作证据
 RUN_RANK = {"new": 0, "queued": 1, "running": 2, "stale": 2, "done": 3, "guard": 3, "failed": 3,
             "merged": 4, "cleaned": 5, "abandoned": 5}
 BLOCK_KINDS = ("decision", "dependency", "external", "technical")
@@ -102,6 +110,7 @@ CREATE TABLE tasks (
   depends_on TEXT NOT NULL DEFAULT '[]', acceptance TEXT NOT NULL DEFAULT '', next_step TEXT NOT NULL DEFAULT '',
   blocked_kind TEXT CHECK (blocked_kind IS NULL OR blocked_kind IN ('decision','dependency','external','technical')),
   blocked_reason TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT 'hermes', retries INTEGER NOT NULL DEFAULT 0,
+  current_run_id TEXT,
   verdict TEXT CHECK (verdict IS NULL OR verdict IN ('passed','failed')), verdict_by TEXT,
   verdict_basis TEXT NOT NULL DEFAULT '', verdict_cites TEXT NOT NULL DEFAULT '[]', verdict_at TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -109,6 +118,7 @@ CREATE INDEX tasks_goal ON tasks(goal_id);
 CREATE TABLE runs (
   id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id), agent TEXT NOT NULL, order_no TEXT UNIQUE,
   status TEXT NOT NULL CHECK (status IN ('new','queued','running','done','guard','failed','merged','cleaned','abandoned','stale')),
+  purpose TEXT NOT NULL DEFAULT 'execute' CHECK (purpose IN ('execute','review')),
   session_id TEXT, receipt TEXT NOT NULL DEFAULT '{}', evidence TEXT NOT NULL DEFAULT '{}', note TEXT NOT NULL DEFAULT '',
   cancel_requested_at TEXT, cancel_requested_by TEXT,
   started_at TEXT, ended_at TEXT, heartbeat_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -173,6 +183,29 @@ def _age(now, ts):
     elif last.tzinfo is not None and now.tzinfo is None:
         now = now.replace(tzinfo=last.tzinfo)
     return (now - last).total_seconds()
+
+
+def owner_open_id():
+    """常浩的飞书 open_id，只从本机受控配置取：先环境变量 DT_OWNER_OPEN_ID，再文件 DT_OWNER_FILE（默认 DEFAULT_OWNER_FILE，
+    取第一个非空行，权限必须是 600，否则拒绝并提示）。两处都没有返回 None。
+    这只用于命令行 --by user 的防误传核对，不是身份认证；个人身份标识不写进仓库源码（第二轮评审要求）。"""
+    v = (os.environ.get("DT_OWNER_OPEN_ID") or "").strip()
+    if v:
+        return v
+    f = Path(os.environ.get("DT_OWNER_FILE") or DEFAULT_OWNER_FILE).expanduser()
+    try:
+        mode = stat.S_IMODE(f.stat().st_mode)
+        lines = [ln.strip() for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return None
+    if mode & 0o077:
+        raise NotAuthorized(f"身份配置文件 {f} 的权限是 {mode:o}，必须是 600（chmod 600 该文件），否则不认")
+    return lines[0] if lines else None
+
+
+def _diff(old, new):
+    """new 里和 old 不一样的字段（冲突留痕用：只记差异，不记整份）。"""
+    return {k: v for k, v in (new or {}).items() if (old or {}).get(k) != v}
 
 
 def clip_receipt(receipt):
@@ -453,9 +486,18 @@ class Store:
         return [self._run_dict(r) for r in self._select("runs", where, args)]
 
     def current_run(self, task_id):
-        """任务当前有效的 Run：最后登记的那一个（按插入顺序）。没有就返回 None。"""
+        """任务当前有效的 Run：tasks.current_run_id 指向的那个——由 start_run 开出来、或 link_run 关联进来的进行中的 Run；
+        后关联的历史 Run 只作证据，不改归属（不按插入顺序）。字段为空（任务只挂过已结束的 Run）时回退到
+        该任务最近开始（started_at，没有就按 created_at）的 Run；一个 Run 都没有返回 None。"""
+        t = self._row("tasks", "id", task_id)
+        if t and t["current_run_id"]:
+            r = self._row("runs", "id", t["current_run_id"])
+            if r:
+                return self._run_dict(r)
         runs = self.list_runs(task_id)
-        return runs[-1] if runs else None
+        if not runs:
+            return None
+        return max(reversed(runs), key=lambda r: r["started_at"] or r["created_at"] or "")
 
     def events(self, object_type=None, object_id=None, kind=None):
         where, args = [], []
@@ -811,10 +853,16 @@ class Store:
             return self.get_task(task_id)
 
     # ---------- Run ----------
-    def start_run(self, task_id, agent, by, order_no=None, session_id=None, status="running", idem_key=None, note=""):
-        """给 ready 的任务开一次执行。一个任务同时只能有一个进行中的 Run；带幂等键时同一键只开一次。"""
+    def start_run(self, task_id, agent, by, order_no=None, session_id=None, status="running", idem_key=None, note="",
+                  purpose="execute"):
+        """给 ready 的任务开一次执行（purpose=execute，任务随之 running，它成为当前 Run）；
+        或给 review（待验收）的任务开一次只读审查（purpose=review，B3 的独立审查）：任务状态不变、不成为当前 Run、
+        审查方不能是当前 Run 的执行方，其回执只作证据（run.review_result），结论要另走 accept_task。
+        一个任务同时只能有一个进行中的 Run；带幂等键时同一键只开一次。"""
         if status not in RUN_ACTIVE:
             raise StateError(f"新 Run 的状态只能是 {'/'.join(RUN_ACTIVE)}")
+        if purpose not in RUN_PURPOSES:
+            raise StateError(f"Run 的用途只能是 {'/'.join(RUN_PURPOSES)}")
         with self._tx() as c:
             if idem_key:
                 row = self._seen(idem_key)
@@ -825,19 +873,27 @@ class Store:
             active = [r["id"] for r in self.list_runs(task_id) if r["status"] in RUN_ACTIVE]
             if active:
                 raise IllegalTransition(f"任务 {task_id} 已有进行中的 Run：{'、'.join(active)}，不重复派单")
-            if t["status"] != "ready":
+            if purpose == "review":
+                if t["status"] != "review":
+                    raise IllegalTransition(f"任务 {task_id} 当前是 {t['status']}，只有 review（待验收）的任务能开审查 Run")
+                cur = self.current_run(task_id)
+                if cur and cur["agent"] == agent:
+                    raise NotAuthorized(f"{agent} 是任务 {task_id} 的执行方（{cur['id']}），不能由它审查自己的结果")
+            elif t["status"] != "ready":
                 raise IllegalTransition(f"任务 {task_id} 当前是 {t['status']}，只有 ready 的任务能开始执行")
             self._require_authorized(t, "不能执行")
             if order_no and c.execute("SELECT 1 FROM runs WHERE order_no=?", (order_no,)).fetchone():
                 raise StateError(f"工单 {order_no} 已登记过，要关联请用 link_run")
             rid = self._new_id("runs", "R")
             now = self.now()
-            c.execute("INSERT INTO runs (id, task_id, agent, order_no, status, session_id, note, started_at, heartbeat_at,"
-                      " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                      (rid, task_id, agent, order_no, status, session_id, note,
+            c.execute("INSERT INTO runs (id, task_id, agent, order_no, status, purpose, session_id, note, started_at,"
+                      " heartbeat_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (rid, task_id, agent, order_no, status, purpose, session_id, note,
                        now if status == "running" else None, now, now, now))
-            self._task_to(t, "running", by, self._source(by), reason=f"开跑 {rid}")
-            self._record("system", "run.start", by, "run", rid, {"task": task_id, "agent": agent, "order_no": order_no},
+            if purpose == "execute":
+                self._task_to(t, "running", by, self._source(by), reason=f"开跑 {rid}", current_run_id=rid)
+            self._record("system", "run.start", by, "run", rid,
+                         {"task": task_id, "agent": agent, "order_no": order_no, "purpose": purpose},
                          idem_key=idem_key, result=_json({"run": rid}))
             return {"applied": True, "run": self.get_run(rid)}
 
@@ -854,6 +910,11 @@ class Store:
         否则只记事件（迟到结果 / 未应用），不动任务。"""
         if not run["task_id"] or run["status"] not in RUN_RESULT:
             return None
+        if run.get("purpose") == "review":
+            self._record("agent", "run.review_result", by, "run", run["id"],
+                         {"task": run["task_id"], "status": run["status"],
+                          "note": "审查 Run 的结果只作证据，不结算任务；结论另走 accept_task"})
+            return "evidence"
         t = self.get_task(run["task_id"])
         cur = self.current_run(t["id"])
         rid = run["id"]
@@ -926,41 +987,55 @@ class Store:
             self._run_to(r, status, by, "system")
             return {"applied": True, "status": status, "task_status": self._settle_task_after_run(r, by)}
 
-    def _resume_task(self, run, by, count_retry):
-        """同一工单续跑后把任务拉回 running。只对当前 Run 有效；decision / external / dependency 类阻塞要先由对应规则解开。"""
-        if not run["task_id"]:
+    def _resume_check(self, task, run, by, count_retry):
+        """续跑前的任务侧检查，不写库。返回 (拒绝原因, 要一并改的任务字段)：原因是 StateError 子类的实例，None 表示可以续跑。
+        规则：只有任务的当前 Run 能续跑；任务不能已 completed / canceled 或还是 observed；decision / external /
+        dependency 类阻塞只有常浩能靠续跑解开；failed 的续跑算一次技术重试，受上限约束；目标必须仍是 authorized。"""
+        cur = self.current_run(task["id"])
+        if cur and cur["id"] != run["id"]:
+            return IllegalTransition(f"Run {run['id']} 不是任务 {task['id']} 的当前 Run（当前是 {cur['id']}），不能续跑"), {}
+        if task["status"] in TASK_TERMINAL or task["status"] == "observed":
+            return IllegalTransition(f"任务 {task['id']} 已 {task['status']}，不能续跑"), {}
+        fields = {}
+        if task["status"] == "blocked":
+            if task["blocked_kind"] != "technical" and by != "user":
+                return NotAuthorized(f"任务 {task['id']} 在等常浩或外部条件（{task['blocked_kind']}：{task['blocked_reason']}），"
+                                     f"{by} 不能靠续跑解开"), {}
+            if task["blocked_kind"] == "technical" and count_retry:
+                if task["retries"] >= self.max_retries:
+                    return StateError(f"任务 {task['id']} 已重试 {task['retries']} 次，超过上限，要常浩定怎么办"), {}
+                fields["retries"] = task["retries"] + 1
+        g = self.get_goal(task["goal_id"])
+        if g["status"] != "authorized":
+            return NotAuthorized(f"目标 {g['id']} 当前是 {g['status']}，不能续跑"), {}
+        return None, fields
+
+    def _resume_task(self, run, by, count_retry, observed=False):
+        """同一工单续跑后把任务拉回 running（检查见 _resume_check）。
+        observed=False 是主动续跑：检查不过直接抛出（resume_run 在改 Run 之前已先查过一遍，这里不会再抛）。
+        observed=True 是台账观察到的续跑：执行事实已经发生，检查不过只记 run.resume_conflict，任务不动。
+        审查 Run（purpose=review）的续跑不碰任务。"""
+        if not run["task_id"] or run.get("purpose") == "review":
             return None
         t = self.get_task(run["task_id"])
-        cur = self.current_run(t["id"])
-        if cur and cur["id"] != run["id"]:
+        err, fields = self._resume_check(t, run, by, count_retry)
+        if err:
+            if not observed:
+                raise err
+            cur = self.current_run(t["id"])
             self._record("system", "run.resume_conflict", by, "run", run["id"],
-                         {"task": t["id"], "current_run": cur["id"], "note": "不是任务的当前 Run，续跑不改任务"})
+                         {"task": t["id"], "task_status": t["status"], "blocked_kind": t["blocked_kind"],
+                          "reason": t["blocked_reason"], "current_run": cur["id"] if cur else None, "why": str(err),
+                          "note": "台账里已经实际续跑：Run 照实记 running，任务不改，请人工核对"})
             return "conflict"
         if t["status"] == "running":
             return "running"
-        if t["status"] in TASK_TERMINAL or t["status"] == "observed":
-            self._record("system", "run.resume_conflict", by, "run", run["id"],
-                         {"task": t["id"], "task_status": t["status"], "note": "任务已不在可推进状态，续跑不改任务"})
-            return "conflict"
-        fields = {}
-        if t["status"] == "blocked":
-            if t["blocked_kind"] != "technical" and by != "user":
-                self._record("system", "run.resume_conflict", by, "run", run["id"],
-                             {"task": t["id"], "blocked_kind": t["blocked_kind"], "reason": t["blocked_reason"],
-                              "note": "任务在等常浩或外部条件，续跑不能替他解开"})
-                return "conflict"
-            if t["blocked_kind"] == "technical" and count_retry:
-                if t["retries"] >= self.max_retries:
-                    self._record("system", "run.resume_conflict", by, "run", run["id"],
-                                 {"task": t["id"], "retries": t["retries"], "note": "技术重试已到上限"})
-                    return "conflict"
-                fields["retries"] = t["retries"] + 1
-        self._require_authorized(t, "不能续跑")
         self._task_to(t, "running", by, self._source(by), kind="task.resume", reason=f"{run['id']} 续跑", **fields)
         return "running"
 
     def resume_run(self, run_id, by, note=""):
-        """同一工单续跑（dispatch run --followup）：done / failed / stale 的 Run 回到 running；guard 的续跑只有常浩能定。"""
+        """主动续跑（dispatch run --followup，由 Hermes 登记）：done / failed / stale 的 Run 回到 running；guard 的续跑只有常浩能定。
+        先做授权与任务状态检查（_resume_check），不合法直接拒绝：Run 不变、不留 running、不留 followup 事件。"""
         with self._tx():
             r = self.get_run(run_id)
             if r["status"] == "running":
@@ -969,13 +1044,18 @@ class Store:
                 raise NotAuthorized(f"Run {r['id']} 触发过护栏，续跑要常浩定")
             if (r["status"], "running") not in RUN_TRANSITIONS:
                 raise IllegalTransition(f"Run {r['id']} 当前是 {r['status']}，不能续跑")
-            was = r["status"]
+            count_retry = r["status"] == "failed"
+            if r["task_id"] and r.get("purpose") != "review":
+                err, _ = self._resume_check(self.get_task(r["task_id"]), r, by, count_retry)
+                if err:
+                    raise err
             self._run_to(r, "running", by, "system", kind="run.followup", note=note or r["note"])
-            return {"applied": True, "status": "running", "task_status": self._resume_task(r, by, count_retry=(was == "failed"))}
+            return {"applied": True, "status": "running", "task_status": self._resume_task(r, by, count_retry)}
 
     def link_run(self, run_id, task_id, by):
         """把既有 Run（按 id 或工单号）关联到任务。进行中的 Run 只能挂到 ready 且目标已授权、没有别的活动 Run 的任务上
-        （任务随之 running）；已结束的 Run 只能挂到未收尾的任务上作证据；项目对不上一律拒绝。"""
+        （任务随之 running，它成为当前 Run）；已结束的 Run 只能挂到未收尾的任务上作证据，不改当前 Run 的归属；
+        项目对不上一律拒绝。"""
         with self._tx():
             r = self.get_run(run_id)
             t = self.get_task(task_id)
@@ -999,7 +1079,7 @@ class Store:
             self._touch("runs", r["id"], task_id=task_id)
             self._record("system", "run.link", by, "run", r["id"], {"task": task_id, "order_no": r["order_no"]})
             if r["status"] in RUN_ACTIVE:
-                self._task_to(t, "running", by, self._source(by), reason=f"关联进行中的 {r['id']}")
+                self._task_to(t, "running", by, self._source(by), reason=f"关联进行中的 {r['id']}", current_run_id=r["id"])
             return {"applied": True, "run": r["id"], "task_status": t["status"]}
 
     # ---------- 外部引用与证据 ----------
@@ -1076,7 +1156,9 @@ class Store:
     def sync_orders(self, dispatch_dir=None, by="system"):
         """把派单台账同步成 Run：新工单登记为未关联的 Run（不建目标、不建任务）；状态变了才更新；
         已关联任务的 Run 到结果状态时按同一套规则反映到任务。同一份 order.json（同一个 updated）只处理一次。
-        台账是执行层事实来源，但状态回退、护栏降级、终态再变一律拦下来记 run.conflict。"""
+        台账是执行层事实来源，但状态回退、护栏降级、终态再变一律拦下来记 run.conflict（先判冲突再合并，冲突时不碰
+        回执与证据）；台账里实际发生的续跑照实把 Run 记成 running，任务侧不合规则时记 run.resume_conflict，
+        两种冲突都进返回值的 conflicts。"""
         ledger = self.read_orders(dispatch_dir)
         stats = {"ledger": ledger["status"], "seen": 0, "created": 0, "updated": 0, "unchanged": 0,
                  "conflicts": [], "skipped": list(ledger["errors"])}
@@ -1095,6 +1177,9 @@ class Store:
                 stats["created"] += 1
             elif res["result"] == "conflict":
                 stats["conflicts"].append(o["no"])
+            elif res["result"] == "resume_conflict":
+                stats["conflicts"].append(o["no"])   # Run 改了（续跑事实），任务没动：两边都算
+                stats["updated"] += 1
             else:
                 stats["updated"] += 1
         return stats
@@ -1133,33 +1218,30 @@ class Store:
             self._record("system", "run.import", by, "run", rid, {"order_no": o["no"], "status": status})
             return "created"
         r = self.get_run(row["id"])
+        # 先判状态冲突，再决定写什么：冲突的台账内容只进事件留痕，已确认的回执、证据、会话一个字段都不动
+        how = None if r["status"] == status else self._resync_kind(r["status"], status)
+        why = "台账状态回退、护栏降级或终态再变，没有应用，请人工核对"
+        if how == "followup" and r["status"] == "guard":
+            how, why = "conflict", "护栏后的续跑要常浩定，没有应用"
+        if how == "conflict":
+            self._record("system", "run.conflict", by, "run", r["id"],
+                         {"local": r["status"], "ledger": status, "order_no": o["no"], "note": why,
+                          "ledger_receipt": _diff(r["receipt"], receipt), "ledger_evidence": _diff(r["evidence"], evidence)})
+            return "conflict"
         merged = {**r["receipt"], **receipt}
         ev = {**r["evidence"], **evidence}
         self._touch("runs", r["id"], receipt=_json(merged), evidence=_json(ev),
                     session_id=merged.get("session_id") or r["session_id"])
         r["receipt"], r["evidence"] = merged, ev
-        if r["status"] == status:
+        if how is None:
             if status == "running":
                 self._touch("runs", r["id"], heartbeat_at=self.now())  # 台账文件还在变，就当有心跳
             return "updated"
-        how = self._resync_kind(r["status"], status)
-        if how == "conflict":
-            self._record("system", "run.conflict", by, "run", r["id"],
-                         {"local": r["status"], "ledger": status, "order_no": o["no"],
-                          "note": "台账状态回退、护栏降级或终态再变，没有应用，请人工核对"})
-            return "conflict"
-        if how == "followup":
-            if r["status"] == "guard":
-                self._record("system", "run.conflict", by, "run", r["id"],
-                             {"local": "guard", "ledger": status, "order_no": o["no"], "note": "护栏后的续跑要常浩定，没有应用"})
-                return "conflict"
+        if how in ("followup", "undo_stale"):
             was = r["status"]
-            self._run_to(r, "running", by, "system", kind="run.followup")
-            self._resume_task(r, by, count_retry=(was == "failed"))
-            return "updated"
-        if how == "undo_stale":
-            self._run_to(r, "running", by, "system", kind="run.resync")
-            self._resume_task(r, by, count_retry=False)
+            self._run_to(r, "running", by, "system", kind="run.followup" if how == "followup" else "run.resync")
+            if self._resume_task(r, by, count_retry=(was == "failed"), observed=True) == "conflict":
+                return "resume_conflict"   # Run 已照实记 running；任务侧没动，由 sync_orders 计入 conflicts
             return "updated"
         if how == "skip":
             self._touch("runs", r["id"], status=status, ended_at=r["ended_at"] or (None if status in RUN_ACTIVE else self.now()))
@@ -1256,12 +1338,19 @@ def done(ok, msg, **kw):
 
 
 def _by(a):
-    """--by 的程序校验：角色必须合法；--by user 还必须带 --sender 且是常浩本人的 open_id。
-    这只是防止调用方误传，不是身份认证——核实发言人是谁，是调用方（Hermes 技能）的责任。"""
+    """--by 的程序校验：角色必须合法；--by user 还必须带 --sender 且等于本机受控配置里常浩的 open_id（owner_open_id），
+    没配置时一律拒绝并提示怎么配。这只是防止调用方误传，不是身份认证——核实发言人是谁，是调用方（Hermes 技能）的责任。"""
     if a.by not in ACTORS:
         done(False, f"--by 只能是 {'/'.join(ACTORS)}")
-    if a.by == "user" and getattr(a, "sender", None) != OWNER_OPEN_ID:
-        done(False, "--by user 必须带 --sender <open_id>，且只能是常浩本人；调用方要先核实发言人再传", error="NotAuthorized")
+    if a.by == "user":
+        try:
+            owner = owner_open_id()
+        except StateError as e:
+            done(False, str(e), error="NotAuthorized")
+        if not owner:
+            done(False, OWNER_HINT, error="NotAuthorized")
+        if getattr(a, "sender", None) != owner:
+            done(False, "--by user 必须带 --sender <open_id>，且只能是常浩本人；调用方要先核实发言人再传", error="NotAuthorized")
     return a.by
 
 
@@ -1299,7 +1388,8 @@ COMMANDS = {
     "task-complete": [("id",), *BY, ("--note", dict(default=""))],
     "task-rework": [("id",), *BY, ("--note", dict(required=True))],
     "task-cancel": [("id",), *BY, ("--reason", dict(default=""))],
-    "run-start": [("--task", dict(required=True)), ("--agent", dict(required=True)), *BY, ("--order",), ("--session",), ("--key",)],
+    "run-start": [("--task", dict(required=True)), ("--agent", dict(required=True)), *BY, ("--order",), ("--session",), ("--key",),
+                  ("--purpose", dict(default="execute", choices=RUN_PURPOSES, help="review：给 review 里的任务开只读审查 Run"))],
     "run-finish": [("id",), ("--status", dict(required=True, choices=RUN_STATUSES)), *BY, ("--receipt",), ("--key",)],
     "run-receipt": [("id",), ("--receipt", dict(required=True)), ("--by", dict(default="hermes")), ("--sender",), ("--key",)],
     "run-resume": [("id",), *BY, ("--note", dict(default=""))],
@@ -1363,9 +1453,11 @@ def run_cli(a):
         if a.cmd == "task-cancel":
             done(True, f"任务 {a.id} 已撤销", **s.cancel_task(a.id, _by(a), a.reason))
         if a.cmd == "run-start":
-            r = s.start_run(a.task, a.agent, _by(a), a.order, a.session, idem_key=a.key)
+            r = s.start_run(a.task, a.agent, _by(a), a.order, a.session, idem_key=a.key, purpose=a.purpose)
             if not r["applied"]:
                 done(True, f"同一事件已处理过，不重复开跑（Run {r['run']['id'] if r['run'] else '?'}）", **r)
+            if a.purpose == "review":
+                done(True, f"已开始审查 {r['run']['id']}（任务 {a.task} 状态不变，回执只作证据）", **r)
             done(True, f"已开始 {r['run']['id']}（任务 {a.task} → running）", **r)
         if a.cmd == "run-finish":
             rc = _read_json(a.receipt) if a.receipt else None

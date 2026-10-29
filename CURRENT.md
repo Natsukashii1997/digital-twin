@@ -6,6 +6,24 @@
 
 ---
 
+## 2026-10-29 · B0/B1 第二轮评审收口 F1～F4 + B3 审查接口（PR #26 继续，待第三轮评审）
+
+- 时间：开工 11:30
+- **来由**：ChatGPT 第二轮评审「返修基本通过」（原文 [docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md)），要求在 PR #26 上做最后一轮小范围收口：F1 台账冲突时提前覆盖了回执与证据、F2 续跑被拒绝时 Run 已先变 running、F3 当前 Run 按插入顺序会被后关联的旧工单夺走、F4 常浩 open_id 硬编码在源码里；另要明确 B3 独立审查任务的接口。按源码逐条核对，四项都属实。
+- **做了什么**（同一分支 `claude/25-state-store`，不改派单系统）：
+  - F1 `_apply_order` 先判 `_resync_kind` 再决定写什么：冲突时 `receipt / evidence / session_id` 一个字段不改，台账状态和有差异的回执 / 证据字段记进 `run.conflict` 的 payload。
+  - F2 抽出 `_resume_check`（当前 Run、任务终态 / observed、阻塞类型与 by、重试上限、目标授权）；`resume_run` 先查再把 Run 置 running，不合法直接抛 `StateError` 子类、Run 不动；台账观察到的续跑保留 Run → running，任务侧记 `run.resume_conflict`，该单计入 `sync_orders` 的 `conflicts`。
+  - F3 `tasks` 加 `current_run_id`（直接改 v1 schema，没有已部署的库）：`start_run` 和关联进行中的 Run 时设置，关联已结束的旧单只作证据；`current_run()` 读它，为空回退到最近开始的 Run。
+  - F4 删 `OWNER_OPEN_ID` 常量；`owner_open_id()` 先读环境变量 `DT_OWNER_OPEN_ID`，再读 `~/Library/Application Support/DigitalTwin/owner_open_id`（`DT_OWNER_FILE` 可改，单行，权限不是 600 不认）；两处都没配置时 `--by user` 一律拒绝并提示怎么配。“角色声明不是身份认证”的结论不变，身份桥接仍留 B2。
+  - B3 接口（最小实现）：`runs` 加 `purpose`（execute / review）；`start_run(purpose="review")` 只对 review 里的任务开只读审查 Run，审查方不能是执行方，任务状态不变、不成为当前 Run，回执只记 `run.review_result`；结论走 `accept_task(by="codex", cites=[审查 Run])`；命令行 `run-start --purpose review`。
+  - 文档：设计文档 3.1 / 3.2 / 3.3 / 3.5 / 3.6 / 3.7 / 3.8 / 4 / 6 / 7 / 8.1 同步；第三轮返修说明 [docs/reviews/2026-10-29-B0B1-第三轮返修说明.md](docs/reviews/2026-10-29-B0B1-第三轮返修说明.md)（交 ChatGPT 复核）。
+- 测试：新增 5 项（F1～F4、B3 各一），改 3 项断言（`test_03` 后挂旧单不改当前 Run；`test_followup_resume_rules` 到上限 / decision 阻塞的主动续跑改为拒绝；`test_cli_roundtrip` 身份改走临时配置文件并加审查 Run 一段），`test_twin_state.py` 共 31 项；先在第二轮评审对象 `2e496f1` 上跑确认 8 项不过（7 FAIL + 1 ERROR），再在收口后跑：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 119 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 119 tests` `OK`。原 88 项不变。
+- 本轮新坑：无。
+- 没做：仍未合并、未安装、未建身份配置文件、未改技能与 Hermes 配置；Codex 审查编排留 B3，身份桥接、事件通知留 B2。
+- 下一步：常浩把第三轮返修说明交 ChatGPT 复核；通过后由常浩一次批准「合并 PR #26 + 安装 `twin_state.py` 到 `~/.hermes/scripts/` + 建 `owner_open_id` 文件（600）+ 次日自检复核」，再进 B2。
+
+---
+
 ## 2026-10-29 · B0/B1 独立评审返修（PR #26 继续，待第二轮评审）
 
 - 时间：开工 10:20
