@@ -20,7 +20,8 @@
 - 测试：新增 9 项、改写 17 项，`test_twin_state.py` 共 26 项；先把新用例跑在返修前的模块（`690dadb`）上确认 R1～R4 等 12 项会失败，再在返修后跑：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14）`Ran 114 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 114 tests` `OK`。原 88 项不变。
 - 本轮新坑：无（台账里的时间是本机 naive 字符串，不拿来当心跳，已在代码里注明）。
 - 没做：仍未合并、未安装、未改技能和 Hermes 配置；真实身份映射、事件通知钩子、进程终止留 B2。
-- 下一步：把返修说明交 ChatGPT 第二轮评审；通过后常浩批准“合并 + 安装副本 + 自检复核”一次收尾，再按设计文档第 7 节进 B2。
+- **第二轮评审结果**（ChatGPT，同日下午，原文存 [docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md)）：返修基本通过，114 项由其独立复跑通过；B0 通过；要求在 PR #26 上做最后一轮小范围收口 F1～F4——① `_apply_order` 先判冲突再合并回执与证据，冲突独立留痕；② `resume_run` 先查授权与任务状态再把 Run 置 running，台账观察到的续跑保留事实并标冲突；③ `current_run` 不能只按插入顺序，历史工单后关联不得夺取当前归属；④ `OWNER_OPEN_ID` 改由本机受控配置提供，不硬编码；另要明确 B3 独立审查任务如何关联待验收 Task 的接口方案。其余六项设计接受。
+- 下一步：新会话做 F1～F4 收口（同一分支 `claude/25-state-store`，worktree `~/Sandbox/worktrees/digital-twin-25-state-store`），先复现后修复，114 项 + 新用例在 3.14 与 3.9 下通过，写第三轮返修说明交 ChatGPT；通过后常浩批准“合并 + 安装副本 + 自检复核”一次收尾，再进 B2。
 
 ---
 
