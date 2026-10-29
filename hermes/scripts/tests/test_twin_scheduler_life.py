@@ -335,7 +335,12 @@ class ReportTests(Base):
         r1 = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(json.loads(r1.stdout)["findings"][0]["object"], a)
         r2 = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
-        self.assertEqual((r2.returncode, r2.stdout), (0, ""))
+        self.assertEqual(json.loads(r2.stdout)["findings"], json.loads(r1.stdout)["findings"])   # 没确认送达：再报（F2）
+        fp = json.loads(r1.stdout)["findings"][0]["fingerprint"]
+        subprocess.run([sys.executable, "-B", str(SCRIPTS / "twin_scheduler.py"), "ack", "--fingerprint", fp], env=env,
+                       capture_output=True, text=True, timeout=60, check=True)
+        r3 = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual((r3.returncode, r3.stdout), (0, ""))
         self.store = ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()
 
 

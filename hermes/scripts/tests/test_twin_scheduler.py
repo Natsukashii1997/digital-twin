@@ -395,8 +395,10 @@ class FakeExecutor:
     def __init__(self, ledger, fail=False, explode=False):
         self.ledger, self.fail, self.explode, self.calls, self.n = ledger, fail, explode, [], 0
 
-    def create(self, decision, sched_key, task_file, on_spawn):
+    def create(self, decision, sched_key, task_file, on_spawn, before_spawn=None, db=None):
         self.calls.append((decision["task_id"], sched_key))
+        if before_spawn:
+            before_spawn()
         on_spawn({"pid": os.getpid(), "host": sched.socket.gethostname(), "started": sched.proc_start(os.getpid())})
         if self.explode:
             raise TimeoutError("开单超时，不知道开没开出来")

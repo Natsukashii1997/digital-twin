@@ -1460,6 +1460,16 @@ class Store:
         claim.update(sets)
         return True
 
+    def claim_mark_spawning(self, sched_key):
+        """开单子进程拉起之前先落这个持久标记（B2.2 返修 F1）：标记存在而子进程没登记，就不能证明没开单，恢复时不许 void。"""
+        with self._tx():
+            cl = self.get_claim(sched_key)
+            if cl["state"] != "claimed":
+                raise IllegalTransition(f"调度预留 {sched_key} 当前是 {cl['state']}，不能再开单")
+            owner = {**cl["owner"], "spawn": {"at": self.now()}}
+            self.conn.execute("UPDATE sched_claims SET owner=?, updated_at=? WHERE sched_key=?", (_json(owner), self.now(), sched_key))
+            return owner
+
     def claim_set_child(self, sched_key, child):
         """记下预留方拉起的开单子进程身份（twin_scheduler 执行器 Popen 后立即调用）；恢复时预留方和子进程都确认退出才算没人在开单。"""
         with self._tx():

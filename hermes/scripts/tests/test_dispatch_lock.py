@@ -33,7 +33,8 @@ class Base(unittest.TestCase):
 
     def env(self, **kw):
         e = {k: v for k, v in os.environ.items() if not k.startswith(("H_", "DT_STATE_NOTIFY"))}
-        e.update(H_ROOT=str(self.root), **{k: str(v) for k, v in kw.items()})
+        e.update(H_ROOT=str(self.root), DT_STATE_DB=str(self.root / "state" / "twin-state.db"))   # 不碰默认正式库路径
+        e.update({k: str(v) for k, v in kw.items()})
         return e
 
     def spawn(self, *args, **kw):
@@ -136,6 +137,16 @@ class IdentityTests(Base):
 
 class SchedKeyTests(Base):
     def test_new_with_sched_key_writes_field_and_marker(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("twin_state", HERE.parent / "twin_state.py")
+        ts = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ts)
+        with ts.Store(self.root / "state" / "twin-state.db") as s:      # 调度单要先有仍是 claimed 的预留（F1）
+            g = s.create_goal("隔离", by="user", status="authorized", project="fixture")
+            t = s.create_task(g["id"], "t", by="hermes", owner="claude")["id"]
+            s.set_ready(t, by="hermes")
+            s.claim_task(t, "S20000101-T1-abc", {"pid": 0}, lambda st: {"decision": "dispatch", "task_id": t,
+                                                                        "evidence": {"project": "fixture"}})
         code, out = self.run_cmd("new", "--project", "fixture", "--tool", "claude", "--mode", "read", "--task-file",
                                  str(self.task), "--sched-key", "S20000101-T1-abc")
         self.assertEqual(code, 0, out)

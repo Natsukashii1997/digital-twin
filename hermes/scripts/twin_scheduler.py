@@ -6,18 +6,24 @@
       不带 --execute 等于 plan；带 --execute 还要环境变量 DT_SCHED_ENABLE=1（正式环境未启用，默认关闭）：
       预留 → dispatch.py new --sched-key 开单 → 按关联键核对台账并登记成任务的当前 Run。只开单，不开跑（开跑仍走确认门）。
   python3 twin_scheduler.py recover
-      跨会话 / 重启恢复：按关联键核对每个未结预留，能证明就关联，证明不了就 unsafe，确认没开出单才 void。
+      跨会话 / 重启恢复：按关联键核对每个未结预留，能证明就关联，证明不了就 unsafe，确认没开出单才 void；
+      另列游离单（带关联键、对应预留却已收口的单），有游离单或 unsafe 时退出码 1。
   python3 twin_scheduler.py observe
       只读：活动 Run 与台账 running 单的生命体征 alive / suspect / lost / finished / not_started / unknown。
   python3 twin_scheduler.py cancel
       已撤销任务上还在活动的 Run：逐个给处理建议并记事件。命令行从不发信号（真实路径只出建议）。
   python3 twin_scheduler.py report [--quiet]
-      低噪声报告：只报错误和要常浩决定的、以前没报过的情形；--quiet 时没有新情形就什么都不输出。输出后才标记已报。
+      低噪声报告：只报错误和要常浩决定的、还没确认送达的情形；--quiet 时没有待报就什么都不输出。只读，不标记：
+      输出不等于送达，投递端确认送达后调 ack，确认前每轮都会再报（宁可重复不漏报）。
+  python3 twin_scheduler.py ack --fingerprint FP [FP ...]
+      投递端确认送达后标记；幂等；不在当前情形里的指纹不标记并返回失败。
 
 崩溃窗口与补偿（不声称跨状态库与工单的 exactly-once，靠关联键对账收口）：
   ① 预留前崩溃：什么都没写，下一轮照常决策。
-  ② 预留后、开单前（或开单中途）崩溃：预留留着占名额；恢复时台账按关联键找不到单、预留方与开单子进程都已退出、
-     租约已过 → void；有 sched_key 文件却没有 order.json 的半截目录 → unsafe。
+  ② 预留后、开单前（或开单中途）崩溃：预留留着占名额；恢复时台账按关联键找不到单、租约已过，并且能证明没开单
+     （从没走到拉开单子进程那一步，或登记过的开单子进程已确认退出）→ void；走到了那一步却没登记子进程 → unsafe；
+     有 sched_key 文件却没有 order.json 的半截目录 → unsafe。dispatch new 在派单锁里只给仍是 claimed 的预留开单，
+     作废也在这把锁里，所以迟到的旧关联键开不出单；万一出现游离单，决策判 unsafe、报告报错误。
   ③ 开单后、关联前崩溃：恢复时按关联键找到恰好一张活动单 → 记单号并关联；多张、已不在活动状态 → unsafe。
   ④ 关联后崩溃：Run 已是任务的当前 Run，“一任务一活动 Run”阻止重派，预留已 linked。
 
@@ -69,6 +75,7 @@ REASONS = {
     "claim_open": "另一个调度预留正在开单",
     "claim_unsafe": "调度预留归属证明不了，要常浩收口",
     "queue_unsafe": "状态矛盾（见 queue 的 unsafe 桶）",
+    "orphan_order": "有带本任务关联键的游离单（预留已收口却开出了单），归属与是否会被执行都说不清",
     "retry_over_limit": "重试次数超过上限",
     "no_executor": "任务负责方不是车间（claude / codex），调度器不派",
     "no_project": "目标没写项目，派不了单",
@@ -92,6 +99,7 @@ NEXT = {
     "claim_open": "等该预留开单或过期后由恢复核对",
     "claim_unsafe": "常浩核对该预留和工单后手动收口",
     "queue_unsafe": "人工核对状态矛盾",
+    "orphan_order": "常浩核对游离单：要用就人工关联，不用就 dispatch.py clean 放弃；调度器不自动处理",
     "retry_over_limit": "常浩决定是否继续",
     "no_executor": "需要车间执行时把负责方改成 claude 或 codex",
     "no_project": "给目标补上项目（名册 id）",
@@ -100,7 +108,8 @@ NEXT = {
     "slot_full_project": "等该项目在跑的单结束，下一轮再看",
 }
 CATEGORY = {"eligible": "dispatch", "claim_open": "hold", "ledger_unavailable": "hold", "slot_full_global": "hold",
-            "slot_full_project": "hold", "claim_unsafe": "unsafe", "queue_unsafe": "unsafe", "retry_over_limit": "unsafe"}
+            "slot_full_project": "hold", "claim_unsafe": "unsafe", "queue_unsafe": "unsafe", "retry_over_limit": "unsafe",
+            "orphan_order": "unsafe"}
 
 
 def _decision(t, reason, **evidence):
@@ -146,6 +155,10 @@ def decide(store, ledger=None, max_running=MAX_RUNNING):
         unsafe.setdefault(tid, u["why"])
     goals = {g["id"]: g for g in store.list_goals()}
     open_claims = {c["task_id"]: c for c in store.claims(states=ts.CLAIM_OPEN)}
+    orphans = {}
+    for o in orphan_orders(store, ledger):
+        if o["task_id"]:
+            orphans.setdefault(o["task_id"], []).append(o)
     busy = occupied(store, ledger)
     decisions = []
     for t in store.list_tasks():
@@ -162,6 +175,8 @@ def decide(store, ledger=None, max_running=MAX_RUNNING):
         elif cl:
             d = _decision(t, "claim_unsafe" if cl["state"] == "unsafe" else "claim_open", sched_key=cl["sched_key"],
                           claim_state=cl["state"], order_no=cl["order_no"], lease_until=cl["lease_until"], note=cl["note"])
+        elif t["id"] in orphans:
+            d = _decision(t, "orphan_order", orphans=orphans[t["id"]], **run_ev)
         elif t["id"] in unsafe:
             d = _decision(t, "queue_unsafe", unsafe=unsafe[t["id"]], **run_ev)
         elif t["status"] == "running":
@@ -381,8 +396,46 @@ def reconcile_claim(store, sched_key, dispatch_dir, settled=False):
             return {"result": "wait", "why": f"租约到 {cl['lease_until']} 才过期"}
         if "unknown" in people:
             return unsafe("租约已过，台账里没有这个关联键的单，但预留方进程身份核对不了")
-        store.claim_close(sched_key, "void", note="预留方和开单进程都已退出、租约已过、台账里没有这个关联键的单")
+        if "spawn" in cl["owner"] and "child" not in cl["owner"]:
+            # F1：已经到了拉开单子进程那一步、却没登记子进程身份——子进程可能已启动、还在锁前慢慢 fetch，不能证明没开单
+            return unsafe("开单子进程可能已经启动但没登记身份，证明不了没有开单：占住任务，等常浩核对")
+        why = ("预留方已退出、从没走到拉开单子进程那一步" if "spawn" not in cl["owner"]
+               else "预留方和登记过的开单子进程都已退出")
+        store.claim_close(sched_key, "void", note=f"{why}、租约已过、台账里没有这个关联键的单")
         return {"result": "void"}
+
+
+def orphan_orders(store, ledger):
+    """F1：带关联键、但对应预留已收口（或状态库里根本没有、或已关联到别的单）的单和半截目录。只读；不删、不关联。"""
+    out = []
+    root = Path(ledger.get("path") or store.dispatch_dir)
+    items = [(o["no"], o.get("sched_key"), "order") for o in ledger.get("orders", []) if o.get("sched_key")]
+    for name in ledger.get("ignored", []):
+        try:
+            items.append((name, (root / name / "sched_key").read_text().strip(), "half"))
+        except OSError:
+            pass
+    for no, key, what in items:
+        try:
+            cl = store.get_claim(key)
+        except ts.NotFound:
+            cl = None
+        if cl and cl["state"] in ("claimed", "ordered"):
+            continue           # 未结预留由恢复按键处理
+        if cl and cl["state"] == "linked" and cl["order_no"] == no:
+            continue
+        why = ("状态库里没有这个关联键的预留" if not cl else
+               f"关联键的预留已是 {cl['state']}" + (f"（关联的是 {cl['order_no']}）" if cl["order_no"] and cl["order_no"] != no else ""))
+        out.append({"order_no": no, "sched_key": key, "task_id": cl["task_id"] if cl else None,
+                    "claim_state": cl["state"] if cl else None, "kind": what,
+                    "why": why + ("；目录没有 order.json" if what == "half" else "") + "：不自动关联、不删除，等常浩核对"})
+    return out
+
+
+def recover(store, dispatch_dir=None):
+    """恢复一轮：逐个核对未结预留，并列出游离单。"""
+    claims = recover_claims(store, dispatch_dir)
+    return {"claims": claims, "orphans": orphan_orders(store, store.read_orders(dispatch_dir))}
 
 
 def recover_claims(store, dispatch_dir=None):
@@ -403,11 +456,16 @@ class DispatchExecutor:
         self.mode, self.timeout = mode, timeout
         self.argv = argv or [sys.executable, str(HERE / "dispatch.py")]
 
-    def create(self, decision, sched_key, task_file, on_spawn):
+    def create(self, decision, sched_key, task_file, on_spawn, before_spawn=None, db=None):
         ev = decision["evidence"]
         cmd = [*self.argv, "new", "--project", ev["project"], "--tool", ev["tool"], "--mode", self.mode,
                "--task-file", str(task_file), "--sched-key", sched_key]
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        env = dict(os.environ)
+        if db:
+            env["DT_STATE_DB"] = str(db)      # dispatch 在派单锁里按这个库核对预留
+        if before_spawn:
+            before_spawn()                    # 先持久记下“要拉子进程了”，再拉（F1）
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         on_spawn({"pid": p.pid, "host": socket.gethostname(), "started": proc_start(p.pid)})
         out, err = p.communicate(timeout=self.timeout)
         last = (out.strip().splitlines() or ["{}"])[-1]
@@ -444,7 +502,8 @@ def tick(store, executor, dispatch_dir=None, limit=1, owner=None, max_running=MA
         tf = tasks / f"{sk}.md"
         tf.write_text(task_text(store, d, sk), encoding="utf-8")
         try:
-            res = executor.create(d, sk, tf, lambda ident, sk=sk: store.claim_set_child(sk, ident))
+            res = executor.create(d, sk, tf, lambda ident, sk=sk: store.claim_set_child(sk, ident),
+                                  before_spawn=lambda sk=sk: store.claim_mark_spawning(sk), db=store.path)
         except Exception as e:  # noqa: BLE001 —— 结果不明：不重试，留给恢复
             out["pending"].append({"task_id": d["task_id"], "sched_key": sk, "error": f"{type(e).__name__}: {e}"[:200]})
             continue
@@ -683,6 +742,8 @@ def findings(store, ledger=None):
             add("error", "run", v["run"] or v["order_no"], v["vital"], v["why"], v["order_no"])
         elif v["vital"] in ("suspect", "unknown") and v["ledger_status"] == "running":
             add("needs_user", "run", v["run"] or v["order_no"], v["vital"], v["why"], v["order_no"])
+    for o in orphan_orders(store, ledger):
+        add("error", "order", o["order_no"], "orphan", o["why"], o["sched_key"], task_id=o["task_id"])
     for c in cancel(store, ledger, send=False, record=False):
         if c["action"] == "advice":
             add("needs_user", "cancel", c["run"], c["vital"], c["advice"], c["order_no"])
@@ -694,12 +755,33 @@ def _reported(store, fp):
 
 
 def report(store, ledger=None):
-    """新出现的情形（以前没报过的）。不标记——送达后调 ack，送不到下次还会报（至少一次）。"""
+    """待报的情形（还没确认送达的）。只读、不标记：输出不等于送达，送达确认后才 ack（至少一次，宁可重复不漏报）。"""
     return [f for f in findings(store, ledger) if not _reported(store, f["fingerprint"])]
 
 
+def deliver(store, sender, ledger=None):
+    """可信投递适配层的接口（F2）：sender(items) 只有明确确认送达才返回 True（全部）或已送达的指纹列表（部分）；
+    返回别的值、抛异常、超时都当没送到，保留待报。返回 {"pending": 剩余待报数, "delivered": 本次确认数}。"""
+    items = report(store, ledger)
+    if not items:
+        return {"pending": 0, "delivered": 0}
+    try:
+        confirmed = sender(items)
+    except Exception:  # noqa: BLE001 —— 投递失败：不标记
+        confirmed = None
+    if confirmed is True:
+        got = items
+    elif isinstance(confirmed, (list, tuple, set)):
+        want = {x for x in confirmed if isinstance(x, str)}
+        got = [f for f in items if f["fingerprint"] in want]
+    else:
+        got = []
+    ack(store, got)
+    return {"pending": len(items) - len(got), "delivered": len(got)}
+
+
 def ack(store, items):
-    """标记已报：每条一个 sched.report 事件，幂等键 sched.report:<指纹>，重复 ack 不重复记。"""
+    """标记已送达：每条一个 sched.report 事件，幂等键 sched.report:<指纹>，重复 ack 不重复记；只记种类 / 对象 / 原因，不记原文。"""
     for f in items:
         store.ingest_event("system", "sched.report", f"sched.report:{f['fingerprint']}", "system",
                            {k: f[k] for k in ("level", "kind", "object", "reason")})
@@ -749,20 +831,34 @@ def cmd_cancel(a):
 
 
 def cmd_report(a):
-    with ts.Store(a.db, dispatch_dir=a.dispatch) as s:
+    """只输出待报，不标记（F2）：stdout 只是待投递内容，送达确认后由投递端调 ack --fingerprint。没确认前每轮都会再报。"""
+    with ts.Store(a.db, dispatch_dir=a.dispatch, readonly=True) as s:
         new = report(s)
-        if not new and a.quiet:
-            return
-        msg = "；".join(f"{LEVELS[f['level']]}：{f['kind']} {f['object']} {f['why']}" for f in new) or "没有新情况"
-        print(json.dumps({"ok": True, "msg": msg, "findings": new}, ensure_ascii=False, sort_keys=True))
-        ack(s, new)
+    if not new and a.quiet:
+        return
+    msg = "；".join(f"{LEVELS[f['level']]}：{f['kind']} {f['object']} {f['why']}" for f in new) or "没有待报的情况"
+    print(json.dumps({"ok": True, "msg": msg, "findings": new, "acked": False}, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_ack(a):
+    """投递端确认送达后调用：只认当前待报里的指纹；不认识的不标记并返回失败。"""
+    with ts.Store(a.db, dispatch_dir=a.dispatch) as s:
+        cur = {f["fingerprint"]: f for f in findings(s)}
+        known = [cur[fp] for fp in a.fingerprint if fp in cur]
+        unknown = [fp for fp in a.fingerprint if fp not in cur]
+        ack(s, known)
+    done(not unknown, f"已标记送达 {len(known)} 条" + (f"；{len(unknown)} 个指纹不在当前情形里，没有标记" if unknown else ""),
+         acked=[f["fingerprint"] for f in known], unknown=unknown)
 
 
 def cmd_recover(a):
     with ts.Store(a.db, dispatch_dir=a.dispatch) as s:
-        out = recover_claims(s)
-    bad = {k: v for k, v in out.items() if v["result"] == "unsafe"}
-    done(not bad, f"核对 {len(out)} 个未结预留" + (f"，{len(bad)} 个要常浩处理" if bad else ""), claims=out)
+        out = recover(s)
+    bad = {k: v for k, v in out["claims"].items() if v["result"] == "unsafe"}
+    msg = f"核对 {len(out['claims'])} 个未结预留" + (f"，{len(bad)} 个要常浩处理" if bad else "")
+    if out["orphans"]:
+        msg += f"；游离单 {len(out['orphans'])} 张（带关联键却没有未结预留），要常浩核对"
+    done(not bad and not out["orphans"], msg, **out)
 
 
 def main(argv=None):
@@ -779,10 +875,11 @@ def main(argv=None):
     sub.add_parser("observe")
     sub.add_parser("cancel")
     sub.add_parser("report").add_argument("--quiet", action="store_true")
+    sub.add_parser("ack").add_argument("--fingerprint", nargs="+", required=True)
     a = ap.parse_args(argv)
     try:
         {"plan": cmd_plan, "tick": cmd_tick, "recover": cmd_recover, "observe": cmd_observe, "cancel": cmd_cancel,
-         "report": cmd_report}[a.cmd](a)
+         "report": cmd_report, "ack": cmd_ack}[a.cmd](a)
     except ts.StateError as e:
         done(False, str(e), error=type(e).__name__)
 

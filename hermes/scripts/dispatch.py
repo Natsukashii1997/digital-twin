@@ -17,6 +17,8 @@
 文件锁 .dispatch.lock 里做（只锁这一小段，不包住车间执行；锁顺序固定：派单锁 → 状态库事务，从不反向）。
 run 时车间进程放进自己的进程组（start_new_session），order.json 记下 dispatch 自己的进程身份，worker 自己写 out/worker.json。
 new --sched-key：调度器开单时带的关联键（B2.2），写进 order.json 和单目录里的 sched_key 文件；手工派单不带。
+带关联键时在派单锁里、建目录前读一次状态库（$DT_STATE_DB）核对预留：只有仍是 claimed、项目一致、还没单号的才开单；
+状态库不存在、读不了、预留已收口（void / released / unsafe / linked）一律拒绝（B2.2 返修 F1：迟到的旧关联键开不出单）。
 每条命令最后输出一行 JSON，字段 ok 表示成败、msg 是给常浩看的一句话。
 """
 import argparse
@@ -180,6 +182,24 @@ def dispatch_lock():
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
+def check_sched_key(key, project):
+    """调度单的最后一道防线：持派单锁时只读状态库（锁顺序派单锁 → 状态库，与调度器一致）。不合格直接 done(False)。"""
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import twin_state
+        with twin_state.Store(readonly=True) as s:
+            cl = s.get_claim(key)
+    except Exception as e:  # noqa: BLE001 —— 核对不了就不开调度单
+        done(False, f"调度关联键 {key} 核对不了（{type(e).__name__}: {str(e)[:120]}），没有开单")
+    if cl["state"] != "claimed" or cl["order_no"]:
+        done(False, f"调度关联键 {key} 的预留已是 {cl['state']}" + (f"（单号 {cl['order_no']}）" if cl["order_no"] else "")
+             + "，不再开单")
+    if cl["project"] != project:
+        done(False, f"调度关联键 {key} 属于项目 {cl['project']}，不是 {project}，没有开单")
+
+
 def busy_reason(o):
     """并发检查：返回 (在跑的单, 是否同仓库)；名额有空返回 None。"""
     running = [x for x in orders() if x["status"] == "running" and x["no"] != o["no"]]
@@ -211,6 +231,8 @@ def cmd_new(a):
     if a.sched_key and not SCHED_KEY.fullmatch(a.sched_key):
         done(False, f"调度关联键格式不对：{a.sched_key}")
     with dispatch_lock():   # 编号 + 建目录原子：两个进程同时开单不会撞号
+        if a.sched_key:     # 迟到的旧关联键在这里被拦下（作废预留也在这把锁里做，二者不会交叉）
+            check_sched_key(a.sched_key, p["id"])
         no = next_no()
         d = ROOT / no
         d.mkdir(parents=True)
