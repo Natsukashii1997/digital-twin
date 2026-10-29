@@ -21,7 +21,7 @@
 - 本轮新坑：无。
 - 没做：仍未合并、未安装、未建身份配置文件、未改技能与 Hermes 配置；Codex 审查编排留 B3，身份桥接、事件通知留 B2。
 - **第三轮评审结果**（ChatGPT，同日下午，原文存 [docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md)）：F1～F4 源码复核通过，119 项由其在 3.9.6 与项目 Python 下独立复跑通过；第 8 节五点全部接受（F2 内部拒绝抛异常即可、B2 外部事件入口负责留痕；F4 允许环境变量覆盖但不得输出身份值；B3 的独立性判断只接受为初版）；**B0 + B1 最终技术验收通过，不再要求第四轮返修**。一条非阻断项记进 B3 接入验收（设计文档第 7 节 B3 行）：任务要求独立审查时，审查没完成前 `complete_task` 要拒绝。
-- **合并与安装**（常浩 13:10 说「合并，四项都做」）：推送前检查无未推提交、分支不落后 main（变基空操作）、密钥扫描无命中；合并前复跑 119 项，3.14.5 与 3.9.6 都 OK；squash 合并为 `11a69c0`，issue #25 自动关闭，主目录 `--ff-only` 拉齐；`twin_state.py` 复制到 `~/.hermes/scripts/`（`cmp` 与 main 一致，`/usr/bin/python3` 能起）；建 `~/Library/Application Support/DigitalTwin/owner_open_id`（取 `report_data.ME`，单行，600，用安装副本回读一致，不进仓库）；`self_check.py` 安装副本与仓库源文件各跑一次都静默、退出码 0。worktree `~/Sandbox/worktrees/digital-twin-25-state-store` 和本地分支还留着（远端分支已随合并删除）。
+- **合并与安装**（常浩 13:10 说「合并，四项都做」）：推送前检查无未推提交、分支不落后 main（变基空操作）、密钥扫描无命中；合并前复跑 119 项，3.14.5 与 3.9.6 都 OK；squash 合并为 `11a69c0`，issue #25 自动关闭，主目录 `--ff-only` 拉齐；`twin_state.py` 复制到 `~/.hermes/scripts/`（`cmp` 与 main 一致，`/usr/bin/python3` 能起）；建 `~/Library/Application Support/DigitalTwin/owner_open_id`（取 `report_data.ME`，单行，600，用安装副本回读一致，不进仓库）；`self_check.py` 安装副本与仓库源文件各跑一次都静默、退出码 0。worktree `~/Sandbox/worktrees/digital-twin-25-state-store` 和本地分支 `claude/25-state-store` 已删（核对过分支树与 `11a69c0` 无差异；远端分支随合并删除）。
 - 下一步：明早 09:50 工程自检应静默（复核无漂移）。B1 收官；B2 第一步按设计文档第 7 节在隔离库上用真实台账只读跑 `sync-orders / recover`，核对冲突与 suspect 的判定——不启用正式状态库、不让 Hermes 自主派单、身份桥接做完并有测试前不用 `--by user`。
 
 ---
