@@ -6,7 +6,7 @@
 
 ---
 
-## 2026-10-29 · B2.1 状态、事件与可信身份接入（PR 待评审，未合并、未安装）
+## 2026-10-29 · B2.1 状态、事件与可信身份接入（[PR #28](https://github.com/Natsukashii1997/digital-twin/pull/28) 待评审，未合并、未安装）
 
 - 时间：开工 15:00
 - **来由**：常浩《Hermes B2.1 正式工程交接与施工任务书 V1.1》；分批计划经常浩确认（T01 后停一次；`--by user` 只认飞书回读核实的消息；两项真实只读探针）。Issue #27，分支 `claude/27-b2-1-events`（从 `b2c553e`），worktree `~/Sandbox/worktrees/digital-twin-27-b2-1`，主目录不动。
