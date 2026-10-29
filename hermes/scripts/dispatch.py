@@ -19,6 +19,8 @@ run 时车间进程放进自己的进程组（start_new_session），order.json 
 new --sched-key：调度器开单时带的关联键（B2.2），写进 order.json 和单目录里的 sched_key 文件；手工派单不带。
 带关联键时在派单锁里、建目录前读一次状态库（$DT_STATE_DB）核对预留：只有仍是 claimed、项目一致、还没单号的才开单；
 状态库不存在、读不了、预留已收口（void / released / unsafe / linked）一律拒绝（B2.2 返修 F1：迟到的旧关联键开不出单）。
+同一把锁里接着查派单根目录直接子目录：已有同键单（sched_key 标记或 order.json 任一带同键，含还没写 order.json 的半截目录）
+就拒绝并列出单号，读不清某个目录也拒绝；同一派单根目录、同一关联键最多建一个单目录（B2.2 终审 P0），不删、不自动关联。
 每条命令最后输出一行 JSON，字段 ok 表示成败、msg 是给常浩看的一句话。
 """
 import argparse
@@ -200,6 +202,31 @@ def check_sched_key(key, project):
         done(False, f"调度关联键 {key} 属于项目 {cl['project']}，不是 {project}，没有开单")
 
 
+def check_sched_key_unused(key):
+    """同键只开一张：持派单锁时扫派单根目录直接子目录（不跟符号链接、不往下扫），sched_key 标记或 order.json 带同键即拒绝。
+    标记在建目录的同一把锁里写，所以只有目录、两样都没有的是手工单开到一半，不算占用；读不清的目录一律拒绝。"""
+    taken, unclear = [], []
+    for d in sorted(ROOT.glob("D*")):
+        if d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            keys = set()
+            if (d / "sched_key").exists():
+                keys.add((d / "sched_key").read_text().strip())
+            if (d / "order.json").exists():
+                keys.add(json.loads((d / "order.json").read_text()).get("sched_key"))
+        except (OSError, ValueError, AttributeError, TypeError):
+            unclear.append(d.name)
+            continue
+        if key in keys:
+            taken.append(d.name)
+    if taken:
+        done(False, f"调度关联键 {key} 已开过单 {'、'.join(taken)}，不再开第二张；请用 twin_scheduler.py recover 核对",
+             existing=taken)
+    if unclear:
+        done(False, f"派单目录 {'、'.join(unclear)} 读不清是否占用调度关联键 {key}，没有开单；请人工核对后再用 recover 收口")
+
+
 def busy_reason(o):
     """并发检查：返回 (在跑的单, 是否同仓库)；名额有空返回 None。"""
     running = [x for x in orders() if x["status"] == "running" and x["no"] != o["no"]]
@@ -233,6 +260,7 @@ def cmd_new(a):
     with dispatch_lock():   # 编号 + 建目录原子：两个进程同时开单不会撞号
         if a.sched_key:     # 迟到的旧关联键在这里被拦下（作废预留也在这把锁里做，二者不会交叉）
             check_sched_key(a.sched_key, p["id"])
+            check_sched_key_unused(a.sched_key)   # 同键已建过目录就拒（检查和下面建目录在同一把锁里）
         no = next_no()
         d = ROOT / no
         d.mkdir(parents=True)

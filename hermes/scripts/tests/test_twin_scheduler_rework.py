@@ -2,6 +2,7 @@
 
 F1 迟到工单与旧关联键：开单子进程已启动但没来得及登记时预留方被杀、锁前 git/gh 拖过租约、旧关联键迟到开单、游离单。
 F2 报告确认时机：输出不等于送达。
+P0 同键重复开单（ChatGPT 终审 2026-10-29）：同一个仍是 claimed 的关联键，派单根目录里已有同键单（含只写了 sched_key 的半截目录）就不再开。
 真实子进程跑 dispatch.py（dispatch_harness.py，可在拿锁前睡一会模拟慢 fetch）；临时状态库与派单根目录；不碰 ~/.hermes、正式状态库、
 真实工单与外部服务。单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_scheduler_rework.py -v
 """
@@ -282,6 +283,87 @@ class F2ReportDeliveryTests(Base):
         self.assertEqual(len([e for e in self.store.events() if e["kind"] == "sched.report"]), 1)
         self.assertEqual(self.store.list_tasks(), [self.store.get_task(a)])     # 报告不生成任务或工单
         self.assertEqual(list(self.ledger.glob("D*")), [])
+
+
+class DupKeyTests(Life):
+    """P0：同一派单根目录、同一调度关联键最多建一个单目录；检查和建目录在同一把派单锁里，读不清就拒绝。"""
+    put_claim, dnew_key, orders = F1SpawnWindowTests.put_claim, F1SpawnWindowTests.dnew_key, F1SpawnWindowTests.orders
+
+    def claimed(self, key, project="alpha"):
+        self.put_claim(self.task(self.goal(project)), key, project=project)
+
+    def test_t1_serial_same_key_only_first_opens(self):
+        self.claimed("S-dup")
+        code, out = self.dnew_key("S-dup")
+        self.assertEqual(code, 0, out)
+        first = out["order"]["no"]
+        self.assertEqual(self.store.get_claim("S-dup")["state"], "claimed")   # 还没关联：返修前的漏洞窗口
+        code, out = self.dnew_key("S-dup")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.get("existing"), [first], out)
+        self.assertIn("recover", out["msg"])
+        self.assertEqual(self.orders(), [first])
+        self.assertEqual(sched.reconcile_claim(self.store, "S-dup", self.ledger)["result"], "linked")
+        self.assertEqual(self.dnew_key("S-dup")[0], 1)                     # 关联后照样拒（状态库那道）
+        self.assertEqual(self.orders(), [first])
+
+    def test_t2_parallel_same_key_at_most_one(self):
+        self.claimed("S-race")
+        go = self.root / "go"
+        ps = [subprocess.Popen([sys.executable, "-B", str(HARNESS), "new", "--project", "alpha", "--tool", "claude",
+                                "--mode", "read", "--task-file", str(self.root / "task.md"), "--sched-key", "S-race"],
+                               env=self.env(DT_STATE_DB=self.db, H_GO=go, H_DELAY=0.3), stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True) for _ in range(3)]
+        self.procs.extend(ps)
+        time.sleep(0.5)
+        go.write_text("go")
+        res = [(p.communicate(timeout=60)[0], p.returncode) for p in ps]
+        self.assertEqual(sorted(c for _, c in res), [0, 1, 1], res)
+        self.assertEqual(len(self.orders()), 1, self.orders())
+        winner = [json.loads(o.strip().splitlines()[-1]) for o, c in res if c == 0][0]["order"]["no"]
+        for o, c in res:
+            if c == 1:
+                self.assertEqual(json.loads(o.strip().splitlines()[-1]).get("existing"), [winner], o)
+
+    def test_t3_marker_only_or_order_only_or_unreadable_blocks(self):
+        half = self.ledger / "D20000101-7"
+        half.mkdir(parents=True)
+        (half / "sched_key").write_text("S-half")                          # 首单只写了标记，order.json 还没写
+        self.claimed("S-half")
+        code, out = self.dnew_key("S-half")
+        self.assertEqual((code, out.get("existing")), (1, ["D20000101-7"]), out)
+        no = self.order(status="new", sched_key="S-json")                  # 只有 order.json 带同键，没有标记文件
+        self.claimed("S-json")
+        code, out = self.dnew_key("S-json")
+        self.assertEqual((code, out.get("existing")), (1, [no]), out)
+        bad = self.ledger / "D20000101-8"
+        bad.mkdir()
+        before = self.orders()
+        (bad / "sched_key").mkdir()                                        # 标记读不了
+        self.claimed("S-other")
+        code, out = self.dnew_key("S-other")
+        self.assertEqual(code, 1, out)
+        self.assertIn("D20000101-8", out["msg"])
+        (bad / "sched_key").rmdir()
+        (bad / "order.json").write_text("{坏")                              # 台账坏了
+        code, out = self.dnew_key("S-other")
+        self.assertEqual(code, 1, out)
+        self.assertIn("D20000101-8", out["msg"])
+        self.assertEqual(self.orders(), before)                            # 拒绝时不新建、不删任何目录
+        self.assertEqual((half / "sched_key").read_text(), "S-half")
+
+    def test_t4_other_keys_and_manual_orders_unaffected(self):
+        for k in ("S-a", "S-b"):
+            self.claimed(k)
+        self.assertEqual(self.dnew_key("S-a")[0], 0)
+        self.assertEqual(self.dnew_key("S-b")[0], 0)
+        (self.ledger / "D20000101-9").mkdir()                              # 手工单开到一半：没有标记也没有台账
+        self.claimed("S-c")
+        self.assertEqual(self.dnew_key("S-c")[0], 0)
+        self.assertEqual(self.dnew_key("S-a")[0], 1)
+        manual = self.dnew()                                               # 手工派单照常，不看关联键
+        self.assertNotIn("sched_key", self.ledger_order(manual))
+        self.assertEqual(len(self.orders()), 5)
 
 
 if __name__ == "__main__":
