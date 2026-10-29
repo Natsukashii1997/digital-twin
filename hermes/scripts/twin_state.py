@@ -1454,6 +1454,16 @@ class Store:
         claim.update(sets)
         return True
 
+    def claim_set_child(self, sched_key, child):
+        """记下预留方拉起的开单子进程身份（twin_scheduler 执行器 Popen 后立即调用）；恢复时预留方和子进程都确认退出才算没人在开单。"""
+        with self._tx():
+            cl = self.get_claim(sched_key)
+            if cl["state"] != "claimed":
+                raise IllegalTransition(f"调度预留 {sched_key} 当前是 {cl['state']}，不再记开单进程")
+            owner = {**cl["owner"], "child": child}
+            self.conn.execute("UPDATE sched_claims SET owner=?, updated_at=? WHERE sched_key=?", (_json(owner), self.now(), sched_key))
+            return owner
+
     def claim_ordered(self, sched_key, order_no, by="system"):
         """claimed → ordered：开单成功、知道单号了。同一单号重复调用不变；已记了别的单号 → unsafe（一个预留两张单）。"""
         with self._tx():

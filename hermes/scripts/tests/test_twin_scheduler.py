@@ -346,6 +346,276 @@ class MigrationTests(Base):
         self.store = ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()
 
 
+def sleeper():
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def ident_of(p):
+    return {"pid": p.pid, "host": sched.socket.gethostname(), "started": sched.proc_start(p.pid)}
+
+
+def dead_identity():
+    p = sleeper()
+    ident = ident_of(p)
+    p.kill()
+    p.wait()
+    return ident
+
+
+class IdentityCheckTests(unittest.TestCase):
+    """S3 基础：进程身份核对。只有 pid + 启动时间 + 主机都对上才算 match；证据不够一律 unknown。"""
+
+    def test_match_gone_reused_zombie_unknown(self):
+        p = sleeper()
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        ident = ident_of(p)
+        self.assertEqual(sched.check_identity(ident), "match")
+        self.assertEqual(sched.check_identity({**ident, "started": "Mon Jan  1 00:00:00 2001"}), "gone")   # 同 PID 换了进程
+        self.assertEqual(sched.check_identity({**ident, "host": "another-host"}), "unknown")
+        self.assertEqual(sched.check_identity({"pid": p.pid, "host": ident["host"]}), "unknown")             # 没记启动时间
+        for bad in (None, {}, {"pid": "12"}, {"pid": 1}):
+            self.assertEqual(sched.check_identity(bad), "unknown")
+        z = subprocess.Popen([sys.executable, "-c", "pass"])
+        zid = {"pid": z.pid, "host": ident["host"], "started": None}
+        for _ in range(100):
+            st, started = sched._ps(z.pid)
+            if st and st.startswith("Z"):
+                break
+            time.sleep(0.02)
+        zid["started"] = started
+        self.assertEqual(sched.check_identity(zid), "gone")     # 僵尸：已经退出、只是还没被回收
+        z.wait()
+        self.assertEqual(sched.check_identity(zid), "gone")
+        self.assertEqual(sched.check_identity(dead_identity()), "gone")
+
+
+class FakeExecutor:
+    """像 dispatch.py new --sched-key 那样在台账里开一张 new 单；可模拟开单失败（不建目录）或结果不明（抛异常）。"""
+
+    def __init__(self, ledger, fail=False, explode=False):
+        self.ledger, self.fail, self.explode, self.calls, self.n = ledger, fail, explode, [], 0
+
+    def create(self, decision, sched_key, task_file, on_spawn):
+        self.calls.append((decision["task_id"], sched_key))
+        on_spawn({"pid": os.getpid(), "host": sched.socket.gethostname(), "started": sched.proc_start(os.getpid())})
+        if self.explode:
+            raise TimeoutError("开单超时，不知道开没开出来")
+        if self.fail:
+            return {"ok": False, "msg": "名册不允许"}
+        self.n += 1
+        no = f"D20000102-{self.n}"
+        d = self.ledger / no
+        d.mkdir()
+        (d / "sched_key").write_text(sched_key)
+        (d / "order.json").write_text(json.dumps({"no": no, "project": decision["evidence"]["project"], "tool": "claude",
+                                                  "mode": "read", "status": "new", "sched_key": sched_key}))
+        return {"ok": True, "order_no": no, "msg": f"已开单 {no}"}
+
+
+class TickTests(Base):
+    """S2 正常路径与 A02：预留 → 开单 → 按关联键关联；重复触发不重复开单；开单失败释放，结果不明不重试。"""
+
+    def test_tick_links_once_and_repeat_does_nothing(self):
+        t = self.task(self.goal())
+        ex = FakeExecutor(self.ledger)
+        out = sched.tick(self.store, ex, self.ledger)
+        self.assertEqual((len(out["claimed"]), len(out["linked"])), (1, 1), out)
+        task = self.store.get_task(t)
+        run = self.store.get_run(task["current_run_id"])
+        self.assertEqual((task["status"], run["order_no"], run["status"]), ("running", "D20000102-1", "new"))
+        self.assertTrue((self.ledger / ".sched-tasks" / f"{out['linked'][0]['sched_key']}.md").exists())
+        for _ in range(3):
+            again = sched.tick(self.store, ex, self.ledger)
+            self.assertEqual(again["claimed"], [])
+        self.assertEqual(len(ex.calls), 1)
+        self.assertEqual(len(list(self.ledger.glob("D*"))), 1)
+
+    def test_failed_create_releases_and_task_is_eligible_again(self):
+        t = self.task(self.goal())
+        out = sched.tick(self.store, FakeExecutor(self.ledger, fail=True), self.ledger)
+        self.assertEqual(len(out["released"]), 1, out)
+        self.assertEqual(self.store.claims(states=ts.CLAIM_OPEN), [])
+        self.assertEqual(self.by_task()[t]["decision"], "dispatch")
+
+    def test_unknown_create_result_keeps_claim_for_recovery(self):
+        t = self.task(self.goal())
+        out = sched.tick(self.store, FakeExecutor(self.ledger, explode=True), self.ledger)
+        self.assertEqual(len(out["pending"]), 1, out)
+        self.assertEqual(self.store.claims(task_id=t)[0]["state"], "claimed")
+        self.assertEqual(self.by_task()[t]["reason"], "claim_open")
+        r = sched.recover_claims(self.store, self.ledger)     # 预留方（本进程）还活着：只等，不作废
+        self.assertEqual(list(r.values())[0]["result"], "wait")
+        self.assertEqual(sched.tick(self.store, FakeExecutor(self.ledger), self.ledger)["claimed"], [])
+
+    def test_slots_respected_across_ticks(self):
+        g = self.goal("alpha")
+        a, b = self.task(g, "a"), self.task(g, "b")
+        c = self.task(self.goal("beta"), "c")
+        ex = FakeExecutor(self.ledger)
+        out = sched.tick(self.store, ex, self.ledger, limit=5)
+        self.assertEqual(sorted(x["task_id"] for x in out["linked"]), sorted([a, c]))
+        self.assertEqual(self.by_task()[b]["reason"], "slot_full_global")
+
+
+class RecoveryTests(Base):
+    """S2 崩溃窗口 / A04：按关联键补偿；归属证明不了就 unsafe，不重派；重复恢复不改状态。"""
+
+    def claimed(self, t, key="S-1", owner=None):
+        r = sched.claim(self.store, t, key, owner=owner or dead_identity(), max_running=10)   # unsafe 预留照样占名额，这里只测收口
+        self.assertTrue(r["applied"], r)
+        return key
+
+    def put_order(self, key, status="new", no=None, with_order=True):
+        self.n += 1
+        no = no or f"D20000103-{self.n}"
+        d = self.ledger / no
+        d.mkdir()
+        (d / "sched_key").write_text(key)
+        if with_order:
+            (d / "order.json").write_text(json.dumps({"no": no, "project": "alpha", "tool": "claude", "mode": "read",
+                                                      "status": status, "sched_key": key}))
+        return no
+
+    def recover(self):
+        return sched.recover_claims(self.store, self.ledger)
+
+    def test_crash_after_create_before_ordered_adopts(self):
+        t = self.task(self.goal())
+        key = self.claimed(t)
+        no = self.put_order(key)
+        self.assertEqual(self.recover()[key]["result"], "linked")
+        self.assertEqual(self.store.get_run(self.store.get_task(t)["current_run_id"])["order_no"], no)
+        n = len(self.store.events())
+        self.assertEqual(self.recover(), {})                 # 重复恢复：没有未结预留，什么都不变
+        self.assertEqual(len(self.store.events()), n)
+        self.store.sync_orders()                             # 漏发的写入后通知由对账补上，不会多出 Run
+        self.assertEqual(len(self.store.list_runs()), 1)
+
+    def test_crash_after_ordered_before_link_links(self):
+        t = self.task(self.goal())
+        key = self.claimed(t)
+        no = self.put_order(key)
+        self.store.claim_ordered(key, no)
+        self.assertEqual(self.recover()[key]["result"], "linked")
+        self.assertEqual(self.store.get_task(t)["status"], "running")
+
+    def test_no_order_waits_until_lease_then_void(self):
+        t = self.task(self.goal())
+        key = self.claimed(t)
+        self.assertEqual(self.recover()[key]["result"], "wait")      # 租约没到
+        self.t += dt.timedelta(seconds=ts.SCHED_LEASE + 1)
+        self.assertEqual(self.recover()[key]["result"], "void")
+        self.assertEqual(self.by_task()[t]["decision"], "dispatch")   # 证明没开出单，任务可以重新派
+
+    def test_live_owner_blocks_void_even_after_lease(self):
+        p = sleeper()
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        t = self.task(self.goal())
+        key = self.claimed(t, owner=ident_of(p))
+        self.t += dt.timedelta(seconds=ts.SCHED_LEASE + 1)
+        self.assertEqual(self.recover()[key]["result"], "wait")
+
+    def test_live_child_blocks_void(self):
+        p = sleeper()
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        t = self.task(self.goal())
+        key = self.claimed(t)
+        self.store.claim_set_child(key, ident_of(p))
+        self.t += dt.timedelta(seconds=ts.SCHED_LEASE + 1)
+        self.assertEqual(self.recover()[key]["result"], "wait")
+
+    def test_unknown_owner_after_lease_is_unsafe(self):
+        t = self.task(self.goal())
+        key = self.claimed(t, owner={"pid": os.getpid(), "host": sched.socket.gethostname()})   # 没记启动时间
+        self.t += dt.timedelta(seconds=ts.SCHED_LEASE + 1)
+        self.assertEqual(self.recover()[key]["result"], "unsafe")
+        self.assertEqual(self.by_task()[t]["reason"], "claim_unsafe")
+
+    def test_ambiguous_ledger_is_unsafe(self):
+        cases = {
+            "two orders": lambda key: (self.put_order(key), self.put_order(key)),
+            "half dir": lambda key: self.put_order(key, with_order=False),
+            "not active": lambda key: self.put_order(key, status="done"),
+        }
+        for name, make in cases.items():
+            t = self.task(self.goal(project=name))
+            key = self.claimed(t, key=f"S-{len(self.store.claims()) + 1}")
+            make(key)
+            self.t += dt.timedelta(seconds=ts.SCHED_LEASE + 1)
+            self.assertEqual(sched.reconcile_claim(self.store, key, self.ledger)["result"], "unsafe", name)
+            self.assertEqual(self.store.list_runs(task_id=t), [], name)
+            self.assertEqual(self.recover().get(key), None, name)   # unsafe 的留给常浩，恢复不再碰
+
+    def test_half_dir_waits_while_lease_open(self):
+        t = self.task(self.goal())
+        key = self.claimed(t)
+        self.put_order(key, with_order=False)
+        self.assertEqual(self.recover()[key]["result"], "wait")
+
+    def test_ordered_but_key_missing_is_unsafe(self):
+        t = self.task(self.goal())
+        key = self.claimed(t)
+        self.store.claim_ordered(key, "D20000103-77")
+        self.assertEqual(self.recover()[key]["result"], "unsafe")
+
+
+CRASHER = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import twin_scheduler as sched, twin_state as ts
+db, ledger, harness, when = sys.argv[2:6]
+class Crash(sched.DispatchExecutor):
+    def create(self, *a, **k):
+        if when == "before":
+            os.kill(os.getpid(), signal.SIGKILL)
+        res = super().create(*a, **k)
+        os.kill(os.getpid(), signal.SIGKILL)     # 开单成功、还没记单号就被杀
+with ts.Store(db, dispatch_dir=ledger) as s:
+    sched.tick(s, Crash("read", argv=[sys.executable, "-B", harness]))
+"""
+
+
+class CrashTests(Base):
+    """S7-4：真实子进程跑 tick + 真实 dispatch.py（隔离根目录），在开单前 / 开单后被 SIGKILL；重启后按证据恢复。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.root / "repo").mkdir()
+        (self.root / "roster.json").write_text(json.dumps({"projects": [
+            {"id": "alpha", "name": "甲", "path": str(self.root / "repo"), "main": "main", "write_allowed": False}]}))
+
+    def crash(self, when):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("H_", "DT_STATE_NOTIFY", "DT_SCHED"))}
+        env["H_ROOT"] = str(self.root)
+        p = subprocess.run([sys.executable, "-B", "-c", CRASHER, str(SCRIPTS), str(self.db), str(self.ledger),
+                            str(HERE / "dispatch_harness.py"), when], env=env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, -9, p.stderr[-500:])
+
+    def test_killed_after_create_recovers_by_key(self):
+        t = self.task(self.goal("alpha"))
+        self.crash("after")
+        cl = self.store.claims(task_id=t)[0]
+        self.assertEqual((cl["state"], cl["order_no"]), ("claimed", None))
+        self.assertEqual(sched.check_identity(cl["owner"]), "gone")
+        self.assertEqual(sched.check_identity(cl["owner"]["child"]), "gone")
+        r = sched.recover_claims(self.store, self.ledger)[cl["sched_key"]]
+        self.assertEqual(r["result"], "linked", r)
+        orders = list(self.ledger.glob("D*/order.json"))
+        self.assertEqual(len(orders), 1)
+        self.assertEqual(json.loads(orders[0].read_text())["sched_key"], cl["sched_key"])
+        self.assertEqual(self.store.get_task(t)["status"], "running")
+        self.assertEqual(sched.decide(self.store)["counts"]["dispatch"], 0)
+
+    def test_killed_before_create_voids_after_lease(self):
+        t = self.task(self.goal("alpha"))
+        self.crash("before")
+        cl = self.store.claims(task_id=t)[0]
+        self.assertEqual(sched.recover_claims(self.store, self.ledger)[cl["sched_key"]]["result"], "wait")
+        self.t = dt.datetime.now().astimezone() + dt.timedelta(seconds=ts.SCHED_LEASE + 1)
+        self.assertEqual(sched.recover_claims(self.store, self.ledger)[cl["sched_key"]]["result"], "void")
+        self.assertEqual(list(self.ledger.glob("D*")), [])
+
+
 class CliTests(Base):
     def cli(self, *args, db=None):
         env = {**os.environ, "DT_STATE_DB": str(db or self.db), "DT_DISPATCH": str(self.ledger)}
@@ -361,6 +631,30 @@ class CliTests(Base):
         self.assertEqual((code, out["ok"], out["counts"]["dispatch"]), (0, True, 1))
         self.assertEqual(out["decisions"][0]["task_id"], t)
         self.assertEqual(before, self.db.read_bytes())
+        self.store = ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()
+
+    def test_tick_execute_is_off_by_default(self):
+        self.task(self.goal())
+        self.store.close()
+        before = self.db.read_bytes()
+        code, out = self.cli("tick", "--execute", "--mode", "read")
+        self.assertEqual((code, out["ok"]), (1, False))
+        self.assertIn("DT_SCHED_ENABLE", out["msg"])
+        self.assertEqual(before, self.db.read_bytes())
+        code, out = self.cli("tick")            # 不带 --execute 等于 plan
+        self.assertEqual((code, out["counts"]["dispatch"]), (0, 1))
+        self.assertEqual(list(self.ledger.glob("D*")), [])
+        self.store = ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()
+
+    def test_recover_cli_reports_unsafe(self):
+        t = self.task(self.goal())
+        sched.claim(self.store, t, "S-1", owner={"pid": os.getpid()})
+        self.store.claim_ordered("S-1", "D20000101-5")
+        self.store.close()
+        code, out = self.cli("recover")
+        self.assertEqual((code, out["claims"]["S-1"]["result"]), (1, "unsafe"))
+        code, out = self.cli("recover")
+        self.assertEqual((code, out["claims"]), (0, {}))
         self.store = ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()
 
     def test_plan_cli_missing_db_does_not_create(self):

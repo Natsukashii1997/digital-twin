@@ -13,18 +13,25 @@
 名册里有 github 的项目（工程流程见 agent-kit/工程流程.md）：分支从 origin 的主分支拉出，开单时建 issue，
 跑完用 pr 开 PR，merge 走 GitHub squash 合并再拉齐主目录；本地主分支有没推的提交时先列给常浩，
 他确认后带 --push-main 再合。没有 github 的项目照旧从本地主分支拉出、本地快进合并。
-并发：同时最多 2 张单在跑；同一个仓库同一时间只跑 1 张。
+并发：同时最多 2 张单在跑；同一个仓库同一时间只跑 1 张。开单编号、开跑前的“并发检查 + 写 running”都在派单根目录的
+文件锁 .dispatch.lock 里做（只锁这一小段，不包住车间执行；锁顺序固定：派单锁 → 状态库事务，从不反向）。
+run 时车间进程放进自己的进程组（start_new_session），order.json 记下 dispatch 自己的进程身份，worker 自己写 out/worker.json。
+new --sched-key：调度器开单时带的关联键（B2.2），写进 order.json 和单目录里的 sched_key 文件；手工派单不带。
 每条命令最后输出一行 JSON，字段 ok 表示成败、msg 是给常浩看的一句话。
 """
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HOME = Path.home()
@@ -34,6 +41,9 @@ WORKER = HOME / ".hermes/scripts/run_worker.py"
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
 NOTIFY_LOG = Path(os.environ.get("DT_STATE_NOTIFY_LOG", "~/Library/Application Support/DigitalTwin/state-notify.log")).expanduser()
 MAX_RUNNING = 2
+LOCK_NAME = ".dispatch.lock"   # 派单根目录下的文件锁（twin_scheduler.py 恢复时用同一把）
+LOCK_WAIT = 30                 # 秒：等锁上限；锁只在编号、并发检查这类小段持有，等不到说明有异常
+SCHED_KEY = re.compile(r"S[0-9A-Za-z._-]{1,96}")
 # 推送前检查只查密钥和 Token（M3 B5-3）；受限内容靠规矩防
 SECRET = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{30,}|github_pat_\w{30,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|xox[abp]-[A-Za-z0-9-]{10,}"
@@ -150,6 +160,41 @@ def orders():
     return [json.loads(f.read_text()) for f in sorted(ROOT.glob("D*/order.json"))]
 
 
+@contextlib.contextmanager
+def dispatch_lock():
+    """派单根目录的排他文件锁（flock，进程退出自动释放）。持锁期间不调外部命令、不跑车间。"""
+    ROOT.mkdir(parents=True, exist_ok=True)
+    with open(ROOT / LOCK_NAME, "a") as f:
+        deadline = dt.datetime.now() + dt.timedelta(seconds=LOCK_WAIT)
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if dt.datetime.now() > deadline:
+                    done(False, f"派单锁 {LOCK_NAME} 等了 {LOCK_WAIT} 秒还被占着，没有动作，请检查是否有卡住的派单进程")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def busy_reason(o):
+    """并发检查：返回 (在跑的单, 是否同仓库)；名额有空返回 None。"""
+    running = [x for x in orders() if x["status"] == "running" and x["no"] != o["no"]]
+    if len(running) >= MAX_RUNNING or any(x["project"] == o["project"] for x in running):
+        return running, any(x["project"] == o["project"] for x in running)
+    return None
+
+
+def queue_busy(o, busy):
+    running, same = busy
+    o["status"] = "queued"
+    save(o)
+    done(False, f"{o['no']} 排队中：现在有 {len(running)} 张单在跑" + ("，且同一仓库已有单在跑" if same else ""), busy=True)
+
+
 def next_no():
     day = dt.date.today().strftime("%Y%m%d")
     seq = [int(d.name.split("-")[1]) for d in ROOT.glob(f"D{day}-*") if d.name.split("-")[1].isdigit()]
@@ -163,12 +208,19 @@ def cmd_new(a):
     hub = a.mode == "write" and p.get("github")
     if hub:  # 从 origin 的主分支拉：本地主分支上别的会话没推的提交不会混进 PR
         git(p["path"], "fetch", "origin", p["main"], check=True)
-    no = next_no()
-    d = ROOT / no
-    d.mkdir(parents=True)
+    if a.sched_key and not SCHED_KEY.fullmatch(a.sched_key):
+        done(False, f"调度关联键格式不对：{a.sched_key}")
+    with dispatch_lock():   # 编号 + 建目录原子：两个进程同时开单不会撞号
+        no = next_no()
+        d = ROOT / no
+        d.mkdir(parents=True)
+        if a.sched_key:     # 关联键先落盘：开单中途失败也能被恢复按键找到
+            (d / "sched_key").write_text(a.sched_key)
     shutil.copy(a.task_file, d / "task.md")
     o = {"no": no, "project": p["id"], "tool": a.tool, "mode": a.mode, "status": "new",
          "created": dt.datetime.now().isoformat(timespec="seconds"), "cwd": p["path"]}
+    if a.sched_key:
+        o["sched_key"] = a.sched_key
     note = ""
     if a.mode == "write":
         wt = WT_ROOT / p["id"] / no
@@ -211,13 +263,9 @@ def cmd_run(a):
     o = load(a.no)
     if o["status"] in ("running", "merged", "cleaned"):
         done(False, f"{a.no} 当前状态是 {o['status']}，不能再跑")
-    running = [x for x in orders() if x["status"] == "running" and x["no"] != a.no]
-    if len(running) >= MAX_RUNNING or any(x["project"] == o["project"] for x in running):
-        o["status"] = "queued"
-        save(o)
-        done(False, f"{a.no} 排队中：现在有 {len(running)} 张单在跑" +
-             ("，且同一仓库已有单在跑" if any(x["project"] == o["project"] for x in running) else ""),
-             busy=True)
+    busy = busy_reason(o)
+    if busy:
+        queue_busy(o, busy)
     task = ROOT / a.no / "task.md"
     if a.followup:  # 卡住后续跑：在原会话里接着做
         task = ROOT / a.no / f"followup-{dt.datetime.now():%H%M%S}.md"
@@ -244,13 +292,22 @@ def cmd_run(a):
         r = gh("issue", "edit", str(o["issue"]), "-R", project(o["project"])["github"],
                "-b", issue_body(task.read_text(encoding="utf-8"), o["no"], o["tool"]))
         o["issue_sync_error"] = gh_err(r) if r.returncode else None
-    o["status"] = "running"
-    save(o)
+    with dispatch_lock():   # 锁里重读、重查再写 running：两个 run 同时进来不会都看到空位
+        now = load(a.no)["status"]
+        if now in ("running", "merged", "cleaned"):
+            done(False, f"{a.no} 当前状态是 {now}，不能再跑")
+        busy = busy_reason(o)
+        if busy:
+            queue_busy(o, busy)
+        # dispatch 自己的身份：pid + 主机 + 写 running 的时刻（进程一定早于此刻启动，核对时据此排除 PID 复用）
+        o.update(status="running", run_started=dt.datetime.now().isoformat(timespec="seconds"),
+                 run_host=socket.gethostname(), dispatch_pid=os.getpid())
+        save(o)
     cmd = [sys.executable, str(WORKER), "--tool", o["tool"], "--cwd", o["cwd"], "--task-file", str(task),
            "--out", str(ROOT / a.no / "out"), "--mode", o["mode"], "--timeout", str(a.timeout)]
     if resume:
         cmd += ["--resume", resume]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, start_new_session=True)   # 车间自成进程组，取消时只停它
     o["status"] = {0: "done", 2: "guard"}.get(r.returncode, "failed")
     o["exit_code"] = r.returncode
     save(o)
@@ -442,6 +499,7 @@ def main():
     s.add_argument("--tool", choices=["claude", "codex"], required=True)
     s.add_argument("--mode", choices=["read", "write"], required=True)
     s.add_argument("--task-file", required=True)
+    s.add_argument("--sched-key", help="调度器开单时的关联键（B2.2）；手工派单不带")
     s = sub.add_parser("run")
     s.add_argument("no")
     s.add_argument("--followup")
