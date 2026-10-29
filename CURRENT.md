@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 手工派单回归（G3）：只读小单 `D20261029-1` 走通，未启用调度
+
+- 时间：开工 23:04
+- **来由**：常浩说「批准 G3」，即批准 D6 的 B22-G3（一张只读小单走 `new → run → list`）；G4–G7 未批。
+- **做了什么**：用安装版 `~/.hermes/scripts/dispatch.py`（`/usr/bin/python3`）开单 `D20261029-1`（数字分身 · claude · 只读，任务：列出 `hermes/scripts/` 下的 `.py` 文件），跑单、`list`；再用隔离库（会话临时目录里新建的空库，不是正式库）跑 `twin_scheduler.py observe` 读真实派单目录。
+- 测试：
+  - `new` 退出码 0；order.json 字段 `no / project / tool / mode / status / created / cwd / updated`，与以前的只读单相同，没有 `sched_key`、目录里没有 `sched_key` 文件；`~/.hermes/dispatch/.dispatch.lock` 首次出现（空文件）。
+  - `run` 退出码 0，`跑完：done`，18 秒；运行中 order.json 为 `running` 并带 `run_started / run_host / dispatch_pid`，车间写了 `out/worker.json`（`pid = pgid = sid`，自成进程组）；回执 `exit_code 0`、`head_before = head_after = b4e0747`、无提交、无未提交改动、各护栏 false；回执字段与 10-26 的只读单相比只多 `note_remote_moved`（M3 批 5 加的，与 B2.2 无关）。车间答 12 个文件，与实际一致。
+  - `list` 退出码 0，该单 `done`。
+  - `observe` 退出码 0，“没有活动的单”（单已跑完）。**照实**：跑单期间那次 `observe` 指向的隔离库还没建，只读打开拒绝建库，退出码 1（`observe-during-run-no-db.json`），所以“跑单中用 observe 看到该单体征”这一项没验到；运行中的身份字段是直接读 order.json / worker.json 核对的。
+  - 证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-g3-20261029/`（`new.json`、`run.json`、`list.json`、`observe.json`、`identity-fields.txt`、`task.md`）。
+- 本轮新坑：无。（事实：`twin_scheduler.py` 的只读命令不会替你建库，隔离库要先显式建好再观察。）
+- 没做（照实）：正式库未建；`DT_SCHED_ENABLE`、cron、自动开单、报告投递、真实取消信号都没开；网关 / 技能 / SOUL / config / `.env` 未改；主目录 main 仍是 `b4e0747`、工作区干净。
+- 下一步：B22-G4（正式库观察）待常浩单独批准；如需补验“跑单中 observe 能看到体征”，可在 G4 建库后的第一张手工单上顺带核对。G5–G7 仍按 D6 逐项单独批。
+
+---
+
 ## 2026-10-29 晚 · B2.2 安装（G2）：四个脚本已装到 `~/.hermes/scripts/`，未启用
 
 - 时间：开工 23:00
