@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 最后定向返修：同键重复开单（[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 同一分支，待 ChatGPT 最后复核）
+
+- 时间：开工 22:00
+- **来由**：ChatGPT 返修终审（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2返修终审报告原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2返修终审报告原文.md)、任务书 [docs/reviews/2026-10-29-ChatGPT-B2.2同键重复开单返修任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2同键重复开单返修任务书原文.md)）：F1 / F2 主要返修通过；新发现合并前 P0——同一个仍是 claimed 的关联键能开出两张单。按源码核实属实。常浩确认：既没标记也没台账的目录不算占用；台账读不了时拒绝开调度单，不改 `save()`。
+- **做了什么**（详见交付报告第 10 节）：`dispatch.py` 新增 `check_sched_key_unused`，在同一把派单锁里、核对预留之后、编号建目录之前扫派单根目录直接子目录，已有同键标记或台账（含半截目录）就拒绝并列出单号，读不清也拒绝；不删、不关联。新增 `DupKeyTests` 4 项；D1 / D2 / 交付报告 / tests README 同步；终审原文与任务书入库。`twin_scheduler.py`、`twin_state.py`、F2 未改。
+- 测试：新增 4 项放到 `9709be7` 上两套 Python 各 `Ran 4 tests` `FAILED (failures=4)` exit 1；修后 HEAD `ce474ba` 全量 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 277 tests` `OK` exit 0，`python3 …`（3.14.5）`Ran 277 tests` `OK` exit 0；`git diff --check` 无输出。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-rework2-20261029/`。
+- 本轮新坑：无。（事实：状态库里预留仍是 claimed 不等于台账里还没开过单，幂等检查要在建目录的同一把锁里看台账本身。）
+- 没做：未合并、未安装、未建正式库、未建 cron、未改 `.env` / 技能 / SOUL / config / 网关、未操作真实工单或发信号。
+- 下一步：交 ChatGPT 最后复核；通过后进入 B22-G1 合并审批，G2–G7 仍各自单独授权。
+
+---
+
 ## 2026-10-29 晚 · B2.2 合并前定向返修 F1 / F2（[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 同一分支，待复核）
 
 - 时间：开工 21:00
