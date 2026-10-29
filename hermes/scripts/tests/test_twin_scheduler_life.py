@@ -59,8 +59,8 @@ class Life(Base):
         return json.loads(r.stdout.strip().splitlines()[-1])["order"]["no"]
 
     def drun(self, no, **kw):
-        p = subprocess.Popen([sys.executable, "-B", str(HARNESS), "run", no], env=self.env(**kw), stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+        p = subprocess.Popen([sys.executable, "-B", str(HARNESS), "run", no], env=self.env(**kw), stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
         self.procs.append(p)
         return p
 

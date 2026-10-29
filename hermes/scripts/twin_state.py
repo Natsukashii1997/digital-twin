@@ -300,7 +300,9 @@ class Store:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA busy_timeout=5000")
             if self.version() > len(MIGRATIONS):
-                raise StateError(f"库版本 {self.version()} 比程序支持的 {len(MIGRATIONS)} 新，请升级脚本")
+                v = self.version()
+                self.close()
+                raise StateError(f"库版本 {v} 比程序支持的 {len(MIGRATIONS)} 新，请升级脚本")
             return self
         created = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -309,7 +311,11 @@ class Store:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self._migrate()
+        try:
+            self._migrate()
+        except BaseException:
+            self.close()   # 版本比程序新等迁移失败时不留打开的连接（回退时旧程序会走到这里）
+            raise
         if created:
             os.chmod(self.path, 0o600)
         return self

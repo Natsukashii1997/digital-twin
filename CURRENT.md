@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 持久调度与跨会话恢复（Issue #29，PR 待评审，未合并、未安装）
+
+- 时间：开工 17:29
+- **来由**：ChatGPT《Hermes B2.2 持久调度与跨会话恢复 正式施工任务书 V1.0》（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2施工任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2施工任务书原文.md)）。常浩定三项：允许 dispatch.py 做锁 / 进程身份 / `--sched-key` 最小改动；批 2 后停一次；SIGTERM 只对测试受控子进程真发，真实路径只出建议。分支 `claude/29-b2-2-scheduler`，worktree `~/Sandbox/worktrees/digital-twin-b2-2`；起点 PR #28 HEAD `ecbb50a`，#28 合并后变基到 main `b0d05a4`，主目录不动。
+- **做了什么**（四批，详见 [docs/reviews/2026-10-29-B2.2-交付与测试报告.md](docs/reviews/2026-10-29-B2.2-交付与测试报告.md)）：
+  - 新增 `hermes/scripts/twin_scheduler.py`：只读决策 `plan`（原因码 + 证据 + 下一步）；调度预留（库 v3 `sched_claims`，写事务复核 + 部分唯一索引）；`tick` 只开单不开跑（`--execute` 还要 `DT_SCHED_ENABLE=1`，正式未启用）；按关联键补偿恢复 `recover`；生命体征 `observe`；取消 `cancel`（命令行只出建议）；重试建议；低噪声报告 `report --quiet`。
+  - `dispatch.py`：派单根目录文件锁（编号、并发检查 + 写 running），run 记 `dispatch_pid / run_host / run_started`、车间自成进程组，`new --sched-key`；手工派单输出与字段不变。`run_worker.py`：一启动写 `out/worker.json`。`twin_state.py`：库 v3、只读打开、预留方法，迁移失败时关闭连接。
+  - 文档：[D1 设计](docs/B2.2-调度与恢复机制设计.md)、[D2 协议](docs/B2.2-调度与异常协议.md)、[D6 部署准备清单](docs/B2.2-部署准备清单.md)、D3 交付与测试报告（含 D5 B2.3 交接）；tests README、AGENTS 结构。
+- 测试：基线 `ecbb50a` 两套 Python 各 `Ran 188 tests` `OK`；新测试先在改前代码上跑红（dispatch 锁 9 项中 8 项红：并行开单撞号崩溃、同仓库两单同时跑、同一单跑两次）；最终 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 259 tests` `OK` 退出码 0；`/usr/bin/python3 …`（3.9.6）`Ran 259 tests` `OK` 退出码 0（原 188 + 新 71；原测试只改 2 处写死的 `schema_version == 2`）。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-20261029/`。
+- 本轮新坑：无。（事实：macOS `ps -o lstart` 的输出随语言环境变化，记录与核对进程启动时间要都用 `LC_ALL=C` 才能逐字比较。）
+- 没做：未合并、未安装、未建正式库；未建 cron；未对真实项目派单、取消或重试；未改 `.env` / 技能 / SOUL / config / 网关。**自动开单与真实取消信号仍关闭**，要动作级授权（B2.x）和常浩单独批准（D6 的 B22-G6 / G7）。
+- 下一步：PR 交 ChatGPT 独立复核；通过后按 D6 逐项批：B22-G1 合并 → G2 安装四个脚本（合并后到安装前 09:50 自检会报这四个文件，属预期）→ G3 手工派单回归。
+
+---
+
 ## 2026-10-29 晚 · B2.1 合并（G1）与安装（G2）：已合并 `04b208d`、四个脚本已安装，未启用
 
 - 时间：开工 17:20
