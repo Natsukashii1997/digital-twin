@@ -1062,7 +1062,7 @@ class MoreTests(Base):
             return self.cli(env, *args, ok=ok)
 
         self.store.close()
-        self.assertEqual(cli("init")["schema_version"], 2)
+        self.assertEqual(cli("init")["schema_version"], ts.SCHEMA_VERSION)   # B2.2 起 v3
         # --by user 必须指向常浩本人最近在私聊里发的一条飞书消息（回读核实）；角色名和参数都不是身份
         no_mid = cli("goal-new", "--title", "x", "--by", "user", "--status", "authorized", ok=False)
         self.assertEqual(no_mid["error"], "NotAuthorized")
@@ -1217,7 +1217,7 @@ class IdentityStoreTests(Base):
         conn.commit()
         conn.close()
         with self.open_store() as s:
-            self.assertEqual(s.version(), 2)
+            self.assertEqual(s.version(), ts.SCHEMA_VERSION)   # 迁到最新（B2.2 起 v3）
             self.assertTrue(s.claim_message("om_a", "test")["claimed"])
 
     def test_claim_once_release_then_reuse(self):

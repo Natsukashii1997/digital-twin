@@ -38,6 +38,8 @@ DT_OWNER_OPEN_ID，或文件 DT_OWNER_FILE，默认 ~/Library/Application Suppor
 旧工单只读同步（sync_orders）：order.json 变成未关联的 Run，不自动推断成长期任务；要关联用 link_run。
 当前 Run 记在 tasks.current_run_id（start_run 开出来的、或 link_run 关联进来的进行中的 Run）；后关联的历史 Run 只作证据。
 审查 Run（start_run(purpose="review")，B3）只对 review 里的任务开，任务状态不变、不成为当前 Run，回执只作证据。
+调度预留（B2.2，库 v3 的 sched_claims）：调度器开单前先在这里落预留；同一任务同时最多一个未结预留，预留与候选复核、
+并发名额检查在同一个 BEGIN IMMEDIATE 事务里（claim_task）。决策与恢复逻辑在 twin_scheduler.py。
 """
 import argparse
 import contextlib
@@ -56,7 +58,7 @@ DEFAULT_OWNER_FILE = "~/Library/Application Support/DigitalTwin/owner_open_id"  
 DEFAULT_OWNER_CHAT_FILE = "~/Library/Application Support/DigitalTwin/owner_chat_id"   # 常浩和 Hermes 私聊的 chat_id（B2.1 身份桥接判私聊用），同样 600
 OWNER_HINT = ("还没配置常浩的 open_id：设环境变量 DT_OWNER_OPEN_ID，或把 open_id 单行写进 "
               f"{DEFAULT_OWNER_FILE}（chmod 600；路径可用 DT_OWNER_FILE 改）；配置前 --by user 一律拒绝")
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 GOAL_STATUSES = ("observed", "authorized", "completed", "canceled")
 TASK_STATUSES = ("observed", "ready", "running", "blocked", "review", "completed", "canceled")
@@ -67,6 +69,16 @@ RUN_RESULT = ("done", "guard", "failed", "stale", "abandoned")       # 这些状
 RUN_SUCCESS = ("done", "merged", "cleaned")
 RUN_FINAL = ("cleaned", "abandoned")                                 # 台账里不会再变的终态
 RUN_PURPOSES = ("execute", "review")   # execute：执行任务的 Run；review：对 review 里的任务开的只读审查 Run（B3），只作证据
+CLAIM_STATES = ("claimed", "ordered", "linked", "released", "void", "unsafe")
+CLAIM_OPEN = ("claimed", "ordered", "unsafe")   # 未结预留：占着任务和并发名额；unsafe 要人工收口
+CLAIM_TRANSITIONS = {
+    ("claimed", "ordered"), ("claimed", "released"), ("claimed", "void"), ("claimed", "unsafe"),
+    ("ordered", "linked"), ("ordered", "unsafe"),
+    ("unsafe", "linked"), ("unsafe", "released"), ("unsafe", "void"),
+}
+# claimed 已预留未开单 → ordered 已开单（知道单号）→ linked Run 已关联（此后由“一任务一活动 Run”防重复）；
+# released 开单前主动放弃；void 恢复时证明没有开出单、预留方也已不在；unsafe 归属证明不了，只有常浩能收口
+SCHED_LEASE = 900          # 秒：预留的租约；过期不自动释放，由恢复按单号关联键与预留方进程核对后决定
 RUN_RANK = {"new": 0, "queued": 1, "running": 2, "stale": 2, "done": 3, "guard": 3, "failed": 3,
             "merged": 4, "cleaned": 5, "abandoned": 5}
 BLOCK_KINDS = ("decision", "dependency", "external", "technical")
@@ -142,6 +154,12 @@ MIGRATIONS = [
     SCHEMA,   # v1 在 2026-10-29 返修时定稿（此前没有任何已部署的库）
     # v2（B2.1 T03）：飞书消息占用登记——常浩的一条消息只换一次 user 动作（防重放）；由 claim_message 在和状态变化同一个事务里写
     "CREATE TABLE identity_uses (message_id TEXT PRIMARY KEY, used_at TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT '')",
+    # v3（B2.2 S2）：调度预留。部分唯一索引保证同一任务同时最多一个未结预留（claimed / ordered / unsafe）
+    "CREATE TABLE sched_claims (sched_key TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), project TEXT,"
+    " state TEXT NOT NULL CHECK (state IN ('claimed','ordered','linked','released','void','unsafe')),"
+    " owner TEXT NOT NULL DEFAULT '{}', order_no TEXT, run_id TEXT, lease_until TEXT NOT NULL,"
+    " note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    "CREATE UNIQUE INDEX sched_claims_open ON sched_claims(task_id) WHERE state IN ('claimed','ordered','unsafe')",
 ]   # 第 n 项把库从版本 n 升到 n+1；改表结构只追加，不改已有项
 
 
@@ -262,8 +280,9 @@ def classify_receipt(receipt):
 class Store:
     """一个 Store 对应一个库文件；用 with 打开，所有公开写方法各自是一个事务。"""
 
-    def __init__(self, path=None, clock=None, dispatch_dir=None, max_retries=MAX_RETRIES):
+    def __init__(self, path=None, clock=None, dispatch_dir=None, max_retries=MAX_RETRIES, readonly=False):
         self.path = Path(path or os.environ.get("DT_STATE_DB", DEFAULT_DB)).expanduser()
+        self.readonly = readonly   # 只读打开（B2.2 调度决策用）：库不存在不建、不迁移、写操作被 SQLite 拒绝
         self.dispatch_dir = Path(dispatch_dir or os.environ.get("DT_DISPATCH", DEFAULT_DISPATCH)).expanduser()
         self.clock = clock or (lambda: dt.datetime.now().astimezone())
         self.max_retries = max_retries
@@ -274,6 +293,17 @@ class Store:
     def open(self):
         if self.conn:
             return self
+        if self.readonly:
+            if not self.path.is_file():
+                raise NotFound(f"状态库不存在：{self.path}（只读打开不建库）")
+            self.conn = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            if self.version() > len(MIGRATIONS):
+                v = self.version()
+                self.close()
+                raise StateError(f"库版本 {v} 比程序支持的 {len(MIGRATIONS)} 新，请升级脚本")
+            return self
         created = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.conn = sqlite3.connect(str(self.path), isolation_level=None)
@@ -281,7 +311,11 @@ class Store:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self._migrate()
+        try:
+            self._migrate()
+        except BaseException:
+            self.close()   # 版本比程序新等迁移失败时不留打开的连接（回退时旧程序会走到这里）
+            raise
         if created:
             os.chmod(self.path, 0o600)
         return self
@@ -1358,8 +1392,142 @@ class Store:
             self._settle_task_after_run(r, by)
         return "updated"
 
+    # ---------- 调度预留（B2.2 S2：决策与恢复逻辑在 twin_scheduler.py）----------
+    def _has_claims(self):
+        """只读打开的 v2 库还没有预留表：当作没有任何预留。"""
+        return bool(self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sched_claims'").fetchone())
+
+    @staticmethod
+    def _claim_dict(r):
+        d = dict(r)
+        d["owner"] = _loads(d["owner"], {})
+        return d
+
+    def get_claim(self, sched_key):
+        r = self.conn.execute("SELECT * FROM sched_claims WHERE sched_key=?", (sched_key,)).fetchone() \
+            if self._has_claims() else None
+        if not r:
+            raise NotFound(f"没有这个调度预留：{sched_key}")
+        return self._claim_dict(r)
+
+    def claims(self, task_id=None, states=None):
+        if not self._has_claims():
+            return []
+        where, args = [], []
+        if task_id:
+            where.append("task_id=?"), args.append(task_id)
+        if states:
+            where.append(f"state IN ({','.join('?' * len(states))})"), args.extend(states)
+        sql = "SELECT * FROM sched_claims" + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY rowid"
+        return [self._claim_dict(r) for r in self.conn.execute(sql, args)]
+
+    def claim_task(self, task_id, sched_key, owner, check, by="system", lease=SCHED_LEASE):
+        """调度预留：在一个 BEGIN IMMEDIATE 事务里先跑 check(store)（twin_scheduler 的候选复核 + 并发名额），
+        结论是 dispatch 才插入预留。两个调度器同时来：写锁让它们排队，后来的复核时已能看到先来的预留；
+        万一绕过复核，部分唯一索引 sched_claims_open 还会拒绝同一任务的第二个未结预留。
+        返回 {"applied": True, "claim"}，或 {"applied": False, "reason", "evidence"}——拒绝不写任何东西。"""
+        with self._tx() as c:
+            verdict = check(self)
+            if verdict.get("decision") != "dispatch" or verdict.get("task_id") != task_id:
+                return {"applied": False, "reason": verdict.get("reason", "not_eligible"), "evidence": verdict.get("evidence", {})}
+            now = self.now()
+            until = (self.clock() + dt.timedelta(seconds=lease)).isoformat(timespec="seconds")
+            project = (verdict.get("evidence") or {}).get("project")
+            try:
+                c.execute("INSERT INTO sched_claims (sched_key, task_id, project, state, owner, lease_until, created_at, updated_at)"
+                          " VALUES (?,?,?,?,?,?,?,?)", (sched_key, task_id, project, "claimed", _json(owner), until, now, now))
+            except sqlite3.IntegrityError as e:
+                return {"applied": False, "reason": "claim_open", "evidence": {"error": str(e)}}
+            self._record("system", "sched.claim", by, "task", task_id,
+                         {"sched_key": sched_key, "project": project, "lease_until": until, "owner": owner})
+            return {"applied": True, "claim": self.get_claim(sched_key)}
+
+    def _claim_to(self, claim, to, by, note="", **fields):
+        if claim["state"] == to:
+            return False
+        if (claim["state"], to) not in CLAIM_TRANSITIONS:
+            raise IllegalTransition(f"调度预留 {claim['sched_key']} 不能从 {claim['state']} 变成 {to}")
+        if claim["state"] == "unsafe" and by != "user":
+            raise NotAuthorized(f"调度预留 {claim['sched_key']} 归属证明不了（unsafe），只有常浩能收口")
+        sets = {"state": to, "updated_at": self.now(), **fields}
+        if note:
+            sets["note"] = note
+        self.conn.execute(f"UPDATE sched_claims SET {', '.join(f'{k}=?' for k in sets)} WHERE sched_key=?",
+                          (*sets.values(), claim["sched_key"]))
+        self._record(self._source(by), f"sched.{to}", by, "task", claim["task_id"],
+                     {"sched_key": claim["sched_key"], "from": claim["state"], "to": to, "note": note,
+                      **fields})
+        claim.update(sets)
+        return True
+
+    def claim_mark_spawning(self, sched_key):
+        """开单子进程拉起之前先落这个持久标记（B2.2 返修 F1）：标记存在而子进程没登记，就不能证明没开单，恢复时不许 void。"""
+        with self._tx():
+            cl = self.get_claim(sched_key)
+            if cl["state"] != "claimed":
+                raise IllegalTransition(f"调度预留 {sched_key} 当前是 {cl['state']}，不能再开单")
+            owner = {**cl["owner"], "spawn": {"at": self.now()}}
+            self.conn.execute("UPDATE sched_claims SET owner=?, updated_at=? WHERE sched_key=?", (_json(owner), self.now(), sched_key))
+            return owner
+
+    def claim_set_child(self, sched_key, child):
+        """记下预留方拉起的开单子进程身份（twin_scheduler 执行器 Popen 后立即调用）；恢复时预留方和子进程都确认退出才算没人在开单。"""
+        with self._tx():
+            cl = self.get_claim(sched_key)
+            if cl["state"] != "claimed":
+                raise IllegalTransition(f"调度预留 {sched_key} 当前是 {cl['state']}，不再记开单进程")
+            owner = {**cl["owner"], "child": child}
+            self.conn.execute("UPDATE sched_claims SET owner=?, updated_at=? WHERE sched_key=?", (_json(owner), self.now(), sched_key))
+            return owner
+
+    def claim_ordered(self, sched_key, order_no, by="system"):
+        """claimed → ordered：开单成功、知道单号了。同一单号重复调用不变；已记了别的单号 → unsafe（一个预留两张单）。"""
+        with self._tx():
+            cl = self.get_claim(sched_key)
+            if cl["order_no"] and cl["order_no"] != order_no:
+                self._claim_to(cl, "unsafe", by, f"同一预留出现两张单：{cl['order_no']}、{order_no}")
+                return {"applied": False, "claim": cl}
+            if cl["state"] == "ordered":
+                return {"applied": False, "claim": cl}
+            self._claim_to(cl, "ordered", by, order_no=order_no)
+            return {"applied": True, "claim": cl}
+
+    def claim_link(self, sched_key, agent, by="system", status="new"):
+        """ordered → linked：把预留开出的单登记成任务的当前 Run。台账写入后通知已把这张单导入成未关联的 Run 就 link_run，
+        否则 start_run(order_no=…)（幂等键 sched.link:<预留>）。任务在开单期间变了（撤销、被别的 Run 占了等）：
+        单已经存在，归属说不清——预留转 unsafe 留给常浩，不重派。"""
+        with self._tx() as c:
+            cl = self.get_claim(sched_key)
+            if cl["state"] == "linked":
+                return {"applied": False, "claim": cl}
+            if cl["state"] != "ordered" or not cl["order_no"]:
+                raise IllegalTransition(f"调度预留 {sched_key} 当前是 {cl['state']}，还没有单号，不能关联")
+            try:
+                row = c.execute("SELECT id, task_id FROM runs WHERE order_no=?", (cl["order_no"],)).fetchone()
+                if row:
+                    self.link_run(row["id"], cl["task_id"], by)
+                    rid = row["id"]
+                else:
+                    rid = self.start_run(cl["task_id"], agent, by, order_no=cl["order_no"], status=status,
+                                         idem_key=f"sched.link:{sched_key}", note=f"调度预留 {sched_key}")["run"]["id"]
+            except StateError as e:
+                self._claim_to(cl, "unsafe", by, f"单 {cl['order_no']} 已开出，但关联任务被拒：{e}")
+                return {"applied": False, "claim": cl, "error": str(e)}
+            self._claim_to(cl, "linked", by, run_id=rid)
+            return {"applied": True, "claim": cl, "run": rid}
+
+    def claim_close(self, sched_key, to, by="system", note=""):
+        """收口一个未结预留：released（开单前主动放弃）/ void（恢复证明没开出单）/ unsafe（归属证明不了）。
+        unsafe 的预留只有常浩能再收口。"""
+        if to not in ("released", "void", "unsafe"):
+            raise StateError("预留只能收口成 released / void / unsafe")
+        with self._tx():
+            cl = self.get_claim(sched_key)
+            changed = self._claim_to(cl, to, by, note)
+            return {"applied": changed, "claim": cl}
+
     # ---------- 调度消费查询（B2.1 T05：B2.2 的持久调度层读这里，本批不执行调度）----------
-    def queue(self, dispatch_dir=None):
+    def queue(self, dispatch_dir=None, ledger=None):
         """只读：按“下一步能不能自动推进”把对象分桶，每项带 id / title / since 和原因，不改任何状态。
         ready              已授权、依赖都完成、没有进行中 Run 的 ready 任务——可以派
         waiting_deps       ready 或 blocked(dependency)，但依赖没完成
@@ -1369,8 +1537,9 @@ class Store:
         cancel_pending     已请求取消、执行层还没停的 Run（B2.2 去停）
         review             待验收的任务（带有没有结论、当前 Run 有没有回执、引用数）
         unsafe             不能自动推进：目标不再 authorized、ready 却有活动 Run、running 却没活动 Run、
-                           当前 Run 在台账里查不到、待验收却没回执、外部引用最近一次探针不可达、台账冲突没处理"""
-        ledger = self.read_orders(dispatch_dir)
+                           当前 Run 在台账里查不到、待验收却没回执、外部引用最近一次探针不可达、台账冲突没处理
+        ledger 可传入已读好的台账（read_orders 的返回），调度决策同一轮只读一次台账、前后一致。"""
+        ledger = ledger or self.read_orders(dispatch_dir)
         out = {k: [] for k in QUEUE_BUCKETS}
         out["ledger"] = ledger["status"]
         goals = {g["id"]: g for g in self.list_goals()}

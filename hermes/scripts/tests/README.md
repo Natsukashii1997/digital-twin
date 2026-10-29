@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项，共 188 项），末尾显示 `Ran 188 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 18 项，共 277 项），末尾显示 `Ran 277 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -100,3 +100,29 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 ## 派单状态通知（test_dispatch_notify.py）
 
 测的是 `dispatch.py` 的 `notify_state`（B2.1 T04）与 `twin_state.reconcile`。和派单续跑测试一样加载源文件、替换根目录和 worker，`NOTIFY_LOG` 指向临时文件。覆盖：`DT_STATE_NOTIFY` 不设时什么都不碰；开着但状态库不存在绝不建库、只记日志；库存在时只同步这一张单、成功不记日志；通知抛错不影响派单、`order.json` 照写、日志留一行；经 `run` 命令整段 stdout 仍是一个 JSON；重复通知幂等；关掉通知时漏掉的变化由 `reconcile` 补上；台账冲突记日志、证据不动；need_decision 之后“先由 user 解阻塞再续跑”正常、顺序反了只记 `run.resume_conflict`。10 项。
+
+## 持久调度（test_twin_scheduler.py、test_twin_scheduler_life.py、test_twin_scheduler_e2e.py）
+
+测的是 `twin_scheduler.py` 与库 v3 的调度预留（B2.2，设计见 `docs/B2.2-调度与恢复机制设计.md`）。临时库、固定时钟、临时派单根目录；需要真实进程的用 `dispatch_harness.py`（在临时根目录里跑真实 `dispatch.py`，可注入延迟拉大竞态窗口）和 `fake_worker_proc.py`（像 `run_worker` 一样写 `out/worker.json`、睡一会、写回执；`H_IGNORE_TERM` 时不理 SIGTERM）。只对测试自己拉起的车间进程组发 SIGTERM，测试结束收掉所有子进程。覆盖：
+
+- 决策：11 种任务状态只有授权 + ready + 依赖完成 + 有车间负责方的入选，每条带原因码 / 证据 / 下一步；只读打开库、重复评估逐字相同、库文件字节不变；台账读不到全 hold；名额总 2 / 同项目 1（外来 running 单占名额，未开跑的 new 单不占）。
+- 预留：同一任务第二个预留被拒、部分唯一索引兜底；4 个进程同时抢只 1 个成功；开单期间任务被撤销 → unsafe，只有 user 能收口；v1 / v2 库迁到 v3，只读打开 v2 库不迁移。
+- 恢复：开单后 / 记单号后崩溃按关联键关联；没开出单要租约过期且预留方与开单子进程都确认退出才 void；多张单、半截目录、单已结束、记过单号却找不到 → unsafe；真实子进程开单前 / 开单后 SIGKILL 两例。
+- 进程身份：match / gone / 僵尸 / PID 复用 / 别的主机 / 没记启动时间。
+- 生命体征：心跳过期 3 天仍 alive；dispatch 与车间都被杀 → lost（不判失败）；dispatch 被杀车间迟到回执 → finished；无身份、PID 复用、外来进程、上一轮身份都不认。
+- 取消：自有车间收 SIGTERM 停下、台账 failed、任务保持 canceled；与自然完成竞争不发信号；身份不明 0 信号；不理 SIGTERM 只报告不升级；真实派单根目录拒绝发信号、命令行只出建议。
+- 重试分级、低噪声报告（未确认送达每轮再报、`ack` 后才安静、重启后去重仍在、没有待报时 `--quiet` 空输出）；`tick --execute` 默认关闭。
+- 端到端：任务书 S7 场景 1、2、3、7、8（其余场景在上面各文件里），对照表在 `test_twin_scheduler_e2e.py` 文件头。
+
+## 派单锁与进程身份（test_dispatch_lock.py）
+
+真实子进程跑 `dispatch.py`（`dispatch_harness.py`）。覆盖：4 个进程并行 `new` 编号互不相同；同仓库两张单同时 `run` 只跑一张、另一张排队；同一单同时 `run` 两次只跑一次；锁被占时等待有上限且不动作；`run` 记 `dispatch_pid / run_host / run_started`，车间 pid = pgid = sid；`write_identity` 与 `ps` 一致；`--sched-key` 写字段和标记文件、格式不对在编号前拒绝；手工 `new` 字段集合不变。改动前 9 项中 8 项失败。
+
+## 调度返修（test_twin_scheduler_rework.py）
+
+ChatGPT 2026-10-29 评审 F1 / F2 与返修终审 P0 的负向用例，18 项。F1 / F2 的 14 项先在返修前 `4154ef0` 上跑红（6 FAIL + 6 ERROR）。`dispatch_harness.py` 加了 `H_PRELOCK_DELAY`（拿派单锁前先睡，模拟锁前慢 `git fetch`）和 `H_DONE_FILE`（进程退出时写文件，给迟到的开单进程计时）。覆盖：
+
+- F1：真实子进程在拉起迟到开单后、登记子进程身份前被 SIGKILL，租约过后预留判 unsafe 而不是 void，迟到的开单在锁内被拒、0 张单、任务不再可派；锁前慢 fetch 期间预留被作废，开单在锁内被拒；只有 claimed 的关联键能开单（void / released / unsafe / linked / 不存在 / 项目不符 / 状态库不存在都拒绝），手工开单照常；另一连接持写事务时开调度单不被阻塞（锁顺序）；游离单（已收口预留的单、未知关联键、半截目录）让任务 unsafe、报告报错误、`recover` 退出码 1，不删不关联；作废证明的三种情形。
+- 终审 P0 同键只开一张（`DupKeyTests`，4 项，先在 `9709be7` 上两套 Python 各 4 FAIL）：同一个仍是 claimed 的键串行开两次，第二次拒绝并在 `existing` 列出首单、目录只有一张，关联后仍拒；三个进程用 `H_GO` 同时起跑、`H_DELAY` 拉长锁内窗口，恰好一个成功、两个拒绝；首单只写了 `sched_key` 标记没写 order.json、或只有 order.json 带同键，都拒绝；标记读不了、台账坏了也拒绝，拒绝时目录不增不减；不同键各自正常，既没标记也没台账的目录不算占用，手工开单照常。
+- F2：命令行输出被丢弃后仍待报；`deliver()` 只有确认送达（True 或指纹列表）才 ack，失败 / None / 其他值 / 异常都保留；部分确认；重复 ack 幂等；`report --quiet` 没确认前重复输出、`ack` 后安静；报告不生成任务或工单。
+

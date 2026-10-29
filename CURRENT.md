@@ -6,6 +6,48 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 最后定向返修：同键重复开单（[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 同一分支，待 ChatGPT 最后复核）
+
+- 时间：开工 22:00
+- **来由**：ChatGPT 返修终审（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2返修终审报告原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2返修终审报告原文.md)、任务书 [docs/reviews/2026-10-29-ChatGPT-B2.2同键重复开单返修任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2同键重复开单返修任务书原文.md)）：F1 / F2 主要返修通过；新发现合并前 P0——同一个仍是 claimed 的关联键能开出两张单。按源码核实属实。常浩确认：既没标记也没台账的目录不算占用；台账读不了时拒绝开调度单，不改 `save()`。
+- **做了什么**（详见交付报告第 10 节）：`dispatch.py` 新增 `check_sched_key_unused`，在同一把派单锁里、核对预留之后、编号建目录之前扫派单根目录直接子目录，已有同键标记或台账（含半截目录）就拒绝并列出单号，读不清也拒绝；不删、不关联。新增 `DupKeyTests` 4 项；D1 / D2 / 交付报告 / tests README 同步；终审原文与任务书入库。`twin_scheduler.py`、`twin_state.py`、F2 未改。
+- 测试：新增 4 项放到 `9709be7` 上两套 Python 各 `Ran 4 tests` `FAILED (failures=4)` exit 1；修后 HEAD `ce474ba` 全量 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 277 tests` `OK` exit 0，`python3 …`（3.14.5）`Ran 277 tests` `OK` exit 0；`git diff --check` 无输出。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-rework2-20261029/`。
+- 本轮新坑：无。（事实：状态库里预留仍是 claimed 不等于台账里还没开过单，幂等检查要在建目录的同一把锁里看台账本身。）
+- 没做：未合并、未安装、未建正式库、未建 cron、未改 `.env` / 技能 / SOUL / config / 网关、未操作真实工单或发信号。
+- 下一步：交 ChatGPT 最后复核；通过后进入 B22-G1 合并审批，G2–G7 仍各自单独授权。
+
+---
+
+## 2026-10-29 晚 · B2.2 合并前定向返修 F1 / F2（[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 同一分支，待复核）
+
+- 时间：开工 21:00
+- **来由**：ChatGPT 独立评审「有条件通过、暂不批准合并」（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2评审原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2评审原文.md)、任务书 [docs/reviews/2026-10-29-ChatGPT-B2.2返修任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2返修任务书原文.md)）：F1（P0）预留作废后迟到的旧关联键仍能开单、任务重新可派；F2（P1）报告打印即标记已报，投递失败会吞掉提醒。按源码核实属实；常浩确认 dispatch 开调度单时可读状态库、`report` 改为不自动标记、一次做完再交。
+- **做了什么**（详见交付报告第 9 节）：
+  - F1：执行器拉开单子进程前持久写“准备开单”标记，作废只认“没标记”或“子进程登记过且已退出”，否则 unsafe；`dispatch new --sched-key` 在派单锁里、建目录前只读状态库核对预留仍 claimed、项目一致，否则拒绝；新增游离单识别（决策 unsafe、报告 error、`recover` 退出码 1，不删不关联）。手工开单不读状态库、行为不变；锁顺序仍是派单锁 → 状态库。
+  - F2：`report` 只读、不标记；新增 `ack --fingerprint` 与 `deliver()`，只有确认送达才标记；D6 的 G5 改为可信投递确认接通前不得启用。
+  - 文档：D1 / D2 / D6 / 交付报告、tests README；评审原文与任务书入库。
+- 测试：新增 14 项先在 `4154ef0` 上两套 Python 各 `Ran 14 tests` `FAILED (failures=6, errors=6)`；返修后各 `Ran 14 tests` `OK`；全量 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 273 tests` `OK` 退出码 0；`/usr/bin/python3 …`（3.9.6）`Ran 273 tests` `OK` 退出码 0；`git diff --check` 无输出。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-rework-20261029/`。
+- 本轮新坑：无。（事实：“子进程身份没登记”不能推出“子进程没启动”，崩溃窗口里要先落“准备开单”标记再拉起；脚本 stdout 只是待投递内容，不能当送达确认。）
+- 没做：未合并、未安装、未建正式库、未建 cron、未改 `.env` / 技能 / SOUL / config / 网关、未操作真实工单；自动开单、真实取消信号、报告定时任务仍关闭。
+- 下一步：返修交 ChatGPT 复核；通过后按 D6 逐项批 B22-G1 合并 → G2 安装。
+
+---
+
+## 2026-10-29 晚 · B2.2 持久调度与跨会话恢复（Issue #29，[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 待评审，未合并、未安装）
+
+- 时间：开工 17:29
+- **来由**：ChatGPT《Hermes B2.2 持久调度与跨会话恢复 正式施工任务书 V1.0》（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2施工任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2施工任务书原文.md)）。常浩定三项：允许 dispatch.py 做锁 / 进程身份 / `--sched-key` 最小改动；批 2 后停一次；SIGTERM 只对测试受控子进程真发，真实路径只出建议。分支 `claude/29-b2-2-scheduler`，worktree `~/Sandbox/worktrees/digital-twin-b2-2`；起点 PR #28 HEAD `ecbb50a`，#28 合并后变基到 main `b0d05a4`，主目录不动。
+- **做了什么**（四批，详见 [docs/reviews/2026-10-29-B2.2-交付与测试报告.md](docs/reviews/2026-10-29-B2.2-交付与测试报告.md)）：
+  - 新增 `hermes/scripts/twin_scheduler.py`：只读决策 `plan`（原因码 + 证据 + 下一步）；调度预留（库 v3 `sched_claims`，写事务复核 + 部分唯一索引）；`tick` 只开单不开跑（`--execute` 还要 `DT_SCHED_ENABLE=1`，正式未启用）；按关联键补偿恢复 `recover`；生命体征 `observe`；取消 `cancel`（命令行只出建议）；重试建议；低噪声报告 `report --quiet`。
+  - `dispatch.py`：派单根目录文件锁（编号、并发检查 + 写 running），run 记 `dispatch_pid / run_host / run_started`、车间自成进程组，`new --sched-key`；手工派单输出与字段不变。`run_worker.py`：一启动写 `out/worker.json`。`twin_state.py`：库 v3、只读打开、预留方法，迁移失败时关闭连接。
+  - 文档：[D1 设计](docs/B2.2-调度与恢复机制设计.md)、[D2 协议](docs/B2.2-调度与异常协议.md)、[D6 部署准备清单](docs/B2.2-部署准备清单.md)、D3 交付与测试报告（含 D5 B2.3 交接）；tests README、AGENTS 结构。
+- 测试：基线 `ecbb50a` 两套 Python 各 `Ran 188 tests` `OK`；新测试先在改前代码上跑红（dispatch 锁 9 项中 8 项红：并行开单撞号崩溃、同仓库两单同时跑、同一单跑两次）；最终 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 259 tests` `OK` 退出码 0；`/usr/bin/python3 …`（3.9.6）`Ran 259 tests` `OK` 退出码 0（原 188 + 新 71；原测试只改 2 处写死的 `schema_version == 2`）。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-20261029/`。
+- 本轮新坑：无。（事实：macOS `ps -o lstart` 的输出随语言环境变化，记录与核对进程启动时间要都用 `LC_ALL=C` 才能逐字比较。）
+- 没做：未合并、未安装、未建正式库；未建 cron；未对真实项目派单、取消或重试；未改 `.env` / 技能 / SOUL / config / 网关。**自动开单与真实取消信号仍关闭**，要动作级授权（B2.x）和常浩单独批准（D6 的 B22-G6 / G7）。
+- 下一步：PR 交 ChatGPT 独立复核；通过后按 D6 逐项批：B22-G1 合并 → G2 安装四个脚本（合并后到安装前 09:50 自检会报这四个文件，属预期）→ G3 手工派单回归。
+
+---
+
 ## 2026-10-29 晚 · B2.1 合并（G1）与安装（G2）：已合并 `04b208d`、四个脚本已安装，未启用
 
 - 时间：开工 17:20

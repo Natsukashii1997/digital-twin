@@ -11,6 +11,7 @@
   主分支被别的会话正常更新（例如另一个 Claude 会话合并了自己的分支）不算违规，只记在 note_main_moved；
   别的远端引用变化（别的会话 push、fetch）也不算违规，只记在 note_remote_moved。
 - 只接项目名册（digital-twin/projects.json）里登记的仓库；worktree 按所属主仓库匹配
+- 一启动就把自己的进程身份写进 结果目录/worker.json（B2.2：调度器判断真在跑还是残留、取消前核对身份用）
 退出码：0 正常；1 车间失败或超时；2 护栏被触发（主分支或远端被动过）；3 不在名册里或名册不允许写入。
 """
 import argparse
@@ -137,6 +138,26 @@ def parse(tool, stdout, out):
     return sid, last.read_text() if last.exists() else "", err
 
 
+def write_identity(out):
+    """worker 的进程身份：pid、进程组、会话、启动时间（ps lstart，防 PID 复用）、主机、结果目录。原子写入；写不成不影响干活。"""
+    pid = os.getpid()
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                           env={**os.environ, "LC_ALL": "C"})   # 固定语言环境：调度器核对时逐字比较
+        started = " ".join(r.stdout.split()) or None
+    except (OSError, subprocess.SubprocessError):
+        started = None
+    ident = {"pid": pid, "pgid": os.getpgid(0), "sid": os.getsid(0), "started": started, "host": socket.gethostname(),
+             "out": str(out.resolve()), "at": dt.datetime.now().isoformat(timespec="seconds")}
+    try:
+        tmp = out / ".worker.json.tmp"
+        tmp.write_text(json.dumps(ident, ensure_ascii=False))
+        os.replace(tmp, out / "worker.json")
+    except OSError:
+        pass
+    return ident
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tool", choices=["claude", "codex"], required=True)
@@ -158,6 +179,7 @@ def main():
     a.main = a.main or proj["main"]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    write_identity(out)
     task = PREAMBLE + (WRITE_RULES if a.mode == "write" else READ_RULES) + "\n任务：\n" + Path(a.task_file).read_text()
     before = snapshot(a.cwd, a.main)
     cmd = claude_cmd(a, task) if a.tool == "claude" else codex_cmd(a, task, out)
