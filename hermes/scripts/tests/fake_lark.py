@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """假 lark-cli：不联网。按 FAKE_LARK_DIR 里的 state.json 回话，每次调用记进 calls.jsonl。
 
-state.json：{"docs": {token: markdown}, "im": [消息], "mget": {message_id: 消息}, "vc": [], "minutes": [], "agenda": [], "tasks": []}
+state.json：{"docs": {token: markdown}, "im": [消息], "mget": {message_id: 消息}, "chats": {chat_id: 会话信息}, "vc": [], "minutes": [], "agenda": [], "tasks": []}
+api GET /open-apis/im/v1/chats/<chat_id> 按 chats 回话（真实接口 2026-10-29 探针：data 里有 chat_mode=p2p/group/topic）；chats 里没有的报错。
 docs +update 的 block_insert_after 会把内容插到文档第一段说明之后，供写后回读。
 """
 import json
@@ -45,6 +46,13 @@ elif cmd == "im +messages-mget":
     ids = [i for i in (opt("--message-ids") or "").split(",") if i]
     found = [state.get("mget", {})[i] for i in ids if i in state.get("mget", {})]
     out({"messages": found, "total": len(found)})
+elif cmd == "api GET" and args[4].startswith("/open-apis/im/v1/chats/"):
+    chat_id = args[4].rsplit("/", 1)[1]
+    chats = state.get("chats", {})
+    if chat_id in chats:
+        out(chats[chat_id])
+    else:
+        print(json.dumps({"ok": False, "error": {"code": 232002, "message": "fake: chat not found"}}))
 elif cmd == "im +messages-search":
     out({"messages": state.get("im", []), "has_more": False})
 elif cmd == "vc +search":

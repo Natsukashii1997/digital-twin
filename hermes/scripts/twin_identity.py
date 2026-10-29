@@ -3,7 +3,9 @@
 
 真值来自飞书，不来自文本：拿 message_id 用猛鬼兽应用的 bot 身份回读消息（lark-cli im +messages-mget --as bot），核对
 ① 发送者是用户且 open_id 等于本机受控配置里的 owner_open_id（twin_state.owner_open_id）；
-② 是常浩和 Hermes 的私聊：回读结果只给 chat_id，不给会话类型，所以要等于本机配置的 owner_chat_id（twin_state.owner_chat_id）；
+② 是常浩和 Hermes 的私聊：回读结果只给 chat_id，不给会话类型，所以必须等于本机配置的 owner_chat_id（twin_state.owner_chat_id）；
+   没配 owner_chat_id 一律拒；回读里就算带 chat_type=p2p 也只是附加证据，不能替代 chat_id 绑定；明说是群聊 / 话题群的拒；
+   回读到的 message_id 必须就是传入的那条，sender_type 必须明确是 user（缺失不猜）——P0-1，ChatGPT 评审 2026-10-29；
 ③ 在时效内（默认 10 分钟；lark-cli 给的时间只到分钟，另留 2 分钟偏差）；
 ④ 这条消息没被用过——占用登记在状态库 identity_uses（Store.claim_message），由调用方和状态变化放在同一事务里。
 模型文本、系统提示里的 User ID、环境变量 HERMES_SESSION_* 都只是线索：命令是模型拼的，VAR=x cmd 就能覆盖，
@@ -15,6 +17,7 @@
 
   python3 twin_identity.py verify --message-id om_xxx            只核实、不占用；末行 JSON ok/msg
   python3 twin_identity.py setup-chat --message-id om_xxx [--write]   安装时用：从常浩发的一条私聊取 chat_id 写进 600 配置
+      （先用 bot 身份查会话 chat_mode，必须是 p2p 才写；查不到就 fail closed 给手工配置说明——P0-2）
 """
 import argparse
 import datetime as dt
@@ -31,6 +34,7 @@ AGENT_ENV = ("HERMES", "OPENCLAW", "LARK_CHANNEL")   # lark-cli 看到这些变�
 MAX_AGE = 600          # 秒：消息多久以内算“这一回合”
 SKEW = 120             # 秒：时钟偏差 + create_time 只到分钟
 MESSAGE_ID = re.compile(r"^om_[A-Za-z0-9]{6,}$")
+CHAT_ID = re.compile(r"^oc_[A-Za-z0-9_]{6,}$")
 METHOD = "feishu_message"
 TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M")
 
@@ -56,12 +60,9 @@ def normalize(m):
             "create_time": m.get("create_time"), "deleted": bool(m.get("deleted"))}
 
 
-def lark_fetch(message_id, timeout=60):
-    """用 bot 身份回读一条消息。查不到返回 None；跑不起来、输出不对、飞书报错抛 IdentityError。"""
-    if not MESSAGE_ID.match(message_id or ""):
-        raise IdentityError("message_id 不是飞书消息 id（om_ 开头）")
-    cmd = [LARK, "--profile", PROFILE, "im", "+messages-mget", "--message-ids", message_id, "--no-reactions",
-           "--as", "bot", "--format", "json"]
+def _lark_json(args, timeout, what):
+    """跑一条 bot 身份的 lark-cli 命令，返回解析后的 JSON 字典；跑不起来、输出不对、飞书报错抛 IdentityError。"""
+    cmd = [LARK, "--profile", PROFILE, *args, "--as", "bot", "--format", "json"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=strip_env())
     except (OSError, subprocess.SubprocessError) as e:
@@ -76,12 +77,58 @@ def lark_fetch(message_id, timeout=60):
     if not isinstance(d, dict):
         raise IdentityError(f"lark-cli 输出不是 JSON（退出码 {r.returncode}）")
     if not d.get("ok", True):
-        raise IdentityError(f"回读失败：{str((d.get('error') or {}).get('message', '未知错误'))[:120]}")
+        raise IdentityError(f"{what}失败：{str((d.get('error') or {}).get('message', '未知错误'))[:120]}")
+    return d
+
+
+def lark_fetch(message_id, timeout=60):
+    """用 bot 身份回读一条消息。查不到返回 None；跑不起来、输出不对、飞书报错、回读不止一条 / 不是这条 / 字段不全抛 IdentityError。"""
+    if not MESSAGE_ID.match(message_id or ""):
+        raise IdentityError("message_id 不是飞书消息 id（om_ 开头）")
+    d = _lark_json(["im", "+messages-mget", "--message-ids", message_id, "--no-reactions"], timeout, "回读")
     data = d.get("data") or {}
     msgs = data.get("messages") if isinstance(data, dict) else None
     if not msgs:
         return None
-    return normalize(msgs[0])
+    if not isinstance(msgs, list) or len(msgs) != 1 or not isinstance(msgs[0], dict):
+        raise IdentityError(f"回读应恰好一条消息，实际 {len(msgs) if isinstance(msgs, list) else '?'} 条")
+    m = normalize(msgs[0])
+    if m["message_id"] != message_id:
+        raise IdentityError("回读到的不是这条消息（message_id 不一致）")
+    if not all(m.get(k) for k in ("message_id", "sender_open_id", "sender_type", "chat_id", "create_time")):
+        raise IdentityError("回读结果字段不全（发送者 / 会话 / 时间缺一不可）")
+    return m
+
+
+def lark_chat_mode(chat_id, timeout=60):
+    """用 bot 身份查一个会话的类型（P0-2）：GET /open-apis/im/v1/chats/{chat_id}，2026-10-29 真实探针确认 data.chat_mode 给
+    p2p / group / topic（证据 evidence/b2.1-rework-20261029/probe-chat.masked.json，已打码）。返回小写的 chat_mode；
+    接口没给出类型返回 None（调用方必须 fail closed）；跑不起来、报错抛 IdentityError。不记录、不输出 chat_id 值。"""
+    if not CHAT_ID.match(chat_id or ""):
+        raise IdentityError("chat_id 不是飞书会话 id（oc_ 开头）")
+    d = _lark_json(["api", "GET", f"/open-apis/im/v1/chats/{chat_id}"], timeout, "查会话")
+    data = d.get("data") or {}
+    mode = data.get("chat_mode") if isinstance(data, dict) else None
+    return str(mode).strip().lower() or None if mode else None
+
+
+def write_secret(target, value):
+    """把一行机密写进 600 文件：先写同目录临时文件（O_EXCL、600），再原子替换；任何一步失败都删临时文件、原文件不动，异常原样抛出。"""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = target.with_name(f".{target.name}.tmp{os.getpid()}")
+    try:
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(value + "\n")
+        os.chmod(str(tmp), 0o600)
+        os.replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def parse_time(v, tz=None):
@@ -126,18 +173,21 @@ def verify_message(message_id, owner, fetch=None, now=None, max_age=MAX_AGE, own
         return fail(f"回读飞书出错：{type(e).__name__}")
     if not m:
         return fail("飞书查不到这条消息（id 不存在，或机器人看不到）")
+    if m.get("message_id") != message_id:
+        return fail("回读到的不是这条消息（message_id 不一致）")
     if m.get("deleted"):
         return fail("这条消息已撤回")
-    if m.get("sender_type") not in (None, "user"):
-        return fail("发送者不是用户（应用或系统消息）")
+    if m.get("sender_type") != "user":
+        return fail("发送者不是用户（应用 / 系统消息，或回读没给出发送者类型，不猜）")
     if not m.get("sender_open_id") or m["sender_open_id"] != owner:
         return fail("发送者不是常浩本人")
+    if not owner_chat_id:
+        return fail("还没配置 owner_chat_id，不能确认是常浩和 Hermes 的私聊（回读带 p2p 标志也不算）")
     kind = str(m.get("chat_type") or "").lower()
-    chat = "p2p" if kind == "p2p" else None
-    if not kind and owner_chat_id and m.get("chat_id") and m["chat_id"] == owner_chat_id:
-        chat = "p2p"            # 回读结果不带会话类型时，只认本机配置的私聊 chat_id；明说是群聊的一律不认
-    if chat != "p2p":
-        return fail("不能确认是常浩和 Hermes 的私聊（群聊、没有会话信息，或还没配置 owner_chat_id）")
+    if kind and kind != "p2p":
+        return fail("回读显示这不是私聊（群聊 / 话题群）")
+    if not m.get("chat_id") or m["chat_id"] != owner_chat_id:
+        return fail("不是本机配置的那条常浩和 Hermes 的私聊会话（chat_id 不一致；p2p 标志只是附加证据）")
     at = parse_time(m.get("create_time"), tz=now.tzinfo)
     if at is None:
         return fail("消息没有可用的时间")
@@ -188,12 +238,26 @@ def main(argv=None):
         if not m.get("chat_id"):
             done(False, "回读结果没有 chat_id")
         target = Path(os.environ.get("DT_OWNER_CHAT_FILE") or T.DEFAULT_OWNER_CHAT_FILE).expanduser()
+        manual = (f"手工配置：在飞书客户端确认这条消息所在会话确实是你和猛鬼兽的私聊，再把它的 chat_id 单独一行写进 {target}，"
+                  "chmod 600；确认不了就不要写，群聊写进去等于把群里任何回合都当成你的私聊")
+        # P0-2：有本人消息不等于私聊。用 bot 身份查会话 chat_mode，必须明确是 p2p 才能登记；查不到一律不写（fail closed）
+        try:
+            mode = lark_chat_mode(m["chat_id"])
+        except IdentityError as e:
+            done(False, f"查不到这个会话的类型，不写（fail closed）：{e}。{manual}", error="ChatModeUnknown", path=str(target), write=False)
+        if mode is None:
+            done(False, f"飞书没有给出这个会话的类型，不写（fail closed）。{manual}", error="ChatModeUnknown", path=str(target), write=False)
+        if mode != "p2p":
+            done(False, f"这条消息所在会话不是私聊（chat_mode={mode}），不能登记成 owner_chat_id", error="NotAuthorized",
+                 path=str(target), write=False)
         if not a.write:
-            done(True, f"预览：会把这条消息所在会话的 chat_id 写进 {target}（600）；确认后加 --write", path=str(target), write=False)
-        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target.write_text(m["chat_id"] + "\n", encoding="utf-8")
-        target.chmod(0o600)
-        done(True, f"已写入 {target}（600）；twin_state 用它判断私聊", path=str(target), write=True)
+            done(True, f"预览：会话类型已确认是私聊（p2p），会把它的 chat_id 写进 {target}（600）；确认后加 --write",
+                 path=str(target), write=False, chat_mode=mode)
+        try:
+            write_secret(target, m["chat_id"])
+        except OSError as e:
+            done(False, f"写入 {target} 失败（{type(e).__name__}），原文件（如有）保持不变", error="WriteFailed", path=str(target), write=False)
+        done(True, f"已写入 {target}（600，先写临时文件再原子替换）；twin_state 用它判断私聊", path=str(target), write=True, chat_mode=mode)
 
 
 if __name__ == "__main__":

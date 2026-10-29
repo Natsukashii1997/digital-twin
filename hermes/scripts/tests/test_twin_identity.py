@@ -25,6 +25,12 @@ OWNER = "ou_fixture_owner_0001"
 CHAT = "oc_fixture_p2p_0001"
 MID = "om_fixturemessage0001"
 OTHER = "om_fixtureother0002"
+GROUP = "oc_fixture_group_0002"          # P0-2：常浩也在里面的群
+NOTYPE = "oc_fixture_notype_0003"        # P0-2：查会话拿不到 chat_mode
+UNKNOWN = "oc_fixture_unknown_0004"      # P0-2：查会话接口报错
+IN_GROUP = "om_fixtureingroup0003"
+IN_NOTYPE = "om_fixturenotype0004"
+IN_UNKNOWN = "om_fixtureunknown0005"
 
 
 def msg(**kw):
@@ -78,8 +84,32 @@ class VerifyTests(unittest.TestCase):
     def test_no_chat_config_fails_closed(self):
         self.assertRejected(self.verify(msg(), chat=None), "owner_chat_id")
 
-    def test_explicit_p2p_flag_accepted_without_chat_config(self):
-        self.assertTrue(self.verify(msg(chat_type="p2p", chat_id="oc_whatever_0004"), chat=None)["ok"])
+    # ---- P0-1（ChatGPT 评审 2026-10-29）：p2p 标志不能绕过 owner_chat_id 绑定，回读要对得上这条消息 ----
+    def test_p2p_flag_without_chat_config_rejected(self):
+        self.assertRejected(self.verify(msg(chat_type="p2p", chat_id="oc_whatever_0004"), chat=None), "owner_chat_id")
+        self.assertRejected(self.verify(msg(chat_type="p2p"), chat=None), "owner_chat_id")
+
+    def test_p2p_flag_with_different_chat_id_rejected(self):
+        self.assertRejected(self.verify(msg(chat_type="p2p", chat_id="oc_other_p2p_0005")), "私聊")
+        self.assertRejected(self.verify(msg(chat_type="p2p", chat_id=None)), "私聊")
+
+    def test_returned_message_id_must_match(self):
+        self.assertRejected(self.verify(msg(message_id=OTHER)), "message_id")
+        self.assertRejected(self.verify(msg(message_id=None)), "message_id")
+
+    def test_missing_sender_type_rejected(self):
+        self.assertRejected(self.verify(msg(sender_type=None)), "不是用户")
+        self.assertRejected(self.verify(msg(sender_type="")), "不是用户")
+
+    def test_topic_group_rejected_even_with_configured_chat_id(self):
+        self.assertRejected(self.verify(msg(chat_type="topic")), "私聊")
+        self.assertRejected(self.verify(msg(chat_type="group")), "私聊")
+
+    def test_real_mget_shape_without_chat_type_passes_when_chat_id_matches(self):
+        r = self.verify(msg(chat_type=None))          # 真实 mget 不带会话类型，只靠本机配置的 chat_id
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["chat"], "p2p")
+        self.assertTrue(self.verify(msg(chat_type="p2p"))["ok"])   # 带 p2p 标志只是附加证据
 
     def test_stale_future_or_timeless_message_rejected(self):
         self.assertRejected(self.verify(msg(create_time="2026-10-29 14:30")), "过时效")
@@ -154,8 +184,36 @@ class LarkFetchTests(unittest.TestCase):
         with self.assertRaisesRegex(ti.IdentityError, "不是 JSON"):
             self.run_fake(stdout="not json", code=1)
         self.assertIsNone(self.run_fake(json.dumps({"ok": True, "data": {"messages": [], "total": 0}}))[0])
+        # P0-1：回读必须恰好一条、就是这条、字段齐全
+        with self.assertRaisesRegex(ti.IdentityError, "恰好一条"):
+            self.run_fake(json.dumps({"ok": True, "data": {"messages": [raw(), raw(message_id=OTHER)], "total": 2}}))
+        with self.assertRaisesRegex(ti.IdentityError, "不是这条"):
+            self.run_fake(json.dumps({"ok": True, "data": {"messages": [raw(message_id=OTHER)], "total": 1}}))
+        with self.assertRaisesRegex(ti.IdentityError, "字段不全"):
+            self.run_fake(json.dumps({"ok": True, "data": {"messages": [raw(chat_id=None)], "total": 1}}))
+        with self.assertRaisesRegex(ti.IdentityError, "字段不全"):
+            self.run_fake(json.dumps({"ok": True, "data": {"messages": [raw(sender={})], "total": 1}}))
         with self.assertRaisesRegex(ti.IdentityError, "om_"):
             ti.lark_fetch("bad id")
+
+    def test_chat_mode_lookup_uses_bot_raw_api(self):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"ok": True, "data": {"chat_mode": "p2p", "chat_id": CHAT}}), "")
+
+        with mock.patch.object(ti.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(ti.lark_chat_mode(CHAT), "p2p")
+        self.assertEqual(calls[0][1:6], ["--profile", ti.PROFILE, "api", "GET", f"/open-apis/im/v1/chats/{CHAT}"])
+        self.assertEqual(calls[0][calls[0].index("--as") + 1], "bot")
+        with mock.patch.object(ti.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps({"ok": True, "data": {}}), "")):
+            self.assertIsNone(ti.lark_chat_mode(CHAT))
+        with mock.patch.object(ti.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", json.dumps({"ok": False, "error": {"message": "no perm"}}))):
+            with self.assertRaisesRegex(ti.IdentityError, "查会话失败"):
+                ti.lark_chat_mode(CHAT)
+        with self.assertRaisesRegex(ti.IdentityError, "oc_"):
+            ti.lark_chat_mode("not a chat")
 
     def test_normalize_sender_id_variants(self):
         self.assertEqual(ti.normalize({"sender": {"sender_id": {"open_id": OWNER}, "sender_type": "user"}})["sender_open_id"], OWNER)
@@ -175,7 +233,10 @@ class CliTests(unittest.TestCase):
             MID: raw(create_time=recent),
             OTHER: raw(message_id=OTHER, create_time=recent,
                        sender={"id": "ou_other_0009", "id_type": "open_id", "sender_type": "user"}),
-        }}
+            IN_GROUP: raw(message_id=IN_GROUP, chat_id=GROUP, create_time=recent),
+            IN_NOTYPE: raw(message_id=IN_NOTYPE, chat_id=NOTYPE, create_time=recent),
+            IN_UNKNOWN: raw(message_id=IN_UNKNOWN, chat_id=UNKNOWN, create_time=recent),
+        }, "chats": {CHAT: {"chat_mode": "p2p", "chat_status": "normal"}, GROUP: {"chat_mode": "group"}, NOTYPE: {"chat_status": "normal"}}}
         (self.fake / "state.json").write_text(json.dumps(self.state), encoding="utf-8")
         self.owner = self.root / "owner"
         self.owner.write_text(OWNER + "\n", encoding="utf-8")
@@ -193,9 +254,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0 if ok else 1, r.stdout + r.stderr)
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(out["ok"], ok, out)
-        for secret in (OWNER, CHAT, "ou_other"):
+        for secret in (OWNER, CHAT, GROUP, NOTYPE, UNKNOWN, "ou_other"):
             self.assertNotIn(secret, r.stdout + r.stderr)
         return out
+
+    def calls(self):
+        return [json.loads(l)["args"] for l in (self.fake / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
 
     def test_verify_roundtrip_with_fake_lark(self):
         out = self.cli("verify", "--message-id", MID)
@@ -230,7 +294,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(out["write"], True)
         self.assertEqual(target.read_text(encoding="utf-8").strip(), CHAT)
         self.assertEqual(oct(target.stat().st_mode & 0o777), "0o600")
+        self.assertEqual([x.name for x in target.parent.iterdir()], ["owner_chat_id"])   # 没留临时文件
         self.assertTrue(self.cli("verify", "--message-id", MID, env=env)["ok"])
+        # P0-2：写之前用 bot 身份查过会话类型
+        api = [c for c in self.calls() if c[2:4] == ["api", "GET"]]
+        self.assertTrue(api and all(c[4].startswith("/open-apis/im/v1/chats/") and c[c.index("--as") + 1] == "bot" for c in api), api)
+
+    # ---- P0-2（ChatGPT 评审 2026-10-29）：有本人消息不等于私聊；会话类型拿不到就 fail closed ----
+    def test_setup_chat_rejects_group_even_if_owner_sent_it(self):
+        target = self.root / "new" / "owner_chat_id"
+        env = {**self.env, "DT_OWNER_CHAT_FILE": str(target)}
+        out = self.cli("setup-chat", "--message-id", IN_GROUP, ok=False, env=env)
+        self.assertIn("不是私聊", out["msg"])
+        self.assertEqual(out.get("error"), "NotAuthorized")
+        self.cli("setup-chat", "--message-id", IN_GROUP, "--write", ok=False, env=env)
+        self.assertFalse(target.exists())
+
+    def test_setup_chat_fails_closed_without_chat_mode(self):
+        target = self.root / "new" / "owner_chat_id"
+        env = {**self.env, "DT_OWNER_CHAT_FILE": str(target)}
+        for mid in (IN_NOTYPE, IN_UNKNOWN):
+            out = self.cli("setup-chat", "--message-id", mid, "--write", ok=False, env=env)
+            self.assertIn("手工", out["msg"])          # 给手工配置说明
+            self.assertEqual(out.get("error"), "ChatModeUnknown")
+            self.assertFalse(target.exists())
+
+    def test_setup_chat_write_failure_keeps_original(self):
+        if os.geteuid() == 0:
+            self.skipTest("root 不受目录权限限制")
+        target = self.root / "locked" / "owner_chat_id"
+        target.parent.mkdir()
+        target.write_text("oc_fixture_old_0000\n", encoding="utf-8")
+        target.chmod(0o600)
+        target.parent.chmod(0o500)
+        self.addCleanup(target.parent.chmod, 0o700)
+        env = {**self.env, "DT_OWNER_CHAT_FILE": str(target)}
+        out = self.cli("setup-chat", "--message-id", MID, "--write", ok=False, env=env)
+        self.assertEqual(out.get("error"), "WriteFailed")
+        self.assertEqual(target.read_text(encoding="utf-8").strip(), "oc_fixture_old_0000")   # 原文件没动
+        self.assertEqual([x.name for x in target.parent.iterdir()], ["owner_chat_id"])         # 没留临时文件
 
 
 if __name__ == "__main__":
