@@ -20,6 +20,9 @@ out.mkdir(parents=True, exist_ok=True)
 ident = rw.write_identity(out) if hasattr(rw, "write_identity") else {"pid": os.getpid()}   # 基线（改前）没有这个函数
 with open(Path(os.environ["H_ROOT"]) / "worker-runs.log", "a") as f:
     f.write(f"{out.parent.name} {ident['pid']}\n")
+if os.environ.get("H_IGNORE_TERM"):   # 模拟不理 SIGTERM 的车间：取消只能报告“停不下来”
+    import signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 time.sleep(float(os.environ.get("H_WORK") or 0))
 now = dt.datetime.now().isoformat(timespec="seconds")
 (out / "receipt.json").write_text(json.dumps({"exit_code": 0, "timed_out": False, "worker_error": False, "started": now,

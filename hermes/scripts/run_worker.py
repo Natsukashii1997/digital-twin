@@ -142,7 +142,8 @@ def write_identity(out):
     """worker 的进程身份：pid、进程组、会话、启动时间（ps lstart，防 PID 复用）、主机、结果目录。原子写入；写不成不影响干活。"""
     pid = os.getpid()
     try:
-        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                           env={**os.environ, "LC_ALL": "C"})   # 固定语言环境：调度器核对时逐字比较
         started = " ".join(r.stdout.split()) or None
     except (OSError, subprocess.SubprocessError):
         started = None

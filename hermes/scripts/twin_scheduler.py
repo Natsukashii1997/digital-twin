@@ -7,6 +7,12 @@
       预留 → dispatch.py new --sched-key 开单 → 按关联键核对台账并登记成任务的当前 Run。只开单，不开跑（开跑仍走确认门）。
   python3 twin_scheduler.py recover
       跨会话 / 重启恢复：按关联键核对每个未结预留，能证明就关联，证明不了就 unsafe，确认没开出单才 void。
+  python3 twin_scheduler.py observe
+      只读：活动 Run 与台账 running 单的生命体征 alive / suspect / lost / finished / not_started / unknown。
+  python3 twin_scheduler.py cancel
+      已撤销任务上还在活动的 Run：逐个给处理建议并记事件。命令行从不发信号（真实路径只出建议）。
+  python3 twin_scheduler.py report [--quiet]
+      低噪声报告：只报错误和要常浩决定的、以前没报过的情形；--quiet 时没有新情形就什么都不输出。输出后才标记已报。
 
 崩溃窗口与补偿（不声称跨状态库与工单的 exactly-once，靠关联键对账收口）：
   ① 预留前崩溃：什么都没写，下一轮照常决策。
@@ -25,9 +31,12 @@
 """
 import argparse
 import contextlib
+import datetime as dt
+import hashlib
 import fcntl
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -41,6 +50,7 @@ import twin_state as ts  # noqa: E402  同目录（安装副本在 ~/.hermes/scr
 
 MAX_RUNNING = 2            # 与 dispatch.py 一致：总并发 2、同一仓库 1
 LOCK_NAME = ".dispatch.lock"   # 与 dispatch.py 同一把派单根目录文件锁
+PS_ENV = {**os.environ, "LC_ALL": "C"}   # ps 输出固定成 C 语言环境，和 run_worker 记下的启动时间逐字可比
 TOOLS = ("claude", "codex")
 DECISIONS = ("dispatch", "hold", "skip", "unsafe")
 REASONS = {
@@ -50,7 +60,10 @@ REASONS = {
     "deps_unmet": "依赖任务还没完成",
     "blocked_decision": "等常浩决定",
     "blocked_external": "等外部条件恢复",
-    "blocked_technical": "技术失败后阻塞（重试建议见 S5）",
+    "blocked_technical": "技术失败后阻塞，失败原因不明或进程没确认退出，不出重试建议",
+    "retry_suggested": "已知可恢复的技术失败，没到上限，执行进程已退出：可以建议重试",
+    "retry_exhausted": "技术重试已到上限",
+    "retry_repeated": "同一种失败连续出现，重试大概率无效",
     "in_review": "待验收：执行完成不等于验收通过",
     "running": "已有进行中的 Run",
     "claim_open": "另一个调度预留正在开单",
@@ -70,7 +83,10 @@ NEXT = {
     "deps_unmet": "等依赖完成，recover 会自动放行",
     "blocked_decision": "等常浩在飞书私聊里决定",
     "blocked_external": "外部来源恢复后带依据 unblock",
-    "blocked_technical": "看失败原因；技术可恢复且没到上限时出重试建议",
+    "blocked_technical": "人工看失败原因（回执、日志）后再定",
+    "retry_suggested": "建议技术重试（retry_task），不早于 evidence.not_before；正式环境不自动执行",
+    "retry_exhausted": "常浩决定是否继续",
+    "retry_repeated": "常浩看失败原因后决定",
     "in_review": "核对回执、测试与 PR，再由非执行方记验收结论",
     "running": "等车间回执；生命体征见 observe",
     "claim_open": "等该预留开单或过期后由恢复核对",
@@ -160,7 +176,8 @@ def decide(store, ledger=None, max_running=MAX_RUNNING):
             if kind == "dependency":
                 ev["depends_on"] = store._unmet(t)
             if reason == "blocked_technical":
-                ev.update(retries=t["retries"], max_retries=store.max_retries)
+                reason, extra = retry_advice(store, t, cur, ledger)
+                ev.update(retries=t["retries"], max_retries=store.max_retries, **extra)
             d = _decision(t, reason, **ev, **run_ev)
         else:   # ready
             d = _ready_decision(store, t, g, ledger, busy, max_running)
@@ -169,6 +186,48 @@ def decide(store, ledger=None, max_running=MAX_RUNNING):
         decisions.append(d)
     counts = {k: sum(1 for d in decisions if d["decision"] == k) for k in DECISIONS}
     return {"ledger": ledger["status"], "decisions": decisions, "occupied": occupied(store, ledger), "counts": counts}
+
+
+RECOVERABLE = ("timeout", "worker_failed")
+RETRY_BACKOFF = 600        # 秒：重试建议的退避基数，第 n 次重试不早于上次结束 + 基数 × 2^n
+
+
+def failure_class(run):
+    """失败分级：timeout / worker_failed 是已知可恢复的技术失败；lost（过期，进程状态不明）、回执不完整等一律 unknown。"""
+    if not run:
+        return "unknown"
+    if run["status"] == "stale":
+        return "lost"
+    rc = run["receipt"] or {}
+    if run["status"] != "failed" or any(k not in rc for k in ts.RECEIPT_REQUIRED):
+        return "unknown"
+    if rc.get("timed_out"):
+        return "timeout"
+    if rc.get("worker_error") or rc.get("exit_code") != 0:
+        return "worker_failed"
+    return "unknown"
+
+
+def retry_advice(store, t, cur, ledger):
+    """S5：blocked(technical) 的任务能不能出重试建议。只出建议，不执行；不从 decision 阻塞推断放权（那类不走这里）。"""
+    cls = failure_class(cur)
+    ev = {"failure": cls}
+    if t["retries"] >= store.max_retries:
+        return "retry_exhausted", ev
+    if cls not in RECOVERABLE:
+        return "blocked_technical", ev
+    o = next((x for x in ledger.get("orders", []) if cur and x.get("no") == cur["order_no"]), None)
+    if ledger.get("status") != "ok" or (cur["order_no"] and (o is None or o.get("status") in ts.RUN_ACTIVE)):
+        ev["ledger_status"] = o.get("status") if o else ledger.get("status")
+        return "blocked_technical", ev       # 执行进程没确认退出（台账还在跑或查不到）
+    prev = [r for r in store.list_runs(t["id"]) if r["id"] != cur["id"] and r["status"] in ("failed", "stale")]
+    if prev and failure_class(prev[-1]) == cls and (prev[-1]["receipt"] or {}).get("worker_error") == (cur["receipt"] or {}).get("worker_error"):
+        ev["previous"] = prev[-1]["id"]
+        return "retry_repeated", ev
+    ended = ts._parse(cur["ended_at"])
+    if ended:
+        ev["not_before"] = (ended + dt.timedelta(seconds=RETRY_BACKOFF * 2 ** t["retries"])).isoformat(timespec="seconds")
+    return "retry_suggested", ev
 
 
 def _ready_decision(store, t, g, ledger, busy, max_running):
@@ -197,7 +256,8 @@ def _ready_decision(store, t, g, ledger, busy, max_running):
 def _ps(pid):
     """(状态, 启动时间) ；进程不在返回 (None, None)；ps 本身失败返回 ("?", None)。"""
     try:
-        r = subprocess.run(["ps", "-o", "stat=", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["ps", "-o", "stat=", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True,
+                           timeout=10, env=PS_ENV)
     except (OSError, ValueError, subprocess.SubprocessError):
         return "?", None
     parts = r.stdout.split()
@@ -411,6 +471,241 @@ def claim(store, task_id, sched_key, owner=None, max_running=MAX_RUNNING, dispat
     return store.claim_task(task_id, sched_key, owner or self_identity(), check, lease=lease)
 
 
+# ---------- S3 生命体征：台账 + 回执 + 进程身份组合判定 ----------
+VITALS = ("alive", "suspect", "lost", "finished", "not_started", "unknown")
+
+
+def _ps_command(pid):
+    try:
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10, env=PS_ENV)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def check_dispatch(o):
+    """dispatch 自己的身份（order.json 的 dispatch_pid / run_host / run_started）：进程在且启动不晚于写 running 的时刻 → match。"""
+    pid, started = o.get("dispatch_pid"), o.get("run_started")
+    if not isinstance(pid, int) or pid <= 1 or not started:
+        return "unknown"
+    if o.get("run_host") and o["run_host"] != socket.gethostname():
+        return "unknown"
+    st, lstart = _ps(pid)
+    if st is None or (st and st.startswith("Z")):
+        return "gone"
+    if st == "?" or not lstart:
+        return "unknown"
+    try:
+        began = dt.datetime.strptime(lstart, "%a %b %d %H:%M:%S %Y")
+        mark = dt.datetime.fromisoformat(started).replace(tzinfo=None)
+    except ValueError:
+        return "unknown"
+    return "match" if began <= mark else "gone"
+
+
+def worker_state(order_dir, o):
+    """本轮车间的身份与核对结果：(worker.json 内容, missing / previous / mismatch / match / gone / unknown)。
+    previous：worker.json 早于本轮开跑（上一轮留下的）；mismatch：记的结果目录不是这张单的；
+    match 还要求该进程的命令行里带着 <单号>/out，否则 unknown（防 PID 复用到别的程序）。"""
+    out = Path(order_dir) / "out"
+    try:
+        w = json.loads((out / "worker.json").read_text())
+    except (OSError, ValueError):
+        return None, "missing"
+    if not isinstance(w, dict):
+        return None, "missing"
+    if o.get("run_started") and str(w.get("at") or "") < o["run_started"]:
+        return w, "previous"
+    try:
+        if Path(str(w.get("out") or "")).resolve() != out.resolve():
+            return w, "mismatch"
+    except OSError:
+        return w, "mismatch"
+    state = check_identity(w)
+    if state == "match":
+        cmd = _ps_command(w["pid"])
+        if not cmd or f"{o['no']}/out" not in cmd:
+            return w, "unknown"
+    return w, state
+
+
+def _fresh_receipt(order_dir, o):
+    try:
+        rc = json.loads((Path(order_dir) / "out" / "receipt.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rc, dict):
+        return None
+    return rc if str(rc.get("ended") or "") >= str(o.get("run_started") or "") else None
+
+
+def vital_of(order, ledger_status="ok"):
+    """一张单的生命体征。心跳只作证据：不会因为心跳旧了就判停，也不会因此判失败或发信号。"""
+    if ledger_status != "ok":
+        return "unknown", "台账读不到", {}
+    if order is None:
+        return "unknown", "台账里没有这张单", {}
+    ls = order.get("status")
+    if ls in ("new", "queued"):
+        return "not_started", f"单还没开跑（{ls}）", {}
+    if ls != "running":
+        return "finished", f"台账已有结果 {ls}，对账会结算", {}
+    d = order.get("_dir") or ""
+    w, ws = worker_state(d, order)
+    ds = check_dispatch(order)
+    rc = _fresh_receipt(d, order)
+    ev = {"worker": ws, "dispatch": ds, "receipt": bool(rc),
+          "worker_pid": (w or {}).get("pid"), "worker_pgid": (w or {}).get("pgid")}
+    if ws == "match":
+        return "alive", "车间进程在，身份（pid、启动时间、主机、命令行）都对上", ev
+    if rc and ws == "gone":
+        why = "车间已退出并写了回执，等 dispatch 收尾" if ds == "match" else "车间已退出并写了回执，但 dispatch 已不在，台账停在 running"
+        return "finished", why, ev
+    if ws == "gone":
+        return "lost", "车间进程确认已不在、没有本轮回执：不自动判失败、不重试，留给人工", ev
+    if ds == "match":
+        return "suspect", "dispatch 还在，但车间身份核对不了（刚启动、没写身份或证据不全）", ev
+    return "unknown", "没有可核对的进程证据，不下判断", ev
+
+
+def observe(store, ledger=None, now=None):
+    """S3：所有活动 Run（已在状态库的）和台账里 running 的单的生命体征。只读：不改库、不改台账、不发信号。"""
+    ledger = ledger or store.read_orders()
+    by_no = {o["no"]: o for o in ledger.get("orders", [])}
+    now = now or store.clock()
+    out, seen = [], set()
+    for r in store.list_runs():
+        if r["status"] not in ts.RUN_ACTIVE:
+            continue
+        o = by_no.get(r["order_no"]) if r["order_no"] else None
+        vital, why, ev = vital_of(o, ledger["status"]) if r["order_no"] else ("unknown", "Run 没有工单号", {})
+        age = ts._age(now, r["heartbeat_at"])
+        out.append({"run": r["id"], "task_id": r["task_id"], "order_no": r["order_no"], "ledger_status": (o or {}).get("status"),
+                    "vital": vital, "why": why, "evidence": {**ev, "heartbeat_age": None if age is None else int(age)},
+                    "cancel_requested": bool(r["cancel_requested_at"])})
+        seen.add(r["order_no"])
+    for o in ledger.get("orders", []):
+        if o.get("status") == "running" and o["no"] not in seen:
+            vital, why, ev = vital_of(o)
+            out.append({"run": None, "task_id": None, "order_no": o["no"], "ledger_status": "running", "vital": vital,
+                        "why": why, "evidence": ev, "cancel_requested": False})
+    return out
+
+
+# ---------- S4 取消闭环 ----------
+def _production(dispatch_dir):
+    return Path(dispatch_dir).expanduser().resolve() == (Path.home() / ".hermes/dispatch").resolve()
+
+
+def cancel(store, ledger=None, send=False, wait=10.0, record=True):
+    """S4：处理 queue 的 cancel_pending（已撤销任务上还在活动的 Run）。
+    只有车间身份全对上（match）、且它是自己进程组的头（pgid = pid = sid）时，才可能对该进程组发 SIGTERM；
+    send=True 只给隔离测试用（真实派单根目录直接拒绝，命令行也不提供），真实路径只出建议。
+    发信号后有界等待并复核；停不下来只报告，不升级到 SIGKILL。身份不明、已退出、PID 复用一律不发信号。
+    结果（含建议）记成 run 上的事件，同一情形只记一次。"""
+    dispatch_dir = Path(store.dispatch_dir)
+    if send and _production(dispatch_dir):
+        raise ts.NotAuthorized("真实派单根目录上不发终止信号（B2.2 只在测试受控子进程上发），只出建议")
+    ledger = ledger or store.read_orders()
+    by_no = {o["no"]: o for o in ledger.get("orders", [])}
+    out = []
+    for item in store.queue(ledger=ledger)["cancel_pending"]:
+        r = store.get_run(item["id"])
+        o = by_no.get(r["order_no"]) if r["order_no"] else None
+        vital, why, ev = vital_of(o, ledger["status"]) if r["order_no"] else ("unknown", "Run 没有工单号", {})
+        res = {"run": r["id"], "task_id": r["task_id"], "order_no": r["order_no"], "vital": vital, "why": why, "evidence": ev}
+        if vital == "finished":
+            res.update(action="none", advice="已结束：对账结算 Run，结果不回写已撤销的任务")
+        elif vital == "not_started":
+            res.update(action="advice", advice=f"单还没开跑：确认后人工 dispatch.py clean {r['order_no']} 放弃")
+        elif vital != "alive":
+            res.update(action="advice", advice="身份核对不了或进程已不在：不发信号，人工核对进程和台账")
+        else:
+            w, _ = worker_state(o["_dir"], o)
+            if not (w.get("pid") == w.get("pgid") == w.get("sid")):
+                res.update(action="advice", advice="车间不是独立进程组的头，不能只停它：人工处理")
+            elif not send:
+                res.update(action="advice", advice=f"确认后对车间进程组 {w['pgid']} 发 SIGTERM（本批真实环境不自动执行）")
+            else:
+                res.update(_terminate(store, r, o, w, wait))
+        if record:
+            key = f"run.cancel:{r['id']}:{res['action']}:{res.get('result', vital)}:{(ev or {}).get('worker_pid')}"
+            store.ingest_event("system", f"run.cancel_{res.get('result') or res['action']}", key, "system",
+                               {k: v for k, v in res.items() if k != "evidence"}, "run", r["id"])
+        out.append(res)
+    return out
+
+
+def _terminate(store, r, o, w, wait):
+    sent_key = f"run.cancel_signal:{r['id']}:{w['pid']}:{w['started']}"
+    _, state = worker_state(o["_dir"], o)            # 发信号前最后再核一次身份（防检查与动作之间进程换人）
+    if state != "match":
+        return {"action": "advice", "result": "identity_changed", "advice": "发信号前复核身份不一致：没有发信号，人工核对"}
+    first = store.ingest_event("system", "run.cancel_signal", sent_key, "system",
+                               {"pgid": w["pgid"], "signal": "SIGTERM", "order_no": r["order_no"]}, "run", r["id"])
+    if first["applied"]:
+        try:
+            os.killpg(w["pgid"], signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if worker_state(o["_dir"], o)[1] != "match":
+            return {"action": "signal", "result": "stopped", "advice": "车间已停；dispatch 收尾后对账结算 Run（任务保持撤销）"}
+        time.sleep(0.1)
+    return {"action": "signal", "result": "still_running",
+            "advice": f"SIGTERM 后 {wait:g} 秒仍在：不升级 SIGKILL，人工处理进程组 {w['pgid']}"}
+
+
+# ---------- S6 低噪声报告：只报错误和要常浩决定的，同一情形只报一次（去重记在状态库事件里）----------
+LEVELS = {"error": "错误", "needs_user": "要常浩决定"}
+
+
+def findings(store, ledger=None):
+    """当前所有值得报的情形，每条带 level / kind / object / reason / why / fingerprint。只读。"""
+    ledger = ledger or store.read_orders()
+    items = []
+
+    def add(level, kind, obj, reason, why, anchor, **extra):
+        fp = hashlib.sha1(json.dumps([kind, obj, reason, anchor], ensure_ascii=False).encode()).hexdigest()[:16]
+        items.append({"level": level, "kind": kind, "object": obj, "reason": reason, "why": why, "fingerprint": fp, **extra})
+
+    plan = decide(store, ledger)
+    tasks = {t["id"]: t for t in store.list_tasks()}
+    for d in plan["decisions"]:
+        t = tasks[d["task_id"]]
+        if d["decision"] == "unsafe":
+            add("error", "task", d["task_id"], d["reason"], d["why"], t["updated_at"], next_action=d["next_action"])
+        elif d["reason"] in ("blocked_decision", "in_review", "retry_suggested", "retry_exhausted", "retry_repeated"):
+            add("needs_user", "task", d["task_id"], d["reason"], d["why"], t["updated_at"], next_action=d["next_action"])
+    for v in observe(store, ledger):
+        if v["vital"] == "lost" or (v["vital"] == "finished" and v["evidence"].get("dispatch") == "gone"):
+            add("error", "run", v["run"] or v["order_no"], v["vital"], v["why"], v["order_no"])
+        elif v["vital"] in ("suspect", "unknown") and v["ledger_status"] == "running":
+            add("needs_user", "run", v["run"] or v["order_no"], v["vital"], v["why"], v["order_no"])
+    for c in cancel(store, ledger, send=False, record=False):
+        if c["action"] == "advice":
+            add("needs_user", "cancel", c["run"], c["vital"], c["advice"], c["order_no"])
+    return items
+
+
+def _reported(store, fp):
+    return bool(store.conn.execute("SELECT 1 FROM events WHERE idem_key=?", (f"sched.report:{fp}",)).fetchone())
+
+
+def report(store, ledger=None):
+    """新出现的情形（以前没报过的）。不标记——送达后调 ack，送不到下次还会报（至少一次）。"""
+    return [f for f in findings(store, ledger) if not _reported(store, f["fingerprint"])]
+
+
+def ack(store, items):
+    """标记已报：每条一个 sched.report 事件，幂等键 sched.report:<指纹>，重复 ack 不重复记。"""
+    for f in items:
+        store.ingest_event("system", "sched.report", f"sched.report:{f['fingerprint']}", "system",
+                           {k: f[k] for k in ("level", "kind", "object", "reason")})
+    return len(items)
+
+
 # ---------- 命令行 ----------
 def done(ok, msg, **kw):
     print(json.dumps({"ok": ok, "msg": msg, **kw}, ensure_ascii=False, sort_keys=True))
@@ -440,6 +735,29 @@ def cmd_tick(a):
     done(not (out["unsafe"] or out["pending"]), f"调度一轮：{msg}", **out)
 
 
+def cmd_observe(a):
+    with ts.Store(a.db, dispatch_dir=a.dispatch, readonly=True) as s:
+        out = observe(s)
+    c = {k: sum(1 for v in out if v["vital"] == k) for k in VITALS}
+    done(True, "生命体征（只读）：" + ("；".join(f"{k} {v}" for k, v in c.items() if v) or "没有活动的单"), vitals=out, counts=c)
+
+
+def cmd_cancel(a):
+    with ts.Store(a.db, dispatch_dir=a.dispatch) as s:
+        out = cancel(s, send=False)
+    done(True, f"待停的 Run {len(out)} 个（只出建议，不发信号）", cancels=out)
+
+
+def cmd_report(a):
+    with ts.Store(a.db, dispatch_dir=a.dispatch) as s:
+        new = report(s)
+        if not new and a.quiet:
+            return
+        msg = "；".join(f"{LEVELS[f['level']]}：{f['kind']} {f['object']} {f['why']}" for f in new) or "没有新情况"
+        print(json.dumps({"ok": True, "msg": msg, "findings": new}, ensure_ascii=False, sort_keys=True))
+        ack(s, new)
+
+
 def cmd_recover(a):
     with ts.Store(a.db, dispatch_dir=a.dispatch) as s:
         out = recover_claims(s)
@@ -458,9 +776,13 @@ def main(argv=None):
     t.add_argument("--mode", choices=("read", "write"))
     t.add_argument("--limit", type=int, default=1)
     sub.add_parser("recover")
+    sub.add_parser("observe")
+    sub.add_parser("cancel")
+    sub.add_parser("report").add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     try:
-        {"plan": cmd_plan, "tick": cmd_tick, "recover": cmd_recover}[a.cmd](a)
+        {"plan": cmd_plan, "tick": cmd_tick, "recover": cmd_recover, "observe": cmd_observe, "cancel": cmd_cancel,
+         "report": cmd_report}[a.cmd](a)
     except ts.StateError as e:
         done(False, str(e), error=type(e).__name__)
 
