@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 31 项，共 119 项），末尾显示 `Ran 119 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 35 项 + 飞书身份桥接 17 项 + 统一事件接入 16 项 + 派单状态通知 10 项，共 166 项），末尾显示 `Ran 166 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -84,6 +84,19 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 - 任务书 B1.5 十项验收，按编号 `test_01` ～ `test_10`：建目标与任务（含不能跨目标依赖）；未授权不能进 ready / 不能开跑、Hermes 不能授权、目标撤销连带任务；一个任务多次 Run（失败 → 重试 → 成功，再挂一张既有工单）；Run 成功只到 review，merged / cleaned 不动任务，目标完成只有常浩能定；同一幂等键的开跑 / 回执 / 通用事件只处理一次（`dup_count` 计数），终态后的不同回执被拒；关库重开状态不变，没有台账的 Run 超时标 stale、任务转技术阻塞，迟到结果只记事件，依赖完成自动放行，running 却没 Run 的任务转阻塞，handler 中途抛异常整体回滚、同键可重来；失败 / 超时 / 护栏 / need_decision 各自的阻塞类型和原因；decision 类阻塞对 hermes / claude / codex / system 的重试与解阻塞一律拒绝且留痕，technical 重试与解阻塞共用上限；外部探针抛异常或返回空只记 `ref.unreachable`、任务不动，台账缺失时恢复不下判断，没有验收结论不能完成；台账同步只建未关联的 Run、不建目标和任务，坏文件跳过、重同步无变化、关联后台账跑完才反映到任务、台账跳状态也跟得上、目录不存在记“缺失”、旧台账文件原样。
 - 2026-10-29 第二轮评审的收口项（`FinalFixTests`，每项先在第二轮评审对象 `2e496f1` 上确认会失败）：F1 台账把 cleaned / guard / done 的工单改回 running / queued 且带来不同回执时，Run 的状态、回执、证据、会话、结束时间一个都不变，任务不动，`run.conflict` 事件带台账状态和有差异的回执 / 证据字段，同一状态下台账内容变了照常刷新；F2 decision 阻塞、已取消、已完成的任务和不是当前 Run 的旧 Run 主动续跑一律拒绝（Run 不变、没有 followup 事件，经事件入口时拒绝留痕），常浩本人可以，台账里实际发生的续跑把 Run 照实记 running、任务不动、记 `run.resume_conflict` 并计入 `conflicts`，常浩解开后台账跑完照常结算；F3 任务正由 B 执行时后导入并关联更早跑完的旧工单，当前 Run 仍是 B（`current_run_id`），旧工单的迟到结果只记 `run.late_result`，只挂过已结束 Run 的任务回退到最近开始的那个，关联进行中的 Run 才改归属；F4 源码里没有写死的 open_id，`owner_open_id()` 先读 `DT_OWNER_OPEN_ID` 再读 `DT_OWNER_FILE`（取第一个非空行，权限不是 600 不认），命令行没配置时 `--by user` 一律拒绝并提示怎么配，配好后只认配置里的那个；B3 审查 Run（`start_run(purpose="review")`）只对 review 里的任务开、审查方不能是执行方、任务状态不变、不成为当前 Run、一任务一活动 Run 不变，回执只记 `run.review_result` 不结算任务，结论由审查方引用审查 Run 写，审查失败或续跑也不碰任务。
 - 2026-10-29 独立评审返修项（`ReviewFixTests`，每项先在返修前的模块上确认会失败）：R1 decision 阻塞不能被非 user 改成别的类型再重试、非 user 只能升级成 decision、已阻塞任务改类型也查类型和原因；R2 过期的旧 Run 迟到成功 / 失败只改它自己，经台账续跑和跑完也一样，任务仍由当前 Run 推进；R3 空回执、缺字段、exit_code 不是整数都算失败并写明原因，只有 PR 引用或成功 Run 不等于验收通过，验收结论必须写依据并引用本任务证据、执行方不能自验、验收不通过退回 ready、续跑清掉结论、当前 Run 还在跑不能完成；R4 进行中的 Run 只能挂到 ready 且目标已授权的任务（observed / review / running / 终态都拒绝，项目对不上拒绝，不形成两个活动 Run），已结束的 Run 不能挂到终态任务，撤销任务 / 目标只记“已请求取消”、Run 仍 running 并可按 `cancel_pending` 查到，执行层真正停下后结果只记事件；幂等键重复新建目标 / 任务返回既有对象；台账回退、护栏降级、放弃后又完成记 `run.conflict` 不应用，done 之后续跑是 followup，done → cleaned 是允许的跳过；续跑规则（review / technical 阻塞可续，failed 续跑计一次重试，到上限或 decision 阻塞时主动续跑直接拒绝、Run 不动，guard 续跑只有常浩能定）；恢复先看台账（台账说在跑只列 suspect、台账给结果就结算、台账读不了记 unknown）；回执白名单。
-- 其余：非法转换与绕过状态机改状态；撤销规则；返工、心跳、引用；备份同秒不覆盖、恢复前完整性 / 版本检查、库版本护栏；库文件 600、目录 700；命令行往返（常浩的 open_id 从临时的 `DT_OWNER_FILE` 文件来，`--by user` 必须带这个 `--sender`，否则 `NotAuthorized`；init、goal-new、task-new、task-ready、run-start 带幂等键及重复、run-receipt、ref-add、run-start --purpose review 与审查回执、task-accept、task-complete、show、list、events、goal-complete、recover、backup、restore --yes）以及拒绝时 `ok: false`、退出码 1。
+- 其余：非法转换与绕过状态机改状态；撤销规则；返工、心跳、引用；备份同秒不覆盖、恢复前完整性 / 版本检查、库版本护栏；库文件 600、目录 700；命令行往返（常浩的 open_id 从临时的 `DT_OWNER_FILE` 文件来，`--by user` 必须带 `--message-id`（或 `HERMES_SESSION_MESSAGE_ID`）指向常浩本人最近在私聊里发的一条消息，由假 lark-cli（`DT_LARK_CLI`）回读核实，否则 `NotAuthorized`；一条消息只换一次动作，命令没成功时占用退回；init、goal-new、task-new、task-ready、run-start 带幂等键及重复、run-receipt、ref-add、run-start --purpose review 与审查回执、task-accept、task-complete、show、list、events、goal-complete、queue、reconcile、recover、backup、restore --yes）以及拒绝时 `ok: false`、退出码 1；输出里不带任何 open_id / chat_id 值。
+- B2.1（`IdentityStoreTests`、`QueueTests`）：v1 库打开自动迁到 v2（多一张 `identity_uses`），消息占用一次、退回后可再用；调度消费查询 `queue()` 的分桶——ready / waiting_deps（依赖未完成）/ blocked_decision / blocked_external / blocked_technical（retryable 与 needs_human 按重试上限分）/ cancel_pending / review（带有无回执与结论）/ unsafe（外部引用不可达、当前 Run 在台账找不到或台账缺失、台账冲突没处理），查询不改状态。
 
 系统 `/usr/bin/python3`（3.9.6）和 `python3`（3.14）都要能通过：模块只用 3.9 有的语法和标准库。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_state.py -v`。
+
+## 飞书可信身份桥接（test_twin_identity.py）
+
+测的是 `twin_identity.py`（B2.1 T03）。纯函数 `verify_message` 用注入的回读结果和固定时钟；`lark_fetch` 打桩 `subprocess.run`；命令行走假 lark-cli（`fake_lark.py` 的 `im +messages-mget`）和临时的 600 配置文件。覆盖：常浩本人、私聊、时效内才通过；别人、应用消息、群聊或没有会话信息、没配 `owner_chat_id`、过时效、未来时间、已撤回、回读失败、查不到、message_id 格式不对、没配 owner 一律拒绝且输出不带身份值；分钟级时间与偏差；回读固定用猛鬼兽 profile 的 bot 身份并去掉 HERMES / OPENCLAW 环境变量；`verify` 与 `setup-chat`（预览不写、`--write` 写 600 文件、别人的消息不认）。17 项。
+
+## 统一事件接入（test_twin_events.py）
+
+测的是 `twin_events.py`（B2.1 T02）。临时库、固定时钟、注入的飞书回读。覆盖：信封缺字段 / 来源与角色不配 / 正文当身份都拒；正文只留 sha1，信封自带的 verified / open_id 丢掉；user 事件经核实才应用并占用消息，别人、群聊、查不到的消息拒绝并留痕（applied=0）；一条消息只换一次动作，重复事件不再回读飞书、只计 dup_count；被 Store 拒绝的动作不消耗消息；Agent 回执重复只应用一次并记引用；旧 Run 的迟到回执只记 `run.late_result`；台账回退是冲突、证据不变；`order.sync` 用内容哈希键（同秒连写不漏）、没有 order.json 的目录只计 ignored、对账补漏；note 只留痕；Store 的授权规则经信封照常生效；命令行 ingest / validate / types。16 项。
+
+## 派单状态通知（test_dispatch_notify.py）
+
+测的是 `dispatch.py` 的 `notify_state`（B2.1 T04）与 `twin_state.reconcile`。和派单续跑测试一样加载源文件、替换根目录和 worker，`NOTIFY_LOG` 指向临时文件。覆盖：`DT_STATE_NOTIFY` 不设时什么都不碰；开着但状态库不存在绝不建库、只记日志；库存在时只同步这一张单、成功不记日志；通知抛错不影响派单、`order.json` 照写、日志留一行；经 `run` 命令整段 stdout 仍是一个 JSON；重复通知幂等；关掉通知时漏掉的变化由 `reconcile` 补上；台账冲突记日志、证据不动；need_decision 之后“先由 user 解阻塞再续跑”正常、顺序反了只记 `run.resume_conflict`。10 项。
