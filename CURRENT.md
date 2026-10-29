@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 合并前定向返修 F1 / F2（[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 同一分支，待复核）
+
+- 时间：开工 21:00
+- **来由**：ChatGPT 独立评审「有条件通过、暂不批准合并」（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2评审原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2评审原文.md)、任务书 [docs/reviews/2026-10-29-ChatGPT-B2.2返修任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2返修任务书原文.md)）：F1（P0）预留作废后迟到的旧关联键仍能开单、任务重新可派；F2（P1）报告打印即标记已报，投递失败会吞掉提醒。按源码核实属实；常浩确认 dispatch 开调度单时可读状态库、`report` 改为不自动标记、一次做完再交。
+- **做了什么**（详见交付报告第 9 节）：
+  - F1：执行器拉开单子进程前持久写“准备开单”标记，作废只认“没标记”或“子进程登记过且已退出”，否则 unsafe；`dispatch new --sched-key` 在派单锁里、建目录前只读状态库核对预留仍 claimed、项目一致，否则拒绝；新增游离单识别（决策 unsafe、报告 error、`recover` 退出码 1，不删不关联）。手工开单不读状态库、行为不变；锁顺序仍是派单锁 → 状态库。
+  - F2：`report` 只读、不标记；新增 `ack --fingerprint` 与 `deliver()`，只有确认送达才标记；D6 的 G5 改为可信投递确认接通前不得启用。
+  - 文档：D1 / D2 / D6 / 交付报告、tests README；评审原文与任务书入库。
+- 测试：新增 14 项先在 `4154ef0` 上两套 Python 各 `Ran 14 tests` `FAILED (failures=6, errors=6)`；返修后各 `Ran 14 tests` `OK`；全量 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 273 tests` `OK` 退出码 0；`/usr/bin/python3 …`（3.9.6）`Ran 273 tests` `OK` 退出码 0；`git diff --check` 无输出。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-rework-20261029/`。
+- 本轮新坑：无。（事实：“子进程身份没登记”不能推出“子进程没启动”，崩溃窗口里要先落“准备开单”标记再拉起；脚本 stdout 只是待投递内容，不能当送达确认。）
+- 没做：未合并、未安装、未建正式库、未建 cron、未改 `.env` / 技能 / SOUL / config / 网关、未操作真实工单；自动开单、真实取消信号、报告定时任务仍关闭。
+- 下一步：返修交 ChatGPT 复核；通过后按 D6 逐项批 B22-G1 合并 → G2 安装。
+
+---
+
 ## 2026-10-29 晚 · B2.2 持久调度与跨会话恢复（Issue #29，[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 待评审，未合并、未安装）
 
 - 时间：开工 17:29

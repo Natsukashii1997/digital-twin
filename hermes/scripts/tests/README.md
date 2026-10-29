@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项，共 259 项），末尾显示 `Ran 259 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 21 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 14 项，共 273 项），末尾显示 `Ran 273 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -111,10 +111,17 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 - 进程身份：match / gone / 僵尸 / PID 复用 / 别的主机 / 没记启动时间。
 - 生命体征：心跳过期 3 天仍 alive；dispatch 与车间都被杀 → lost（不判失败）；dispatch 被杀车间迟到回执 → finished；无身份、PID 复用、外来进程、上一轮身份都不认。
 - 取消：自有车间收 SIGTERM 停下、台账 failed、任务保持 canceled；与自然完成竞争不发信号；身份不明 0 信号；不理 SIGTERM 只报告不升级；真实派单根目录拒绝发信号、命令行只出建议。
-- 重试分级、低噪声报告（只报一次、未 ack 再报、重启后去重仍在、`--quiet` 空输出）；`tick --execute` 默认关闭。
+- 重试分级、低噪声报告（未确认送达每轮再报、`ack` 后才安静、重启后去重仍在、没有待报时 `--quiet` 空输出）；`tick --execute` 默认关闭。
 - 端到端：任务书 S7 场景 1、2、3、7、8（其余场景在上面各文件里），对照表在 `test_twin_scheduler_e2e.py` 文件头。
 
 ## 派单锁与进程身份（test_dispatch_lock.py）
 
 真实子进程跑 `dispatch.py`（`dispatch_harness.py`）。覆盖：4 个进程并行 `new` 编号互不相同；同仓库两张单同时 `run` 只跑一张、另一张排队；同一单同时 `run` 两次只跑一次；锁被占时等待有上限且不动作；`run` 记 `dispatch_pid / run_host / run_started`，车间 pid = pgid = sid；`write_identity` 与 `ps` 一致；`--sched-key` 写字段和标记文件、格式不对在编号前拒绝；手工 `new` 字段集合不变。改动前 9 项中 8 项失败。
+
+## 调度返修（test_twin_scheduler_rework.py）
+
+ChatGPT 2026-10-29 评审 F1 / F2 的负向用例，14 项，先在返修前 `4154ef0` 上跑红（6 FAIL + 6 ERROR）。`dispatch_harness.py` 加了 `H_PRELOCK_DELAY`（拿派单锁前先睡，模拟锁前慢 `git fetch`）和 `H_DONE_FILE`（进程退出时写文件，给迟到的开单进程计时）。覆盖：
+
+- F1：真实子进程在拉起迟到开单后、登记子进程身份前被 SIGKILL，租约过后预留判 unsafe 而不是 void，迟到的开单在锁内被拒、0 张单、任务不再可派；锁前慢 fetch 期间预留被作废，开单在锁内被拒；只有 claimed 的关联键能开单（void / released / unsafe / linked / 不存在 / 项目不符 / 状态库不存在都拒绝），手工开单照常；另一连接持写事务时开调度单不被阻塞（锁顺序）；游离单（已收口预留的单、未知关联键、半截目录）让任务 unsafe、报告报错误、`recover` 退出码 1，不删不关联；作废证明的三种情形。
+- F2：命令行输出被丢弃后仍待报；`deliver()` 只有确认送达（True 或指纹列表）才 ack，失败 / None / 其他值 / 异常都保留；部分确认；重复 ack 幂等；`report --quiet` 没确认前重复输出、`ack` 后安静；报告不生成任务或工单。
 
