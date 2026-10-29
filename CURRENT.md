@@ -6,7 +6,7 @@
 
 ---
 
-## 2026-10-29 晚 · B2.2 持久调度与跨会话恢复（Issue #29，PR 待评审，未合并、未安装）
+## 2026-10-29 晚 · B2.2 持久调度与跨会话恢复（Issue #29，[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 待评审，未合并、未安装）
 
 - 时间：开工 17:29
 - **来由**：ChatGPT《Hermes B2.2 持久调度与跨会话恢复 正式施工任务书 V1.0》（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2施工任务书原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2施工任务书原文.md)）。常浩定三项：允许 dispatch.py 做锁 / 进程身份 / `--sched-key` 最小改动；批 2 后停一次；SIGTERM 只对测试受控子进程真发，真实路径只出建议。分支 `claude/29-b2-2-scheduler`，worktree `~/Sandbox/worktrees/digital-twin-b2-2`；起点 PR #28 HEAD `ecbb50a`，#28 合并后变基到 main `b0d05a4`，主目录不动。
