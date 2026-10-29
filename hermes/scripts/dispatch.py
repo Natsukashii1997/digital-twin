@@ -32,6 +32,7 @@ ROOT = HOME / ".hermes/dispatch"
 WT_ROOT = HOME / ".hermes/worktrees"
 WORKER = HOME / ".hermes/scripts/run_worker.py"
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
+NOTIFY_LOG = Path(os.environ.get("DT_STATE_NOTIFY_LOG", "~/Library/Application Support/DigitalTwin/state-notify.log")).expanduser()
 MAX_RUNNING = 2
 # 推送前检查只查密钥和 Token（M3 B5-3）；受限内容靠规矩防
 SECRET = re.compile(
@@ -111,6 +112,38 @@ def load(no):
 def save(o):
     o["updated"] = dt.datetime.now().isoformat(timespec="seconds")
     (ROOT / o["no"] / "order.json").write_text(json.dumps(o, ensure_ascii=False, indent=2))
+    notify_state(o["no"])
+
+
+def notify_state(no):
+    """B2.1 T04：台账写入后通知状态库同步这一张单（写入后通知为主，twin_state.py reconcile 定时对账兜底）。
+    默认关闭：DT_STATE_NOTIFY=1 才动作；状态库文件不存在就跳过、绝不建库；任何异常只追加一行到 NOTIFY_LOG，
+    不改台账、不改命令结果、不往 stdout / stderr 写——派单本身永远不受影响。"""
+    if os.environ.get("DT_STATE_NOTIFY") != "1":
+        return None
+    try:
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import twin_state   # 同目录（安装副本在 ~/.hermes/scripts/）
+        out = twin_state.notify_order(ROOT / no, dispatch_dir=ROOT)    # 内部可信通知：根目录是自己的 ROOT，不是信封说的
+        if out.get("conflicts"):
+            _notify_log(f"{no} 台账与状态库冲突，没有应用，请人工核对：{'、'.join(out['conflicts'])}")
+        if out.get("skipped"):
+            _notify_log(f"{no} 没有同步：{'；'.join(str(x) for x in out['skipped'])}")
+        return out
+    except Exception as e:  # noqa: BLE001 —— 通知失败不能影响派单
+        _notify_log(f"{no} 通知状态库失败：{type(e).__name__}: {str(e)[:200]}")
+        return None
+
+
+def _notify_log(line):
+    try:
+        NOTIFY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(NOTIFY_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {line}\n")
+    except OSError:
+        pass
 
 
 def orders():

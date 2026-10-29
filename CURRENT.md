@@ -6,6 +6,43 @@
 
 ---
 
+## 2026-10-29 晚 · B2.1 定向返修（ChatGPT 评审 P0-1 / P0-2 / P1-1 / P1-2 / P1-3 + P2 一条；[PR #28](https://github.com/Natsukashii1997/digital-twin/pull/28) 同一分支，待复核）
+
+- 时间：开工 16:40
+- **来由**：ChatGPT 对 PR #28 独立评审「有条件通过」（原文 [docs/reviews/2026-10-29-ChatGPT-B2.1评审原文.md](docs/reviews/2026-10-29-ChatGPT-B2.1评审原文.md)）：P0 两条身份闭环、P1 三条事务 / 重试 / 来源边界要在同一分支定向返修。按源码逐条核实属实；常浩确认三项取舍（事务化命令行；配置缺失算临时失败；bot 身份裸 API `chat_mode` 判私聊）后开工。
+- **做了什么**（每条先写失败用例跑红再改，三个提交 `51b9248` → `73754ea` → `060de51`，详见 [docs/reviews/2026-10-29-B2.1-返修说明.md](docs/reviews/2026-10-29-B2.1-返修说明.md)）：
+  - P0-1 `twin_identity.verify_message`：回读 message_id 必须一致、`sender_type` 必须明确 `user`、`owner_chat_id` 必配且 `chat_id` 必须相等，p2p 标志只作附加证据；`lark_fetch` 要求恰好一条、就是这条、字段齐。
+  - P0-2 `setup-chat`：bot 身份 `GET /open-apis/im/v1/chats/{chat_id}` 取 `chat_mode`，只有 `p2p` 才写，群聊拒、拿不到 fail closed 给手工说明；`--write` 临时文件 + 原子替换，失败保留原文件。真实只读探针确认私聊返回 `chat_mode=p2p`（打码证据 `evidence/b2.1-rework-20261029/probe-chat.masked.json`）。
+  - P1-1 `twin_state` 命令行：`done()` 改抛 `_Done`，占用与动作同一事务，只有成功才提交；崩溃 / 拒绝 / `StateError` 整体回滚。
+  - P1-2 `twin_events`：临时失败不记事件可重试；永久拒绝锁住 event_id，再来返回 `rejected_before` 要新消息；命令行三种文案。
+  - P1-3 `Store.trusted_order_dir`：`order_dir` 必须是派单根目录的直接子目录、非符号链接、目录名等于单号；`dispatch.py` 通知传自己的 `ROOT`。
+  - P2 `normalize` 对 `identity / payload / refs` 非对象给 `EventError`。
+  - 文档：协议 1.4 / 1.6 / 2.1 / 2.4 / 2.5 / 3、接入清单步骤 3、tests README。
+- 测试：新用例先在 `9d5a363` 上跑红（身份 5 FAIL；再 4 FAIL + 1 ERROR；状态库 2 FAIL；事件 3 FAIL + 7 ERROR，证据 `*-red.txt`）；改后 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 188 tests` `OK` 退出码 0；`/usr/bin/python3 …`（3.9.6）`Ran 188 tests` `OK` 退出码 0（`full-regression.txt`）。原 166 项保留（1 项按评审反转）。真实环境只读（一次 bot 身份查会话信息）。
+- 本轮新坑：无。（事实：飞书 `GET /im/v1/chats/{chat_id}` 用 bot 身份对私聊返回 `chat_mode=p2p`，可作私聊判定；Python `Path.resolve()` 在 macOS 把 `/var` 解析到 `/private/var`，边界比对两边都要 resolve。）
+- 没做：未合并、未安装、未建正式库、未配 `owner_chat_id`、未改 `.env` / 技能 / SOUL / cron / 网关、未发真实派单。**技术基建完成 ≠ 正式可信自主授权可启用**：网关可信凭据、动作级确认仍留 B2.x。
+- 下一步：推送后 Issue #27 留评、返修说明交 ChatGPT 复核；复核通过后进入 PR #28 的最终技术合并审批，合并 / 安装与 `owner_chat_id` 配置、正式启用仍按接入清单第 2 节逐步单独批。
+
+---
+
+## 2026-10-29 · B2.1 状态、事件与可信身份接入（[PR #28](https://github.com/Natsukashii1997/digital-twin/pull/28) 待评审，未合并、未安装）
+
+- 时间：开工 15:00
+- **来由**：常浩《Hermes B2.1 正式工程交接与施工任务书 V1.1》；分批计划经常浩确认（T01 后停一次；`--by user` 只认飞书回读核实的消息；两项真实只读探针）。Issue #27，分支 `claude/27-b2-1-events`（从 `b2c553e`），worktree `~/Sandbox/worktrees/digital-twin-27-b2-1`，主目录不动。
+- **做了什么**：
+  - T01：隔离库（证据目录）用真实台账只读跑 `sync-orders / recover`，两套 Python 逐单核对 15 / 15 一致、0 目标 / 任务；3 个无 order.json 的目录、3 张无存档的历史续跑、2 单 need_decision；同秒连写漏 `merged_to`。报告 [docs/reviews/2026-10-29-B2.1-真实派单台账兼容性核验报告.md](docs/reviews/2026-10-29-B2.1-真实派单台账兼容性核验报告.md)；常浩定：C1、C2 做，C3 只记。
+  - T02 `hermes/scripts/twin_events.py`：统一信封 + 幂等接入，正文只留哈希，信封自带身份结论不信，拒绝留痕不消耗消息。
+  - T03 `hermes/scripts/twin_identity.py`：message_id → 猛鬼兽 bot 身份回读飞书 → 本人 / 私聊（本机 `owner_chat_id`）/ 时效 → 库 v2 `identity_uses` 一条消息一次动作；`twin_state.py --by user` 改走 `--message-id`，`--sender` 退役。探针 ①（bot 回读一条常浩私聊）做了，字段形状打码存证据；网关不签发可回验凭据，缺口与最小替代写进协议。
+  - T04 `dispatch.py save()` 后 `notify_state`（默认关闭、库不存在不建库、失败只记日志、stdout 不变）；`twin_state.py` 加 `sync_order / notify_order / reconcile`；C1 无 order.json 目录计 ignored，C2 幂等键改内容哈希。
+  - T05 `Store.queue()` 八桶 + 命令行 `queue`。T06 [docs/B2.1-Hermes接入与配置变更清单.md](docs/B2.1-Hermes接入与配置变更清单.md)。
+  - 文档：[docs/B2.1-事件与身份协议.md](docs/B2.1-事件与身份协议.md)、[docs/reviews/2026-10-29-B2.1-交付说明.md](docs/reviews/2026-10-29-B2.1-交付说明.md)（含测试记录与 B2.2 交接）；设计文档第 7 节加 B2.1 落地说明；tests README。
+- 测试：新用例先在 `b2c553e` 上跑 `Ran 47 tests` `FAILED (failures=4, errors=13)`；改后 `python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 166 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 166 tests` `OK`；原 119 项不动。真实环境只读（台账 mtime 不变；bot 回读一条私聊），证据 `~/Library/Application Support/DigitalTwin/evidence/b2.1-t01-20261029/`、`b2.1-t03-20261029/`、`b2.1-t02-t05-20261029/`。
+- 本轮新坑：无。（两条事实：系统 Python 3.9 不接受嵌套同引号的 f-string；lark-cli 的 bot 身份列不出私聊会话、`--user-id` 只认用户身份、回读结果没有会话类型，所以私聊判定靠本机 `owner_chat_id`。）
+- 没做：未合并、未安装、未建正式库、未配 `owner_chat_id`、未改 `.env` / 技能 / SOUL / cron / 网关、未发真实派单；探针 ②（常浩在飞书让 Hermes 只回 `HERMES_SESSION_*` 变量名）待常浩做；B2.2 项见交付说明 7.2。
+- 下一步：交 ChatGPT 独立评审；通过后常浩按接入清单第 2 节逐步批：合并 → 安装四个脚本 + 自检静默 → `setup-chat --write` 配 `owner_chat_id` → 探针 ② → 正式库 `init + backup + reconcile` → `.env` 加 `DT_STATE_NOTIFY=1`。明早 09:50 自检在合并前应静默。
+
+---
+
 ## 2026-10-29 · B0/B1 第二轮评审收口 F1～F4 + B3 审查接口（已合并 `11a69c0` 并安装）
 
 - 时间：开工 11:30

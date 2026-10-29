@@ -53,9 +53,10 @@ from pathlib import Path
 DEFAULT_DB = "~/Library/Application Support/DigitalTwin/twin-state.db"
 DEFAULT_DISPATCH = "~/.hermes/dispatch"
 DEFAULT_OWNER_FILE = "~/Library/Application Support/DigitalTwin/owner_open_id"   # 常浩的飞书 open_id 只放本机受控配置，不进仓库
+DEFAULT_OWNER_CHAT_FILE = "~/Library/Application Support/DigitalTwin/owner_chat_id"   # 常浩和 Hermes 私聊的 chat_id（B2.1 身份桥接判私聊用），同样 600
 OWNER_HINT = ("还没配置常浩的 open_id：设环境变量 DT_OWNER_OPEN_ID，或把 open_id 单行写进 "
               f"{DEFAULT_OWNER_FILE}（chmod 600；路径可用 DT_OWNER_FILE 改）；配置前 --by user 一律拒绝")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 GOAL_STATUSES = ("observed", "authorized", "completed", "canceled")
 TASK_STATUSES = ("observed", "ready", "running", "blocked", "review", "completed", "canceled")
@@ -72,6 +73,8 @@ BLOCK_KINDS = ("decision", "dependency", "external", "technical")
 ACTORS = ("user", "hermes", "claude", "codex", "system")
 SOURCES = ("user", "discovery", "agent", "system")
 OBJECT_TYPES = ("goal", "task", "run")
+QUEUE_BUCKETS = ("ready", "waiting_deps", "blocked_decision", "blocked_external", "blocked_technical",
+                 "cancel_pending", "review", "unsafe")   # B2.1 T05 调度消费查询的分桶
 MAX_RETRIES = 2            # 临时保护：technical 类阻塞最多自动重试几次，超过就要常浩定；按故障原因分级的策略留到 B2
 STALE_AFTER = 2 * 3600     # 秒：没有台账可查的 Run 超过这么久没有心跳就算过期；有台账的只提示 suspect，不单凭时间判定
 SUMMARY_CLIP = 1000        # 回执里的车间总结最多存多少字
@@ -135,7 +138,11 @@ CREATE TABLE refs (
   ref TEXT NOT NULL, url TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
   UNIQUE (object_type, object_id, kind, ref));
 """
-MIGRATIONS = [SCHEMA]  # 第 n 项把库从版本 n 升到 n+1；v1 在 2026-10-29 返修时定稿（此前没有任何已部署的库）；之后只追加
+MIGRATIONS = [
+    SCHEMA,   # v1 在 2026-10-29 返修时定稿（此前没有任何已部署的库）
+    # v2（B2.1 T03）：飞书消息占用登记——常浩的一条消息只换一次 user 动作（防重放）；由 claim_message 在和状态变化同一个事务里写
+    "CREATE TABLE identity_uses (message_id TEXT PRIMARY KEY, used_at TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT '')",
+]   # 第 n 项把库从版本 n 升到 n+1；改表结构只追加，不改已有项
 
 
 class StateError(Exception):
@@ -185,22 +192,30 @@ def _age(now, ts):
     return (now - last).total_seconds()
 
 
-def owner_open_id():
-    """常浩的飞书 open_id，只从本机受控配置取：先环境变量 DT_OWNER_OPEN_ID，再文件 DT_OWNER_FILE（默认 DEFAULT_OWNER_FILE，
-    取第一个非空行，权限必须是 600，否则拒绝并提示）。两处都没有返回 None。
-    这只用于命令行 --by user 的防误传核对，不是身份认证；个人身份标识不写进仓库源码（第二轮评审要求）。"""
-    v = (os.environ.get("DT_OWNER_OPEN_ID") or "").strip()
+def _local_config(env_name, file_env, default_file, what):
+    """本机受控配置：先读环境变量，再读单行文件（取第一个非空行；文件权限不是 600 不认）。没配置返回 None。"""
+    v = (os.environ.get(env_name) or "").strip()
     if v:
         return v
-    f = Path(os.environ.get("DT_OWNER_FILE") or DEFAULT_OWNER_FILE).expanduser()
+    f = Path(os.environ.get(file_env) or default_file).expanduser()
     try:
         mode = stat.S_IMODE(f.stat().st_mode)
         lines = [ln.strip() for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip()]
     except OSError:
         return None
     if mode & 0o077:
-        raise NotAuthorized(f"身份配置文件 {f} 的权限是 {mode:o}，必须是 600（chmod 600 该文件），否则不认")
+        raise NotAuthorized(f"{what}配置文件 {f} 的权限是 {mode:o}，必须是 600（chmod 600 该文件），否则不认")
     return lines[0] if lines else None
+
+
+def owner_open_id():
+    """常浩的飞书 open_id：环境变量 DT_OWNER_OPEN_ID，或 DT_OWNER_FILE / 默认文件。源码里不写死（F4）。"""
+    return _local_config("DT_OWNER_OPEN_ID", "DT_OWNER_FILE", DEFAULT_OWNER_FILE, "身份")
+
+
+def owner_chat_id():
+    """常浩和 Hermes 私聊的 chat_id：环境变量 DT_OWNER_CHAT_ID，或 DT_OWNER_CHAT_FILE / 默认文件（twin_identity.py setup-chat 写）。"""
+    return _local_config("DT_OWNER_CHAT_ID", "DT_OWNER_CHAT_FILE", DEFAULT_OWNER_CHAT_FILE, "私聊会话")
 
 
 def _diff(old, new):
@@ -414,6 +429,23 @@ class Store:
                 # 内层已回滚 handler 的改动；事件本身要留痕，记为拒绝
                 eid = self._record(source, kind, actor, object_type, object_id, payload, evidence, idem_key, False, str(e))
                 return {"applied": False, "event_id": eid, "rejected": str(e)}
+
+    # ---------- 身份：飞书消息占用（B2.1 T03）----------
+    def claim_message(self, message_id, purpose=""):
+        """登记“常浩的这条飞书消息已经换过一次 user 动作”；同一条消息再来一律拒绝（防重放）。
+        和状态变化放在同一个事务里：动作被拒绝时整体回滚，消息还能再用。"""
+        with self._tx() as c:
+            row = c.execute("SELECT used_at, purpose FROM identity_uses WHERE message_id=?", (message_id,)).fetchone()
+            if row:
+                raise NotAuthorized(f"这条飞书消息已经用过（{row['used_at']}，{row['purpose'] or '未注明'}）：一条消息只换一次动作，"
+                                    "要再做请常浩再说一次")
+            c.execute("INSERT INTO identity_uses (message_id, used_at, purpose) VALUES (?,?,?)", (message_id, self.now(), purpose))
+            return {"message_id": message_id, "claimed": True}
+
+    def release_message(self, message_id):
+        """动作没成功时把占用退回去（命令行用：拒绝、出错都退）。返回退掉的条数。"""
+        with self._tx() as c:
+            return c.execute("DELETE FROM identity_uses WHERE message_id=?", (message_id,)).rowcount
 
     # ---------- 读取 ----------
     def _row(self, table, key, value):
@@ -1112,38 +1144,57 @@ class Store:
             return {"reachable": True, "seen": seen}
 
     # ---------- 与派单台账兼容 ----------
+    @staticmethod
+    def read_order(d):
+        """只读读一张单的目录：返回 (order 或 None, 错误或 None)。两个都是 None 表示这不是工单目录（没有 order.json）。
+        order 带 _receipt（out/receipt.json，坏的当空）、_dir，以及 _hash：order.json 与 receipt.json 原文的哈希，
+        同步幂等键用——同一份内容只处理一次，同一秒连写两次也分得开（C2）。"""
+        d = Path(d)
+        try:
+            raw = (d / "order.json").read_bytes()
+            o = json.loads(raw.decode("utf-8"))
+        except FileNotFoundError:
+            return None, None
+        except (OSError, ValueError) as e:
+            return None, f"{d.name}：{type(e).__name__}"
+        if not isinstance(o, dict) or not o.get("no"):
+            return None, f"{d.name}：不是工单"
+        rc = d / "out/receipt.json"
+        rraw = b""
+        try:
+            rraw = rc.read_bytes() if rc.is_file() else b""
+            o["_receipt"] = json.loads(rraw.decode("utf-8")) if rraw else {}
+            if not isinstance(o["_receipt"], dict):
+                o["_receipt"] = {}
+        except (OSError, ValueError):
+            o["_receipt"] = {}
+        o["_dir"] = str(d)
+        o["_hash"] = hashlib.sha1(raw + b"\0" + rraw).hexdigest()[:16]
+        return o, None
+
     def read_orders(self, dispatch_dir=None):
-        """只读扫描派单目录。返回 {"status": ok / missing / unreadable, "orders": [...], "errors": [...]}：
-        目录不存在、读不了、没有任何工单是三种不同情况，调用方据此决定能不能下判断。"""
+        """只读扫描派单目录。返回 {"status": ok / missing / unreadable, "orders", "errors", "ignored"}：
+        目录不存在、读不了、没有任何工单是三种不同情况，调用方据此决定能不能下判断；
+        有 task.md 或 out/ 却没有 order.json 的 D* 目录不是工单，只记进 ignored（C1：对账时看得见，不导入、不报错）。"""
         root = Path(dispatch_dir or self.dispatch_dir).expanduser()
-        out = {"status": "ok", "path": str(root), "orders": [], "errors": []}
+        out = {"status": "ok", "path": str(root), "orders": [], "errors": [], "ignored": []}
         if not root.is_dir():
             out["status"] = "missing"
             return out
         try:
-            files = sorted(root.glob("D*/order.json"))
+            dirs = sorted(p for p in root.glob("D*") if p.is_dir())
         except OSError as e:
             out["status"], out["errors"] = "unreadable", [str(e)]
             return out
-        for f in files:
-            try:
-                o = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as e:
-                out["errors"].append(f"{f.parent.name}：{type(e).__name__}")
-                continue
-            if not isinstance(o, dict) or not o.get("no"):
-                out["errors"].append(f"{f.parent.name}：不是工单")
-                continue
-            rc = f.parent / "out/receipt.json"
-            try:
-                o["_receipt"] = json.loads(rc.read_text(encoding="utf-8")) if rc.is_file() else {}
-                if not isinstance(o["_receipt"], dict):
-                    o["_receipt"] = {}
-            except (OSError, ValueError):
-                o["_receipt"] = {}
-            o["_dir"] = str(f.parent)
-            out["orders"].append(o)
-        if not out["orders"] and out["errors"] and len(out["errors"]) == len(files):
+        for d in dirs:
+            o, err = self.read_order(d)
+            if o:
+                out["orders"].append(o)
+            elif err:
+                out["errors"].append(err)
+            else:
+                out["ignored"].append(d.name)
+        if not out["orders"] and out["errors"] and len(out["errors"]) == len(dirs) - len(out["ignored"]):
             out["status"] = "unreadable"
         return out
 
@@ -1153,35 +1204,87 @@ class Store:
                 return o.get("status")
         return None
 
+    @staticmethod
+    def order_key(o):
+        """台账同步的幂等键：单号 + 文件内容哈希（C2）。写入后通知和定时对账算出同一个键，互相去重。"""
+        tail = o.get("_hash") or f"{o.get('updated') or o.get('created')}:{o.get('status')}"
+        return f"order.sync:{o['no']}:{tail}"
+
+    def _sync_one(self, o, by, stats):
+        stats["seen"] += 1
+        status = o.get("status")
+        if status not in RUN_STATUSES:
+            stats["skipped"].append(f"{o['no']}：状态 {status} 不认识")
+            return None
+        res = self.ingest_event("system", "order.sync", self.order_key(o), by,
+                                {"no": o["no"], "status": status, "hash": o.get("_hash")}, "run", o["no"],
+                                handler=lambda s, o=o, status=status: s._apply_order(o, status, by))
+        if not res["applied"] or res["result"] == "unchanged":
+            stats["unchanged"] += 1
+        elif res["result"] == "created":
+            stats["created"] += 1
+        elif res["result"] == "conflict":
+            stats["conflicts"].append(o["no"])
+        elif res["result"] == "resume_conflict":
+            stats["conflicts"].append(o["no"])   # Run 改了（续跑事实），任务没动：两边都算
+            stats["updated"] += 1
+        else:
+            stats["updated"] += 1
+        return res
+
+    @staticmethod
+    def _stats(ledger_status, errors=(), ignored=0):
+        return {"ledger": ledger_status, "seen": 0, "created": 0, "updated": 0, "unchanged": 0, "conflicts": [],
+                "skipped": list(errors), "ignored": ignored}
+
     def sync_orders(self, dispatch_dir=None, by="system"):
         """把派单台账同步成 Run：新工单登记为未关联的 Run（不建目标、不建任务）；状态变了才更新；
-        已关联任务的 Run 到结果状态时按同一套规则反映到任务。同一份 order.json（同一个 updated）只处理一次。
+        已关联任务的 Run 到结果状态时按同一套规则反映到任务。同一份 order.json + receipt.json（同一个内容哈希）只处理一次。
         台账是执行层事实来源，但状态回退、护栏降级、终态再变一律拦下来记 run.conflict（先判冲突再合并，冲突时不碰
         回执与证据）；台账里实际发生的续跑照实把 Run 记成 running，任务侧不合规则时记 run.resume_conflict，
-        两种冲突都进返回值的 conflicts。"""
+        两种冲突都进返回值的 conflicts。没有 order.json 的目录只计 ignored。"""
         ledger = self.read_orders(dispatch_dir)
-        stats = {"ledger": ledger["status"], "seen": 0, "created": 0, "updated": 0, "unchanged": 0,
-                 "conflicts": [], "skipped": list(ledger["errors"])}
+        stats = self._stats(ledger["status"], ledger["errors"], len(ledger["ignored"]))
         for o in ledger["orders"]:
-            stats["seen"] += 1
-            status = o.get("status")
-            if status not in RUN_STATUSES:
-                stats["skipped"].append(f"{o['no']}：状态 {status} 不认识")
-                continue
-            key = f"order.sync:{o['no']}:{o.get('updated') or o.get('created')}:{status}"
-            res = self.ingest_event("system", "order.sync", key, by, {"no": o["no"], "status": status}, "run", o["no"],
-                                    handler=lambda s, o=o, status=status: s._apply_order(o, status, by))
-            if not res["applied"]:
-                stats["unchanged"] += 1
-            elif res["result"] == "created":
-                stats["created"] += 1
-            elif res["result"] == "conflict":
-                stats["conflicts"].append(o["no"])
-            elif res["result"] == "resume_conflict":
-                stats["conflicts"].append(o["no"])   # Run 改了（续跑事实），任务没动：两边都算
-                stats["updated"] += 1
-            else:
-                stats["updated"] += 1
+            self._sync_one(o, by, stats)
+        return stats
+
+    def trusted_order_dir(self, order_dir):
+        """P1-3（ChatGPT 评审 2026-10-29）：只认派单根目录（self.dispatch_dir）的直接子目录——实路径比对、目录本身不能是符号链接。
+        信封里 source="dispatch" 的字符串不算来源证明，路径边界才算。不合规抛 NotAuthorized。返回实路径。"""
+        d = Path(order_dir).expanduser()
+        if d.is_symlink():
+            raise NotAuthorized(f"工单目录是符号链接，不同步：{d.name}")
+        root = Path(self.dispatch_dir).expanduser().resolve()
+        real = d.resolve()
+        if real.parent != root:
+            raise NotAuthorized(f"工单目录不在派单根目录之内（必须是 {root.name}/ 下的直接子目录），不同步")
+        return real
+
+    def sync_order(self, order_dir, by="system"):
+        """只同步一张单（B2.1 T04：dispatch.py 写入台账后的通知走这里）。和 sync_orders 用同一个幂等键，两条路互相去重。
+        order_dir 必须通过 trusted_order_dir，且目录名等于 order.json 的 no（P1-3）。"""
+        real = self.trusted_order_dir(order_dir)
+        o, err = self.read_order(real)
+        if o and o["no"] != real.name:
+            raise NotAuthorized(f"工单目录名 {real.name} 与 order.json 的单号不一致，不同步")
+        stats = self._stats("ok" if o else "missing", [err] if err else [], 0 if (o or err) else 1)
+        if o:
+            self._sync_one(o, by, stats)
+        return stats
+
+    def reconcile(self, dispatch_dir=None, by="system"):
+        """定时对账（写入后通知的兜底，B2.1 T04）：整个台账同步一遍，这次才补上的单（新建或更新）列进 missed——
+        通知开着时它们就是漏掉的通知；另带没有 order.json 的目录名和冲突单，给人看。"""
+        ledger = self.read_orders(dispatch_dir)
+        stats = self._stats(ledger["status"], ledger["errors"], len(ledger["ignored"]))
+        stats["ignored_dirs"] = list(ledger["ignored"])
+        stats["missed"] = []
+        for o in ledger["orders"]:
+            before = (stats["created"], stats["updated"])
+            self._sync_one(o, by, stats)
+            if (stats["created"], stats["updated"]) != before:
+                stats["missed"].append(o["no"])
         return stats
 
     def _resync_kind(self, src, dst):
@@ -1230,13 +1333,15 @@ class Store:
             return "conflict"
         merged = {**r["receipt"], **receipt}
         ev = {**r["evidence"], **evidence}
-        self._touch("runs", r["id"], receipt=_json(merged), evidence=_json(ev),
-                    session_id=merged.get("session_id") or r["session_id"])
+        changed = merged != r["receipt"] or ev != r["evidence"]
+        if changed:
+            self._touch("runs", r["id"], receipt=_json(merged), evidence=_json(ev),
+                        session_id=merged.get("session_id") or r["session_id"])
         r["receipt"], r["evidence"] = merged, ev
         if how is None:
             if status == "running":
                 self._touch("runs", r["id"], heartbeat_at=self.now())  # 台账文件还在变，就当有心跳
-            return "updated"
+            return "updated" if changed else "unchanged"   # 只是重写了文件（内容哈希变了）但没新东西：算 unchanged
         if how in ("followup", "undo_stale"):
             was = r["status"]
             self._run_to(r, "running", by, "system", kind="run.followup" if how == "followup" else "run.resync")
@@ -1252,6 +1357,90 @@ class Store:
         if status in RUN_RESULT:
             self._settle_task_after_run(r, by)
         return "updated"
+
+    # ---------- 调度消费查询（B2.1 T05：B2.2 的持久调度层读这里，本批不执行调度）----------
+    def queue(self, dispatch_dir=None):
+        """只读：按“下一步能不能自动推进”把对象分桶，每项带 id / title / since 和原因，不改任何状态。
+        ready              已授权、依赖都完成、没有进行中 Run 的 ready 任务——可以派
+        waiting_deps       ready 或 blocked(dependency)，但依赖没完成
+        blocked_decision   等常浩决定（只有经核实的 user 事件能解）
+        blocked_external   等外部条件
+        blocked_technical  技术失败：retryable（重试没到上限）/ needs_human（到上限，要常浩定）
+        cancel_pending     已请求取消、执行层还没停的 Run（B2.2 去停）
+        review             待验收的任务（带有没有结论、当前 Run 有没有回执、引用数）
+        unsafe             不能自动推进：目标不再 authorized、ready 却有活动 Run、running 却没活动 Run、
+                           当前 Run 在台账里查不到、待验收却没回执、外部引用最近一次探针不可达、台账冲突没处理"""
+        ledger = self.read_orders(dispatch_dir)
+        out = {k: [] for k in QUEUE_BUCKETS}
+        out["ledger"] = ledger["status"]
+        goals = {g["id"]: g for g in self.list_goals()}
+
+        def item(t, **extra):
+            return {"id": t["id"], "goal_id": t["goal_id"], "title": t["title"], "status": t["status"],
+                    "since": t["updated_at"], **extra}
+
+        def unsafe(obj, why, **extra):
+            out["unsafe"].append({"id": obj["id"], "title": obj.get("title"), "why": why, "since": obj.get("updated_at"), **extra})
+
+        for t in self.list_tasks():
+            if t["status"] in TASK_TERMINAL or t["status"] == "observed":
+                continue
+            g = goals.get(t["goal_id"]) or {}
+            if g.get("status") != "authorized":
+                unsafe(t, f"目标 {t['goal_id']} 当前是 {g.get('status')}，不再推进")
+                continue
+            unmet = self._unmet(t)
+            active = [r["id"] for r in self.list_runs(t["id"]) if r["status"] in RUN_ACTIVE]
+            if t["status"] == "ready":
+                if unmet:
+                    out["waiting_deps"].append(item(t, depends_on=unmet))
+                elif active:
+                    unsafe(t, f"ready 却有进行中的 Run：{'、'.join(active)}", runs=active)
+                else:
+                    out["ready"].append(item(t, next_step=t["next_step"], acceptance=t["acceptance"], retries=t["retries"]))
+            elif t["status"] == "blocked":
+                kind = t["blocked_kind"]
+                entry = item(t, kind=kind, reason=t["blocked_reason"])
+                if kind == "dependency":
+                    out["waiting_deps"].append(item(t, depends_on=unmet, reason=t["blocked_reason"]))
+                elif kind == "decision":
+                    out["blocked_decision"].append(entry)
+                elif kind == "external":
+                    out["blocked_external"].append(entry)
+                else:
+                    stuck = t["retries"] >= self.max_retries
+                    out["blocked_technical"].append({**entry, "retries": t["retries"], "retryable": not stuck, "needs_human": stuck})
+            elif t["status"] == "review":
+                cur = self.current_run(t["id"])
+                out["review"].append(item(t, verdict=t["verdict"], run=cur["id"] if cur else None,
+                                          has_receipt=bool(cur and cur["receipt"]), refs=len(self.refs("task", t["id"]))))
+                if not cur or not cur["receipt"]:
+                    unsafe(t, "待验收却没有回执可核", run=cur["id"] if cur else None)
+            elif t["status"] == "running":
+                cur = self.current_run(t["id"])
+                if not cur or cur["status"] not in RUN_ACTIVE:
+                    unsafe(t, "running 却没有进行中的 Run（等 recover 处理）", run=cur["id"] if cur else None)
+                elif cur["order_no"] and ledger["status"] != "ok":
+                    unsafe(t, f"台账 {ledger['status']}，当前 Run {cur['id']} 的状态查不到", run=cur["id"])
+                elif cur["order_no"] and self.ledger_status(cur["order_no"], ledger) is None:
+                    unsafe(t, f"当前 Run {cur['id']} 的工单 {cur['order_no']} 在台账里找不到", run=cur["id"])
+            refs = self.events(object_type="task", object_id=t["id"])
+            last_ref = next((e for e in reversed(refs) if e["kind"].startswith("ref.")), None)
+            if last_ref and last_ref["kind"] == "ref.unreachable":
+                unsafe(t, f"外部引用最近一次探针不可达：{last_ref['payload']}", since=last_ref["at"])
+        for r in self.list_runs(cancel_pending=True):
+            out["cancel_pending"].append({"id": r["id"], "task_id": r["task_id"], "order_no": r["order_no"], "status": r["status"],
+                                          "since": r["cancel_requested_at"], "by": r["cancel_requested_by"]})
+        for r in self.list_runs():
+            evs = self.events(object_type="run", object_id=r["id"])
+            last = max((e["id"] for e in evs if e["kind"] in ("run.conflict", "run.resume_conflict")), default=None)
+            if last is None:
+                continue
+            if not [e for e in evs if e["id"] > last and e["applied"] and e["kind"] not in ("run.conflict", "run.resume_conflict")]:
+                e = next(x for x in evs if x["id"] == last)
+                out["unsafe"].append({"id": r["id"], "task_id": r["task_id"], "order_no": r["order_no"],
+                                      "why": f"台账冲突没有处理：{e['kind']}", "since": e["at"], "conflict": e["payload"]})
+        return out
 
     # ---------- 恢复 ----------
     def recover(self, now=None, stale_after=STALE_AFTER, probe=None, dispatch_dir=None, by="system"):
@@ -1331,27 +1520,70 @@ class Store:
         return out
 
 
+def notify_order(order_dir, db=None, by="system", dispatch_dir=None):
+    """B2.1 T04：派单台账写入后的通知入口（dispatch.py 的 save() 调）。状态库文件不存在就跳过、绝不建库
+    （正式库只由 init 建）；存在才同步这一张单。dispatch_dir 是调用方自己的派单根目录（dispatch.py 传 ROOT），
+    order_dir 必须在它之内（P1-3）。返回和 sync_orders 同形状的统计。"""
+    path = Path(db or os.environ.get("DT_STATE_DB", DEFAULT_DB)).expanduser()
+    if not path.exists():
+        out = Store._stats("skipped", [f"状态库 {path} 不存在，没有同步（不自动建库）"])
+        out["db"] = str(path)
+        return out
+    with Store(path, dispatch_dir=dispatch_dir) as s:
+        out = s.sync_order(order_dir, by)
+    out["db"] = str(path)
+    return out
+
+
 # ---------- 命令行 ----------
+class _Done(BaseException):
+    """命令行结果（P1-1）：done() 抛它、不直接退出，run_cli 据 ok 决定提交还是回滚，main() 顶层打印并退出。
+    继承 BaseException：中间任何 except Exception 都接不到它。"""
+
+    def __init__(self, ok, msg, kw):
+        super().__init__(msg)
+        self.ok, self.msg, self.kw = ok, msg, kw
+
+
 def done(ok, msg, **kw):
-    print(json.dumps({"ok": ok, "msg": msg, **kw}, ensure_ascii=False, default=str))
-    sys.exit(0 if ok else 1)
+    raise _Done(ok, msg, kw)
+
+
+def _exit(d):
+    print(json.dumps({"ok": d.ok, "msg": d.msg, **d.kw}, ensure_ascii=False, default=str))
+    sys.exit(0 if d.ok else 1)
 
 
 def _by(a):
-    """--by 的程序校验：角色必须合法；--by user 还必须带 --sender 且等于本机受控配置里常浩的 open_id（owner_open_id），
-    没配置时一律拒绝并提示怎么配。这只是防止调用方误传，不是身份认证——核实发言人是谁，是调用方（Hermes 技能）的责任。"""
+    """--by 的程序校验：角色必须合法。--by user 的身份核实在 _user_turn（进命令之前做），这里不再认 --sender：
+    角色名和命令行参数都不是身份，身份只能从飞书回读来（B2.1 T03）。"""
     if a.by not in ACTORS:
         done(False, f"--by 只能是 {'/'.join(ACTORS)}")
-    if a.by == "user":
-        try:
-            owner = owner_open_id()
-        except StateError as e:
-            done(False, str(e), error="NotAuthorized")
-        if not owner:
-            done(False, OWNER_HINT, error="NotAuthorized")
-        if getattr(a, "sender", None) != owner:
-            done(False, "--by user 必须带 --sender <open_id>，且只能是常浩本人；调用方要先核实发言人再传", error="NotAuthorized")
     return a.by
+
+
+def _user_turn(a):
+    """--by user 的准入（B2.1 T03）：必须给 --message-id（Hermes 会话里可省略，读 HERMES_SESSION_MESSAGE_ID——只是指针），
+    用猛鬼兽 bot 身份回读飞书核实这条消息是常浩本人最近在私聊里发的。这里只核实、不碰库；占用登记（一条消息只换一次动作）
+    由 run_cli 和业务动作放进同一个事务（P1-1）。任何一步不过都拒绝；成功返回 message_id。"""
+    if getattr(a, "by", None) != "user":
+        return None
+    mid = getattr(a, "message_id", None) or os.environ.get("HERMES_SESSION_MESSAGE_ID")
+    if not mid:
+        done(False, "--by user 必须带 --message-id <常浩这条指令的飞书消息 id>（Hermes 会话里可省略，读 HERMES_SESSION_MESSAGE_ID）："
+                    "状态库会用猛鬼兽 bot 身份回读飞书核实是常浩本人在私聊里说的，角色名不是身份", error="NotAuthorized")
+    try:
+        owner, chat = owner_open_id(), owner_chat_id()
+    except StateError as e:
+        done(False, str(e), error="NotAuthorized")
+    if not owner:
+        done(False, OWNER_HINT, error="NotAuthorized")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import twin_identity   # 同目录
+    v = twin_identity.verify_message(mid, owner, owner_chat_id=chat)
+    if not v["ok"]:
+        done(False, f"身份核实不通过：{v['reason']}", error="NotAuthorized", message_id=mid)
+    return mid
 
 
 def _read_json(path):
@@ -1365,11 +1597,15 @@ def _type_of(obj_id):
     return {"G": "goal", "T": "task"}.get(obj_id[:1].upper(), "run")
 
 
-BY = [("--by", dict(required=True)), ("--sender", dict(help="--by user 时必填：发言人的飞书 open_id"))]
+BY = [("--by", dict(required=True)),
+      ("--message-id", dict(help="--by user 时必填：常浩这条指令的飞书消息 id（Hermes 会话里可省略，读 HERMES_SESSION_MESSAGE_ID）；"
+                                 "状态库回读飞书核实，一条消息只换一次动作"))]
 COMMANDS = {
     "init": [], "backup": [("--to",)], "restore": [("--from", dict(dest="src", required=True)), ("--yes", dict(action="store_true"))],
     "recover": [("--stale-after", dict(type=int, default=STALE_AFTER)), ("--dispatch",), ("--no-sync", dict(action="store_true"))],
     "sync-orders": [("--dispatch",)],
+    "reconcile": [("--dispatch",)],
+    "queue": [("--dispatch",), ("--bucket", dict(choices=QUEUE_BUCKETS))],
     "goal-new": [("--title", dict(required=True)), *BY, ("--description", dict(default="")),
                  ("--status", dict(default="observed")), ("--scope", dict(default="")), ("--project",),
                  ("--phase", dict(default="")), ("--done-when", dict(default="")), ("--key",)],
@@ -1391,7 +1627,7 @@ COMMANDS = {
     "run-start": [("--task", dict(required=True)), ("--agent", dict(required=True)), *BY, ("--order",), ("--session",), ("--key",),
                   ("--purpose", dict(default="execute", choices=RUN_PURPOSES, help="review：给 review 里的任务开只读审查 Run"))],
     "run-finish": [("id",), ("--status", dict(required=True, choices=RUN_STATUSES)), *BY, ("--receipt",), ("--key",)],
-    "run-receipt": [("id",), ("--receipt", dict(required=True)), ("--by", dict(default="hermes")), ("--sender",), ("--key",)],
+    "run-receipt": [("id",), ("--receipt", dict(required=True)), ("--by", dict(default="hermes")), ("--message-id",), ("--key",)],
     "run-resume": [("id",), *BY, ("--note", dict(default=""))],
     "run-link": [("run",), ("--task", dict(required=True)), *BY],
     "ref-add": [("--type", dict(required=True, choices=OBJECT_TYPES)), ("--id", dict(required=True)),
@@ -1401,8 +1637,39 @@ COMMANDS = {
 }
 
 
+def _run(s, a, turn):
+    """跑一条命令，把结果收成 _Done（不抛 StateError）：--by user 时先登记消息占用，再做动作，二者同一事务由 run_cli 保证。"""
+    try:
+        if turn:
+            s.claim_message(turn, purpose=a.cmd)
+        _commands(s, a)
+        return _Done(False, f"命令 {a.cmd} 没有给出结果", {"error": "Internal"})
+    except _Done as d:
+        return d
+    except StateError as e:
+        kw = {"error": type(e).__name__}
+        if turn:
+            kw["message_id"] = turn
+        return _Done(False, str(e), kw)
+
+
 def run_cli(a):
+    """P1-1：--by user 的网络核实放在事务之前；消息占用和业务动作放在同一个 _tx 里，只有 _Done(ok=True) 才提交——
+    拒绝、StateError、进程中途被杀（任何 BaseException）都整体回滚，占用和半截动作一起退，常浩不用再说一遍。"""
     with Store(a.db) as s:
+        turn = _user_turn(a)
+        if not turn:
+            d = _run(s, a, None)
+        else:
+            with s._tx():
+                d = _run(s, a, turn)
+                if not d.ok:
+                    raise d          # _tx 回滚后继续往上抛，main 打印
+    raise d
+
+
+def _commands(s, a):
+    if True:
         if a.cmd == "init":
             done(True, f"状态库就绪：{s.path}（schema v{s.version()}）", **s.summary())
         if a.cmd == "backup":
@@ -1414,6 +1681,20 @@ def run_cli(a):
         if a.cmd == "sync-orders":
             st = s.sync_orders(a.dispatch)
             done(True, f"派单台账已同步（台账 {st['ledger']}）", **st)
+        if a.cmd == "queue":
+            q = s.queue(a.dispatch)
+            if a.bucket:
+                done(True, f"{a.bucket}：{len(q[a.bucket])} 项", bucket=a.bucket, items=q[a.bucket], ledger=q["ledger"])
+            counts = {k: len(q[k]) for k in QUEUE_BUCKETS}
+            done(True, "；".join(f"{k} {v}" for k, v in counts.items() if v) or "没有待推进的对象", counts=counts, **q)
+        if a.cmd == "reconcile":
+            st = s.reconcile(a.dispatch)
+            body = f"补上 {len(st['missed'])} 单" if st["missed"] else "没有漏掉的"
+            if st["conflicts"]:
+                body += f"；冲突 {len(st['conflicts'])} 单要人工核对"
+            if st["ignored_dirs"]:
+                body += f"；{len(st['ignored_dirs'])} 个目录没有 order.json 不算工单"
+            done(True, f"对账完成（台账 {st['ledger']}）：{body}", **st)
         if a.cmd == "recover":
             synced = None if a.no_sync else s.sync_orders(a.dispatch)
             out = s.recover(stale_after=a.stale_after, dispatch_dir=a.dispatch)
@@ -1491,8 +1772,10 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         run_cli(a)
+    except _Done as d:
+        _exit(d)
     except StateError as e:
-        done(False, str(e), error=type(e).__name__)
+        _exit(_Done(False, str(e), {"error": type(e).__name__}))
 
 
 if __name__ == "__main__":
