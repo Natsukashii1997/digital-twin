@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-29 晚 · B2.1 合并（G1）与安装（G2）：已合并 `04b208d`、四个脚本已安装，未启用
+
+- 时间：开工 17:20
+- **来由**：ChatGPT 复跑 188/188 后出《B2.1 合并与安装收尾交接 V1.0》，B2.1 技术返修通过；常浩 17:28 说「合并并安装」，即批准 G1 合并 PR #28、G2 安装四个脚本；G3–G7 未批。
+- **做了什么**：
+  - 合并前复核：PR HEAD 仍是已验收的 `ecbb50a`；`origin/main...HEAD` = 0 / 8，无需变基；主目录无未推提交；PR 差异密钥扫描无命中。
+  - G1：`gh pr merge 28 --squash --match-head-commit ecbb50a…` → 合并提交 `04b208d`，文件树与 `ecbb50a` 完全一致；Issue #27 自动关闭；远端分支自动删除；主目录 `pull --ff-only` 拉齐。
+  - G2：旧安装副本 `twin_state.py`（sha256 `3afe51c4abd4…`）、`dispatch.py`（`f4888d49191c…`）先备份到证据目录（700 / 600）；`twin_events.py`、`twin_identity.py` 原本不存在。四个文件复制到 `~/.hermes/scripts/` 后逐个 `cmp` 与 main 一致；`/usr/bin/python3` 在安装目录可导入四个模块（schema v2）；安装版 `self_check.py` 静默、退出码 0。
+- 测试：合并前在 `ecbb50a` 上 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 188 tests` `OK` 退出码 0；`python3 …`（3.14.5）`Ran 188 tests` `OK` 退出码 0。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.1-merge-install-20261029/`（`pre-merge-regression.txt`、`post-install-checks.txt`、`backup-before-install/`）。
+- 本轮新坑：无。
+- 没做（照实）：正式库 `twin-state.db` 未建（G4）；`owner_chat_id` 未配（G3），`--by user` 仍一律拒绝；`.env` 无 `DT_STATE_NOTIFY`（G5），通知钩子不动作；技能 / cron / launchd / 网关 / SOUL 未改、未重启（G6）；正式用户授权动作与自主派单关闭（G7）。旧 worktree `~/Sandbox/worktrees/digital-twin-27-b2-1` 与本地分支先保留，B2.2 不再依赖后再清理。
+- 回退：`cp -p <证据目录>/backup-before-install/{twin_state.py,dispatch.py} ~/.hermes/scripts/`，删除 `~/.hermes/scripts/twin_events.py`、`twin_identity.py`；代码回退走 `git revert 04b208d` 的 PR。
+- 下一步：B2.2（持久调度与跨会话恢复）在独立会话与分支上隔离开发，以 main `04b208d` 为基线；G3–G7 仍按接入清单第 2 节逐项单独批。
+
+---
+
 ## 2026-10-29 晚 · B2.1 定向返修（ChatGPT 评审 P0-1 / P0-2 / P1-1 / P1-2 / P1-3 + P2 一条；[PR #28](https://github.com/Natsukashii1997/digital-twin/pull/28) 同一分支，待复核）
 
 - 时间：开工 16:40
