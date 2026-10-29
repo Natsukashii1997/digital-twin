@@ -6,6 +6,61 @@
 
 ---
 
+## 2026-10-29 · B0/B1 第二轮评审收口 F1～F4 + B3 审查接口（PR #26 继续，待第三轮评审）
+
+- 时间：开工 11:30
+- **来由**：ChatGPT 第二轮评审「返修基本通过」（原文 [docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md)），要求在 PR #26 上做最后一轮小范围收口：F1 台账冲突时提前覆盖了回执与证据、F2 续跑被拒绝时 Run 已先变 running、F3 当前 Run 按插入顺序会被后关联的旧工单夺走、F4 常浩 open_id 硬编码在源码里；另要明确 B3 独立审查任务的接口。按源码逐条核对，四项都属实。
+- **做了什么**（同一分支 `claude/25-state-store`，不改派单系统）：
+  - F1 `_apply_order` 先判 `_resync_kind` 再决定写什么：冲突时 `receipt / evidence / session_id` 一个字段不改，台账状态和有差异的回执 / 证据字段记进 `run.conflict` 的 payload。
+  - F2 抽出 `_resume_check`（当前 Run、任务终态 / observed、阻塞类型与 by、重试上限、目标授权）；`resume_run` 先查再把 Run 置 running，不合法直接抛 `StateError` 子类、Run 不动；台账观察到的续跑保留 Run → running，任务侧记 `run.resume_conflict`，该单计入 `sync_orders` 的 `conflicts`。
+  - F3 `tasks` 加 `current_run_id`（直接改 v1 schema，没有已部署的库）：`start_run` 和关联进行中的 Run 时设置，关联已结束的旧单只作证据；`current_run()` 读它，为空回退到最近开始的 Run。
+  - F4 删 `OWNER_OPEN_ID` 常量；`owner_open_id()` 先读环境变量 `DT_OWNER_OPEN_ID`，再读 `~/Library/Application Support/DigitalTwin/owner_open_id`（`DT_OWNER_FILE` 可改，单行，权限不是 600 不认）；两处都没配置时 `--by user` 一律拒绝并提示怎么配。“角色声明不是身份认证”的结论不变，身份桥接仍留 B2。
+  - B3 接口（最小实现）：`runs` 加 `purpose`（execute / review）；`start_run(purpose="review")` 只对 review 里的任务开只读审查 Run，审查方不能是执行方，任务状态不变、不成为当前 Run，回执只记 `run.review_result`；结论走 `accept_task(by="codex", cites=[审查 Run])`；命令行 `run-start --purpose review`。
+  - 文档：设计文档 3.1 / 3.2 / 3.3 / 3.5 / 3.6 / 3.7 / 3.8 / 4 / 6 / 7 / 8.1 同步；第三轮返修说明 [docs/reviews/2026-10-29-B0B1-第三轮返修说明.md](docs/reviews/2026-10-29-B0B1-第三轮返修说明.md)（交 ChatGPT 复核）。
+- 测试：新增 5 项（F1～F4、B3 各一），改 3 项断言（`test_03` 后挂旧单不改当前 Run；`test_followup_resume_rules` 到上限 / decision 阻塞的主动续跑改为拒绝；`test_cli_roundtrip` 身份改走临时配置文件并加审查 Run 一段），`test_twin_state.py` 共 31 项；先在第二轮评审对象 `2e496f1` 上跑确认 8 项不过（7 FAIL + 1 ERROR），再在收口后跑：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 119 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 119 tests` `OK`。原 88 项不变。
+- 本轮新坑：无。
+- 没做：仍未合并、未安装、未建身份配置文件、未改技能与 Hermes 配置；Codex 审查编排留 B3，身份桥接、事件通知留 B2。
+- **第三轮评审结果**（ChatGPT，同日下午，原文存 [docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md)）：F1～F4 源码复核通过，119 项由其在 3.9.6 与项目 Python 下独立复跑通过；第 8 节五点全部接受（F2 内部拒绝抛异常即可、B2 外部事件入口负责留痕；F4 允许环境变量覆盖但不得输出身份值；B3 的独立性判断只接受为初版）；**B0 + B1 最终技术验收通过，不再要求第四轮返修**。一条非阻断项记进 B3 接入验收（设计文档第 7 节 B3 行）：任务要求独立审查时，审查没完成前 `complete_task` 要拒绝。
+- 下一步：等常浩本人说「合并」，再按《工程流程》第 5 节一次做完四项：① 推送前检查、变基、复跑 119 项、squash 合并 PR #26、主目录拉齐；② 把 `twin_state.py` 复制到 `~/.hermes/scripts/` 并核对与 main 一致；③ 建 `~/Library/Application Support/DigitalTwin/owner_open_id`（常浩 open_id 单行，600，不进仓库）；④ 跑 `ops/self_check.py` 即时自检，次日 09:50 自检复核无漂移。安装不等于启用正式状态库，B2 先在隔离库上只读核对真实台账。
+
+---
+
+## 2026-10-29 · B0/B1 独立评审返修（PR #26 继续，待第二轮评审）
+
+- 时间：开工 10:20
+- **来由**：ChatGPT 对 PR #26 的独立评审「有条件通过」（B0 认可，B1 四项 P0、六项 P1 待修；暂不合并、不安装、不进 B2）。按源码逐条核对，四项 P0 都属实。
+- **做了什么**（同一分支 `claude/25-state-store`，不改派单系统）：
+  - R1 `block_task` 改阻塞类型过权限：非 user 只能把类型升级成 decision，decision 类只有常浩能改；解 technical 阻塞与重试共用上限。
+  - R2 任务有“当前 Run”（最后登记的那个）：旧 Run 的迟到结果只改它自己，记 `run.late_result`，不动任务；任务不在 running 时结果只记 `run.result_not_applied`。
+  - R3 回执缺 `exit_code` / `ended` 或 exit_code 不是整数一律算失败并写明原因；新增 `accept_task` 验收结论（必须写依据、引用本任务证据，执行方不能自验，B3 的 Codex 审查接这里），`complete_task` 只认通过的结论，有 PR 引用或成功 Run 不等于验收通过；续跑 / 返工清结论。
+  - R4 `link_run` 全量校验（活动 Run 只挂 ready 且目标已授权、无其他活动 Run 的任务，终态任务不挂，项目对不上不挂）；撤销任务 / 目标改为“已请求取消”（`cancel_requested_at`，Run 仍 running，`list_runs(cancel_pending=True)` 可查），不再直接写 abandoned。
+  - 工程契约：`by=user` 明确为内部可信调用约定，命令行 `--by user` 必须带 `--sender` 且等于常浩 open_id；新建目标 / 任务重复幂等键返回既有对象；台账回退、护栏降级、终态再变记 `run.conflict` 不应用，done / failed 之后的 running 按续跑处理（`resume_run`）；回执只存白名单字段；`max_retries` 可配，注明是临时保护；恢复先看台账（缺失 / 读不了 / 没这张单记 unknown，台账说在跑只列 suspect），只有没台账的 Run 才按时间判过期；备份同秒不覆盖，恢复前查完整性和版本。
+  - 文档：设计文档补事实归属、角色 ≠ 身份、验收依据、迟到结果与冲突、B2 方向（事件通知为主、定时对账兜底）、B1 边界与安全接入前置条件；返修说明 `docs/reviews/2026-10-29-B0B1-返修说明.md`。
+- 测试：新增 9 项、改写 17 项，`test_twin_state.py` 共 26 项；先把新用例跑在返修前的模块（`690dadb`）上确认 R1～R4 等 12 项会失败，再在返修后跑：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14）`Ran 114 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 114 tests` `OK`。原 88 项不变。
+- 本轮新坑：无（台账里的时间是本机 naive 字符串，不拿来当心跳，已在代码里注明）。
+- 没做：仍未合并、未安装、未改技能和 Hermes 配置；真实身份映射、事件通知钩子、进程终止留 B2。
+- **第二轮评审结果**（ChatGPT，同日下午，原文存 [docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md)）：返修基本通过，114 项由其独立复跑通过；B0 通过；要求在 PR #26 上做最后一轮小范围收口 F1～F4——① `_apply_order` 先判冲突再合并回执与证据，冲突独立留痕；② `resume_run` 先查授权与任务状态再把 Run 置 running，台账观察到的续跑保留事实并标冲突；③ `current_run` 不能只按插入顺序，历史工单后关联不得夺取当前归属；④ `OWNER_OPEN_ID` 改由本机受控配置提供，不硬编码；另要明确 B3 独立审查任务如何关联待验收 Task 的接口方案。其余六项设计接受。
+- 下一步：新会话做 F1～F4 收口（同一分支 `claude/25-state-store`，worktree `~/Sandbox/worktrees/digital-twin-25-state-store`），先复现后修复，114 项 + 新用例在 3.14 与 3.9 下通过，写第三轮返修说明交 ChatGPT；通过后常浩批准“合并 + 安装副本 + 自检复核”一次收尾，再进 B2。
+
+---
+
+## 2026-10-29 · 七层架构 B0 复核 + B1 持久状态底座（PR 待合并）
+
+- 时间：开工 09:10
+- **来由**：常浩《Hermes Digital Twin · 七层架构基建工程启动任务书 V1.0》，本轮只做 B0 + B1，隔离分支提交、开 PR、不合并、不安装、不动运行中的 Hermes。
+- **B0 复核**：任务书 9 条“已知现状”逐条核实都成立（源码与安装副本一致、88 项测试 OK、15 张真实工单、三个技能版本）；没有和七层目标冲突的正式需求；Hermes 自带 `kanban.db` 不拿来当长期状态。七层映射、对象关系、状态机、授权边界、三个事件入口、交接协议、文件清单、取舍、回退都在 [docs/B0-七层架构复核与状态底座设计.md](docs/B0-七层架构复核与状态底座设计.md)。
+- **B1 做了什么**：issue #25 → [PR #26](https://github.com/Natsukashii1997/digital-twin/pull/26)，分支 `claude/25-state-store`（worktree `~/Sandbox/worktrees/digital-twin-25-state-store`）：
+  - 新增 `hermes/scripts/twin_state.py`（只用标准库，兼容系统 Python 3.9）：Goal / Task / Run / Event / Ref 五张表，SQLite 在 `~/Library/Application Support/DigitalTwin/twin-state.db`（`DT_STATE_DB` 可改，700/600，WAL，版本迁移，在线备份 / 恢复）；任务状态 `observed / ready / running / blocked / review / completed / canceled` 查表转换；Run 沿用台账状态词另加 `stale`；授权、解 decision 阻塞、完成 / 撤销目标只认 `by=user`；事件幂等键 + `dup_count`，状态和事件同一事务；`recover()` 处理过期 Run、孤儿任务、依赖放行；`sync_orders()` 只读同步 `~/.hermes/dispatch` 台账为未关联 Run，不建目标；命令行每条末行 JSON，和 `dispatch.py` 一致。
+  - 新增 `hermes/scripts/tests/test_twin_state.py` 17 项：任务书 B1.5 十项验收各一项（编号对应），加非法转换、撤销规则、返工心跳、备份恢复、权限、命令行往返。
+  - 没改 `dispatch.py`、`run_worker.py`、技能、`ops/*`、任何安装副本和 Hermes 配置；台账写入钩子留到 B2。
+- 测试：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14）`Ran 105 tests` `OK`；`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 105 tests` `OK`。主目录 `main` 改动前基线 88 项 OK。真实环境只读核对，没有写入。
+- 本轮新坑：系统 Python 3.9 自带的 SQLite 用 `file:…?mode=ro` 打不开 WAL 库（`unable to open database file`），3.14 可以；读备份文件加 `immutable=1`。只记在这里，还没到提升为全局坑的程度。
+- 没做：没安装到 `~/.hermes/scripts/`（合并后另需授权；装之前 `self_check` 每天会报安装缺文件）；没给 `dispatch.py` 加写入钩子；没改技能读状态库。
+- 范围外：`hermes gateway status` 仍提示 launchd 服务定义比安装旧（旧记录已有）。
+- 下一步：常浩看 PR #26；说“合并”后变基复跑 105 项、squash 合并、安装 `twin_state.py` 到 `~/.hermes/scripts/`（不用重启网关）；然后按设计文档第 7 节进 B2（先用 cron 跑 `recover`，技能改读状态库）。
+
+---
+
 ## 2026-10-28 · 首日运行核对；巡检定时任务误报修复（已上线）
 
 - 时间：开工 09:42
