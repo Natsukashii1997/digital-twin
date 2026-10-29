@@ -6,7 +6,7 @@
 
 ---
 
-## 2026-10-29 · B0/B1 第二轮评审收口 F1～F4 + B3 审查接口（PR #26 继续，待第三轮评审）
+## 2026-10-29 · B0/B1 第二轮评审收口 F1～F4 + B3 审查接口（已合并 `11a69c0` 并安装）
 
 - 时间：开工 11:30
 - **来由**：ChatGPT 第二轮评审「返修基本通过」（原文 [docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第二轮评审原文.md)），要求在 PR #26 上做最后一轮小范围收口：F1 台账冲突时提前覆盖了回执与证据、F2 续跑被拒绝时 Run 已先变 running、F3 当前 Run 按插入顺序会被后关联的旧工单夺走、F4 常浩 open_id 硬编码在源码里；另要明确 B3 独立审查任务的接口。按源码逐条核对，四项都属实。
@@ -21,7 +21,8 @@
 - 本轮新坑：无。
 - 没做：仍未合并、未安装、未建身份配置文件、未改技能与 Hermes 配置；Codex 审查编排留 B3，身份桥接、事件通知留 B2。
 - **第三轮评审结果**（ChatGPT，同日下午，原文存 [docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md)）：F1～F4 源码复核通过，119 项由其在 3.9.6 与项目 Python 下独立复跑通过；第 8 节五点全部接受（F2 内部拒绝抛异常即可、B2 外部事件入口负责留痕；F4 允许环境变量覆盖但不得输出身份值；B3 的独立性判断只接受为初版）；**B0 + B1 最终技术验收通过，不再要求第四轮返修**。一条非阻断项记进 B3 接入验收（设计文档第 7 节 B3 行）：任务要求独立审查时，审查没完成前 `complete_task` 要拒绝。
-- 下一步：等常浩本人说「合并」，再按《工程流程》第 5 节一次做完四项：① 推送前检查、变基、复跑 119 项、squash 合并 PR #26、主目录拉齐；② 把 `twin_state.py` 复制到 `~/.hermes/scripts/` 并核对与 main 一致；③ 建 `~/Library/Application Support/DigitalTwin/owner_open_id`（常浩 open_id 单行，600，不进仓库）；④ 跑 `ops/self_check.py` 即时自检，次日 09:50 自检复核无漂移。安装不等于启用正式状态库，B2 先在隔离库上只读核对真实台账。
+- **合并与安装**（常浩 13:10 说「合并，四项都做」）：推送前检查无未推提交、分支不落后 main（变基空操作）、密钥扫描无命中；合并前复跑 119 项，3.14.5 与 3.9.6 都 OK；squash 合并为 `11a69c0`，issue #25 自动关闭，主目录 `--ff-only` 拉齐；`twin_state.py` 复制到 `~/.hermes/scripts/`（`cmp` 与 main 一致，`/usr/bin/python3` 能起）；建 `~/Library/Application Support/DigitalTwin/owner_open_id`（取 `report_data.ME`，单行，600，用安装副本回读一致，不进仓库）；`self_check.py` 安装副本与仓库源文件各跑一次都静默、退出码 0。worktree `~/Sandbox/worktrees/digital-twin-25-state-store` 和本地分支还留着（远端分支已随合并删除）。
+- 下一步：明早 09:50 工程自检应静默（复核无漂移）。B1 收官；B2 第一步按设计文档第 7 节在隔离库上用真实台账只读跑 `sync-orders / recover`，核对冲突与 suspect 的判定——不启用正式状态库、不让 Hermes 自主派单、身份桥接做完并有测试前不用 `--by user`。
 
 ---
 
