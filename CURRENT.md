@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 安装（G2）：四个脚本已装到 `~/.hermes/scripts/`，未启用
+
+- 时间：开工 23:00
+- **来由**：常浩说「批准 G2 安装」，即批准 D6 的 B22-G2（只复制脚本、不启用）；G3–G7 未批。
+- **做了什么**：
+  - 安装前：主目录 main `3cb3b83`、`hermes/scripts` 无改动；没有在跑的派单或车间进程，台账里没有 new / queued / running 的单；安装版 `self_check.py` 报的正好是这四个文件（3 个不一致、`twin_scheduler.py` 缺失）。
+  - 备份：旧副本 `twin_state.py`（sha256 `6adc2d49b787…`）、`dispatch.py`（`e5c9eaf5b497…`）、`run_worker.py`（`ad650618509c…`）复制到证据目录 `backup-before-install/`（700 / 600），逐个 `cmp` 一致；`twin_scheduler.py` 原本不存在。
+  - 安装：从 main 复制 `twin_scheduler.py`（新，644）、`twin_state.py`、`dispatch.py`、`run_worker.py` 到 `~/.hermes/scripts/`，逐个 `cmp` 与 main 一致，且与合并提交 `b4c350c` 无差异。
+- 测试：`/usr/bin/python3`（3.9.6）与 `python3`（3.14.5）在安装目录都能导入四个模块（库结构版本 3），退出码 0；安装版 `self_check.py` 静默、退出码 0。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-install-20261029/`（`before-install-sha256.txt`、`post-install-checks.txt`、`backup-before-install/`）。
+- 本轮新坑：无。
+- 没做（照实）：正式库 `twin-state.db` 未建；`~/.hermes/dispatch` 下还没有 `.dispatch.lock`、`.sched-tasks`（下一次手工派单才会建锁文件）；`.env` 无 `DT_SCHED_ENABLE`；没建 cron；自动开单、报告投递、真实取消信号都没开；网关 / 技能 / SOUL / config 未改、未重启。worktree `~/Sandbox/worktrees/digital-twin-b2-2` 与本地分支先保留。
+- 安装后对手工派单的变化（D6 第 2 节）：`new / run` 多拿一把派单锁；`run` 的车间自成进程组，order.json 多 `run_started / run_host / dispatch_pid`，车间写 `out/worker.json`；同仓库两单同时 `run` 时后到的排队（`busy: true`）。不带 `--sched-key` 的 `new` 输出与字段不变。
+- 回退：`cp -p <证据目录>/backup-before-install/{twin_state.py,dispatch.py,run_worker.py} ~/.hermes/scripts/`，删除 `~/.hermes/scripts/twin_scheduler.py`；之后 09:50 自检会报不一致，属回退后的预期。
+- 下一步：B22-G3 手工派单回归（一张只读小单走 `new → run → list`，核对输出不变与新身份字段），待常浩单独批准；G4–G7 仍按 D6 逐项单独批。
+
+---
+
 ## 2026-10-29 晚 · B2.2 合并（G1）：已合并 `b4c350c`，未安装、未启用
 
 - 时间：开工 22:50
