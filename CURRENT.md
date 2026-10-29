@@ -20,7 +20,8 @@
 - 测试：新增 5 项（F1～F4、B3 各一），改 3 项断言（`test_03` 后挂旧单不改当前 Run；`test_followup_resume_rules` 到上限 / decision 阻塞的主动续跑改为拒绝；`test_cli_roundtrip` 身份改走临时配置文件并加审查 Run 一段），`test_twin_state.py` 共 31 项；先在第二轮评审对象 `2e496f1` 上跑确认 8 项不过（7 FAIL + 1 ERROR），再在收口后跑：`python3 -B -m unittest discover -s hermes/scripts/tests`（3.14.5）`Ran 119 tests` `OK`；`/usr/bin/python3 …`（3.9.6）`Ran 119 tests` `OK`。原 88 项不变。
 - 本轮新坑：无。
 - 没做：仍未合并、未安装、未建身份配置文件、未改技能与 Hermes 配置；Codex 审查编排留 B3，身份桥接、事件通知留 B2。
-- 下一步：常浩把第三轮返修说明交 ChatGPT 复核；通过后由常浩一次批准「合并 PR #26 + 安装 `twin_state.py` 到 `~/.hermes/scripts/` + 建 `owner_open_id` 文件（600）+ 次日自检复核」，再进 B2。
+- **第三轮评审结果**（ChatGPT，同日下午，原文存 [docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md](docs/reviews/2026-10-29-ChatGPT第三轮评审原文.md)）：F1～F4 源码复核通过，119 项由其在 3.9.6 与项目 Python 下独立复跑通过；第 8 节五点全部接受（F2 内部拒绝抛异常即可、B2 外部事件入口负责留痕；F4 允许环境变量覆盖但不得输出身份值；B3 的独立性判断只接受为初版）；**B0 + B1 最终技术验收通过，不再要求第四轮返修**。一条非阻断项记进 B3 接入验收（设计文档第 7 节 B3 行）：任务要求独立审查时，审查没完成前 `complete_task` 要拒绝。
+- 下一步：等常浩本人说「合并」，再按《工程流程》第 5 节一次做完四项：① 推送前检查、变基、复跑 119 项、squash 合并 PR #26、主目录拉齐；② 把 `twin_state.py` 复制到 `~/.hermes/scripts/` 并核对与 main 一致；③ 建 `~/Library/Application Support/DigitalTwin/owner_open_id`（常浩 open_id 单行，600，不进仓库）；④ 跑 `ops/self_check.py` 即时自检，次日 09:50 自检复核无漂移。安装不等于启用正式状态库，B2 先在隔离库上只读核对真实台账。
 
 ---
 
