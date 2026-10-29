@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-10-29 晚 · B2.2 合并（G1）：已合并 `b4c350c`，未安装、未启用
+
+- 时间：开工 22:50
+- **来由**：ChatGPT 最终独立验收（原文 [docs/reviews/2026-10-29-ChatGPT-B2.2最终独立验收报告原文.md](docs/reviews/2026-10-29-ChatGPT-B2.2最终独立验收报告原文.md)）：同键重复开单 P0 已修复，技术验收通过，B22-G1 可进入合并审批；评审通过本身不是合并授权。常浩随后说「批准合并」，即批准 G1；G2–G7 未批。
+- **做了什么**：
+  - 合并前复核：PR #30 HEAD 仍是已验收的 `854adcd`，本机与远端一致、工作树干净；`origin/main...HEAD` = 0 / 9，无需变基；主目录在 main、无未推提交、与远端一致；PR 差异新增行密钥 / 身份值扫描无命中；`OPEN` `MERGEABLE` `CLEAN`。
+  - G1：`gh pr merge 30 --squash --match-head-commit 854adcd…` → 合并提交 `b4c350c`，文件树与 `854adcd` 完全一致（`d40a79f`）；Issue #29 自动关闭；远端分支自动删除；主目录 `pull --ff-only` 拉齐。
+- 测试：合并前在 `854adcd` 上 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 277 tests` `OK` 退出码 0；`python3 …`（3.14.5）`Ran 277 tests` `OK` 退出码 0；无残留测试进程。证据 `~/Library/Application Support/DigitalTwin/evidence/b2.2-merge-20261029/`（`pre-merge-python3-3.9.txt`、`pre-merge-python3-3.14.txt`）。
+- 本轮新坑：无。
+- 没做（照实）：G2 未安装（`~/.hermes/scripts/` 里没有 `twin_scheduler.py`，`twin_state.py` / `dispatch.py` / `run_worker.py` 仍是旧安装副本）；正式库 `twin-state.db` 未建；`DT_SCHED_ENABLE`、cron、自动开单、报告投递、真实取消信号都没开；网关 / 技能 / SOUL / `.env` 未改。worktree `~/Sandbox/worktrees/digital-twin-b2-2` 与本地分支先保留。合并后到安装前，09:50 工程自检会报这四个脚本缺失或与 main 不一致，属预期。
+- 回退：代码回退走 `git revert b4c350c` 的 PR；本轮没有改动安装目录，无需恢复副本。
+- 下一步：B22-G2 安装（只复制脚本，不建正式库、不开 `DT_SCHED_ENABLE` / cron / 自动开单），待常浩单独批准；G3–G7 仍按 D6 逐项单独批。
+
+---
+
 ## 2026-10-29 晚 · B2.2 最后定向返修：同键重复开单（[PR #30](https://github.com/Natsukashii1997/digital-twin/pull/30) 同一分支，待 ChatGPT 最后复核）
 
 - 时间：开工 22:00
