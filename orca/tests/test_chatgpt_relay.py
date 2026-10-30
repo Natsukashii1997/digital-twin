@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +41,7 @@ class RelayTest(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             code = relay.main(["review", "--worktree", "path:/x", "--page", "p1", "--packet", self.packet,
-                               "--out", self.out, "--poll", "0", "--timeout", "2", *extra])
+                               "--out", self.out, "--poll", "0", "--timeout", "2", "--settle", "0", *extra])
         return code, err.getvalue()
 
     def test_pass_writes_record_and_does_not_wake_claude(self):
@@ -75,10 +76,15 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(self.review("--deliver-to", "term_1")[0], 20)
         self.assertFalse(any(c[:2] == ["terminal", "send"] for c in self.calls()["calls"]))
 
-    def test_conflicting_verdicts_are_needs_human(self):
-        self.assertEqual(relay.parse_verdict("VERDICT: PASS\n...\nVERDICT: REWORK"), "NEEDS_HUMAN")
+    def test_verdict_is_only_the_last_non_empty_line(self):
+        # PR #36 评审 P1-03：结论不在最后一行就不算
+        self.assertEqual(relay.parse_verdict("VERDICT: PASS\n以下问题还没有审完。"), "NEEDS_HUMAN")
         self.assertEqual(relay.parse_verdict("格式示例 VERDICT: PASS 写在句中不算"), "NEEDS_HUMAN")
-        self.assertEqual(relay.parse_verdict("结论如下\n`VERDICT: REWORK`\n"), "REWORK")
+        self.assertEqual(relay.parse_verdict(""), "NEEDS_HUMAN")
+        self.assertEqual(relay.parse_verdict("VERDICT: MAYBE"), "NEEDS_HUMAN")
+        # 正文举例写到的结论行不影响末行（PR #36 评审原文就是这种情况）
+        self.assertEqual(relay.parse_verdict("例如：\nVERDICT: PASS\n会被误收。\nVERDICT: REWORK"), "REWORK")
+        self.assertEqual(relay.parse_verdict("结论如下\n`VERDICT: REWORK`\n\n"), "REWORK")
         self.assertEqual(relay.parse_verdict("VERDICT：PASS"), "PASS")
 
     def test_not_logged_in_sends_nothing(self):
@@ -101,7 +107,7 @@ class RelayTest(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             code = relay.main(["collect", "--worktree", "path:/x", "--page", "p1", "--packet", self.packet,
-                               "--out", self.out, "--deliver-to", "term_1"])
+                               "--out", self.out, "--deliver-to", "term_1", "--settle", "0"])
         return code, err.getvalue()
 
     def test_collect_takes_finished_reply_without_resending(self):
@@ -153,6 +159,130 @@ class RelayTest(unittest.TestCase):
         self.assertNotIn("calls", self.calls())
         with open(self.out) as f:
             self.assertEqual(f.read(), "旧回执")
+
+    # ---- PR #36 评审返修 ----
+
+    def marker(self):
+        return self.out + ".sending"
+
+    def test_flickering_stop_button_does_not_return_partial_reply(self):
+        # P1-02：停止按钮短暂消失时文本还在变，不能当成写完
+        self.page(script=[[True, "第"], [False, "第一段"], [True, "第一段，第二段"],
+                          [False, "第一段，第二段\nVERDICT: PASS"]])
+        code, _ = self.review()
+        self.assertEqual(code, 0)
+        with open(self.out) as f:
+            self.assertIn("第一段，第二段\nVERDICT: PASS", f.read())
+
+    def test_partial_pass_must_stay_stable_before_accepted(self):
+        # 读到一次带 PASS 的半截回复，紧接着又变了：最终按写完的内容判
+        # 半截 PASS 连读两次都一样，第三次才追加：至少 3 次读取不变才算写完
+        self.page(script=[[False, "VERDICT: PASS"], [False, "VERDICT: PASS"],
+                          [False, "VERDICT: PASS\n补充：缺测试\nVERDICT: REWORK"]])
+        self.assertEqual(self.review()[0], 10)
+
+    def test_reply_must_stay_unchanged_for_settle_seconds(self):
+        self.page(reply="VERDICT: PASS", stream_polls=0)
+        t = time.monotonic()
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = relay.main(["review", "--worktree", "path:/x", "--page", "p1", "--packet", self.packet,
+                               "--out", self.out, "--poll", "0.05", "--timeout", "5", "--settle", "0.6"])
+        self.assertEqual(code, 0)
+        self.assertGreaterEqual(time.monotonic() - t, 0.6)
+
+    def test_conversation_switch_while_waiting_is_refused(self):
+        # P1-01：等回复期间会话换了
+        self.page(script=[[True, "审核中"], [False, "VERDICT: PASS", "https://chatgpt.com/c/other"]])
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("会话变了", err)
+        self.assertFalse(os.path.exists(self.out))
+        self.assertTrue(os.path.exists(self.marker()))  # 消息已发出，结果不明
+
+    def test_reply_to_another_user_message_is_refused(self):
+        # P1-01：最新回复前的用户消息不是这份送审包
+        self.page(reply="VERDICT: PASS", foreign_user="别人插进来的一条消息" * 40)
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("不是这份送审包", err)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_unknown_send_result_blocks_resend_until_collect(self):
+        # P1-04：点了发送但 orca 报错 → 留标记；再 review 拒绝重发；collect 收取后清标记
+        self.page(fail_after_send=True, reply="VERDICT: REWORK", stream_polls=0)
+        self.assertEqual(self.review()[0], 2)
+        self.assertTrue(os.path.exists(self.marker()))
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("结果不明", err)
+        self.assertEqual(sum("/*relay:send*/" in " ".join(c) for c in self.calls()["calls"]), 1)
+        st = self.calls()
+        st.pop("fail_after_send")
+        self.page(**st)
+        self.assertEqual(self.collect()[0], 10)
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_disabled_send_button_clears_marker(self):
+        self.page(send_disabled=True, reply="x")
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("发送按钮不可用", err)
+        self.assertFalse(os.path.exists(self.marker()))
+
+    def test_delivery_failure_keeps_record_and_can_be_retried(self):
+        # P1-06：回执已落盘、终端交付失败 → 退出码 3；deliver 只重试交付，不重发送审
+        self.page(reply="缺测试。\nVERDICT: REWORK", fail="terminal")
+        code, _ = self.review("--deliver-to", "term_1")
+        self.assertEqual(code, 3)
+        self.assertTrue(os.path.exists(self.out))
+        self.assertFalse(os.path.exists(self.marker()))
+        st = self.calls()
+        st.pop("fail")
+        self.page(**st)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = relay.main(["deliver", "--record", self.out, "--deliver-to", "term_1"])
+        self.assertEqual(code, 10)
+        calls = self.calls()["calls"]
+        self.assertEqual(sum("/*relay:send*/" in " ".join(c) for c in calls), 1)
+        self.assertEqual(calls[-1][:2], ["terminal", "send"])
+
+    def test_deliver_refuses_non_rework_record(self):
+        self.page(reply="VERDICT: PASS")
+        self.review()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = relay.main(["deliver", "--record", self.out, "--deliver-to", "term_1"])
+        self.assertEqual(code, 2)
+        self.assertIn("不是 REWORK", err.getvalue())
+
+    def test_record_is_written_atomically_without_temp_leftovers(self):
+        self.page(reply="VERDICT: PASS")
+        self.review()
+        self.assertEqual(sorted(os.listdir(self.dir)), sorted(["packet.md", "state.json", "回执.md"]))
+
+    def test_collect_refuses_reply_that_is_still_changing(self):
+        # P1-05：collect 隔一段读两次，文本变了就不收
+        with open(self.packet) as f:
+            sent = f.read() + relay.FOOTER
+        self.page(sent=True, composer_text=sent, script=[[False, "半截"], [False, "半截，又多了\nVERDICT: PASS"]])
+        code, err = self.collect()
+        self.assertEqual(code, 2)
+        self.assertIn("还在变化", err)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_orca_nonzero_exit_with_ok_json_is_an_error(self):
+        # P2-02：退出码非零时即使输出 ok:true 也不信
+        self.page(rc_nonzero="eval", reply="x")
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("退出码 1", err)
+        self.assertNotIn("sent", self.calls())
+
+    def test_orca_non_object_json_is_an_error(self):
+        self.page(raw_stdout="eval", reply="x")
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("orca eval 失败", err)
 
     def test_orca_failure_is_reported(self):
         self.page(fail="eval", reply="x")

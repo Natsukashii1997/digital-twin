@@ -10,8 +10,10 @@
   chatgpt_relay.py status --worktree W --page P
   chatgpt_relay.py review --worktree W --page P --packet 送审包.md --out 回执.md [--deliver-to 终端]
   chatgpt_relay.py collect …同 review 参数…   # 等待中途断掉时收取已写完的回复，不重发
+  chatgpt_relay.py deliver --record 回执.md --deliver-to 终端   # 回执已保存但交付失败时重试交付
 
-退出码：0 PASS；10 REWORK；20 NEEDS_HUMAN；2 通道出错（没有回执）。
+退出码：0 PASS；10 REWORK；20 NEEDS_HUMAN；2 通道出错（没有回执）；3 回执已保存、交付失败。
+发送前会留 `<回执>.sending` 标记，回执落盘后才删；标记还在说明上次发送结果不明，review 拒绝重发，先用 collect 核对。
 """
 import argparse
 import datetime
@@ -89,14 +91,20 @@ class RelayError(Exception):
     pass
 
 
-def orca(*args):
-    p = subprocess.run([ORCA, *args, "--json"], capture_output=True, text=True)
+def orca(*args, timeout=60):
+    try:
+        p = subprocess.run([ORCA, *args, "--json"], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RelayError("orca %s 超过 %ss 没有返回" % (args[0], timeout))
     try:
         data = json.loads(p.stdout)
     except ValueError:
         raise RelayError("orca %s 输出不是 JSON：%s" % (args[0], (p.stderr or p.stdout).strip()[:300]))
-    if not data.get("ok"):
-        raise RelayError("orca %s 失败：%s" % (args[0], json.dumps(data.get("error", data), ensure_ascii=False)[:300]))
+    if p.returncode != 0 or not isinstance(data, dict) or data.get("ok") is not True \
+            or not isinstance(data.get("result"), dict):
+        detail = data.get("error", data) if isinstance(data, dict) else data
+        raise RelayError("orca %s 失败（退出码 %s）：%s" % (
+            args[0], p.returncode, json.dumps(detail, ensure_ascii=False)[:300]))
     return data["result"]
 
 
@@ -107,6 +115,8 @@ class Page:
     def eval(self, js):
         """返回页面表达式结果的字符串形式（orca eval 把 true 也返回成 "true"）。"""
         r = orca("eval", "--worktree", self.worktree, "--page", self.page, "--expression", js)
+        if "result" not in r:
+            raise RelayError("orca eval 没有返回 result 字段")
         return str(r["result"])
 
     def state(self):
@@ -114,8 +124,15 @@ class Page:
 
 
 def parse_verdict(text):
-    found = set(VERDICT_RE.findall(text))
-    return found.pop() if len(found) == 1 else "NEEDS_HUMAN"
+    """只认最后一个非空行；正文里举例写到的 VERDICT 行不算结论。"""
+    lines = [l for l in text.splitlines() if l.strip()]
+    m = VERDICT_RE.match(lines[-1]) if lines else None
+    return m.group(1) if m else "NEEDS_HUMAN"
+
+
+def conversation(url):
+    m = re.search(r"/c/([0-9a-f-]+)", url)
+    return m.group(1) if m else url
 
 
 def squash(s):
@@ -145,30 +162,64 @@ def fill_composer(page, text, poll):
     raise RelayError("输入框内容和送审包不一致，未发送")
 
 
-def send_and_wait(page, text, timeout, poll, settle=2):
+def send_and_wait(page, text, timeout, poll, settle, marker):
+    """发出送审包并等回复写完。回复必须同时满足：属于这份送审包（最后一条回复之前的用户消息核对一致）、
+    会话没变、看不到停止按钮、文本至少 3 次读取不变且持续 settle 秒。"""
     before = page.state()
     if not before["composer"]:
         raise RelayError("页面没有输入框：没登录或不在聊天页（%s）" % before["url"])
     if before["streaming"]:
         raise RelayError("ChatGPT 还在回复上一条，拒绝插话")
     fill_composer(page, text, poll)
+    marker.create(before["url"])  # 从这里起发送结果可能不明
     if page.eval(SEND_JS) != "true":
+        marker.clear()  # 按钮没点到，确定没发
         raise RelayError("发送按钮不可用")
     deadline = time.monotonic() + timeout
-    sent = False
-    prev, same = None, 0
+    conv, prev, since, seen = None, None, 0.0, 0
     while time.monotonic() < deadline:
         time.sleep(poll)
         st = page.state()
-        sent = sent or st["user"] > before["user"]
-        if not sent or st["assistant"] <= before["assistant"] or st["streaming"]:
-            prev, same = None, 0
+        if st["user"] <= before["user"] or st["assistant"] <= before["assistant"]:
+            prev = None
             continue
-        same = same + 1 if st["last"] == prev else 0
-        prev = st["last"]
-        if same >= settle - 1 and prev.strip():
+        if conv is None:
+            conv = conversation(st["url"])
+        elif conversation(st["url"]) != conv:
+            raise RelayError("等回复期间会话变了：%s" % st["url"])
+        if not bubble_matches(st["last_user"], text):
+            raise RelayError("最新回复前的用户消息不是这份送审包，拒绝收取")
+        if st["streaming"] or not st["last"].strip():
+            prev = None
+            continue
+        now = time.monotonic()
+        if st["last"] != prev:
+            prev, since, seen = st["last"], now, 1
+            continue
+        seen += 1
+        if seen >= 3 and now - since >= settle:
             return prev, st["url"]
-    raise RelayError("等回复超时（%ss）；%s" % (timeout, "消息已发出" if sent else "没确认消息发出"))
+    raise RelayError("等回复超时（%ss）；消息可能已发出，用 collect 核对" % timeout)
+
+
+class Marker:
+    """发送标记：点发送前建，回执落盘后删。还在就说明上次发送结果不明。"""
+
+    def __init__(self, out, packet):
+        self.path, self.packet = out + ".sending", packet
+
+    def exists(self):
+        return os.path.exists(self.path)
+
+    def create(self, url):
+        with open(self.path, "x", encoding="utf-8") as f:
+            json.dump({"packet_sha256": hashlib.sha256(self.packet.encode()).hexdigest(), "page": url,
+                       "time": datetime.datetime.now().astimezone().isoformat(timespec="seconds")},
+                      f, ensure_ascii=False)
+
+    def clear(self):
+        if self.exists():
+            os.unlink(self.path)
 
 
 def write_record(path, packet, reply, url, verdict):
@@ -184,8 +235,17 @@ def write_record(path, packet, reply, url, verdict):
         "---",
         "",
     ]
-    with open(path, "x", encoding="utf-8") as f:
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write("\n".join(head) + reply.rstrip() + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.link(tmp, path)  # 原子发布，且不覆盖已有回执
+    except FileExistsError:
+        raise RelayError("回执文件已存在，拒绝覆盖：%s" % path)
+    finally:
+        os.unlink(tmp)
 
 
 def deliver(terminal, path):
@@ -210,31 +270,58 @@ def read_packet(a):
 
 def cmd_review(a):
     packet = read_packet(a)
-    reply, url = send_and_wait(Page(a.worktree, a.page), packet + FOOTER, a.timeout, a.poll)
-    return finish(a, packet, reply, url)
+    marker = Marker(a.out, packet)
+    if marker.exists():
+        raise RelayError("上次送审结果不明（%s），先用 collect 核对，不要重发" % marker.path)
+    reply, url = send_and_wait(Page(a.worktree, a.page), packet + FOOTER, a.timeout, a.poll, a.settle, marker)
+    return finish(a, packet, reply, url, marker)
 
 
 def cmd_collect(a):
-    """等待中途断掉时，不重发、直接收取页面上已写完的回复；先核对最后一条用户消息就是这份送审包。"""
+    """等待中途断掉时，不重发、直接收取页面上已写完的回复：最后一条回复之前的用户消息必须是这份送审包，
+    且隔 settle 秒读两次都没在生成、文本不变。"""
     packet = read_packet(a)
-    st = Page(a.worktree, a.page).state()
-    if st["streaming"]:
-        raise RelayError("ChatGPT 还在生成，稍后再收")
-    if not st["assistant"] or not st["last"].strip():
-        raise RelayError("页面上没有可收取的回复")
-    if not bubble_matches(st["last_user"], packet + FOOTER):
-        raise RelayError("页面最后一条用户消息不是这份送审包，拒绝收取")
-    return finish(a, packet, st["last"], st["url"])
+    page = Page(a.worktree, a.page)
+    reads = [page.state()]
+    time.sleep(a.settle)
+    reads.append(page.state())
+    for st in reads:
+        if st["streaming"]:
+            raise RelayError("ChatGPT 还在生成，稍后再收")
+        if not st["assistant"] or not st["last"].strip():
+            raise RelayError("页面上没有可收取的回复")
+        if not bubble_matches(st["last_user"], packet + FOOTER):
+            raise RelayError("最新回复前的用户消息不是这份送审包，拒绝收取")
+    if reads[0]["last"] != reads[1]["last"] or conversation(reads[0]["url"]) != conversation(reads[1]["url"]):
+        raise RelayError("回复还在变化，稍后再收")
+    return finish(a, packet, reads[1]["last"], reads[1]["url"], Marker(a.out, packet))
 
 
-def finish(a, packet, reply, url):
+def finish(a, packet, reply, url, marker):
     verdict = parse_verdict(reply)
     write_record(a.out, packet, reply, url, verdict)
+    marker.clear()
+    result = {"verdict": verdict, "record": a.out, "url": url, "delivered": False}
+    code = EXIT[verdict]
     if verdict == "REWORK" and a.deliver_to:
-        deliver(a.deliver_to, a.out)
-    print(json.dumps({"verdict": verdict, "record": a.out, "url": url,
-                      "delivered": bool(verdict == "REWORK" and a.deliver_to)}, ensure_ascii=False))
-    return EXIT[verdict]
+        try:
+            deliver(a.deliver_to, a.out)
+            result["delivered"] = True
+        except RelayError as e:
+            result["deliver_error"] = "%s；回执已保存，用 deliver 重试" % e
+            code = 3
+    print(json.dumps(result, ensure_ascii=False))
+    return code
+
+
+def cmd_deliver(a):
+    with open(a.record, encoding="utf-8") as f:
+        head = f.read(2000)
+    if "- 解析结论：**REWORK**" not in head:
+        raise RelayError("回执结论不是 REWORK，不交付：%s" % a.record)
+    deliver(a.deliver_to, a.record)
+    print(json.dumps({"record": a.record, "delivered": True}, ensure_ascii=False))
+    return 10
 
 
 def main(argv=None):
@@ -248,12 +335,17 @@ def main(argv=None):
             s.add_argument("--packet", required=True)
             s.add_argument("--out", required=True)
             s.add_argument("--deliver-to", help="REWORK 时把回执交给这个 ORCA 终端")
+            s.add_argument("--settle", type=float, default=10, help="回复文本须保持不变的秒数")
     r = sub.choices["review"]
     r.add_argument("--timeout", type=float, default=900)
     r.add_argument("--poll", type=float, default=3)
+    d = sub.add_parser("deliver")
+    d.add_argument("--record", required=True)
+    d.add_argument("--deliver-to", required=True)
     a = ap.parse_args(argv)
     try:
-        return {"status": cmd_status, "review": cmd_review, "collect": cmd_collect}[a.cmd](a)
+        return {"status": cmd_status, "review": cmd_review, "collect": cmd_collect,
+                "deliver": cmd_deliver}[a.cmd](a)
     except RelayError as e:
         print("relay 出错：%s" % e, file=sys.stderr)
         return 2

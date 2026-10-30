@@ -5,9 +5,15 @@ state 字段：
   composer / streaming_before   发送前页面状态
   reply                         发出后 ChatGPT 的回复原文
   stream_polls                  回复出现后还要“生成中”几次轮询
+  script                        发出后每次读状态依次返回 [streaming, 回复文本, url?]，读完后停在最后一项；优先于 reply
   never_reply                   true 时一直不回复
   mangle                        true 时输入框里的内容被截断
+  foreign_user                  最新回复前的用户消息换成这段文字（模拟别人插话）
+  send_disabled                 发送按钮不可用
+  fail_after_send               点了发送，但 orca 返回失败
   fail                          设为某个命令名时，该命令返回 ok:false
+  rc_nonzero                    设为某个命令名时，该命令退出码 1 但输出 ok:true
+  raw_stdout                    设为某个命令名时，该命令输出 [1, 2]（不是对象）
   calls                         记录收到的命令（测试读）
 """
 import json
@@ -23,34 +29,54 @@ s.setdefault("calls", []).append(args)
 
 
 def out(result=None, ok=True):
-    s.setdefault("user", 0)
     with open(path, "w") as f:
         json.dump(s, f)
-    print(json.dumps({"ok": ok, "result": result} if ok else {"ok": False, "error": {"code": "fake_fail"}}))
-    sys.exit(0)
+    if s.get("raw_stdout") == args[0]:
+        print(json.dumps([1, 2]))
+    else:
+        print(json.dumps({"ok": ok, "result": result} if ok else {"ok": False, "error": {"code": "fake_fail"}}))
+    sys.exit(1 if s.get("rc_nonzero") == args[0] else 0)
 
 
 if s.get("fail") == args[0]:
     out(ok=False)
 
+URL = "https://chatgpt.com/c/fake"
+
+
+def page_state():
+    sent = s.get("sent", False)
+    replying = sent and not s.get("never_reply")
+    polls = s.get("polls", 0)
+    if replying:
+        s["polls"] = polls + 1
+    url = URL
+    if not sent:
+        streaming, last = s.get("streaming_before", False), ""
+    elif not replying:
+        streaming, last = False, ""
+    elif "script" in s:
+        step = s["script"][min(polls, len(s["script"]) - 1)]
+        streaming, last = step[0], step[1]
+        url = step[2] if len(step) > 2 else URL
+    else:
+        streaming = polls < s.get("stream_polls", 1)
+        last = s["reply"][:5] if streaming else s["reply"]
+    return {
+        "url": url,
+        "composer": s.get("composer", True),
+        "streaming": streaming,
+        "user": 1 if sent else 0,
+        "assistant": 1 if replying else 0,
+        "last_user": s.get("foreign_user", s.get("composer_text", "")) if replying else "",
+        "last": last,
+    }
+
+
 if args[0] == "eval":
     js = args[args.index("--expression") + 1]
     if "/*relay:state*/" in js:
-        sent = s.get("sent", False)
-        replying = sent and not s.get("never_reply")
-        polls = s.get("polls", 0)
-        if replying:
-            s["polls"] = polls + 1
-        streaming = s.get("streaming_before", False) if not sent else (replying and polls < s.get("stream_polls", 1))
-        out({"result": json.dumps({
-            "url": "https://chatgpt.com/c/fake",
-            "composer": s.get("composer", True),
-            "streaming": streaming,
-            "user": 1 if sent else 0,
-            "assistant": 1 if replying else 0,
-            "last_user": s.get("composer_text", "") if sent else "",
-            "last": (s["reply"] if not streaming else s["reply"][:5]) if replying else "",
-        })})
+        out({"result": json.dumps(page_state())})
     if "/*relay:insert*/" in js:
         s["inserted"] = js
         text = json.loads(re.search(r"insertText', false, (\".*\")\);", js).group(1))
@@ -61,7 +87,11 @@ if args[0] == "eval":
     if "/*relay:composer*/" in js:
         out({"result": s.get("composer_text", "")})
     if "/*relay:send*/" in js:
+        if s.get("send_disabled"):
+            out({"result": "false"})
         s["sent"] = True
+        if s.get("fail_after_send"):
+            out(ok=False)
         out({"result": "true"})
 if args[:2] == ["terminal", "send"]:
     out({"accepted": True})
