@@ -38,25 +38,26 @@ SEND_BTN = '[data-testid="send-button"], button[aria-label="发送"], button[ari
 STOP_BTN = '[data-testid="stop-button"], button[aria-label*="停止"], button[aria-label^="Stop"]'
 
 # 消息：旧版是 [data-message-author-role]；2026-10 版是 h4[data-conversation-role]（「你说：」「ChatGPT 说：」），正文在它的父节点里。
+# 页面末尾会多渲染一份带「You」前缀的用户消息，所以 last_user 取最后一条回复之前的那条用户消息。
+# 输入框里常驻一个隐藏的「停止」按钮，只有可见的才算正在生成。
 STATE_JS = r"""/*relay:state*/(() => {
   const q = s => [...document.querySelectorAll(s)];
-  const msgs = role => {
-    const old = q('[data-message-author-role="' + role + '"]');
-    if (old.length) return old.map(e => e.innerText);
-    return q('h4[data-conversation-role="' + role + '"]').map(h => {
-      const t = h.parentElement.innerText, label = h.innerText;
-      return (t.startsWith(label) ? t.slice(label.length) : t).trim();
-    });
-  };
-  const u = msgs('user'), a = msgs('assistant');
+  let m = q('[data-message-author-role]').map(e => ({role: e.dataset.messageAuthorRole, text: e.innerText}));
+  if (!m.length) m = q('h4[data-conversation-role]').map(h => {
+    const t = h.parentElement.innerText, label = h.innerText;
+    return {role: h.getAttribute('data-conversation-role'), text: (t.startsWith(label) ? t.slice(label.length) : t).trim()};
+  });
+  const a = m.filter(x => x.role === 'assistant');
+  const ai = m.map(x => x.role).lastIndexOf('assistant');
+  const before = (ai < 0 ? m : m.slice(0, ai)).filter(x => x.role === 'user');
   return JSON.stringify({
     url: location.href,
     composer: !!document.querySelector('%(composer)s'),
-    streaming: !!document.querySelector('%(stop)s'),
-    user: u.length,
+    streaming: q('%(stop)s').some(b => b.getClientRects().length > 0),
+    user: m.filter(x => x.role === 'user').length,
     assistant: a.length,
-    last_user: u.length ? u[u.length - 1] : '',
-    last: a.length ? a[a.length - 1] : ''
+    last_user: before.length ? before[before.length - 1].text : '',
+    last: a.length ? a[a.length - 1].text : ''
   });
 })()""" % {"composer": COMPOSER, "stop": STOP_BTN}
 
@@ -126,6 +127,12 @@ def squash_bubble(s):
     s = re.sub(r"(?m)^\s*```[\w+-]*\s*$", "", s)
     s = squash(s).replace("`", "")
     return re.sub(r"…?(显示更多|Showmore)$", "", s)
+
+
+def bubble_matches(bubble, sent):
+    """长消息气泡只显示开头，所以要求气泡内容是送审包的开头，且至少 300 字（短包则要求全文）。"""
+    b, w = squash_bubble(bubble), squash_bubble(sent)
+    return len(b) >= min(300, len(w)) and w.startswith(b)
 
 
 def fill_composer(page, text, poll):
@@ -215,7 +222,7 @@ def cmd_collect(a):
         raise RelayError("ChatGPT 还在生成，稍后再收")
     if not st["assistant"] or not st["last"].strip():
         raise RelayError("页面上没有可收取的回复")
-    if squash_bubble(st["last_user"]) != squash_bubble(packet + FOOTER):
+    if not bubble_matches(st["last_user"], packet + FOOTER):
         raise RelayError("页面最后一条用户消息不是这份送审包，拒绝收取")
     return finish(a, packet, st["last"], st["url"])
 

@@ -116,6 +116,14 @@ class RelayTest(unittest.TestCase):
         with open(self.out) as f:
             self.assertIn("缺测试。", f.read())
 
+    def test_bubble_match_accepts_only_a_long_enough_prefix(self):
+        sent = "送审包" + "正文" * 400 + "`x`\n```python\nprint(1)\n```\n" + relay.FOOTER
+        shown = "送审包" + "正文" * 200 + "\n…\n显示更多"
+        self.assertTrue(relay.bubble_matches(shown, sent))
+        self.assertTrue(relay.bubble_matches(sent.replace("```python", "").replace("`", ""), sent))
+        self.assertFalse(relay.bubble_matches("送审包正文\n…\n显示更多", sent))  # 太短，不足以认定
+        self.assertFalse(relay.bubble_matches("别的" + "正文" * 200, sent))
+
     def test_collect_refuses_reply_to_another_packet(self):
         self.page(sent=True, polls=5, composer_text="别的送审包", reply="VERDICT: PASS")
         code, err = self.collect()
