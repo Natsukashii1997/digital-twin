@@ -6,14 +6,16 @@
 
 ---
 
-## 2026-10-31 凌晨 · Claude 接管 DT-ORC；RELAY-01 ChatGPT 聊天审核通道沙盒跑通（[PR #36](https://github.com/Natsukashii1997/digital-twin/pull/36) 审核第 2 轮 REWORK）
+## 2026-10-31 凌晨 · Claude 接管 DT-ORC；RELAY-01 ChatGPT 聊天审核通道沙盒跑通（[PR #36](https://github.com/Natsukashii1997/digital-twin/pull/36) 第 3 轮 NEEDS_HUMAN，待常浩裁决）
 
 - **来由**：常浩说 Codex 额度将尽，由 Claude 正式接管 Hermes 数字分身、Obsidian 知识库和 DT-ORC 的推进。审核方固定为 **ChatGPT 聊天模式**（不是 Work 模式、不是 Codex），要把常浩在 Claude 和 ChatGPT 之间复制粘贴的那一步，改成在 ORCA 里自动往返。常浩确认：接受自动操作 ChatGPT 网页的账号风险；正式项目的审核材料优先走 GitHub PR；ChatGPT 侧新建项目；代码放 digital-twin。
-- **做法**：Issue [#35](https://github.com/Natsukashii1997/digital-twin/issues/35)（Part of #32），分支 `claude/35-chatgpt-relay`（worktree `~/Sandbox/worktrees/digital-twin-35-relay`，HEAD `cd82bef`，已推送）。新增 `orca/chatgpt_relay.py`：在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审，收回原文并解析结论，REWORK 时交回 ORCA 终端里的 Claude。设计与实测见 [docs/DT-ORC/RELAY-01-ChatGPT聊天审核通道.md](https://github.com/Natsukashii1997/digital-twin/blob/claude/35-chatgpt-relay/docs/DT-ORC/RELAY-01-ChatGPT聊天审核通道.md)。ChatGPT 侧新建了项目「数字分身审核」，项目说明写了审核员规则（已回读）。
+- **做法**：Issue [#35](https://github.com/Natsukashii1997/digital-twin/issues/35)（Part of #32），分支 `claude/35-chatgpt-relay`（worktree `~/Sandbox/worktrees/digital-twin-35-relay`，HEAD `3fa0cc4`，已推送）。新增 `orca/chatgpt_relay.py`：在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审，收回原文并解析结论，REWORK 时交回 ORCA 终端里的 Claude。设计与实测见 [docs/DT-ORC/RELAY-01-ChatGPT聊天审核通道.md](https://github.com/Natsukashii1997/digital-twin/blob/claude/35-chatgpt-relay/docs/DT-ORC/RELAY-01-ChatGPT聊天审核通道.md)。ChatGPT 侧新建了项目「数字分身审核」，项目说明写了审核员规则（已回读）。
 - **实测**：沙盒仓库 `~/Sandbox/2026-10-31-orca-relay/sandbox-repo`（已加入 ORCA），全部是合成数据。第 1 轮 REWORK → ORCA 里的 Claude 44 秒返修（`2014c51`）→ 第 2 轮全自动 PASS。中途 5 次失败都是停下，而不是误发或误收，均已修复。13 项单测在 3.9.6 和 3.14.5 下都通过。证据在 `evidence/relay01-20261031/`。
 - **没做的**：没在正式项目上运行，没配 ORCA 自动化，没有循环驱动、返修上限和飞书通知。`claude/32-dt-orc`（本地领先 8 个提交、未推送）和 #33、#34 都没有动；ORC-01b-1 R7 原本在等 Codex 审查，往后改由 ChatGPT 聊天审核。
 - **PR #36 走自己的通道审核**（10-31 凌晨，后续）：第 1 轮 ChatGPT 判 REWORK（P1×6、P2×4）。返修提交 `1e0bb27`：回复归属与会话核对、稳定窗口、末行结论、发送标记、原子落盘与交付重试、子进程校验；单测 27 项，逐项撤销修复都有测试失败；返修后的沙盒真实端到端 REWORK → 返修（`41b5355`）→ PASS。第 2 轮仍判 REWORK（`cd82bef` 入库），P1-03 末行方案已被接受；剩余 4 条 P1：300 字前缀不足以证明送审包身份、会话校验起点太晚、发送标记绑定输出路径可被绕过、deliver 重试可能让 Claude 重复返修。另有 5 条 P2。按 D3-5，返修上限是 2 轮，这一轮是最后一次。ChatGPT 的 GitHub 连接器仍读不到 digital-twin（需常浩授权）。
-- **下一步**：等常浩决定 PR #36 是否做第 2 轮返修（推荐做法：送审包开头加唯一送审编号，标记按送审包摘要存放，交付打戳防重复）；合并和第 2 批（循环驱动、通知、真实任务试运行）仍待批准。
+- **最后一轮返修**（常浩批准）：`8d69695` 加了送审编号（R-<送审包 sha256 前 16 位>，写在发出消息的第一行）、会话从发送起绑定、按送审包摘要的发送标记（状态目录 `~/Library/Application Support/DigitalTwin/relay/`）、回执首行元数据与完整性校验、交付状态 sending/done（已交付不重发，结果不明要人确认）。单测 34 项；16 处修复逐个撤销，都有测试失败。沙盒真实恢复端到端（合成任务 3）：杀掉后 collect 收回、换 `--out` 重发被拒、交付失败后确认重试、再调用 `already`，Claude 只处理一次，第 2 轮 PASS。
+- **第 3 轮评审 NEEDS_HUMAN**（`3fa0cc4` 入库）：上一轮 9 项中 8 项通过，交付幂等部分通过。新提出 2 条 P1，都在交付状态上：① 检查和写入不是原子操作，两个 deliver 并发时可能重复交付；② `already` 不核对目标终端，换终端重试会误报已交付。另有 4 条 P2：新会话绑定写入不是原子操作、标记未绑定会话时 collect 没有明确拒收、摘要只能防篡改不能认证来源、ORCA 原生的 `--retry-request` 恢复协议没有用上。按 D3-5 已到上限，交常浩裁决。ChatGPT 建议批准只针对这两条 P1 的定向修复；如果接受现状，要写明「单进程、单终端、隔离环境」的使用前提。
+- **下一步**：等常浩裁决三件事：① 是否破例批准针对交付状态两条 P1 的定向修复；② PR #36 是否合并；③ 第 2 批（循环驱动、通知、真实任务试运行）是否开工。另外需要常浩给 ChatGPT 的 GitHub 连接器开通 digital-twin 的读取权限。
 
 ## 2026-10-30 · B2.2 G5 第 0 批与 G5-A 第 1 批：架构定稿，本地通知 Inbox 隔离代码已验收（GO），未合并、未部署
 
