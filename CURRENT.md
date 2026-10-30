@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-10-31 凌晨 · Claude 接管 DT-ORC；RELAY-01 ChatGPT 聊天审核通道沙盒跑通（[PR #36](https://github.com/Natsukashii1997/digital-twin/pull/36) 待合并）
+
+- **来由**：常浩说 Codex 额度将尽，由 Claude 正式接管 Hermes 数字分身、Obsidian 知识库和 DT-ORC 的推进。审核方固定为 **ChatGPT 聊天模式**（不是 Work 模式、不是 Codex），要把常浩在 Claude 和 ChatGPT 之间复制粘贴的那一步，改成在 ORCA 里自动往返。常浩确认：接受自动操作 ChatGPT 网页的账号风险；正式项目的审核材料优先走 GitHub PR；ChatGPT 侧新建项目；代码放 digital-twin。
+- **做法**：Issue [#35](https://github.com/Natsukashii1997/digital-twin/issues/35)（Part of #32），分支 `claude/35-chatgpt-relay`（worktree `~/Sandbox/worktrees/digital-twin-35-relay`，HEAD `d20d867`，已推送）。新增 `orca/chatgpt_relay.py`：在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审，收回原文并解析结论，REWORK 时交回 ORCA 终端里的 Claude。设计与实测见 [docs/DT-ORC/RELAY-01-ChatGPT聊天审核通道.md](https://github.com/Natsukashii1997/digital-twin/blob/claude/35-chatgpt-relay/docs/DT-ORC/RELAY-01-ChatGPT聊天审核通道.md)。ChatGPT 侧新建了项目「数字分身审核」，项目说明写了审核员规则（已回读）。
+- **实测**：沙盒仓库 `~/Sandbox/2026-10-31-orca-relay/sandbox-repo`（已加入 ORCA），全部是合成数据。第 1 轮 REWORK → ORCA 里的 Claude 44 秒返修（`2014c51`）→ 第 2 轮全自动 PASS。中途 5 次失败都是停下，而不是误发或误收，均已修复。13 项单测在 3.9.6 和 3.14.5 下都通过。证据在 `evidence/relay01-20261031/`。
+- **没做的**：没在正式项目上运行，没配 ORCA 自动化，没有循环驱动、返修上限和飞书通知。`claude/32-dt-orc`（本地领先 8 个提交、未推送）和 #33、#34 都没有动；ORC-01b-1 R7 原本在等 Codex 审查，往后改由 ChatGPT 聊天审核。
+- **下一步**：等常浩决定是否合并 PR #36，以及第 2 批是否开工（循环驱动、返修上限 2 轮、NEEDS_HUMAN 时走 Hermes 飞书私聊通知；在 digital-twin 一个真实小任务上试运行，审核材料走 PR）。
+
 ## 2026-10-30 · B2.2 G5 第 0 批与 G5-A 第 1 批：架构定稿，本地通知 Inbox 隔离代码已验收（GO），未合并、未部署
 
 - 时间：10:20–12:20；Issue [#31](https://github.com/Natsukashii1997/digital-twin/issues/31)；分支 `claude/31-g5-delivery`（worktree `~/Sandbox/worktrees/digital-twin-31-g5`，HEAD `b95373d`，**只在本地，没有推送**）。
