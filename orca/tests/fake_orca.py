@@ -5,7 +5,8 @@ state 字段：
   composer / streaming_before   发送前页面状态
   reply                         发出后 ChatGPT 的回复原文
   stream_polls                  回复出现后还要“生成中”几次轮询
-  script                        发出后每次读状态依次返回 [streaming, 回复文本, url?]，读完后停在最后一项；优先于 reply
+  script                        发出后每次读状态依次返回 [streaming, 回复文本, url?, 回复条数?]，读完后停在最后一项；优先于 reply
+  url_before                    发送前页面地址（默认在会话 /c/fake 里）
   never_reply                   true 时一直不回复
   mangle                        true 时输入框里的内容被截断
   foreign_user                  最新回复前的用户消息换成这段文字（模拟别人插话）
@@ -50,8 +51,9 @@ def page_state():
     polls = s.get("polls", 0)
     if replying:
         s["polls"] = polls + 1
-    url = URL
+    url, assistant = URL, 1 if replying else 0
     if not sent:
+        url = s.get("url_before", URL)
         streaming, last = s.get("streaming_before", False), ""
     elif not replying:
         streaming, last = False, ""
@@ -59,6 +61,7 @@ def page_state():
         step = s["script"][min(polls, len(s["script"]) - 1)]
         streaming, last = step[0], step[1]
         url = step[2] if len(step) > 2 else URL
+        assistant = step[3] if len(step) > 3 else 1
     else:
         streaming = polls < s.get("stream_polls", 1)
         last = s["reply"][:5] if streaming else s["reply"]
@@ -67,7 +70,7 @@ def page_state():
         "composer": s.get("composer", True),
         "streaming": streaming,
         "user": 1 if sent else 0,
-        "assistant": 1 if replying else 0,
+        "assistant": assistant,
         "last_user": s.get("foreign_user", s.get("composer_text", "")) if replying else "",
         "last": last,
     }

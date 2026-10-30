@@ -10,10 +10,16 @@
   chatgpt_relay.py status --worktree W --page P
   chatgpt_relay.py review --worktree W --page P --packet 送审包.md --out 回执.md [--deliver-to 终端]
   chatgpt_relay.py collect …同 review 参数…   # 等待中途断掉时收取已写完的回复，不重发
-  chatgpt_relay.py deliver --record 回执.md --deliver-to 终端   # 回执已保存但交付失败时重试交付
+  chatgpt_relay.py deliver --record 回执.md --deliver-to 终端 [--confirm-not-received]   # 只重试交付
 
 退出码：0 PASS；10 REWORK；20 NEEDS_HUMAN；2 通道出错（没有回执）；3 回执已保存、交付失败。
-发送前会留 `<回执>.sending` 标记，回执落盘后才删；标记还在说明上次发送结果不明，review 拒绝重发，先用 collect 核对。
+
+身份与幂等（状态目录 $RELAY_STATE_DIR，默认 ~/Library/Application Support/DigitalTwin/relay/）：
+- 发出的消息第一行是送审编号 R-<送审包 sha256 前 16 位>；页面气泡必须以它开头才认作这份送审包。
+- 点发送前按送审包摘要建 sending/<sha256>.json，回执落盘后才删；它还在就说明上次发送结果不明，
+  同一送审包（换 --out 也一样）拒绝重发，先用 collect 核对。
+- 回执首行是 relay-record 元数据（送审编号、正文摘要、结论），deliver 先校验再交付；
+  交付状态记在 delivered/<回执编号>.json：已交付的再调用不重发，结果不明的要人确认终端没收到才重发。
 """
 import argparse
 import datetime
@@ -131,8 +137,22 @@ def parse_verdict(text):
 
 
 def conversation(url):
-    m = re.search(r"/c/([0-9a-f-]+)", url)
-    return m.group(1) if m else url
+    """会话 ID；还没进入具体会话（如项目首页）时为 None。"""
+    m = re.search(r"/c/([^/?#]+)", url)
+    return m.group(1) if m else None
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def review_id(packet):
+    return "R-" + sha(packet)[:16]
+
+
+def message_for(packet):
+    """实际发出的消息：第一行是送审编号（由送审包全文摘要得出），末尾是回执格式要求。"""
+    return "【RELAY 送审编号 %s】\n\n%s%s" % (review_id(packet), packet, FOOTER)
 
 
 def squash(s):
@@ -147,7 +167,8 @@ def squash_bubble(s):
 
 
 def bubble_matches(bubble, sent):
-    """长消息气泡只显示开头，所以要求气泡内容是送审包的开头，且至少 300 字（短包则要求全文）。"""
+    """长消息气泡只显示开头，所以要求气泡是已发消息的开头，且至少 300 字（短包则要求全文）。
+    已发消息第一行就是送审编号（由送审包全文摘要得出），所以这同时要求编号一致：两份送审包模板再像也分得开。"""
     b, w = squash_bubble(bubble), squash_bubble(sent)
     return len(b) >= min(300, len(w)) and w.startswith(b)
 
@@ -162,33 +183,37 @@ def fill_composer(page, text, poll):
     raise RelayError("输入框内容和送审包不一致，未发送")
 
 
-def send_and_wait(page, text, timeout, poll, settle, marker):
-    """发出送审包并等回复写完。回复必须同时满足：属于这份送审包（最后一条回复之前的用户消息核对一致）、
-    会话没变、看不到停止按钮、文本至少 3 次读取不变且持续 settle 秒。"""
+def send_and_wait(page, packet, timeout, poll, settle, marker):
+    """发出送审包并等回复写完。回复必须同时满足：在发送时所在的会话里（新会话以发送后第一次进入的为准，
+    之后不能再变）、最新回复之前的用户消息带这份送审包的编号、看不到停止按钮、文本至少 3 次读取不变且持续 settle 秒。"""
+    text = message_for(packet)
     before = page.state()
     if not before["composer"]:
         raise RelayError("页面没有输入框：没登录或不在聊天页（%s）" % before["url"])
     if before["streaming"]:
         raise RelayError("ChatGPT 还在回复上一条，拒绝插话")
+    conv = conversation(before["url"])
     fill_composer(page, text, poll)
-    marker.create(before["url"])  # 从这里起发送结果可能不明
+    marker.create(conv, before["url"])  # 从这里起发送结果可能不明
     if page.eval(SEND_JS) != "true":
         marker.clear()  # 按钮没点到，确定没发
         raise RelayError("发送按钮不可用")
     deadline = time.monotonic() + timeout
-    conv, prev, since, seen = None, None, 0.0, 0
+    prev, since, seen = None, 0.0, 0
     while time.monotonic() < deadline:
         time.sleep(poll)
         st = page.state()
+        cur = conversation(st["url"])
+        if conv is None and cur is not None:
+            conv = cur
+            marker.bind(conv)
+        elif cur != conv:
+            raise RelayError("发送后会话变了：%s" % st["url"])
         if st["user"] <= before["user"] or st["assistant"] <= before["assistant"]:
             prev = None
             continue
-        if conv is None:
-            conv = conversation(st["url"])
-        elif conversation(st["url"]) != conv:
-            raise RelayError("等回复期间会话变了：%s" % st["url"])
         if not bubble_matches(st["last_user"], text):
-            raise RelayError("最新回复前的用户消息不是这份送审包，拒绝收取")
+            raise RelayError("最新回复前的用户消息不是这份送审包（%s），拒绝收取" % review_id(packet))
         if st["streaming"] or not st["last"].strip():
             prev = None
             continue
@@ -202,56 +227,122 @@ def send_and_wait(page, text, timeout, poll, settle, marker):
     raise RelayError("等回复超时（%ss）；消息可能已发出，用 collect 核对" % timeout)
 
 
-class Marker:
-    """发送标记：点发送前建，回执落盘后删。还在就说明上次发送结果不明。"""
+def state_dir(kind):
+    d = os.path.join(os.environ.get("RELAY_STATE_DIR")
+                     or os.path.expanduser("~/Library/Application Support/DigitalTwin/relay"), kind)
+    os.makedirs(d, exist_ok=True)
+    return d
 
-    def __init__(self, out, packet):
-        self.path, self.packet = out + ".sending", packet
+
+def now_iso():
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+class Marker:
+    """发送标记：按送审包摘要存放，点发送前建，回执落盘后删。还在就说明这份送审包上次发送结果不明。"""
+
+    def __init__(self, packet):
+        self.path = os.path.join(state_dir("sending"), sha(packet) + ".json")
+        self.packet = packet
 
     def exists(self):
         return os.path.exists(self.path)
 
-    def create(self, url):
+    def load(self):
+        with open(self.path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def create(self, conv, page_url):
         with open(self.path, "x", encoding="utf-8") as f:
-            json.dump({"packet_sha256": hashlib.sha256(self.packet.encode()).hexdigest(), "page": url,
-                       "time": datetime.datetime.now().astimezone().isoformat(timespec="seconds")},
-                      f, ensure_ascii=False)
+            json.dump({"packet_sha256": sha(self.packet), "review_id": review_id(self.packet),
+                       "conversation": conv, "page": page_url, "time": now_iso()}, f, ensure_ascii=False)
+
+    def bind(self, conv):
+        data = self.load()
+        data["conversation"] = conv
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
 
     def clear(self):
         if self.exists():
             os.unlink(self.path)
 
 
+RECORD_META = re.compile(r"\A<!-- relay-record (\{.*\}) -->\n")
+SEPARATOR = "\n---\n\n"
+
+
 def write_record(path, packet, reply, url, verdict):
-    now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    body = reply.rstrip() + "\n"
+    meta = {"review_id": review_id(packet), "packet_sha256": sha(packet), "conversation": conversation(url),
+            "verdict": verdict, "reply_sha256": sha(body)}
     head = [
+        "<!-- relay-record %s -->" % json.dumps(meta, ensure_ascii=False),
         "# ChatGPT 审核回执原文",
         "",
-        "- 时间：%s" % now,
+        "- 时间：%s" % now_iso(),
         "- 会话：%s" % url,
-        "- 送审包 sha256：`%s`" % hashlib.sha256(packet.encode()).hexdigest(),
+        "- 送审编号：`%s`；送审包 sha256：`%s`" % (meta["review_id"], meta["packet_sha256"]),
         "- 解析结论：**%s**（relay 解析；以下为 ChatGPT 原文，未改动）" % verdict,
-        "",
-        "---",
-        "",
     ]
     tmp = "%s.tmp-%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(head) + reply.rstrip() + "\n")
-        f.flush()
-        os.fsync(f.fileno())
     try:
-        os.link(tmp, path)  # 原子发布，且不覆盖已有回执
-    except FileExistsError:
-        raise RelayError("回执文件已存在，拒绝覆盖：%s" % path)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(head) + SEPARATOR + body)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)  # 原子发布，且不覆盖已有回执
+        except FileExistsError:
+            raise RelayError("回执文件已存在，拒绝覆盖：%s" % path)
     finally:
-        os.unlink(tmp)
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
-def deliver(terminal, path):
-    msg = ("ChatGPT 审核结论 REWORK，回执原文：%s 。请先读原文，按仓库 AGENTS.md 逐条核实属实后再返修；"
-           "不属实的写明理由。返修完写新的送审包，不要自行合并或安装。" % os.path.abspath(path))
+def read_record(path):
+    """读回回执并校验：首行元数据完整、正文摘要一致、正文重新解析出的结论和元数据一致。"""
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    m = RECORD_META.match(text)
+    if not m or SEPARATOR not in text:
+        raise RelayError("不是本通道生成的回执：%s" % path)
+    meta = json.loads(m.group(1))
+    body = text.split(SEPARATOR, 1)[1]
+    if sha(body) != meta.get("reply_sha256") or parse_verdict(body) != meta.get("verdict"):
+        raise RelayError("回执不完整或被改过：%s" % path)
+    return meta
+
+
+def record_id(meta):
+    return "%s-%s" % (meta["review_id"], meta["reply_sha256"][:12])
+
+
+def deliver(terminal, path, meta, confirm_not_received=False):
+    """交付状态：sending（结果不明）/ done。已交付的不重发；结果不明的要人确认终端没收到才重发。"""
+    rid = record_id(meta)
+    state = os.path.join(state_dir("delivered"), rid + ".json")
+    if os.path.exists(state):
+        with open(state, encoding="utf-8") as f:
+            status = json.load(f)["status"]
+        if status == "done":
+            return "already"
+        if not confirm_not_received:
+            raise RelayError("回执 %s 上次交付结果不明：先到终端核对有没有收到这个回执编号，"
+                             "确认没收到再加 --confirm-not-received 重试" % rid)
+
+    def mark(status):
+        with open(state, "w", encoding="utf-8") as f:
+            json.dump({"status": status, "terminal": terminal, "record": os.path.abspath(path), "time": now_iso()},
+                      f, ensure_ascii=False)
+
+    mark("sending")
+    msg = ("ChatGPT 审核结论 REWORK（回执编号 %s），回执原文：%s 。同一回执编号只处理一次，处理过就忽略本条。"
+           "请先读原文，按仓库 AGENTS.md 逐条核实属实后再返修；不属实的写明理由。"
+           "返修完写新的送审包，不要自行合并或安装。" % (rid, os.path.abspath(path)))
     orca("terminal", "send", "--terminal", terminal, "--text", msg, "--enter")
+    mark("done")
+    return "sent"
 
 
 def cmd_status(a):
@@ -270,17 +361,20 @@ def read_packet(a):
 
 def cmd_review(a):
     packet = read_packet(a)
-    marker = Marker(a.out, packet)
+    marker = Marker(packet)
     if marker.exists():
-        raise RelayError("上次送审结果不明（%s），先用 collect 核对，不要重发" % marker.path)
-    reply, url = send_and_wait(Page(a.worktree, a.page), packet + FOOTER, a.timeout, a.poll, a.settle, marker)
+        raise RelayError("这份送审包（%s）上次发送结果不明（%s），先用 collect 核对，不要重发"
+                         % (review_id(packet), marker.path))
+    reply, url = send_and_wait(Page(a.worktree, a.page), packet, a.timeout, a.poll, a.settle, marker)
     return finish(a, packet, reply, url, marker)
 
 
 def cmd_collect(a):
-    """等待中途断掉时，不重发、直接收取页面上已写完的回复：最后一条回复之前的用户消息必须是这份送审包，
-    且隔 settle 秒读两次都没在生成、文本不变。"""
+    """等待中途断掉时，不重发、直接收取页面上已写完的回复：最新回复之前的用户消息必须带这份送审包的编号；
+    有发送标记时页面会话必须是标记记下的会话；隔 settle 秒读两次都没在生成、文本和会话不变。"""
     packet = read_packet(a)
+    marker = Marker(packet)
+    expect = marker.load()["conversation"] if marker.exists() else None
     page = Page(a.worktree, a.page)
     reads = [page.state()]
     time.sleep(a.settle)
@@ -290,22 +384,25 @@ def cmd_collect(a):
             raise RelayError("ChatGPT 还在生成，稍后再收")
         if not st["assistant"] or not st["last"].strip():
             raise RelayError("页面上没有可收取的回复")
-        if not bubble_matches(st["last_user"], packet + FOOTER):
-            raise RelayError("最新回复前的用户消息不是这份送审包，拒绝收取")
-    if reads[0]["last"] != reads[1]["last"] or conversation(reads[0]["url"]) != conversation(reads[1]["url"]):
+        if expect and conversation(st["url"]) != expect:
+            raise RelayError("页面会话和发送标记记下的（%s）不一致，拒绝收取" % expect)
+        if not bubble_matches(st["last_user"], message_for(packet)):
+            raise RelayError("最新回复前的用户消息不是这份送审包（%s），拒绝收取" % review_id(packet))
+    if reads[0]["last"] != reads[1]["last"] or reads[0]["url"] != reads[1]["url"]:
         raise RelayError("回复还在变化，稍后再收")
-    return finish(a, packet, reads[1]["last"], reads[1]["url"], Marker(a.out, packet))
+    return finish(a, packet, reads[1]["last"], reads[1]["url"], marker)
 
 
 def finish(a, packet, reply, url, marker):
     verdict = parse_verdict(reply)
     write_record(a.out, packet, reply, url, verdict)
+    meta = read_record(a.out)  # 写后回读
     marker.clear()
-    result = {"verdict": verdict, "record": a.out, "url": url, "delivered": False}
+    result = {"verdict": verdict, "record": a.out, "review_id": meta["review_id"], "url": url, "delivered": False}
     code = EXIT[verdict]
     if verdict == "REWORK" and a.deliver_to:
         try:
-            deliver(a.deliver_to, a.out)
+            deliver(a.deliver_to, a.out, meta)
             result["delivered"] = True
         except RelayError as e:
             result["deliver_error"] = "%s；回执已保存，用 deliver 重试" % e
@@ -315,12 +412,12 @@ def finish(a, packet, reply, url, marker):
 
 
 def cmd_deliver(a):
-    with open(a.record, encoding="utf-8") as f:
-        head = f.read(2000)
-    if "- 解析结论：**REWORK**" not in head:
+    meta = read_record(a.record)
+    if meta["verdict"] != "REWORK":
         raise RelayError("回执结论不是 REWORK，不交付：%s" % a.record)
-    deliver(a.deliver_to, a.record)
-    print(json.dumps({"record": a.record, "delivered": True}, ensure_ascii=False))
+    how = deliver(a.deliver_to, a.record, meta, a.confirm_not_received)
+    print(json.dumps({"record": a.record, "record_id": record_id(meta), "delivered": True,
+                      "already": how == "already"}, ensure_ascii=False))
     return 10
 
 
@@ -342,6 +439,7 @@ def main(argv=None):
     d = sub.add_parser("deliver")
     d.add_argument("--record", required=True)
     d.add_argument("--deliver-to", required=True)
+    d.add_argument("--confirm-not-received", action="store_true", help="已到终端核对过，上次交付确实没收到")
     a = ap.parse_args(argv)
     try:
         return {"status": cmd_status, "review": cmd_review, "collect": cmd_collect,
