@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-30 · B2.2 G5 第 0 批与 G5-A 第 1 批：架构定稿，本地通知 Inbox 隔离代码已验收（GO），未合并、未部署
+
+- 时间：10:20–12:20；Issue [#31](https://github.com/Natsukashii1997/digital-twin/issues/31)；分支 `claude/31-g5-delivery`（worktree `~/Sandbox/worktrees/digital-twin-31-g5`，HEAD `b95373d`，**只在本地，没有推送**）。
+- **来由**：常浩同意按推荐开工 G5，D8 v1 写成后，又转来 ChatGPT 任务书 V1.0：G5 改成“本地优先、多通道”，飞书只作可选的远程通道。第 0 批（设计）先评审，再按 R1–R5 补正；之后常浩转来《G5-A 第 1 批隔离开发正式开工指令 V1.0》，授权隔离开发。
+- **第 0 批**（纯文档，提交 `7c09541`、`933a244`）：现状审计、D8 v2、隔离测试与部署闸门（D1–D6）、G5-A 任务书、补正对照表。审计发现两点：`twin_identity.lark_fetch()` 核实不了 bot 自己发出的消息，所以 D8 v1 的回读方案不成立；`Store` 以读写方式打开时会自动迁移，因此安装新版脚本和迁移正式库合成同一道闸门 D1。
+- **G5-A**（提交 `919dd9d` 和返修 `9bacb67`）：
+  - `twin_state.py` 追加 v4 迁移：notifications 和 deliveries 两张表；一代一行；旧 `sched.report` 映射成 legacy。
+  - 新增 `twin_notify.py`：`sync / list / show / history`，退出码 0–4；只有完整扫描才解决通知；工单目录不见了判为 partial；同一指纹内容变化记新 revision；版本闸门在建锁之前。
+  - 新增无参入口 `twin_notify_cron.py`。
+  - 第 1 批验收 NO-GO（P1-1、P1-2、P2-1），定向返修后二次验收 **GO**。
+- **测试**：新增 58 项，都是先红后绿；全量 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`（3.9.6）`Ran 335 tests` `OK` exit 0；`python3 …`（3.14.5）同样 335 项 OK。ChatGPT 在本机独立重跑，结果一致。证据在 `~/Library/Application Support/DigitalTwin/evidence/g5a-20261030/`、`g5a-rework-20261030/`；三份评审原文在分支的 `docs/reviews/2026-10-30-ChatGPT-B2.2-G5*`。
+- **本轮新坑**：
+  - `read_orders()` 遇到读不了的派单目录，可能当成空目录；遇到整张单的目录消失，也不报错（twin_notify 里已自己防住，`read_orders` 本身没改）；
+  - `restore()` 恢复完会立刻按当前程序再迁移一次，所以回退到 v3 必须先换回旧脚本再恢复；
+  - 只读打开 WAL 库时，SQLite 可能留下空的 `-wal` 文件；
+  - WAL 库的副本要用 `immutable=1` 才能只读打开。
+- **没做（照实）**：分支没有合并、没有推送；没有安装到 `~/.hermes/scripts/`；正式库仍是 v3（sha `6cde8737…`，前后核对未变）；没有建 cron；没有发飞书；`.env`、Skill、网关都没动；G5-B、G5-C、G6、G7 都没有开始。
+- **回退**：生产环境没有变化，不需要回退；要放弃的话，删掉本地分支和 worktree 即可。
+- **下一步**：等常浩决定做 G5-B（终端只读层）、G5-C（飞书适配器），还是先做 D1（正式迁移与安装方案）。每一项都要单独授权，建议开新会话来做。ChatGPT 留待后续的项：D1 的迁移与回退要单独验收；G5-C 的幂等键要带上 `content_digest`；工单目录长期消失时，要有需要人确认的收口办法。
+
+---
+
 ## 2026-10-30 上午 · B2.2 G4 独立验收：G4 技术验收通过，G3 observe 补验关闭，停在 G4
 
 - 时间：10:15
