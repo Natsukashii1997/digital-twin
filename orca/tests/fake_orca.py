@@ -13,6 +13,9 @@ state 字段：
   mangle                        true 时输入框里的内容被截断
   foreign_user                  最新回复前的用户消息换成这段文字（模拟别人插话）
   send_disabled                 发送按钮不可用
+  url_at_send                   点发送那一刻的页面地址（模拟核对通过后标签被切走）
+  composer_text_at_send         点发送那一刻的输入框内容（模拟填好后被改动）
+  streaming_at_send             点发送那一刻正在生成
   fail_after_send               点了发送，但 orca 返回失败
   fail                          设为某个命令名时，该命令返回 ok:false
   rc_nonzero                    设为某个命令名时，该命令退出码 1 但输出 ok:true
@@ -96,12 +99,25 @@ if args[0] == "eval":
     if "/*relay:composer*/" in js:
         out({"result": s.get("composer_text", "")})
     if "/*relay:send*/" in js:
+        # 按发送脚本的约定在「点击那一刻」核对：页面地址、输入框、生成状态、按钮；不符就不点
+        url, text = json.loads("[" + js[js.rindex("})(") + 3:-1] + "]")
+        norm = lambda u: u.split("?")[0].split("#")[0].rstrip("/")
+        squash = lambda t: re.sub(r"\s+", "", t)
+        now = s.get("composer_text_at_send", s.get("composer_text", ""))
+        if norm(s.get("url_at_send", s.get("url_before", URL))) != norm(url):
+            out({"result": "chat"})
+        if not s.get("composer", True):
+            out({"result": "composer"})
+        if squash(now) != squash(text):
+            out({"result": "text"})
+        if s.get("streaming_at_send"):
+            out({"result": "streaming"})
         if s.get("send_disabled"):
-            out({"result": "false"})
+            out({"result": "button"})
         s["sent"] = True
         if s.get("fail_after_send"):
             out(ok=False)
-        out({"result": "true"})
+        out({"result": "sent"})
 if args[:2] == ["terminal", "send"]:
     out({"accepted": True})
 out(ok=False)

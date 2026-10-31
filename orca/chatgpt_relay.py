@@ -89,12 +89,31 @@ COMPOSER_TEXT_JS = r"""/*relay:composer*/(() => {
   return els.length === 1 ? els[0].innerText : '';
 })()""" % COMPOSER
 
-SEND_JS = r"""/*relay:send*/(() => {
-  const b = document.querySelector('%s');
-  if (!b || b.disabled) return false;
+# 最后一次核对和点击在同一段脚本里同步完成（P1-01-R4）：Python 侧检查之后、点击之前，共用标签可能被切走或改动。
+# 参数是发送前核对过的页面地址和送审消息；页面地址去掉查询串后必须完全一致（新会话首页同样适用）。
+# 返回 sent 才算点了；其余返回值都是没点的原因。
+SEND_JS = r"""/*relay:send*/((url, text) => {
+  const norm = u => u.split('?')[0].split('#')[0].replace(/\/+$/, '');
+  const squash = s => s.replace(/\s+/g, '');
+  const vis = s => [...document.querySelectorAll(s)].filter(e => e.getClientRects().length > 0);
+  if (norm(location.href) !== norm(url)) return 'chat';
+  const els = vis('%(composer)s');
+  if (els.length !== 1) return 'composer';
+  if (squash(els[0].innerText) !== squash(text)) return 'text';
+  if (vis('%(stop)s').length) return 'streaming';
+  const b = document.querySelector('%(send)s');
+  if (!b || b.disabled) return 'button';
   b.click();
-  return true;
-})()""" % SEND_BTN
+  return 'sent';
+})(%%s, %%s)""" % {"composer": COMPOSER, "stop": STOP_BTN, "send": SEND_BTN}
+
+SEND_REFUSED = {
+    "chat": "点发送前页面已不在指定的会话上",
+    "composer": "点发送前输入框不是恰好一个",
+    "text": "点发送前输入框内容已和送审包不一致",
+    "streaming": "点发送前 ChatGPT 正在回复",
+    "button": "发送按钮不可用",
+}
 
 VERDICT_RE = re.compile(r"^\s*`?VERDICT\s*[:：]\s*(PASS|REWORK|NEEDS_HUMAN)`?\s*$", re.M)
 EXIT = {"PASS": 0, "REWORK": 10, "NEEDS_HUMAN": 20}
@@ -216,9 +235,12 @@ def send_and_wait(page, packet, chat, timeout, poll, settle, marker):
     conv = conversation(before["url"])
     fill_composer(page, text, poll)
     marker.create(conv, before["url"])  # 从这里起发送结果可能不明
-    if page.eval(SEND_JS) != "true":
-        marker.clear()  # 按钮没点到，确定没发
-        raise RelayError("发送按钮不可用")
+    sent = page.eval(SEND_JS % (json.dumps(before["url"]), json.dumps(text)))
+    if sent in SEND_REFUSED:
+        marker.clear()  # 脚本在点击前拒绝了，确定没发
+        raise RelayError(SEND_REFUSED[sent] + "，没有点发送")
+    if sent != "sent":
+        raise RelayError("发送脚本返回 %r，发送结果不明；先用 collect 核对" % sent)
     deadline = time.monotonic() + timeout
     prev, since, seen = None, 0.0, 0
     while time.monotonic() < deadline:

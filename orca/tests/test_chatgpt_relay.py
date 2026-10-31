@@ -6,6 +6,8 @@ import contextlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -447,6 +449,78 @@ class RelayTest(unittest.TestCase):
             self.assertIn("不在指定的会话", err)
             self.assertNotIn("inserted", self.calls())
             self.assertNotIn("sent", self.calls())
+
+    def test_page_changed_after_check_is_not_sent(self):
+        # P1-01-R4：发送前核对通过、填好送审包之后，到点击之前页面被切走或改动，必须不点击
+        cases = [
+            (self.chat, dict(url_at_send="https://chatgpt.com/c/someone-elses-chat"), "不在指定的会话"),
+            ("https://chatgpt.com/g/g-p-x/project",
+             dict(url_before="https://chatgpt.com/g/g-p-x/project", url_at_send="https://chatgpt.com/c/someone-elses-chat"),
+             "不在指定的会话"),
+            (self.chat, dict(composer_text_at_send="别人的草稿"), "输入框内容"),
+            (self.chat, dict(streaming_at_send=True), "正在回复"),
+        ]
+        for chat, change, msg in cases:
+            with self.subTest(change=change):
+                self.chat = chat
+                self.page(reply="VERDICT: PASS", **change)
+                code, err = self.review()
+                self.assertEqual(code, 2)
+                self.assertIn(msg, err)
+                self.assertIn("没有点发送", err)
+                self.assertNotIn("sent", self.calls())
+                self.assertFalse(os.path.exists(self.marker()))
+                self.assertFalse(os.path.exists(self.out))
+
+    def test_send_script_checks_page_at_click_time(self):
+        # 直接在 node 里跑真实的 SEND_JS（假 DOM），确认核对和点击在同一段脚本里
+        if not shutil.which("node"):
+            self.skipTest("没有 node")
+        text = "【RELAY 送审编号 R-x】\n第一段\n\n第二段"
+
+        def run(href, composers=(text,), stop=False, button=True, disabled=False, url=self.chat):
+            page = dict(href=href, composers=list(composers), stop=stop, button=button, disabled=disabled)
+            js = """
+const clicked = [];
+const el = (t, vis) => ({innerText: t, getClientRects: () => (vis ? [1] : [])});
+const page = %s;
+globalThis.location = {href: page.href};
+globalThis.document = {
+  querySelectorAll: s => s === %s ? page.composers.map(t => el(t, true)) : s === %s ? [el('', page.stop)] : [],
+  querySelector: s => (s === %s && page.button ? {disabled: page.disabled, click: () => clicked.push(1)} : null),
+};
+const r = %s;
+console.log(JSON.stringify([r, clicked.length]));
+""" % (json.dumps(page), json.dumps(relay.COMPOSER), json.dumps(relay.STOP_BTN), json.dumps(relay.SEND_BTN),
+       relay.SEND_JS % (json.dumps(url), json.dumps(text)))
+            p = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return json.loads(p.stdout)
+
+        home = "https://chatgpt.com/g/g-p-x/project"
+        self.assertEqual(run(self.chat + "?model=x"), ["sent", 1])
+        self.assertEqual(run(self.chat, composers=["【RELAY 送审编号 R-x】\n\n第一段\n第二段"]), ["sent", 1])
+        self.assertEqual(run(home + "/", url=home), ["sent", 1])
+        self.assertEqual(run("https://chatgpt.com/c/someone-elses-chat"), ["chat", 0])
+        self.assertEqual(run("https://chatgpt.com/c/new", url=home), ["chat", 0])
+        self.assertEqual(run(self.chat, composers=["别人的草稿"]), ["text", 0])
+        self.assertEqual(run(self.chat, composers=[text, text]), ["composer", 0])
+        self.assertEqual(run(self.chat, stop=True), ["streaming", 0])
+        self.assertEqual(run(self.chat, disabled=True), ["button", 0])
+        self.assertEqual(run(self.chat, button=False), ["button", 0])
+
+    def test_unexpected_send_result_keeps_marker(self):
+        # 发送脚本返回了看不懂的结果：不能断定没点，发送标记留着，按结果不明处理
+        self.page(reply="VERDICT: PASS")
+        real = relay.Page.eval
+        relay.Page.eval = lambda page, js: "undefined" if "/*relay:send*/" in js else real(page, js)
+        try:
+            code, err = self.review()
+        finally:
+            relay.Page.eval = real
+        self.assertEqual(code, 2)
+        self.assertIn("结果不明", err)
+        self.assertTrue(os.path.exists(self.marker()))
 
     def test_missing_files_are_channel_errors(self):
         code, msg = self.deliver()
