@@ -519,15 +519,18 @@ class RelayTest(unittest.TestCase):
             self.skipTest("没有 node")
         text = "【RELAY 送审编号 R-x】\n第一段\n\n第二段"
 
-        def run(href, composers=(text,), stop=False, button=True, disabled=False, url=self.chat):
-            page = dict(href=href, composers=list(composers), stop=stop, button=button, disabled=disabled)
+        def run(href, composers=(text,), stop=False, button=True, disabled=False, url=self.chat,
+                mode=relay.MODE_LABEL, strength="思考强度\n高"):
+            page = dict(href=href, composers=list(composers), stop=stop, button=button, disabled=disabled,
+                        buttons=[[mode, ""], [relay.MODEL_LABEL, strength]])
             js = """
 const clicked = [];
-const el = (t, vis) => ({innerText: t, getClientRects: () => (vis ? [1] : [])});
+const el = (t, vis, label) => ({innerText: t, getClientRects: () => (vis ? [1] : []), getAttribute: () => label});
 const page = %s;
 globalThis.location = {href: page.href};
 globalThis.document = {
-  querySelectorAll: s => s === %s ? page.composers.map(t => el(t, true)) : s === %s ? [el('', page.stop)] : [],
+  querySelectorAll: s => s === %s ? page.composers.map(t => el(t, true)) : s === %s ? [el('', page.stop)]
+    : s === 'button' ? page.buttons.map(([label, t]) => el(t, true, label)) : [],
   querySelector: s => (s === %s && page.button ? {disabled: page.disabled, click: () => clicked.push(1)} : null),
 };
 const r = %s;
@@ -549,6 +552,10 @@ console.log(JSON.stringify([r, clicked.length]));
         self.assertEqual(run(self.chat, stop=True), ["streaming", 0])
         self.assertEqual(run(self.chat, disabled=True), ["button", 0])
         self.assertEqual(run(self.chat, button=False), ["button", 0])
+        # RELAY-02 P1-04：点击前再核一次聊天模式和思考强度「高」
+        self.assertEqual(run(self.chat, strength="思考强度\n中"), ["mode", 0])
+        self.assertEqual(run(self.chat, strength=""), ["mode", 0])
+        self.assertEqual(run(self.chat, mode="切换模式，当前模式：Work"), ["mode", 0])
 
     def test_unexpected_send_result_keeps_marker(self):
         # 发送脚本返回了看不懂的结果：不能断定没点，发送标记留着，按结果不明处理
@@ -578,6 +585,26 @@ console.log(JSON.stringify([r, clicked.length]));
         self.page(strength_seq=["高", "中", "中"], reply="VERDICT: PASS")
         self.assertEqual(self.review()[0], 0)
         self.assertTrue(any("/*relay:set-high*/" in " ".join(c) for c in self.calls()["calls"]))
+
+    def test_high_then_medium_reading_is_raised(self):
+        # RELAY-02 P1-04：「高、高、中」——连续两次读到瞬时的「高」也不能当真，要等读数稳定在「中」再调高
+        self.page(strength_seq=["高", "高", "中"], reply="VERDICT: PASS")
+        self.assertEqual(self.review()[0], 0)
+        self.assertTrue(any("/*relay:set-high*/" in " ".join(c) for c in self.calls()["calls"]))
+
+    def test_mode_changed_after_fill_is_not_sent(self):
+        # RELAY-02 P1-04：发送前核对通过、填好送审包之后，到点击之前强度变回「中」或离开聊天模式，必须不点击
+        for change in (dict(strength_at_send="中"), dict(mode_chat_at_send=False)):
+            with self.subTest(change=change):
+                self.page(reply="VERDICT: PASS", **change)
+                code, err = self.review()
+                self.assertEqual(code, 2)
+                self.assertIn("思考强度不是「高」", err)
+                self.assertIn("没有点发送", err)
+                self.assertIn("inserted", self.calls())
+                self.assertNotIn("sent", self.calls())
+                self.assertFalse(os.path.exists(self.marker()))
+                self.assertFalse(os.path.exists(self.out))
 
     def test_refuses_when_strength_cannot_be_raised_or_not_chat_mode(self):
         for state, msg in ((dict(strength="中", strength_stuck=True), "没能调到「高」"), (dict(mode_chat=False), "不是聊天模式")):
@@ -613,6 +640,13 @@ console.log(JSON.stringify([r, clicked.length]));
         self.assertEqual(code, 2)
         self.assertIn("已经有回复", err)
         self.assertNotIn("sent", self.calls())
+
+    def test_orca_error_code_is_kept(self):
+        # RELAY-02 P2-04：orca 的错误码要带出来，循环驱动据此区分「确定没发出」（agent_prompt_blocked）和结果不明
+        self.page(fail="terminal")
+        with self.assertRaises(relay.RelayError) as c:
+            relay.orca("terminal", "send", "--terminal", "t", "--text", "x", "--enter")
+        self.assertEqual(c.exception.code, "fake_fail")
 
     def test_orca_failure_is_reported(self):
         self.page(fail="eval", reply="x")

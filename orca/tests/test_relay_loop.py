@@ -1,4 +1,4 @@
-"""relay_loop 单测：替换和外部打交道的四个函数（终端、页面跳转、relay、飞书），不连真实 ORCA / ChatGPT / 飞书。
+"""relay_loop 单测：替换和外部打交道的五个函数（终端、页面跳转、relay、飞书、查已合并 PR），不连真实 ORCA / ChatGPT / 飞书。
 
 运行：python3 -B -m unittest discover -s orca/tests
 """
@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,33 @@ import chatgpt_relay as relay  # noqa: E402
 import relay_loop as loop  # noqa: E402
 
 PROJECT = "https://chatgpt.com/g/g-p-x/project"
+REAL_TERMINAL_SEND, REAL_RUN_RELAY, REAL_LARK_SEND = loop.terminal_send, loop.run_relay, loop.lark_send
+
+# 两个真实进程同时跑同一运行目录（P1-02）：假 Claude 收到任务后慢 1 秒才写送审包，把并发窗口拉开
+TWIN = r"""
+import json, os, re, sys, time
+sys.path.insert(0, %(orca)r)
+import chatgpt_relay as relay, relay_loop as loop
+log = lambda name, text: open(os.path.join(%(dir)r, name), "a").write(json.dumps(text, ensure_ascii=False) + "\n")
+def terminal(term, text):
+    log("claude.log", text)
+    time.sleep(1)
+    with open(re.search(r"写到 (\S+)", text).group(1), "w") as f:
+        f.write("送审包\n")
+    open(re.search(r"空文件 (\S+) ", text).group(1), "w").close()
+def fake_relay(argv):
+    get = lambda k: argv[argv.index(k) + 1]
+    with open(get("--packet")) as f:
+        packet = f.read()
+    relay.write_record(get("--out"), packet, "意见。\nVERDICT: PASS", "https://chatgpt.com/g/g-p-x/c/new1", "PASS")
+    return 0
+loop.terminal_send, loop.run_relay, loop.goto_chat = terminal, fake_relay, lambda a, url: None
+loop.lark_send = lambda text, key: log("notes.log", text)
+loop.merged_prs = lambda a, since: []
+sys.exit(loop.main(["run", "--run-dir", %(run)r, "--task", %(task)r, "--repo", "/repo", "--worktree", "path:/x",
+                    "--page", "p1", "--project", "https://chatgpt.com/g/g-p-x/project", "--claude-term", "term_c",
+                    "--poll", "0", "--claude-timeout", "10"]))
+"""
 
 
 class LoopTest(unittest.TestCase):
@@ -37,6 +65,8 @@ class LoopTest(unittest.TestCase):
         self.patch(loop, "goto_chat", lambda a, url: self.gotos.append(url))
         self.patch(loop, "run_relay", self.fake_relay)
         self.patch(loop, "lark_send", lambda text, key: self.notes.append((text, key)))
+        self.merged = []        # 任务开工后被合并的 PR
+        self.patch(loop, "merged_prs", lambda a, since: self.merged)
 
     def patch(self, mod, name, fn):
         old = getattr(mod, name)
@@ -154,21 +184,23 @@ class LoopTest(unittest.TestCase):
         with open(packet, "w") as f:
             f.write("上次发出去结果不明的送审包\n")
         open(os.path.join(self.run_dir, "round-1.ready"), "w").close()
-        relay.Marker(open(packet).read()).create("abc", PROJECT)
+        relay.Marker("上次发出去结果不明的送审包\n").create("abc", PROJECT)
         self.collect_misses = 2                        # 前两次回复还没写完
         self.assertEqual(self.go(), 0)
         self.assertEqual([r[0] for r in self.relays], ["collect"] * 3)
         self.assertEqual(self.gotos, ["https://chatgpt.com/g/g-p-x/c/abc"])
 
     def test_temporary_or_missing_conversation_is_not_collected(self):
-        os.makedirs(self.run_dir)
-        packet = os.path.join(self.run_dir, "round-1-packet.md")
-        for conv in ("local-chatgpt%3A9ad4", None):
+        for i, conv in enumerate(("local-chatgpt%3A9ad4", None)):
             with self.subTest(conv=conv):
+                self.run_dir = os.path.join(self.dir, "run-%d" % i)
+                os.makedirs(self.run_dir)
+                packet = os.path.join(self.run_dir, "round-1-packet.md")
+                body = "送审包 %s\n" % conv
                 with open(packet, "w") as f:
-                    f.write("送审包 %s\n" % conv)
+                    f.write(body)
                 open(os.path.join(self.run_dir, "round-1.ready"), "w").close()
-                relay.Marker(open(packet).read()).create(conv, PROJECT)
+                relay.Marker(body).create(conv, PROJECT)
                 self.claude_writes = False
                 self.assertEqual(self.go(), 2)
                 self.assertIn("没有绑定会话", self.notes[-1][0])
@@ -184,6 +216,198 @@ class LoopTest(unittest.TestCase):
         self.patch(loop, "lark_send", lambda text, key: self.notes.append((text, key)))
         self.assertEqual(self.go(), 0)
         self.assertIn("PASS", self.notes[-1][0])
+
+    def errors(self):
+        with open(os.path.join(self.run_dir, "errors.jsonl")) as f:
+            return [json.loads(l) for l in f]
+
+    def test_stale_pass_record_is_not_reused(self):
+        # P1-01：运行目录里留着旧任务 / 旧版本的有效 PASS 回执，当前送审包已经变了：拒绝复用，不发 PASS 通知
+        os.makedirs(self.run_dir)
+        relay.write_record(os.path.join(self.run_dir, "round-1-回执.md"), "旧版本的送审包\n", "好。\nVERDICT: PASS",
+                           "https://chatgpt.com/g/g-p-x/c/old", "PASS")
+        self.assertEqual(self.go(), 2)
+        self.assertEqual(self.relays, [])
+        self.assertFalse(any("PASS" in n[0] for n in self.notes))
+        self.assertIn("对不上", self.notes[-1][0])
+        self.assertIn("回执里的送审包摘要", self.notes[-1][0])
+
+    def test_record_from_another_run_with_same_packet_is_not_reused(self):
+        # P1-01：送审包内容碰巧一样、但回执不是本运行目录送出去的（账上没有这一轮），同样不认
+        os.makedirs(self.run_dir)
+        self.claude_writes = False
+        with open(os.path.join(self.run_dir, "round-1-packet.md"), "w") as f:
+            f.write("同样的送审包\n")
+        relay.write_record(os.path.join(self.run_dir, "round-1-回执.md"), "同样的送审包\n",
+                           "好。\nVERDICT: PASS", "https://chatgpt.com/g/g-p-x/c/old", "PASS")
+        self.assertEqual(self.go(), 2)
+        self.assertNotIn("回执里的送审包摘要", self.notes[-1][0])
+        self.assertIn("本运行目录记下的送审包", self.notes[-1][0])
+        self.assertFalse(any("PASS" in n[0] for n in self.notes))
+
+    def test_packet_changed_after_pass_is_not_reused(self):
+        # P1-01：收口后送审包被改，重跑不能再认旧回执
+        self.verdicts = ["PASS"]
+        self.assertEqual(self.go(), 0)
+        with open(os.path.join(self.run_dir, "round-1-packet.md"), "a") as f:
+            f.write("事后追加的改动\n")
+        self.assertEqual(self.go(), 2)
+        self.assertEqual([n[0].count("审核 PASS") for n in self.notes], [1, 0])
+        self.assertIn("对不上", self.notes[-1][0])
+
+    def test_rerun_with_another_task_is_refused(self):
+        # P1-01：同一运行目录换了任务说明，拒绝续跑
+        self.verdicts = ["REWORK"]
+        self.fail_relay_at = 1
+        self.assertEqual(self.go(), 2)
+        with open(self.task, "w") as f:
+            f.write("# 另一个任务\n")
+        self.assertEqual(self.go(), 2)
+        self.assertIn("属于另一个任务", self.notes[-1][0])
+        self.assertEqual(len(self.sent), 1)
+
+    def test_two_processes_on_one_run_dir(self):
+        # P1-02：两个进程同时用同一 --run-dir 启动：只有一个干活，Claude 只收到一次任务，PASS 只通知一次
+        code = TWIN % {"orca": os.path.dirname(HERE), "dir": self.dir, "run": self.run_dir, "task": self.task}
+        procs = [subprocess.Popen([sys.executable, "-B", "-c", code], stdout=subprocess.DEVNULL) for _ in range(2)]
+        codes = sorted(p.wait(timeout=60) for p in procs)
+        self.assertEqual(codes, [0, 3])
+        with open(os.path.join(self.dir, "claude.log")) as f:
+            self.assertEqual(len(f.readlines()), 1)
+        with open(os.path.join(self.dir, "notes.log")) as f:
+            notes = f.readlines()
+        self.assertEqual(len(notes), 1)
+        self.assertIn("PASS", notes[0])
+
+    def test_held_lock_refuses_without_side_effects(self):
+        # P1-02：锁被别的进程拿着时，本进程不交付、不送审、不通知
+        os.makedirs(self.run_dir)
+        holder = subprocess.Popen([sys.executable, "-c", "import fcntl,sys,time\nf=open(sys.argv[1],'a')\n"
+                                   "fcntl.flock(f,fcntl.LOCK_EX)\nprint('ok',flush=True)\ntime.sleep(30)",
+                                   os.path.join(self.run_dir, ".lock")], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "ok")
+        self.verdicts = ["PASS"]
+        self.assertEqual(self.go(), 3)
+        self.assertEqual((self.sent, self.relays, self.notes), ([], [], []))
+        holder.kill()
+        holder.wait()
+        self.assertEqual(self.go(), 0)
+
+    def test_corrupt_state_stops_and_is_recorded(self):
+        # P1-05：state.json 损坏不再直接抛 JSONDecodeError：停下、通知、落盘
+        self.verdicts = ["REWORK"]
+        self.fail_relay_at = 1
+        self.assertEqual(self.go(), 2)
+        with open(os.path.join(self.run_dir, "state.json"), "w") as f:
+            f.write("{坏的")
+        self.assertEqual(self.go(), 2)
+        self.assertIn("state.json 损坏", self.notes[-1][0])
+        self.assertTrue(self.errors()[-1]["notified"])
+
+    def test_notification_timeout_is_recorded(self):
+        # P1-05：飞书命令超时不再逃逸；通知发不出去时，出错状态仍落盘
+        owner = os.path.join(self.dir, "owner")
+        with open(owner, "w") as f:
+            f.write("ou_x\n")
+        self.patch(loop, "OWNER_FILE", owner)
+        self.patch(loop, "lark_send", REAL_LARK_SEND)
+
+        def timeout(*args, **kw):
+            raise subprocess.TimeoutExpired(args[0], 60)
+        self.patch(loop.subprocess, "run", timeout)
+        self.verdicts = ["PASS"]
+        self.assertEqual(self.go(), 2)
+        last = self.errors()[-1]
+        self.assertIn("60 秒没有返回", last["error"])
+        self.assertFalse(last["notified"])
+        self.assertIn("60 秒没有返回", last["notify_error"])
+
+    def test_unexpected_exception_and_init_error_are_handled(self):
+        # P1-05：没预料到的异常、任务文件读不到（初始化阶段），都走统一出错处理，不直接抛出
+        def bug(argv):
+            raise ValueError("模拟程序缺陷")
+        self.patch(loop, "run_relay", bug)
+        self.assertEqual(self.go(), 2)
+        self.assertIn("模拟程序缺陷", self.notes[-1][0])
+        self.assertIn("ValueError", self.errors()[-1]["error"])
+        os.unlink(self.task)
+        self.assertEqual(self.go(), 2)
+        self.assertIn("FileNotFoundError", self.errors()[-1]["error"])
+
+    def test_max_rework_cannot_exceed_policy(self):
+        # P2-01：D3-5 上限 2 轮是政策，命令行不能调大
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.go("--max-rework", "3")
+        self.assertFalse(os.path.exists(self.run_dir))
+        self.verdicts = ["REWORK", "REWORK"]
+        self.assertEqual(self.go("--max-rework", "1"), 20)
+
+    def test_prompt_blocked_fails_fast_and_can_be_resent(self):
+        # P2-04：Claude 停在确认菜单时 orca 拒收（确定没发出）：立刻停下通知，不等就绪超时；处理菜单后重跑直接重发
+        def blocked(*args, **kw):
+            e = relay.RelayError("orca terminal 失败")
+            e.code = "agent_prompt_blocked"
+            raise e
+        self.patch(relay, "orca", blocked)
+        self.patch(loop, "terminal_send", REAL_TERMINAL_SEND)
+        self.assertEqual(self.go("--claude-timeout", "3600"), 2)
+        self.assertIn("确认菜单", self.notes[-1][0])
+        self.assertFalse(os.path.exists(os.path.join(self.run_dir, "handoff", "kickoff.json")))
+        self.patch(loop, "terminal_send", self.fake_terminal)
+        self.verdicts = ["PASS"]
+        self.assertEqual(self.go(), 0)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_merged_pr_during_task_stops_the_loop(self):
+        # P1-03：执行方不许合并：送审前或 PASS 收口前发现开工后有 PR 被合并，就停下等常浩，不发 PASS
+        self.merged = [41]
+        self.verdicts = ["PASS"]
+        self.assertEqual(self.go(), 20)
+        self.assertEqual(self.relays, [])
+        self.assertIn("#41", self.notes[-1][0])
+        seq = [[], [42]]
+        self.run_dir += "-2"
+        self.patch(loop, "merged_prs", lambda a, since: seq.pop(0))
+        self.verdicts = ["PASS"]
+        self.assertEqual(self.go(), 20)
+        self.assertEqual(len(self.relays), 1)            # 送审了，但 PASS 收口前查到合并
+        self.assertIn("#42", self.notes[-1][0])
+        self.assertFalse(any("审核 PASS" in n[0] for n in self.notes))
+
+    def test_interrupted_bind_is_not_resent(self):
+        # P1-06：新会话发出后、绑定真实会话编号时进程中断：发送标记仍是完整的 JSON；驱动停下通知，重跑不重发
+        state = os.path.join(self.dir, "orca.json")
+        os.environ["FAKE_ORCA_STATE"] = state
+        with open(state, "w") as f:
+            json.dump({"url_before": PROJECT, "reply": "VERDICT: PASS"}, f)
+        self.patch(loop, "run_relay", REAL_RUN_RELAY)
+        self.patch(relay.time, "sleep", lambda s: None)
+        real_bind = relay.Marker.bind
+
+        def interrupted(marker, conv):
+            real_replace = os.replace
+
+            def boom(*a):
+                raise OSError("模拟绑定时进程中断")
+            os.replace = boom
+            try:
+                real_bind(marker, conv)
+            finally:
+                os.replace = real_replace
+        self.patch(relay.Marker, "bind", interrupted)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.go(), 2)
+            self.assertIn("没有拿到回执", self.notes[-1][0])
+            with open(os.path.join(self.run_dir, "round-1-packet.md")) as f:
+                marker = relay.Marker(f.read())
+            self.assertIsNone(marker.load()["conversation"])     # 标记完整可读，只是没绑上
+            self.assertEqual(self.go(), 2)
+        self.assertIn("没有绑定会话", self.notes[-1][0])
+        with open(state) as f:
+            sends = [c for c in json.load(f)["calls"] if c[0] == "eval" and "/*relay:send*/" in c[-1]]
+        self.assertEqual(len(sends), 1)
 
 
 if __name__ == "__main__":

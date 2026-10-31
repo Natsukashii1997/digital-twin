@@ -89,14 +89,22 @@ COMPOSER_TEXT_JS = r"""/*relay:composer*/(() => {
   return els.length === 1 ? els[0].innerText : '';
 })()""" % COMPOSER
 
+# 撰写器模式与思考强度（RELAY-02，#37）：常浩要求用「聊天」模式、思考强度「高」；切换会话后页面会变回「中」。
+# 读：模式按钮的 aria-label、模型按钮文本的最后一行（「思考强度\n高」）。调：打开模型菜单 → 强度滑块按 End 到最高档 → Esc 关菜单。
+MODE_LABEL, MODEL_LABEL = "切换模式，当前模式：ChatGPT", "选择 ChatGPT 模型"
+
 # 最后一次核对和点击在同一段脚本里同步完成（P1-01-R4）：Python 侧检查之后、点击之前，共用标签可能被切走或改动。
 # 参数是发送前核对过的页面地址和送审消息；页面地址去掉查询串后必须完全一致（新会话首页同样适用）。
+# 撰写器模式和思考强度也在这里再核一次（RELAY-02 P1-04）：ensure_chat_high 之后、点击之前，页面可能把强度变回「中」。
 # 返回 sent 才算点了；其余返回值都是没点的原因。
 SEND_JS = r"""/*relay:send*/((url, text) => {
   const norm = u => u.split('?')[0].split('#')[0].replace(/\/+$/, '');
   const squash = s => s.replace(/\s+/g, '');
   const vis = s => [...document.querySelectorAll(s)].filter(e => e.getClientRects().length > 0);
   if (norm(location.href) !== norm(url)) return 'chat';
+  const btn = l => vis('button').find(b => b.getAttribute('aria-label') === l);
+  const model = btn('%(model)s');
+  if (!btn('%(mode)s') || !model || model.innerText.trim().split('\n').pop().trim() !== '高') return 'mode';
   const els = vis('%(composer)s');
   if (els.length !== 1) return 'composer';
   if (squash(els[0].innerText) !== squash(text)) return 'text';
@@ -105,11 +113,8 @@ SEND_JS = r"""/*relay:send*/((url, text) => {
   if (!b || b.disabled) return 'button';
   b.click();
   return 'sent';
-})(%%s, %%s)""" % {"composer": COMPOSER, "stop": STOP_BTN, "send": SEND_BTN}
+})(%%s, %%s)""" % {"composer": COMPOSER, "stop": STOP_BTN, "send": SEND_BTN, "mode": MODE_LABEL, "model": MODEL_LABEL}
 
-# 撰写器模式与思考强度（RELAY-02，#37）：常浩要求用「聊天」模式、思考强度「高」；切换会话后页面会变回「中」。
-# 读：模式按钮的 aria-label、模型按钮文本的最后一行（「思考强度\n高」）。调：打开模型菜单 → 强度滑块按 End 到最高档 → Esc 关菜单。
-MODE_LABEL, MODEL_LABEL = "切换模式，当前模式：ChatGPT", "选择 ChatGPT 模型"
 MODE_JS = r"""/*relay:mode*/(() => {
   const vis = [...document.querySelectorAll('button')].filter(b => b.getClientRects().length > 0);
   const m = vis.find(b => b.getAttribute('aria-label') === '%s');
@@ -138,6 +143,7 @@ CLOSE_MENU_JS = r"""/*relay:close-menu*/(() => {
 
 SEND_REFUSED = {
     "chat": "点发送前页面已不在指定的会话上",
+    "mode": "点发送前撰写器已不是聊天模式或思考强度不是「高」",
     "composer": "点发送前输入框不是恰好一个",
     "text": "点发送前输入框内容已和送审包不一致",
     "streaming": "点发送前 ChatGPT 正在回复",
@@ -149,7 +155,7 @@ EXIT = {"PASS": 0, "REWORK": 10, "NEEDS_HUMAN": 20}
 
 
 class RelayError(Exception):
-    pass
+    code = None   # orca 返回的错误码（如 agent_prompt_blocked），调用方据此区分确定没发出和结果不明
 
 
 def orca(*args, timeout=60):
@@ -164,8 +170,10 @@ def orca(*args, timeout=60):
     if p.returncode != 0 or not isinstance(data, dict) or data.get("ok") is not True \
             or not isinstance(data.get("result"), dict):
         detail = data.get("error", data) if isinstance(data, dict) else data
-        raise RelayError("orca %s 失败（退出码 %s）：%s" % (
+        err = RelayError("orca %s 失败（退出码 %s）：%s" % (
             args[0], p.returncode, json.dumps(detail, ensure_ascii=False)[:300]))
+        err.code = detail.get("code") if isinstance(detail, dict) else None
+        raise err
     return data["result"]
 
 
@@ -241,15 +249,17 @@ def fill_composer(page, text, poll):
     raise RelayError("输入框内容和送审包不一致，未发送")
 
 
-def read_mode(page, wait):
-    """切会话后强度按钮先显示默认值、稍后才换成会话记住的值（实测「中」约 1 秒后变「高」），所以要连续两次读数一致才算。"""
-    prev = json.loads(page.eval(MODE_JS))
-    for _ in range(10):
-        time.sleep(wait)
+def read_mode(page, wait, need=3):
+    """切会话后强度按钮先显示默认值、稍后才换成会话记住的值（实测「中」约 1 秒后变「高」），所以要连续 need 次读数一致才算；
+    两次不够：「高、高、中」会把瞬时的「高」当真（RELAY-02 P1-04）。读数稳定也不代表点发送时还是这样，最终以 SEND_JS 点击前的核对为准。"""
+    prev, same = None, 0
+    for _ in range(15):
         st = json.loads(page.eval(MODE_JS))
-        if st == prev:
-            return st
+        same = same + 1 if st == prev else 1
         prev = st
+        if same >= need:
+            return st
+        time.sleep(wait)
     raise RelayError("撰写器的模式和思考强度读数一直在变，拒绝发送")
 
 

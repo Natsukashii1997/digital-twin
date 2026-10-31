@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gh pr merge:*)",
+      "Bash(gh api:*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push origin HEAD:main:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(launchctl:*)",
+      "Bash(crontab:*)",
+      "Bash(hermes:*)",
+      "Bash(lark-cli:*)",
+      "Edit(~/.hermes/**)",
+      "Edit(~/Library/LaunchAgents/**)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(~/.claude/settings.local.json)"
+    ]
+  }
+}

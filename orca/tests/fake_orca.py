@@ -24,6 +24,8 @@ state 字段：
   strength                      思考强度（默认「高」）
   strength_stuck                true 时调强度不起作用
   strength_seq                  依次读到的思考强度（模拟切会话后读数还在变），读完停在最后一个
+  strength_at_send              点发送那一刻的思考强度（模拟核对通过后页面把强度变回「中」）
+  mode_chat_at_send             点发送那一刻是否还是聊天模式
   calls                         记录收到的命令（测试读）
 """
 import json
@@ -117,13 +119,16 @@ if args[0] == "eval":
         s["menu"] = False
         out({"result": "true"})
     if "/*relay:send*/" in js:
-        # 按发送脚本的约定在「点击那一刻」核对：页面地址、输入框、生成状态、按钮；不符就不点
+        # 按发送脚本的约定在「点击那一刻」核对：页面地址、模式和强度、输入框、生成状态、按钮；不符就不点
         url, text = json.loads("[" + js[js.rindex("})(") + 3:-1] + "]")
         norm = lambda u: u.split("?")[0].split("#")[0].rstrip("/")
         squash = lambda t: re.sub(r"\s+", "", t)
         now = s.get("composer_text_at_send", s.get("composer_text", ""))
         if norm(s.get("url_at_send", s.get("url_before", URL))) != norm(url):
             out({"result": "chat"})
+        if not s.get("mode_chat_at_send", s.get("mode_chat", True)) \
+                or s.get("strength_at_send", s.get("strength", "高")) != "高":
+            out({"result": "mode"})
         if not s.get("composer", True):
             out({"result": "composer"})
         if squash(now) != squash(text):
