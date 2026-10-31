@@ -7,6 +7,8 @@ state 字段：
   stream_polls                  回复出现后还要“生成中”几次轮询
   script                        发出后每次读状态依次返回 [streaming, 回复文本, url?, 回复条数?]，读完后停在最后一项；优先于 reply
   url_before                    发送前页面地址（默认在会话 /c/fake 里）
+  user_before_text              发送前「最新回复前的用户消息」（默认空）
+  frozen_counts                 设了就固定返回这个消息条数（模拟长会话只渲染最近几轮）
   never_reply                   true 时一直不回复
   mangle                        true 时输入框里的内容被截断
   foreign_user                  最新回复前的用户消息换成这段文字（模拟别人插话）
@@ -65,13 +67,17 @@ def page_state():
     else:
         streaming = polls < s.get("stream_polls", 1)
         last = s["reply"][:5] if streaming else s["reply"]
+    if not replying:
+        last_user = s.get("user_before_text", "")
+    else:
+        last_user = s.get("foreign_user", s.get("composer_text", ""))
     return {
         "url": url,
         "composer": s.get("composer", True),
         "streaming": streaming,
-        "user": 1 if sent else 0,
-        "assistant": assistant,
-        "last_user": s.get("foreign_user", s.get("composer_text", "")) if replying else "",
+        "user": s.get("frozen_counts", 1 if sent else 0),
+        "assistant": s.get("frozen_counts", assistant),
+        "last_user": last_user,
         "last": last,
     }
 

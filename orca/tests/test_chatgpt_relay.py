@@ -29,6 +29,7 @@ class RelayTest(unittest.TestCase):
             f.write("合成送审包：请审 `add(a, b)`。\n```python\ndef add(a, b):\n    return a + b\n```\n")
         self.out = os.path.join(self.dir, "回执.md")
         os.environ["RELAY_STATE_DIR"] = os.path.join(self.dir, "state")
+        self.chat = "https://chatgpt.com/c/fake"
 
     def page(self, **state):
         with open(self.state, "w") as f:
@@ -42,7 +43,7 @@ class RelayTest(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             code = relay.main(["review", "--worktree", "path:/x", "--page", "p1", "--packet", self.packet,
-                               "--out", self.out, "--poll", "0", "--timeout", "2", "--settle", "0", *extra])
+                               "--out", self.out, "--chat", self.chat, "--poll", "0", "--timeout", "2", "--settle", "0", *extra])
         return code, err.getvalue()
 
     def test_pass_writes_record_and_does_not_wake_claude(self):
@@ -190,7 +191,7 @@ class RelayTest(unittest.TestCase):
         t = time.monotonic()
         with contextlib.redirect_stdout(io.StringIO()):
             code = relay.main(["review", "--worktree", "path:/x", "--page", "p1", "--packet", self.packet,
-                               "--out", self.out, "--poll", "0.05", "--timeout", "5", "--settle", "0.6"])
+                               "--out", self.out, "--chat", self.chat, "--poll", "0.05", "--timeout", "5", "--settle", "0.6"])
         self.assertEqual(code, 0)
         self.assertGreaterEqual(time.monotonic() - t, 0.6)
 
@@ -208,8 +209,9 @@ class RelayTest(unittest.TestCase):
         self.page(reply="VERDICT: PASS", foreign_user="别人插进来的一条消息" * 40)
         code, err = self.review()
         self.assertEqual(code, 2)
-        self.assertIn("不是这份送审包", err)
+        self.assertIn("超时", err)  # 回复不属于本包就一直不认，等到超时、保留发送标记
         self.assertFalse(os.path.exists(self.out))
+        self.assertTrue(os.path.exists(self.marker()))
 
     def test_unknown_send_result_blocks_resend_until_collect(self):
         # P1-04：点了发送但 orca 报错 → 留标记；再 review 拒绝重发；collect 收取后清标记
@@ -320,7 +322,7 @@ class RelayTest(unittest.TestCase):
         self.page(reply="VERDICT: PASS", foreign_user=shown_a)
         code, err = self.review()
         self.assertEqual(code, 2)
-        self.assertIn(relay.review_id(b), err)
+        self.assertIn("超时", err)
         self.assertFalse(os.path.exists(self.out))
         self.page(sent=True, polls=5, composer_text=shown_a, reply="VERDICT: PASS")
         self.assertEqual(self.collect()[0], 2)
@@ -335,7 +337,8 @@ class RelayTest(unittest.TestCase):
 
     def test_new_chat_binds_to_first_conversation_after_send(self):
         # 从项目首页开新会话：发送前没有会话 ID，发送后第一次进入的会话就是绑定对象
-        self.page(url_before="https://chatgpt.com/g/g-p-x/project",
+        self.chat = "https://chatgpt.com/g/g-p-x/project"
+        self.page(url_before="https://chatgpt.com/g/g-p-x/project?model=x",
                   script=[[True, "审核中", "https://chatgpt.com/c/new"], [False, "VERDICT: PASS", "https://chatgpt.com/c/new"]])
         self.assertEqual(self.review()[0], 0)
         with open(self.out) as f:
@@ -391,6 +394,83 @@ class RelayTest(unittest.TestCase):
             f.write("# 手写的回执\n- 解析结论：**REWORK**\n")
         self.assertIn("不是本通道生成的回执", self.deliver()[1])
         self.assertEqual(self.terminal_sends(), 0)
+
+    # ---- PR #36 第 3 轮评审定向修复 ----
+
+    def rework_record(self):
+        self.page(reply="缺测试。\nVERDICT: REWORK")
+        self.assertEqual(self.review()[0], 10)
+        return relay.read_record(self.out)
+
+    def test_concurrent_delivery_is_refused(self):
+        # P1-01-R3：同一回执正在交付（另一进程持锁）时，第二个交付直接拒绝、不发送
+        import fcntl
+        meta = self.rework_record()
+        rid = relay.record_id(meta)
+        with open(os.path.join(relay.state_dir("delivered"), rid + ".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for extra in ((), ("--confirm-not-received",)):
+                code, msg = self.deliver(*extra)
+                self.assertEqual(code, 2)
+                self.assertIn("并发", msg)
+        self.assertEqual(self.terminal_sends(), 0)
+        self.assertEqual(self.deliver()[0], 10)  # 锁释放后可以交付
+        self.assertEqual(self.terminal_sends(), 1)
+
+    def test_already_only_for_the_same_terminal(self):
+        # P1-02-R3：已交付给 term_1，再交给 term_2 不能报 already，也不能悄悄重发
+        self.rework_record()
+        self.assertEqual(self.deliver()[0], 10)
+        code, msg = self.deliver_to("term_2")
+        self.assertEqual(code, 2)
+        self.assertIn("已交付给终端 term_1", msg)
+        self.assertEqual(self.terminal_sends(), 1)
+        self.assertEqual(self.deliver_to("term_2", "--confirm-not-received")[0], 10)
+        sends = [c for c in self.calls()["calls"] if c[:2] == ["terminal", "send"]]
+        self.assertEqual([c[c.index("--terminal") + 1] for c in sends], ["term_1", "term_2"])
+        code, msg = self.deliver_to("term_2")
+        self.assertIn('"already": true', msg)
+        self.assertEqual(self.terminal_sends(), 2)
+
+    def deliver_to(self, terminal, *extra):
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = relay.main(["deliver", "--record", self.out, "--deliver-to", terminal, *extra])
+        return code, err.getvalue() + out.getvalue()
+
+    def test_refuses_to_send_outside_the_given_chat(self):
+        # 定向修复实测发现：共用的浏览器标签被切到了别的会话，必须拒绝发送
+        for url in ("https://chatgpt.com/c/someone-elses-chat", "https://chatgpt.com/g/g-p-x/project"):
+            self.page(url_before=url, reply="VERDICT: PASS")
+            code, err = self.review()
+            self.assertEqual(code, 2)
+            self.assertIn("不在指定的会话", err)
+            self.assertNotIn("inserted", self.calls())
+            self.assertNotIn("sent", self.calls())
+
+    def test_missing_files_are_channel_errors(self):
+        code, msg = self.deliver()
+        self.assertEqual(code, 2)
+        self.assertIn("relay 出错", msg)
+        os.unlink(self.packet)
+        self.assertEqual(self.review()[0], 2)
+
+    def test_long_chat_with_frozen_message_counts(self):
+        # 定向修复实测发现：长会话只渲染最近几轮，发送前后条数都是 4；不能靠条数判断回复到了
+        with open(self.packet) as f:
+            sent = relay.message_for(f.read())
+        self.page(script=[[True, "审核中"], [False, "缺测试。\nVERDICT: REWORK"]], frozen_counts=4,
+                  user_before_text="上一轮的送审包")
+        self.assertEqual(self.review()[0], 10)
+
+    def test_packet_already_answered_in_this_chat_is_not_resent(self):
+        with open(self.packet) as f:
+            sent = relay.message_for(f.read())
+        self.page(reply="VERDICT: PASS", user_before_text=sent)
+        code, err = self.review()
+        self.assertEqual(code, 2)
+        self.assertIn("已经有回复", err)
+        self.assertNotIn("sent", self.calls())
 
     def test_orca_failure_is_reported(self):
         self.page(fail="eval", reply="x")

@@ -8,8 +8,8 @@
 
 用法：
   chatgpt_relay.py status --worktree W --page P
-  chatgpt_relay.py review --worktree W --page P --packet 送审包.md --out 回执.md [--deliver-to 终端]
-  chatgpt_relay.py collect …同 review 参数…   # 等待中途断掉时收取已写完的回复，不重发
+  chatgpt_relay.py review --worktree W --page P --chat 会话或项目首页地址 --packet 送审包.md --out 回执.md [--deliver-to 终端]
+  chatgpt_relay.py collect …同 review 参数（不要 --chat）…   # 等待中途断掉时收取已写完的回复，不重发
   chatgpt_relay.py deliver --record 回执.md --deliver-to 终端 [--confirm-not-received]   # 只重试交付
 
 退出码：0 PASS；10 REWORK；20 NEEDS_HUMAN；2 通道出错（没有回执）；3 回执已保存、交付失败。
@@ -19,10 +19,12 @@
 - 点发送前按送审包摘要建 sending/<sha256>.json，回执落盘后才删；它还在就说明上次发送结果不明，
   同一送审包（换 --out 也一样）拒绝重发，先用 collect 核对。
 - 回执首行是 relay-record 元数据（送审编号、正文摘要、结论），deliver 先校验再交付；
-  交付状态记在 delivered/<回执编号>.json：已交付的再调用不重发，结果不明的要人确认终端没收到才重发。
+  交付状态记在 delivered/<回执编号>.json（含目标终端），交付全程持有 flock 进程锁：并发交付直接拒绝；
+  已交付到同一终端的再调用不重发；改交别的终端、或上次结果不明，都要人确认后才发。
 """
 import argparse
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -60,7 +62,7 @@ STATE_JS = r"""/*relay:state*/(() => {
   const before = (ai < 0 ? m : m.slice(0, ai)).filter(x => x.role === 'user');
   return JSON.stringify({
     url: location.href,
-    composer: !!document.querySelector('%(composer)s'),
+    composer: q('%(composer)s').filter(e => e.getClientRects().length > 0).length === 1,
     streaming: q('%(stop)s').some(b => b.getClientRects().length > 0),
     user: m.filter(x => x.role === 'user').length,
     assistant: a.length,
@@ -70,9 +72,11 @@ STATE_JS = r"""/*relay:state*/(() => {
 })()""" % {"composer": COMPOSER, "stop": STOP_BTN}
 
 # 先清空再填入；填没填对由 COMPOSER_TEXT_JS 回读后在 Python 里逐字比对（编辑器异步渲染，不能当场判断）。
+# 输入框只认「可见且恰好一个」：页面上有多个编辑框（如编辑旧消息）时拒绝填写。
 INSERT_JS = r"""/*relay:insert*/(() => {
-  const el = document.querySelector('%s');
-  if (!el) return false;
+  const els = [...document.querySelectorAll('%s')].filter(e => e.getClientRects().length > 0);
+  if (els.length !== 1) return false;
+  const el = els[0];
   el.focus();
   document.execCommand('selectAll');
   document.execCommand('delete');
@@ -80,7 +84,10 @@ INSERT_JS = r"""/*relay:insert*/(() => {
   return true;
 })()""" % COMPOSER
 
-COMPOSER_TEXT_JS = r"""/*relay:composer*/(document.querySelector('%s') || {}).innerText || ''""" % COMPOSER
+COMPOSER_TEXT_JS = r"""/*relay:composer*/(() => {
+  const els = [...document.querySelectorAll('%s')].filter(e => e.getClientRects().length > 0);
+  return els.length === 1 ? els[0].innerText : '';
+})()""" % COMPOSER
 
 SEND_JS = r"""/*relay:send*/(() => {
   const b = document.querySelector('%s');
@@ -183,15 +190,29 @@ def fill_composer(page, text, poll):
     raise RelayError("输入框内容和送审包不一致，未发送")
 
 
-def send_and_wait(page, packet, timeout, poll, settle, marker):
+def same_chat(url, expected):
+    """expected 是会话地址时比会话 ID；是项目首页等其他地址时比去掉查询串后的路径。"""
+    if conversation(expected):
+        return conversation(url) == conversation(expected)
+    norm = lambda u: u.split("?")[0].split("#")[0].rstrip("/")
+    return norm(url) == norm(expected)
+
+
+def send_and_wait(page, packet, chat, timeout, poll, settle, marker):
     """发出送审包并等回复写完。回复必须同时满足：在发送时所在的会话里（新会话以发送后第一次进入的为准，
-    之后不能再变）、最新回复之前的用户消息带这份送审包的编号、看不到停止按钮、文本至少 3 次读取不变且持续 settle 秒。"""
+    之后不能再变）、最新回复之前的用户消息带这份送审包的编号、看不到停止按钮、文本至少 3 次读取不变且持续 settle 秒。
+    不靠消息条数：长会话里 ChatGPT 只渲染最近几轮，条数会停住不涨。最新回复前的用户消息还不是本包，就当回复没到、
+    继续等（别人插话的情形会等到超时，按结果不明处理）。"""
     text = message_for(packet)
     before = page.state()
+    if not same_chat(before["url"], chat):
+        raise RelayError("页面不在指定的会话上（现在 %s，要求 %s），拒绝发送" % (before["url"], chat))
     if not before["composer"]:
         raise RelayError("页面没有输入框：没登录或不在聊天页（%s）" % before["url"])
     if before["streaming"]:
         raise RelayError("ChatGPT 还在回复上一条，拒绝插话")
+    if bubble_matches(before["last_user"], text):
+        raise RelayError("这份送审包（%s）在本会话里已经有回复，拒绝重发；要收那条回复用 collect" % review_id(packet))
     conv = conversation(before["url"])
     fill_composer(page, text, poll)
     marker.create(conv, before["url"])  # 从这里起发送结果可能不明
@@ -209,12 +230,7 @@ def send_and_wait(page, packet, timeout, poll, settle, marker):
             marker.bind(conv)
         elif cur != conv:
             raise RelayError("发送后会话变了：%s" % st["url"])
-        if st["user"] <= before["user"] or st["assistant"] <= before["assistant"]:
-            prev = None
-            continue
-        if not bubble_matches(st["last_user"], text):
-            raise RelayError("最新回复前的用户消息不是这份送审包（%s），拒绝收取" % review_id(packet))
-        if st["streaming"] or not st["last"].strip():
+        if not bubble_matches(st["last_user"], text) or st["streaming"] or not st["last"].strip():
             prev = None
             continue
         now = time.monotonic()
@@ -319,30 +335,41 @@ def record_id(meta):
 
 
 def deliver(terminal, path, meta, confirm_not_received=False):
-    """交付状态：sending（结果不明）/ done。已交付的不重发；结果不明的要人确认终端没收到才重发。"""
+    """交付状态：sending（结果不明）/ done，记着交给了哪个终端。
+    同一回执的交付全程持有进程锁（flock，进程退出自动释放），并发的第二个交付直接拒绝。
+    已交付到同一终端的再调用返回 already、不重发；交给别的终端、或上次结果不明，都要人确认后才发。"""
     rid = record_id(meta)
-    state = os.path.join(state_dir("delivered"), rid + ".json")
-    if os.path.exists(state):
-        with open(state, encoding="utf-8") as f:
-            status = json.load(f)["status"]
-        if status == "done":
-            return "already"
-        if not confirm_not_received:
-            raise RelayError("回执 %s 上次交付结果不明：先到终端核对有没有收到这个回执编号，"
-                             "确认没收到再加 --confirm-not-received 重试" % rid)
+    d = state_dir("delivered")
+    state = os.path.join(d, rid + ".json")
+    with open(os.path.join(d, rid + ".lock"), "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RelayError("回执 %s 正由另一个进程交付，拒绝并发交付" % rid)
+        if os.path.exists(state):
+            with open(state, encoding="utf-8") as f:
+                last = json.load(f)
+            if last["status"] == "done" and last["terminal"] == terminal:
+                return "already"
+            if not confirm_not_received:
+                if last["status"] == "done":
+                    raise RelayError("回执 %s 已交付给终端 %s，不是 %s；确认原终端没处理、要改交新终端，"
+                                     "再加 --confirm-not-received" % (rid, last["terminal"], terminal))
+                raise RelayError("回执 %s 上次交付结果不明：先到终端核对有没有收到这个回执编号，"
+                                 "确认没收到再加 --confirm-not-received 重试" % rid)
 
-    def mark(status):
-        with open(state, "w", encoding="utf-8") as f:
-            json.dump({"status": status, "terminal": terminal, "record": os.path.abspath(path), "time": now_iso()},
-                      f, ensure_ascii=False)
+        def mark(status):
+            with open(state, "w", encoding="utf-8") as f:
+                json.dump({"status": status, "terminal": terminal, "record": os.path.abspath(path),
+                           "time": now_iso()}, f, ensure_ascii=False)
 
-    mark("sending")
-    msg = ("ChatGPT 审核结论 REWORK（回执编号 %s），回执原文：%s 。同一回执编号只处理一次，处理过就忽略本条。"
-           "请先读原文，按仓库 AGENTS.md 逐条核实属实后再返修；不属实的写明理由。"
-           "返修完写新的送审包，不要自行合并或安装。" % (rid, os.path.abspath(path)))
-    orca("terminal", "send", "--terminal", terminal, "--text", msg, "--enter")
-    mark("done")
-    return "sent"
+        mark("sending")
+        msg = ("ChatGPT 审核结论 REWORK（回执编号 %s），回执原文：%s 。同一回执编号只处理一次，处理过就忽略本条。"
+               "请先读原文，按仓库 AGENTS.md 逐条核实属实后再返修；不属实的写明理由。"
+               "返修完写新的送审包，不要自行合并或安装。" % (rid, os.path.abspath(path)))
+        orca("terminal", "send", "--terminal", terminal, "--text", msg, "--enter")
+        mark("done")
+        return "sent"
 
 
 def cmd_status(a):
@@ -365,7 +392,7 @@ def cmd_review(a):
     if marker.exists():
         raise RelayError("这份送审包（%s）上次发送结果不明（%s），先用 collect 核对，不要重发"
                          % (review_id(packet), marker.path))
-    reply, url = send_and_wait(Page(a.worktree, a.page), packet, a.timeout, a.poll, a.settle, marker)
+    reply, url = send_and_wait(Page(a.worktree, a.page), packet, a.chat, a.timeout, a.poll, a.settle, marker)
     return finish(a, packet, reply, url, marker)
 
 
@@ -434,6 +461,7 @@ def main(argv=None):
             s.add_argument("--deliver-to", help="REWORK 时把回执交给这个 ORCA 终端")
             s.add_argument("--settle", type=float, default=10, help="回复文本须保持不变的秒数")
     r = sub.choices["review"]
+    r.add_argument("--chat", required=True, help="必须在这个会话（或项目首页，表示开新会话）里发送；页面不在这里就拒绝")
     r.add_argument("--timeout", type=float, default=900)
     r.add_argument("--poll", type=float, default=3)
     d = sub.add_parser("deliver")
@@ -444,7 +472,7 @@ def main(argv=None):
     try:
         return {"status": cmd_status, "review": cmd_review, "collect": cmd_collect,
                 "deliver": cmd_deliver}[a.cmd](a)
-    except RelayError as e:
+    except (RelayError, OSError) as e:
         print("relay 出错：%s" % e, file=sys.stderr)
         return 2
 
