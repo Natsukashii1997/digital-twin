@@ -549,6 +549,33 @@ console.log(JSON.stringify([r, clicked.length]));
         self.assertIn("结果不明", err)
         self.assertTrue(os.path.exists(self.marker()))
 
+    def test_strength_is_raised_to_high_before_filling(self):
+        # RELAY-02：常浩要求聊天模式「思考强度 高」；切会话后页面会变回「中」，发送前自动调高并回读
+        self.page(strength="中", reply="VERDICT: PASS")
+        self.assertEqual(self.review()[0], 0)
+        js = [c[c.index("--expression") + 1] for c in self.calls()["calls"] if c[0] == "eval"]
+        first = lambda t: next(i for i, j in enumerate(js) if t in j)
+        self.assertLess(first("/*relay:set-high*/"), first("/*relay:insert*/"))
+        self.assertLess(first("/*relay:insert*/"), first("/*relay:send*/"))
+        self.assertEqual(self.calls()["strength"], "高")
+
+    def test_transient_high_reading_is_not_trusted(self):
+        # 实测：切会话后强度读数会变；先读到一次「高」、随后稳定在「中」，也要调高
+        self.page(strength_seq=["高", "中", "中"], reply="VERDICT: PASS")
+        self.assertEqual(self.review()[0], 0)
+        self.assertTrue(any("/*relay:set-high*/" in " ".join(c) for c in self.calls()["calls"]))
+
+    def test_refuses_when_strength_cannot_be_raised_or_not_chat_mode(self):
+        for state, msg in ((dict(strength="中", strength_stuck=True), "没能调到「高」"), (dict(mode_chat=False), "不是聊天模式")):
+            with self.subTest(state=state):
+                self.page(reply="VERDICT: PASS", **state)
+                code, err = self.review()
+                self.assertEqual(code, 2)
+                self.assertIn(msg, err)
+                self.assertNotIn("inserted", self.calls())
+                self.assertNotIn("sent", self.calls())
+                self.assertFalse(os.path.exists(self.marker()))
+
     def test_missing_files_are_channel_errors(self):
         code, msg = self.deliver()
         self.assertEqual(code, 2)

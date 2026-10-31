@@ -20,6 +20,10 @@ state 字段：
   fail                          设为某个命令名时，该命令返回 ok:false
   rc_nonzero                    设为某个命令名时，该命令退出码 1 但输出 ok:true
   raw_stdout                    设为某个命令名时，该命令输出 [1, 2]（不是对象）
+  mode_chat                     撰写器是聊天模式（默认 true）
+  strength                      思考强度（默认「高」）
+  strength_stuck                true 时调强度不起作用
+  strength_seq                  依次读到的思考强度（模拟切会话后读数还在变），读完停在最后一个
   calls                         记录收到的命令（测试读）
 """
 import json
@@ -98,6 +102,20 @@ if args[0] == "eval":
         out({"result": "true"})
     if "/*relay:composer*/" in js:
         out({"result": s.get("composer_text", "")})
+    if "/*relay:mode*/" in js:
+        if s.get("strength_seq"):
+            s["strength"] = s["strength_seq"].pop(0)
+        out({"result": json.dumps({"chat": s.get("mode_chat", True), "strength": s.get("strength", "高")})})
+    if "/*relay:open-model*/" in js:
+        s["menu"] = True
+        out({"result": "true"})
+    if "/*relay:set-high*/" in js:
+        if s.get("menu") and not s.get("strength_stuck"):
+            s["strength"] = "高"
+        out({"result": "true" if s.get("menu") else "false"})
+    if "/*relay:close-menu*/" in js:
+        s["menu"] = False
+        out({"result": "true"})
     if "/*relay:send*/" in js:
         # 按发送脚本的约定在「点击那一刻」核对：页面地址、输入框、生成状态、按钮；不符就不点
         url, text = json.loads("[" + js[js.rindex("})(") + 3:-1] + "]")

@@ -107,6 +107,35 @@ SEND_JS = r"""/*relay:send*/((url, text) => {
   return 'sent';
 })(%%s, %%s)""" % {"composer": COMPOSER, "stop": STOP_BTN, "send": SEND_BTN}
 
+# 撰写器模式与思考强度（RELAY-02，#37）：常浩要求用「聊天」模式、思考强度「高」；切换会话后页面会变回「中」。
+# 读：模式按钮的 aria-label、模型按钮文本的最后一行（「思考强度\n高」）。调：打开模型菜单 → 强度滑块按 End 到最高档 → Esc 关菜单。
+MODE_LABEL, MODEL_LABEL = "切换模式，当前模式：ChatGPT", "选择 ChatGPT 模型"
+MODE_JS = r"""/*relay:mode*/(() => {
+  const vis = [...document.querySelectorAll('button')].filter(b => b.getClientRects().length > 0);
+  const m = vis.find(b => b.getAttribute('aria-label') === '%s');
+  const s = vis.find(b => b.getAttribute('aria-label') === '%s');
+  return JSON.stringify({chat: !!m, strength: s ? s.innerText.trim().split('\n').pop().trim() : ''});
+})()""" % (MODE_LABEL, MODEL_LABEL)
+OPEN_MODEL_JS = r"""/*relay:open-model*/(() => {
+  const b = [...document.querySelectorAll('button')].find(b => b.getClientRects().length > 0 && b.getAttribute('aria-label') === '%s');
+  if (!b) return false;
+  for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'])
+    b.dispatchEvent(new (t.startsWith('pointer') ? PointerEvent : MouseEvent)(t, {bubbles: true}));
+  return true;
+})()""" % MODEL_LABEL
+SET_HIGH_JS = r"""/*relay:set-high*/(() => {
+  const s = document.querySelector('[role=menu] [role=slider]');
+  if (!s) return false;
+  s.focus();
+  s.dispatchEvent(new KeyboardEvent('keydown', {key: 'End', code: 'End', bubbles: true}));
+  return true;
+})()"""
+CLOSE_MENU_JS = r"""/*relay:close-menu*/(() => {
+  const m = document.querySelector('[role=menu]');
+  if (m) m.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', bubbles: true}));
+  return !document.querySelector('[role=menu]');
+})()"""
+
 SEND_REFUSED = {
     "chat": "点发送前页面已不在指定的会话上",
     "composer": "点发送前输入框不是恰好一个",
@@ -209,6 +238,37 @@ def fill_composer(page, text, poll):
     raise RelayError("输入框内容和送审包不一致，未发送")
 
 
+def read_mode(page, wait):
+    """切会话后强度按钮先显示默认值、稍后才换成会话记住的值（实测「中」约 1 秒后变「高」），所以要连续两次读数一致才算。"""
+    prev = json.loads(page.eval(MODE_JS))
+    for _ in range(10):
+        time.sleep(wait)
+        st = json.loads(page.eval(MODE_JS))
+        if st == prev:
+            return st
+        prev = st
+    raise RelayError("撰写器的模式和思考强度读数一直在变，拒绝发送")
+
+
+def ensure_chat_high(page, wait=1.0):
+    """撰写器必须是聊天模式；思考强度不是「高」就调高，调完回读，仍不是「高」就拒绝发送。返回是否动过设置。"""
+    st = read_mode(page, wait)
+    if not st["chat"]:
+        raise RelayError("撰写器不是聊天模式，拒绝发送")
+    if st["strength"] == "高":
+        return False
+    if page.eval(OPEN_MODEL_JS) != "true":
+        raise RelayError("找不到模型按钮，没法把思考强度调到「高」，拒绝发送")
+    time.sleep(wait)
+    page.eval(SET_HIGH_JS)
+    time.sleep(wait)
+    page.eval(CLOSE_MENU_JS)
+    st = read_mode(page, wait)
+    if not st["chat"] or st["strength"] != "高":
+        raise RelayError("思考强度没能调到「高」（现在「%s」），拒绝发送" % st["strength"])
+    return True
+
+
 def same_chat(url, expected):
     """expected 是会话地址时比会话 ID；是项目首页等其他地址时比去掉查询串后的路径。"""
     if conversation(expected):
@@ -233,6 +293,7 @@ def send_and_wait(page, packet, chat, timeout, poll, settle, marker):
     if bubble_matches(before["last_user"], text):
         raise RelayError("这份送审包（%s）在本会话里已经有回复，拒绝重发；要收那条回复用 collect" % review_id(packet))
     conv = conversation(before["url"])
+    ensure_chat_high(page, wait=min(1.0, poll))
     fill_composer(page, text, poll)
     marker.create(conv, before["url"])  # 从这里起发送结果可能不明
     sent = page.eval(SEND_JS % (json.dumps(before["url"]), json.dumps(text)))
