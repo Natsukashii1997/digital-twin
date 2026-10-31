@@ -133,7 +133,10 @@ class RelayTest(unittest.TestCase):
         shown = sent[:sent.index("正文") + 400] + "\n…\n显示更多"
         self.assertTrue(relay.bubble_matches(shown, sent))
         self.assertTrue(relay.bubble_matches(sent.replace("```python", "").replace("`", ""), sent))
-        self.assertFalse(relay.bubble_matches(sent[:40] + "\n…\n显示更多", sent))  # 太短，不足以认定
+        self.assertFalse(relay.bubble_matches(sent[:20] + "\n…\n显示更多", sent))  # 编号行都没显示全，不足以认定
+        # RELAY-02 实测：正文里的 Markdown 链接在气泡里被渲染成别的样子，仍要认得出（编号行在最前面）
+        linked = relay.message_for("说明 [Claude Code](https://claude.com/claude-code) 之后的正文" * 20)
+        self.assertTrue(relay.bubble_matches(linked.replace("](https://claude.com/claude-code)", "](\n[https://claude.com/claude-code](https://claude.com/claude-code))"), linked))
         self.assertFalse(relay.bubble_matches("别的" + "正文" * 200, sent))
 
     def test_collect_refuses_reply_to_another_packet(self):

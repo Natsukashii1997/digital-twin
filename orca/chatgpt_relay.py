@@ -225,10 +225,10 @@ def squash_bubble(s):
 
 
 def bubble_matches(bubble, sent):
-    """长消息气泡只显示开头，所以要求气泡是已发消息的开头，且至少 300 字（短包则要求全文）。
-    已发消息第一行就是送审编号（由送审包全文摘要得出），所以这同时要求编号一致：两份送审包模板再像也分得开。"""
-    b, w = squash_bubble(bubble), squash_bubble(sent)
-    return len(b) >= min(300, len(w)) and w.startswith(b)
+    """气泡开头必须是这份送审包的编号行。编号由送审包全文 sha256 得出，换一份送审包就不同，所以它本身就认定了身份。
+    不逐字比对正文：气泡会渲染 Markdown（链接、代码块、反引号）并折叠长文；正文里有链接时逐字比对会认不出自己发的消息，
+    一直等到超时（RELAY-02 实测：PR #40 送审包里的 [Claude Code](https://…) 被渲染成别的样子）。"""
+    return squash_bubble(bubble).startswith(squash(sent.split("\n", 1)[0]))
 
 
 def fill_composer(page, text, poll):
