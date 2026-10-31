@@ -11,7 +11,8 @@
 - **常浩 10-31 要求**：digital-twin 基于 ORCA 自动推进到项目结束，不再逐步让他确认。**闸门按建议定**：全自动——开 issue、开分支、Claude 开发、ChatGPT 聊天模式（思考强度「高」）审核、返修（最多 2 轮），以及 PASS 且没碰正式环境的 PR 自动 squash 合并；攒起来用飞书私聊问常浩——正式安装和部署、改 Hermes 正式配置和 cron、机器人对外发消息、NEEDS_HUMAN、返修超限。本条替代 PRD 第 10 节「每个任务开工前给分批计划，你确认后再动」在本项目的执行方式。
 - **RELAY-02（#37，PR #40）**：`orca/relay_loop.py` 把任务交给 ORCA 终端里的 Claude → 等就绪文件 → ChatGPT 审核 → PASS 收口 / REWORK 自动交回返修 / NEEDS_HUMAN、超限、出错时用猛鬼兽私聊常浩；中断后重跑即续跑，不重发、不重复通知。relay 发送前自动核对聊天模式，并把强度调到「高」。单测 57 项，12 处反向验证都有测试失败。说明见 `docs/DT-ORC/RELAY-02-自动循环驱动.md`（分支 `claude/37-relay-loop`）。
 - **首次真实试运行**：#38（`Marker.bind` 原子写）→ PR #39：第 1 轮 REWORK（GitHub 连接器 404、证据无法独立核实）→ 自动返修 → 第 2 轮 PASS → 飞书通知（常浩已确认收到）。中途 3 次人工介入，都已修到代码或文档里：ORCA 终端的 Claude 要带系统代理 `127.0.0.1:8086` 启动，否则 403；新会话的临时编号 `local-chatgpt%3A…`；续跑 collect 要反复等。
-- **卡点（权限）**：① ChatGPT Codex Connector 只是「授权」，还要「安装」并选上 digital-twin，审核方才读得到仓库（常浩处理中）；② Claude Code 的 auto 模式拦下了合并 PR #39 和强推分支，需要常浩在 Claude Code 设置里放行 `gh pr merge` 和 `git push --force-with-lease`，之后 PASS 才能自动合并。
+- **权限已解决**：常浩已把 Codex Connector 的仓库访问设为「所有仓库」（ChatGPT 能不能读到，以下一轮审核为准；如果还是 404，查 ChatGPT 设置里 GitHub 连接器连的是不是同一个账号）。本会话的权限模式按常浩要求升到最高（bypassPermissions），合并和强推不再被拦。PR #39 已按闸门变基、复测、squash 合并（`3904910`），#38 关闭。
+- **注意**：PR #40 分支要变基到含 `3904910` 的 main。两边都改了 `orca/chatgpt_relay.py`（#39 改 `Marker.bind`，#40 改 `conversation`、`bubble_matches` 和强度核对），变基时核对一下冲突。
 - **下一步**：权限放开后合并 PR #39、PR #40（PR #40 审核 PASS 之后），再做第 3 批：任务队列（PASS 合并后自动接下一个任务）和常驻运行（LaunchAgent 属于正式安装，先出方案等常浩点头）。
 
 ## 2026-10-31 上午 · RELAY-01 合并（[PR #36](https://github.com/Natsukashii1997/digital-twin/pull/36) squash `5e65524`，#35 关闭）
