@@ -25,6 +25,9 @@ hermes/
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   samples/             样稿
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
+docs/DT-ORC/           Hermes × ORCA 支线文档（RELAY-01：ChatGPT 聊天审核通道）
+orca/
+  chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、回退模型、定时任务；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
   self_check.py        工程自检（Hermes 无模型定时任务 09:50，stdout 直接发、空输出不发）：每天比对仓库 main 和安装副本；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
