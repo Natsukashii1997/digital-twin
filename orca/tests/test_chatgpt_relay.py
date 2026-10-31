@@ -381,6 +381,33 @@ class RelayTest(unittest.TestCase):
                 relay.os.fsync, relay.os.link = real_fsync, real_link
             self.assertEqual(sorted(os.listdir(self.dir)), ["packet.md"])
 
+    def test_failed_marker_bind_keeps_original_marker(self):
+        # P2-01-R3：绑定会话时写到一半、fsync 或替换失败，原标记不变，也不留临时文件
+        marker = relay.Marker("包")
+        marker.create(None, "https://chatgpt.com/")
+        with open(marker.path, encoding="utf-8") as f:
+            original = f.read()
+        real_dump, real_fsync, real_replace = relay.json.dump, relay.os.fsync, relay.os.replace
+
+        def half_dump(obj, f, **kw):
+            f.write(json.dumps(obj, **kw)[:10])
+            raise OSError("模拟写到一半中断")
+
+        def boom(*a):
+            raise OSError("模拟失败")
+        for mod, name, fake in ((relay.json, "dump", half_dump), (relay.os, "fsync", boom), (relay.os, "replace", boom)):
+            setattr(mod, name, fake)
+            try:
+                with self.assertRaises(OSError):
+                    marker.bind("abc")
+            finally:
+                relay.json.dump, relay.os.fsync, relay.os.replace = real_dump, real_fsync, real_replace
+            with open(marker.path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), original)
+            self.assertEqual(os.listdir(os.path.dirname(marker.path)), [os.path.basename(marker.path)])
+        marker.bind("abc")
+        self.assertEqual(marker.load()["conversation"], "abc")
+
     def test_deliver_rejects_tampered_or_foreign_record(self):
         # P2-03-R2：回执正文被改、或不是本通道生成的，都不交付
         self.page(reply="缺测试。\nVERDICT: REWORK")
