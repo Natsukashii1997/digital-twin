@@ -298,8 +298,16 @@ class Marker:
     def bind(self, conv):
         data = self.load()
         data["conversation"] = conv
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        tmp = "%s.tmp-%d" % (self.path, os.getpid())
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)  # 原子替换：中途失败时原标记不变
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def clear(self):
         if self.exists():
