@@ -32,6 +32,7 @@ class LoopTest(unittest.TestCase):
         self.claude_writes = True
         self.sent, self.gotos, self.relays, self.notes = [], [], [], []
         self.fail_relay_at = None
+        self.collect_misses = 0
         self.patch(loop, "terminal_send", self.fake_terminal)
         self.patch(loop, "goto_chat", lambda a, url: self.gotos.append(url))
         self.patch(loop, "run_relay", self.fake_relay)
@@ -54,6 +55,9 @@ class LoopTest(unittest.TestCase):
 
     def fake_relay(self, argv):
         self.relays.append(argv)
+        if argv[0] == "collect" and self.collect_misses:
+            self.collect_misses -= 1
+            return 2                                   # 回复还没写完，没有回执
         if self.fail_relay_at == len(self.relays):
             raise relay.RelayError("模拟 relay 中断")
         get = lambda k: argv[argv.index(k) + 1]
@@ -151,9 +155,24 @@ class LoopTest(unittest.TestCase):
             f.write("上次发出去结果不明的送审包\n")
         open(os.path.join(self.run_dir, "round-1.ready"), "w").close()
         relay.Marker(open(packet).read()).create("abc", PROJECT)
+        self.collect_misses = 2                        # 前两次回复还没写完
         self.assertEqual(self.go(), 0)
-        self.assertEqual(self.relays[0][0], "collect")
+        self.assertEqual([r[0] for r in self.relays], ["collect"] * 3)
         self.assertEqual(self.gotos, ["https://chatgpt.com/g/g-p-x/c/abc"])
+
+    def test_temporary_or_missing_conversation_is_not_collected(self):
+        os.makedirs(self.run_dir)
+        packet = os.path.join(self.run_dir, "round-1-packet.md")
+        for conv in ("local-chatgpt%3A9ad4", None):
+            with self.subTest(conv=conv):
+                with open(packet, "w") as f:
+                    f.write("送审包 %s\n" % conv)
+                open(os.path.join(self.run_dir, "round-1.ready"), "w").close()
+                relay.Marker(open(packet).read()).create(conv, PROJECT)
+                self.claude_writes = False
+                self.assertEqual(self.go(), 2)
+                self.assertIn("没有绑定会话", self.notes[-1][0])
+                self.assertEqual(self.relays, [])
 
     def test_notification_failure_does_not_hide_the_result(self):
         self.verdicts = ["PASS"]

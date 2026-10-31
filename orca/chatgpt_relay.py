@@ -192,9 +192,12 @@ def parse_verdict(text):
 
 
 def conversation(url):
-    """会话 ID；还没进入具体会话（如项目首页）时为 None。"""
+    """会话 ID；还没进入具体会话（如项目首页）时为 None。
+    新会话发出后，地址先是页面临时编号 /c/local-chatgpt%3A…，服务器分配真实编号后才换掉（RELAY-02 实测）；临时编号也当 None。"""
     m = re.search(r"/c/([^/?#]+)", url)
-    return m.group(1) if m else None
+    if not m or m.group(1).startswith("local-") or "%3A" in m.group(1).upper() or ":" in m.group(1):
+        return None
+    return m.group(1)
 
 
 def sha(text):

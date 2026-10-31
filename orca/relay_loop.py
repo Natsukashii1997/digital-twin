@@ -189,12 +189,18 @@ def review_round(run, a, n):
         chat = run.state().get("chat") or a.project
         base = ["--worktree", a.worktree, "--page", a.page, "--packet", packet, "--out", record]
         if marker.exists():
-            conv = marker.load().get("conversation")
+            raw = marker.load().get("conversation")
+            conv = raw and relay.conversation("/c/" + raw)   # 没绑定或只是临时编号都不算
             if not conv:
                 raise relay.RelayError("第 %d 轮发送结果不明，且没有绑定会话，需要人到 ChatGPT 页面核对" % n)
             goto_chat(a, chat_url(a.project, conv))
             log("第 %d 轮上次发送结果不明，collect 收取" % n)
-            code = run_relay(["collect", *base])
+            deadline = time.monotonic() + a.review_timeout
+            while True:   # 回复可能还在写（思考强度「高」要几分钟）：没收到就隔一会儿再收，直到超时
+                code = run_relay(["collect", *base])
+                if os.path.exists(record) or time.monotonic() > deadline:
+                    break
+                time.sleep(a.poll * 3)
         else:
             goto_chat(a, chat)
             log("第 %d 轮送审（%s）" % (n, chat))

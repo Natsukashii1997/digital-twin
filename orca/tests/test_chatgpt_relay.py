@@ -346,6 +346,17 @@ class RelayTest(unittest.TestCase):
         with open(self.out) as f:
             self.assertIn('"conversation": "new"', f.readline())
 
+    def test_new_chat_skips_the_temporary_local_id(self):
+        # RELAY-02 实测：新会话发出后地址先是临时编号 /c/local-chatgpt%3A…，再换成服务器分配的编号；绑定后者
+        self.chat = "https://chatgpt.com/g/g-p-x/project"
+        self.page(url_before="https://chatgpt.com/g/g-p-x/project",
+                  script=[[True, "审核中", "https://chatgpt.com/g/g-p-x/c/local-chatgpt%3A9ad4"],
+                          [True, "审核中", "https://chatgpt.com/g/g-p-x/c/real-1"], [False, "VERDICT: PASS", "https://chatgpt.com/g/g-p-x/c/real-1"]])
+        self.assertEqual(self.review()[0], 0)
+        with open(self.out) as f:
+            self.assertIn('"conversation": "real-1"', f.readline())
+        self.assertIsNone(relay.conversation("https://chatgpt.com/c/local-chatgpt:9ad4"))
+
     def test_changing_out_does_not_bypass_unknown_send(self):
         # P1-03-R2：同一送审包换个 --out 也不能重发
         self.page(fail_after_send=True, reply="VERDICT: PASS")
