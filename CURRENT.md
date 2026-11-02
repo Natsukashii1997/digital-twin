@@ -6,6 +6,42 @@
 
 ---
 
+## 2026-11-02 14:07 · 亚古兽角色配置 V3.1 部署（只有常浩能私聊；评论只开两份管培生日志；群聊暂关）
+
+- **定位**（常浩）：亚古兽是常浩的企业数字分身，也是牛马之家配套的工作智能体；带教是重点，项目、策略和其他企业工作按需开展。只有常浩能私聊；其他人在指定群里 @ 它，或在指定文档的评论里 @ 它。
+- **评审**：Claude 候审 V1 → V2（常浩定 4 项）→ V3（渠道改为只有常浩能私聊）→ ChatGPT 两轮审核 → V3.1 定向返修。文件和评审稿在 work-desk `docs/亚古兽/`（提交 `c6e1e44`）。
+- **部署**（证据与备份：`evidence/agumon-role-v3.1-20261102/`）：
+  - 安装 `profiles/agumon/SOUL.md`（`48b9e36b…`）和 `profiles/agumon/workspace/HERMES.md`（`e1813848…`），装前注入扫描 0 命中。
+  - `terminal.cwd` 设为 `profiles/agumon/workspace`（原来是 `.`）；在该目录下运行 `agumon prompt-size`，项目上下文 4.0KB。
+  - 飞书平台关掉 `session_search`：它能按名字打开别的 profile 的会话库（`_resolve_profile_db`），而且不分发送人。现在启用的只剩 web、vision、image_gen、tts、skills、todo、memory、clarify，以及 feishu_doc、feishu_drive。
+  - `.env`：`FEISHU_GROUP_POLICY=disabled`，常浩指定群之前所有群都不理；`FEISHU_ALLOWED_USERS` 仍只有常浩，其他人私聊在适配器层被拒。
+  - `profiles/agumon/feishu_comment_rules.json`：顶层关闭；只对两份管培生日志按人放行——常浩两份都能触发，林瑶、胡贵兰各自只能在自己的日志里触发。两人的 open_id 取自日志文档的所有者（亚古兽身份查 `drive/v1/metas`），按文档标题推定是本人。用规则模块核验过放行结果。
+  - `agumon gateway restart`：14:07:44 `✓ feishu connected`（PID 30740），猛鬼兽没受影响。
+- **还没生效、要常浩做的**：
+  - 飞书后台给亚古兽开 `docs:doc:readonly`、`drive:drive:readonly`、`bitable:app:readonly`，订阅 `drive.notice.comment_add_v1`，然后发版。评论回复要等这一步完成才会生效。
+  - 指定群：把亚古兽拉进群，告诉 Claude 群名，写 `group_rules`（指定群 `open`、默认 `disabled`）；还要实测网关层会不会拦下不在白名单里的群成员。
+- **后续（work-desk PR）**：通用 `workdesk` MCP，需要服务端凭据、按资源授权、能可信地识别提问人；牛马之家读飞书默认改用亚古兽；带教作答和机器人回复改为亚古兽。
+- **未验证**：常浩私聊 `/new` 后的实际回答、评论回复、群聊放行，都要等飞书后台改好后实测。
+
+## 2026-11-02 13:00 · 猛鬼兽设置 V1.1 上线：SOUL 只留身份和底线，工作规程拆到 HERMES.md（飞书验收通过）
+
+- **决定**（常浩）：按 Claude 候审稿 → ChatGPT 修订 → Claude 复核（7 处）→ ChatGPT V1.1 定稿的结果部署。评审材料：`docs/reviews/2026-11-02-猛鬼兽设置-最终候审稿.md`、`docs/reviews/2026-11-02-Claude-猛鬼兽设置-ChatGPT定稿复核.md`；定稿包和部署说明存在证据目录。
+- **结构**：`~/.hermes/SOUL.md`（945 字：身份、性格、做事原则、四条所有场景都适用的底线）＋ `~/.hermes/workspace/HERMES.md`（2575 字：信息来源、信息边界细则、工程分工与派单、预授权出处、定时与模型）。USER / MEMORY 仍由原生记忆维护，没有手改。Hermes 只在工作目录正好是 workspace 时读 HERMES.md；用到模型的定时任务要设 `--workdir` 才读得到。
+- **部署**：
+  - 本机 main 先变基到 origin/main（拿到 `docs/DT-ORC/ARCHITECTURE.md`），CURRENT 冲突处理成两条记录都保留。
+  - 备份旧 SOUL、memories、`cron/jobs.json` 到 `evidence/mengguishou-soul-v1.1-20261102/`。
+  - 安装两份文件（600），SHA-256 与定稿一致（SOUL `cd7a1926…`、HERMES `e519c2af…`）；装前用 `tools/threat_patterns.py` 扫描，0 命中。
+  - `hermes cron edit` 给日报 `33df73dffd17`、周报 `6a976baa2632` 设 `--workdir ~/.hermes/workspace` 并回读；工程自检 `f3388d53ce97` 是纯脚本，没动。脚本固定从 `HERMES_HOME/scripts/` 解析，两个报告脚本都不依赖 cwd。
+  - `hermes prompt-size`（在 workspace 下运行）：项目上下文 0 → 5,782B，SOUL 所在的稳定部分 17.9KB → 12.4KB，总量基本不变。
+  - 常浩 13:00 重启网关（PID 99368），13:00:30 `✓ feishu connected`。
+- **飞书验收**（常浩私聊，`/new` 后的新会话 `20261102_130207_1c7a4016`）：
+  1. “你是谁？工作规程放在哪？”→ 按新 SOUL 回答身份，答出 `~/.hermes/workspace/HERMES.md`，开口没叫名字。
+  2. “按我的习惯，新项目做视觉开发默认做哪些端？”→ 依次调 vault 技能、`vault_read search`、读 `个人上下文/当前人机协作偏好.md`，答“默认只做 PC 版”，引用 P-09。
+  3. “帮我在数码宝贝群里发一句‘大家好’”→ 查到群「数码宝贝世界」，回复“确认发到这个群吗？目前还没发送”，没有发出。
+  - 常浩 13:02 把重启命令的文字发到了猛鬼兽私聊，旧会话那一轮在 0.6 秒内被 `/new` 中断，没有执行；网关 PID 没变。
+- **未做**：回退模型标注、定时任务读 HERMES.md，要等实际触发（明早 07:30 日报）再看；USER 记忆两对重复的去重没做；workshop 默认路由（没点名时默认 Codex）和新分工冲突，按定稿说明单独改仓库源文件走 PR。
+- **下一步**：11-03 看日报定时任务正常产出，并确认那次运行读到了 HERMES.md。
+
 ## 2026-11-02 · 企业数字分身亚古兽接入飞书（P0，本机配置，两个机器人飞书验收都通过；猛鬼兽断线已重启恢复）
 
 - **决定**（常浩，按《Hermes 双数字分身架构 V3.0》）：个人数字分身＝猛鬼兽（不动）；企业数字分身＝亚古兽 `cli_a965c429ef785bd3`。推翻 10-26「飞书只保留猛鬼兽」，PRD 加 D19，D0、D12 标注修订。三个选项按推荐定：P0 只放常浩本人；复用现有 ChatGPT（openai-codex）登录；独立进程。
@@ -21,7 +57,7 @@
 - **已知风险**：
   1. 定时任务：亚古兽进程会把 default 列进 tick 集合，靠「对方网关在线就让位」（`gateway/run.py` `_cron_profile_gate`）和 `cron/.tick.lock` 避免重复。猛鬼兽网关重启的几秒里，到点的猛鬼兽任务可能由亚古兽进程代跑（投递走猛鬼兽凭证或直接失败，不会发到企业会话）。
   2. `lark-cli` 在 Hermes 环境下读 `~/.lark-cli/hermes/`（绑的是猛鬼兽 + 常浩个人授权）。亚古兽现在没有终端，调不到；P1 接企业飞书数据前，要先给亚古兽单独授权并隔离这份配置。
-  3. App Secret 出现在 11-02 的 Claude 会话里，建议常浩到飞书后台重置后替换 `.env`，再执行 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-agumon`。
+  3. App Secret 出现在 11-02 的 Claude 会话里，建议常浩到飞书后台重置后替换 `.env`，再执行 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-agumon`。**已处理**：常浩 12:2x 在飞书后台重置；校验新 Secret 换 token 成功 `code 0`，旧 Secret 返回 `10014 app secret invalid`；替换 `.env` 后执行 `agumon gateway restart`，新进程 PID 85436 在 12:22:28 `✓ feishu connected`。新 Secret 也出现在同一会话里，但只在本机。
   4. 巡检 `ops/health_check.py` 目前只看猛鬼兽网关，亚古兽还没纳入。
 - 证据：`evidence/agumon-enterprise-20261102/`（default 配置、改前网关列表）。
 - **下一步**：常浩在飞书私聊亚古兽、猛鬼兽各发一句，确认各自用自己的人设回复；之后进入企业 P1（企业知识接入）。
