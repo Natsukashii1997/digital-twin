@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-11-02 · 企业数字分身亚古兽接入飞书（P0，本机配置，两个机器人飞书验收都通过；猛鬼兽断线已重启恢复）
+
+- **决定**（常浩，按《Hermes 双数字分身架构 V3.0》）：个人数字分身＝猛鬼兽（不动）；企业数字分身＝亚古兽 `cli_a965c429ef785bd3`。推翻 10-26「飞书只保留猛鬼兽」，PRD 加 D19，D0、D12 标注修订。三个选项按推荐定：P0 只放常浩本人；复用现有 ChatGPT（openai-codex）登录；独立进程。
+- **做了什么**（只改本机配置，仓库代码没动）：
+  - `hermes profile create agumon`（空白 profile，不克隆猛鬼兽的配置、技能、记忆；包装命令 `~/.local/bin/agumon`）。
+  - `agumon config set`：`gateway.standalone: true`（Hermes 新版默认一个网关进程服务所有 profile，这是让它单独起进程的开关，官方称为临时兼容项）；模型同 default（gpt-6.1-sol / openai-codex，OAuth 从根 `auth.json` 读，不复制）。
+  - 飞书平台工具：`agumon tools disable --platform feishu browser terminal file code_execution delegation computer_use connections cronjob`，只剩 web、vision、image_gen、tts、skills、todo、memory、session_search、clarify。没有终端和文件工具，技术上读不到 Vault；也没装 vault-read MCP。
+  - `profiles/agumon/SOUL.md`：企业人设、五个模块、P0 阶段说明、边界（不读个人记忆和 Vault、不调 ORCA、L2 以上要授权）。
+  - `profiles/agumon/.env`（600）：飞书凭证、`FEISHU_ALLOWED_USERS=ou_6fac…`（常浩在亚古兽下的 open_id，取自 `~/.lark-cli/config.json` 旧条目）、`FEISHU_GROUP_POLICY=allowlist`、`FEISHU_ALLOW_ALL_USERS=false`。
+  - `agumon gateway install` → `~/Library/LaunchAgents/ai.hermes.gateway-agumon.plist`；11:24:45 `✓ feishu connected`（websocket）。`hermes gateway list`：default 与 agumon 两个进程各自在跑，猛鬼兽网关没有重启。
+- **验证**：凭证换 tenant token `code 0`；`agumon -z` 自我介绍为亚古兽、说明读不到 Obsidian。**飞书验收（亚古兽）通过**：常浩 11:28 私聊「你好」，agumon 网关收到（sender `ou_6fac…`），8.1 秒回复 101 字，会话库 `profiles/agumon/state.db` 里是企业人设（说明企业知识库还在建设中）。
+- **顺带发现：猛鬼兽从 11-01 15:41 起收不到飞书消息**（与本次无关）。`gateway_state.json` 里 feishu 一直是 `retrying`；10-27 起的网关进程（PID 63167）长连接还挂在旧网络地址 `192.168.1.3`（本机现在是 `172.16.11.40`），日志停在 11-01 15:51「trying to reconnect for the 1st time」。11-02 09:49 巡检其实查到了，但发告警时 DNS 失败，没有发出去。处理办法：`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`。Claude 被自动模式权限拦下，常浩 11:30 自己执行：旧进程 11:30:37 正常退出，launchd 隔了约 1 分半（ThrottleInterval 30 秒，加上连跑了两次 kickstart）才拉起新进程 PID 58709，11:32:06 `✓ feishu connected`，长连接走的是当前地址。新进程的定时任务只管 `default`，没有接管 agumon。**飞书验收（猛鬼兽）通过**：常浩 11:33～11:34 私聊，猛鬼兽 default 网关收到（sender `ou_5ad2…`，会话 `20261027_000913_b71a7260`，仍是原个人会话），分别在 6.1 秒、5.7 秒内回复，人设是猛鬼兽。两个机器人各自收、各自回，会话库互不相通。待补：巡检遇到网络断开时告警发不出去。
+- **已知风险**：
+  1. 定时任务：亚古兽进程会把 default 列进 tick 集合，靠「对方网关在线就让位」（`gateway/run.py` `_cron_profile_gate`）和 `cron/.tick.lock` 避免重复。猛鬼兽网关重启的几秒里，到点的猛鬼兽任务可能由亚古兽进程代跑（投递走猛鬼兽凭证或直接失败，不会发到企业会话）。
+  2. `lark-cli` 在 Hermes 环境下读 `~/.lark-cli/hermes/`（绑的是猛鬼兽 + 常浩个人授权）。亚古兽现在没有终端，调不到；P1 接企业飞书数据前，要先给亚古兽单独授权并隔离这份配置。
+  3. App Secret 出现在 11-02 的 Claude 会话里，建议常浩到飞书后台重置后替换 `.env`，再执行 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-agumon`。
+  4. 巡检 `ops/health_check.py` 目前只看猛鬼兽网关，亚古兽还没纳入。
+- 证据：`evidence/agumon-enterprise-20261102/`（default 配置、改前网关列表）。
+- **下一步**：常浩在飞书私聊亚古兽、猛鬼兽各发一句，确认各自用自己的人设回复；之后进入企业 P1（企业知识接入）。
+
 ## 2026-11-02 · DT-ORC 唯一工程架构基线 V3.1.0 A+ 入库（[PR #43](https://github.com/Natsukashii1997/digital-twin/pull/43)）
 
 - **决定**（常浩）：[docs/DT-ORC/ARCHITECTURE.md](docs/DT-ORC/ARCHITECTURE.md) 是 DT-ORC 唯一的长期工程共识；以后按实际开发、测试和运行反馈在这份文件上迭代，不再另起总方案。V1.0、Claude V2.0、ChatGPT V3.0 原样移入 `docs/DT-ORC/history/`。
