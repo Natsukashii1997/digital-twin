@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-11-02 · DT-ORC 唯一工程架构基线 V3.1.0 A+ 入库（[PR #43](https://github.com/Natsukashii1997/digital-twin/pull/43)）
+
+- **决定**（常浩）：[docs/DT-ORC/ARCHITECTURE.md](docs/DT-ORC/ARCHITECTURE.md) 是 DT-ORC 唯一的长期工程共识；以后按实际开发、测试和运行反馈在这份文件上迭代，不再另起总方案。V1.0、Claude V2.0、ChatGPT V3.0 原样移入 `docs/DT-ORC/history/`。
+- **定稿内容**：
+  - 角色：Claude 主开发和返修，可提出技术异议；ChatGPT 聊天模式 High 主审；Codex 按需做专项验证；Hermes 负责监工、记账和协调。
+  - 运行模式：A+ 双模式，SUPERVISED（有人值守）和 UNATTENDED（无人值守）。
+  - SUPERVISED 的授权来源（常浩选「(a)+(b) 都要」）：(a) 本机交互授权入口，(b) 飞书私聊，经 `twin_identity` 核验。
+  - 最小执行桥：ORCA CLI 白名单调用加 RELAY-01。
+  - L0–L2 自动合并：只能走受限发布通道；做不到时改为人工合并。
+- **评审链**：
+  - Claude 对原件 `8d7bb274…` 的结论为 NEEDS_HUMAN + REWORK（R1–R5），修订稿为 `d0ec5ed3…`。
+  - ChatGPT High 做了定向审查，收紧了 4 处；定稿 SHA-256 为 `3f0b55f6…`。
+  - Claude 对定稿的结论为 PASS（[定稿复核](docs/reviews/2026-11-02-Claude-ARCHITECTURE-V3.1.0定稿复核.md)）。
+  - ChatGPT 审查原文还没入库（N1）。
+- **文件合并 ≠ 任何真实动作放行**：`LIVE_ACTIONS_ENABLED=False`、`merge_gate` 只认 `owner_direct` 这两点都没变。
+- **下一步**：
+  - M1 工单 `DT-ORC-M1-B11-FILE-ISOLATION`：修 B11-R5 指出的文件级符号链接问题；同时按 5.2a/5.2b 实现 `run_authorization`。实现 (b) 时先确认 Worker 环境拿不到常浩的飞书用户身份凭据（N2）。
+  - M2 人工直控试点可以和 M1 并行。
+
 ## 2026-10-31 上午 · 常浩定自动推进闸门；RELAY-02 循环驱动首次真实跑通（[PR #40](https://github.com/Natsukashii1997/digital-twin/pull/40) 送审中，[PR #39](https://github.com/Natsukashii1997/digital-twin/pull/39) PASS 待合并）
 
 - **常浩 10-31 要求**：digital-twin 基于 ORCA 自动推进到项目结束，不再逐步让他确认。**闸门按建议定**：全自动——开 issue、开分支、Claude 开发、ChatGPT 聊天模式（思考强度「高」）审核、返修（最多 2 轮），以及 PASS 且没碰正式环境的 PR 自动 squash 合并；攒起来用飞书私聊问常浩——正式安装和部署、改 Hermes 正式配置和 cron、机器人对外发消息、NEEDS_HUMAN、返修超限。本条替代 PRD 第 10 节「每个任务开工前给分批计划，你确认后再动」在本项目的执行方式。
