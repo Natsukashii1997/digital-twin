@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-11-02 · 亚古兽接通牛马之家（workdesk MCP 只读，仅常浩私聊）
+
+- **牛马之家一侧**：work-desk [PR #7](https://github.com/Natsukashii1997/work-desk/pull/7) squash 合并为 `ee743c9`，已发布 `nm-20261102-174752-ee743c9`，回读与冒烟通过（work-desk CURRENT 有完整记录）。通用的智能体接入：每个 agent 一个服务端凭据（只存哈希），按工具授权，提问人必填，所有调用记进 `agent_calls`。第一期 4 个只读工具：`mentor_trainees`、`mentor_questions`、`project_list`、`strategy_month`。
+- **亚古兽一侧**（证据：`evidence/agumon-workdesk-mcp-20261102/`，含改前的 `.env` 和 `config.yaml` 备份）：
+  - 凭据：`agent-token.mjs issue agumon <4 个工具> --write-env` 直接写进 `profiles/agumon/.env` 的 `WORKDESK_AGENT_TOKEN`（权限 600，没有显示出来）；
+  - `config.yaml`：`mcp_servers.workdesk`（stdio，node + work-desk 主工作区的 `server/mcp-workdesk.mjs`，凭据用 `${WORKDESK_AGENT_TOKEN}` 引用）；`platform_toolsets.feishu` 加 `workdesk`；`plugins.enabled: [workdesk-gate]`；
+  - 插件 `profiles/agumon/plugins/workdesk-gate/`：`pre_tool_call` 拦 `mcp__workdesk__*`，只有 platform=feishu、chat_type=dm、发送人=常浩（`ou_6fac…`）才放行，并用 `modify` 写入真实提问人 `_caller`（覆盖模型自己填的）；拿不到会话信息也拦；
+  - HERMES.md §0 牛马之家改为“已接通，只在常浩私聊里能用”（work-desk `docs/亚古兽/角色配置-V3/HERMES.md` 同步，`cmp` 一致，SHA `bedb439c…`，1599 字，注入扫描 0 命中）。
+- **为什么要插件**：Hermes 调 MCP 时不带发送人，飞书的工具集也不分私聊和群聊；启用的 MCP 服务默认会进所有渠道。不加插件的话，群里任何人都能让亚古兽去读牛马之家。
+- **验证**：
+  - `agumon mcp test workdesk`：连接成功，发现 4 个工具（凭据引用生效）；
+  - 插件单测（Hermes 自带 Python）：本人私聊放行并覆盖伪造的 `_caller`；群里的本人、他人私聊、非飞书、无会话都拦；
+  - 命令行单次对话实测：第一次插件按单下划线 `mcp_workdesk_` 匹配，没拦住（实际工具名是 `mcp__workdesk__project_list`），请求到了牛马之家，因缺提问人被 400 拒绝，没有数据外流；改成两种前缀都拦后再测，被插件拦下，牛马之家没有收到新的请求；
+  - 网关重启两次，最后一次 17:53:23 连上飞书（进程 59128）。
+- **还没验证**：常浩飞书私聊里真实调用一次，确认 `_caller` 能穿过 MCP 送到牛马之家（看 `agent_calls` 有带 `ou_6fac…` 的 200 记录）；群里 @ 问同样的问题会被拦下并如实说明。
+- **新坑**：Hermes 的 MCP 工具名是 `mcp__<服务>__<工具>`（双下划线），文档里写的 `mcp_<服务>_<工具>` 不对；按工具名拦截要以实际调用为准。
+
 ## 2026-11-02 · 三报体系 V2.1 定为基线：PRD D20 已合并（PR #44），猛鬼兽 HERMES.md 已装三报规则
 
 - **评审链**：V1.0 REWORK → V1.1 小返修 → V2.0 有条件通过（C1–C6）→ **V2.1 PASS**（[复核](docs/reviews/2026-11-02-Claude-三报体系V2.1-复核.md)）。常浩说“最终方案，无问题就施工”。各报告的具体设置（cron、脚本、提示词）先跳过，先把底层规则定下来、上传 GitHub，并装给猛鬼兽。
