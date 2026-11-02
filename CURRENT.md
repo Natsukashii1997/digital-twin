@@ -6,6 +6,23 @@
 
 ---
 
+## 2026-11-02 · 三报第 0 批：G5 只读盘点与分批计划（待 ChatGPT 复核）
+
+- **报告**：[docs/三报-第0批-G5盘点.md](docs/三报-第0批-G5盘点.md)；证据 `evidence/three-reports-batch0-g5-inventory-20261102/`。只读：没有合并、安装、迁移，没改 cron 和网关；正式库只做 stat 和 sha256，读取在副本上用 immutable。前后核对，正式库仍是 v3（sha `6cde8737…`），没变。
+- **结论**：
+  - G5 的合并候选是第 4 批分支 `Natsukashii1997/hermes-g5-batch4-isolated`，HEAD `e058caf`，不是 A/B/C 三个分支。合入 main 的预演无冲突。两套 Python 各 448 项测试，OK。
+  - D1 方案要出 v2：合并来源改成 e058caf；安装文件从 3 个变成 5 个，因为自检会比对全部 `hermes/scripts/*.py`；窗口开始前的基准提交（`$PRE`）按当天 main 重新记录；窗口还要避开 09:45 巡检。
+  - 三报接 G5 需要一次最小扩展：sync 不能清掉报告通知；render 和 SCOPE 要支持报告类型。表结构不用改。快照和锚点放进 `events`（`report.snapshot`、`report.ledger_committed`）和 `refs`。
+  - cron 静默失败：11-02 07:30 日报的取数脚本超时退出 1，cron 仍记为 ok，failure_deliver 没触发。
+  - 牛马之家读的是正式文档 `TCG9…` / `KD1W…`，不是并跑文档。T1 协作者没查到：缺 `docs:permission.member:retrieve`，没有替常浩授权。
+- **补记 G5 10-30 晚至 11-01 的历程**（之前的 CURRENT 停在 10-30 G5-A GO；评审原文在 `~/Library/Application Support/DigitalTwin/collab-inbox/hermes/`）：
+  - D1 第 1 轮 `3edcea8`：HMS-20261030-003 REWORK。第 2 轮 `e08d45d`：HMS-20261031-002 PASS（有条件：正式窗口必须停网关）。
+  - G5-B `657e37d`：HMS-20261030-005 PASS。
+  - G5-C：`848e3d2` 被 HMS-20261030-006 判 REWORK；返修 `204dffc`，HMS-20261031-001 PASS。
+  - 第 4 批隔离集成 `2e022a4`（10-31，按文件叠加 B、C）：HMS-20261031-003 PASS_WITH_CONDITIONS，遗留 OBS-01。OBS-01 返修 `e058caf`（11-01）：HMS-20261101-001 PASS。
+  - 所有分支都只在本地，没有推送、合并、安装；`owner_chat_id` 没配；没有建 G5 的 cron。
+- **下一步**：盘点报告送 ChatGPT 独立复核（P1）；之后 P2（D1 方案 v2）、P3（三报适配扩展）都要常浩先授权改动范围。P3 前常浩要定两件事：晚报迟到超过 23:00 怎么处理；写入后立即投递，还是等轮询。
+
 ## 2026-11-02 · 亚古兽接通牛马之家（workdesk MCP 只读，仅常浩私聊）
 
 - **牛马之家一侧**：work-desk [PR #7](https://github.com/Natsukashii1997/work-desk/pull/7) squash 合并为 `ee743c9`，已发布 `nm-20261102-174752-ee743c9`，回读与冒烟通过（work-desk CURRENT 有完整记录）。通用的智能体接入：每个 agent 一个服务端凭据（只存哈希），按工具授权，提问人必填，所有调用记进 `agent_calls`。第一期 4 个只读工具：`mentor_trainees`、`mentor_questions`、`project_list`、`strategy_month`。
