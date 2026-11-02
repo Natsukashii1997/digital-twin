@@ -23,9 +23,11 @@ hermes/
     progress/          项目进展现查（F6）
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
+  workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是三报规则
   samples/             样稿
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
+docs/三报体系-V2.1.md   主动运营与三报（早报 / 晚报 / 周报）的产品与实施基线（PRD D20）；评审过程在 docs/reviews/
 orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
