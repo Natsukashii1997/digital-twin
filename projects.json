@@ -8,9 +8,10 @@
       "aliases": [
         "牛马之家",
         "work-desk",
-        "工作台"
+        "工作台",
+        "niuma-home"
       ],
-      "path": "~/Documents/ChatGPT/个人/work/work-desk",
+      "path": "~/Documents/ChatGPT/个人/work/niuma-home",
       "main": "main",
       "agents": "AGENTS.md",
       "card": "10 项目/牛马之家.md",
@@ -19,7 +20,7 @@
       "write_allowed": true,
       "notes": "正式服务 5280 由 launchd 常驻；发布只能在常浩同意后，在 main 执行 scripts/release-app.sh。测试自动用临时数据目录，不碰 data/。",
       "category": "活跃",
-      "github": "Natsukashii1997/work-desk"
+      "github": "Natsukashii1997/niuma-home"
     },
     {
       "id": "personal-ai-workbench",
@@ -28,9 +29,10 @@
         "数码世界",
         "个人AI工作台",
         "personal-ai-workbench",
-        "工作台5178"
+        "工作台5178",
+        "digiworld"
       ],
-      "path": "~/Documents/ChatGPT/个人/work/personal-ai-workbench",
+      "path": "~/Documents/ChatGPT/个人/work/digiworld",
       "main": "main",
       "agents": "AGENTS.md",
       "card": "10 项目/数码世界.md",
@@ -39,7 +41,7 @@
       "write_allowed": true,
       "notes": "PRD 决定已收缩为看板和资产库，调度、接力、提醒类功能不再做。",
       "category": "活跃",
-      "github": "Natsukashii1997/personal-ai-workbench"
+      "github": "Natsukashii1997/digiworld"
     },
     {
       "id": "agent-kit",
@@ -149,12 +151,6 @@
   },
   "inventory": [
     {
-      "path": "~/Documents/ChatGPT/个人/work/work-desk-ui-bitmap",
-      "category": "活跃",
-      "todo": "—",
-      "why": "牛马之家的 worktree（分支 ui-v4），跟主仓库走"
-    },
-    {
       "path": "~/Documents/ChatGPT/个人/work/get-index",
       "category": "只登记",
       "todo": "M4 定",
@@ -215,25 +211,25 @@
       "why": "营销战役卡片网关，远端在飞书妙搭"
     },
     {
-      "path": "~/Documents/ChatGPT/Fmode-销售侧壁栏",
+      "path": "~/Documents/ChatGPT/Fmode/lumi-sales-sidebar",
       "category": "只登记",
       "todo": "—",
       "why": "远端在 git.fmode.cn，保留（M3-Q4）"
     },
     {
-      "path": "~/Documents/ChatGPT/Fmode-销售案例库",
+      "path": "~/Documents/ChatGPT/Fmode/销售案例库",
       "category": "只登记",
       "todo": "—",
       "why": "远端在 git.fmode.cn，保留（M3-Q4）"
     },
     {
-      "path": "~/Documents/ChatGPT/Fmode-用户案例库",
+      "path": "~/Documents/ChatGPT/Fmode/用户案例库",
       "category": "只登记",
       "todo": "—",
       "why": "Fmode 项目，没有远端"
     },
     {
-      "path": "~/Documents/ChatGPT/Fmode-用户案例库/docs/share-site",
+      "path": "~/Documents/ChatGPT/Fmode/用户案例库/docs/share-site",
       "category": "只登记",
       "todo": "—",
       "why": "Fmode 用户案例库的分享站点，跟着它走"
