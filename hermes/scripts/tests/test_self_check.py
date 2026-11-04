@@ -1,7 +1,7 @@
-"""隔离自测：ops/self_check.py（安装副本漂移、每月沙盒和仓库自检）。
+"""隔离自测：ops/self_check.py（安装副本漂移、Tidings 健康检查、每月沙盒和仓库自检）。
 
 漂移检查用临时 git 仓库当 DT_REPO、临时目录当 HERMES_HOME 和 DT_BIN，HOME 也换成临时目录；git 用临时全局配置。
-仓库自检的子进程打桩或用空名册跑真的 check_repos.py。不联网，不碰真实仓库、~/.hermes、安装副本和 Vault。
+仓库自检的子进程打桩或用空名册跑真的 check_repos.py。Tidings 的 node 换成当前 python、health.js 换成临时脚本。不联网，不碰真实仓库、~/.hermes、安装副本和 Vault。
 """
 import importlib.util
 import io
@@ -52,6 +52,7 @@ class ScriptTest(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(self.home), "DT_REPO": str(self.repo),
                     "HERMES_HOME": str(self.home / "hermes"), "DT_BIN": str(self.home / "bin"),
                     "DT_TODAY": "2000-01-02", "DT_ROSTER": str(self.home / "projects.json"),
+                    "TIDINGS_REPO": str(self.home / "tidings"), "TIDINGS_NODE": sys.executable,
                     "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
         p = patch.dict(os.environ, self.env)
@@ -67,6 +68,7 @@ class ScriptTest(unittest.TestCase):
         sh(self.repo, "commit", "-q", "-m", "起步")
         self.write(self.home / "hermes/scripts/check_repos.py", "源 ops/check_repos.py\n")   # check_repos.py 装两处
         self.write(self.home / "hermes/scripts/安装处多出的.py", "不管\n")
+        self.write(self.home / "tidings/bin/health.js", "")   # 健康：什么都不打印
 
     @staticmethod
     def write(path, text):
@@ -113,6 +115,15 @@ class ScriptTest(unittest.TestCase):
         self.write(self.repo / "hermes/skills/workshop/SKILL.md", "别的分支提交了\n")
         sh(self.repo, "commit", "-qam", "dev 上的改动")
         self.assertEqual(self.run_script(), "")
+
+    def test_tidings_problem_printed_as_is(self):
+        self.write(self.home / "tidings/bin/health.js",
+                   "import pathlib\nprint('🌟 Github·Tidings 自检\\n- 在 ' + pathlib.Path.cwd().name + ' 下跑的')\n")
+        self.assertEqual(self.run_script(), "🔧 工程自检\n\n🌟 Github·Tidings 自检\n- 在 tidings 下跑的\n")
+
+    def test_tidings_not_runnable_is_one_line(self):
+        out = self.run_script(TIDINGS_NODE=str(self.home / "没有这个node"))
+        self.assertEqual(out, "🔧 工程自检\n\nTidings 自检未完成（无法启动：No such file or directory）\n")
 
     def test_unreadable_repo_is_one_issue(self):
         for repo in (self.home / "没有这个仓库", self.home / "hermes"):
@@ -185,6 +196,7 @@ class MonthlyGateTest(unittest.TestCase):
         self.drift = self.patch("check_drift", return_value=[])
         self.sandbox = self.patch("check_sandbox", return_value=([], []))
         self.repos = self.patch("check_repos", return_value=[])
+        self.tidings = self.patch("check_tidings", return_value="")
 
     def patch(self, name, **kwargs):
         p = patch.object(sc, name, **kwargs)
@@ -201,6 +213,7 @@ class MonthlyGateTest(unittest.TestCase):
     def test_other_days_only_check_drift(self):
         self.assertEqual(self.main(), "")
         self.drift.assert_called_once_with()
+        self.tidings.assert_called_once_with()
         self.sandbox.assert_not_called()
         self.repos.assert_not_called()
 
@@ -217,11 +230,13 @@ class MonthlyGateTest(unittest.TestCase):
         self.drift.return_value = [f"漂移{i}" for i in range(12)]
         self.sandbox.return_value = ([], ["扫不了 ~/Documents/Codex（Operation not permitted）"])
         self.repos.return_value = ["a：不是私有仓库"]
+        self.tidings.return_value = "🌟 Github·Tidings 自检\n- 虚构问题"
         out = self.main("2000-01-01")
         self.assertEqual(out.split("\n\n"), [
             "🔧 工程自检",
             "\n".join(["🔁 安装副本不一致：12 项和仓库 main 对不上", *[f"- 漂移{i}" for i in range(10)],
                        "- ……另有 2 项", "处理：从仓库 main 复制到安装位置；技能、提示词改了要重启网关。"]),
+            "🌟 Github·Tidings 自检\n- 虚构问题",
             "🧹 沙盒提醒（每月 1 号）\n- 扫不了 ~/Documents/Codex（Operation not permitted）",
             "📦 仓库自检提醒（每月 1 号）\n- a：不是私有仓库\n",
         ])
@@ -233,6 +248,43 @@ class MonthlyGateTest(unittest.TestCase):
                       "- /虚构沙盒/目录00\n", out)
         self.assertIn("- /虚构沙盒/目录09\n- ……另有 1 项\n只是提醒，不会自动删；要清理就让 Claude 或 Codex 列清单给你定。", out)
         self.assertNotIn("目录10", out)
+
+
+class TidingsTest(unittest.TestCase):
+    """check_tidings() 的调用方式和失败分支；子进程打桩。"""
+
+    def setUp(self):
+        self.outcome = subprocess.CompletedProcess([], 0, "", "")
+        p = patch.object(sc.subprocess, "run", side_effect=self.fake_process)
+        self.process = p.start()
+        self.addCleanup(p.stop)
+
+    def fake_process(self, cmd, **kwargs):
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    def test_runs_health_js_in_repo_with_absolute_node(self):
+        self.assertEqual(sc.check_tidings(), "")
+        call = self.process.call_args
+        self.assertEqual(call.args[0], [sc.TIDINGS_NODE, "bin/health.js"])
+        self.assertTrue(Path(sc.TIDINGS_NODE).is_absolute())
+        self.assertEqual(call.kwargs["cwd"], sc.TIDINGS_REPO)
+        self.assertEqual(call.kwargs["timeout"], 120)
+        self.assertEqual(call.kwargs["env"]["PATH"], sc.PATH)
+
+    def test_output_returned_as_is(self):
+        self.outcome = subprocess.CompletedProcess([], 0, "🌟 Github·Tidings 自检\n- 问题一\n", "")
+        self.assertEqual(sc.check_tidings(), "🌟 Github·Tidings 自检\n- 问题一")
+
+    def test_failures_are_one_line_without_stderr(self):
+        cases = [(subprocess.CompletedProcess([], 1, "半截输出", "fake traceback"), "Tidings 自检未完成（退出码 1）"),
+                 (subprocess.TimeoutExpired("fake", 120), "Tidings 自检未完成（超过 120 秒）"),
+                 (FileNotFoundError(2, "No such file or directory"), "Tidings 自检未完成（无法启动：No such file or directory）")]
+        for outcome, expected in cases:
+            with self.subTest(outcome=outcome):
+                self.outcome = outcome
+                self.assertEqual(sc.check_tidings(), expected)
 
 
 class RepoCheckTest(unittest.TestCase):
