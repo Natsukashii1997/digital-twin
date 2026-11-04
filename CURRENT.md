@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-04 · 映射 v5 已合并（PR #49，`acdd83b`），已登记送审 HMS-20261104-001
+
+- **已合并**：PR 分支先合入 main（自检接入 Tidings，#51），CURRENT 顶部的文字冲突两段都保留；常浩说“合并”后 squash 合并为 `acdd83b`，主目录已拉齐，6 个文件的 blob 和 PR 分支一致。
+- **已送审**：登记 HMS-20261104-001，supersedes HMS-20261103-001，`addresses` 4 条（HMS004-P1-01、P1-02、P2-01、P2-02），绑定 `acdd83b` 中 6 个文件的 sha。submission sha `a55db46b…`。证据 `evidence/three-reports-batch0-mapping-v5-20261104/`。
+- **待审清单**：登记前 `pending.json` 还列着已复核的 001，脚本只接受这一种已知过期状态（`pending_before_stale_001: true`）；重写后回读与扫描一致，待审只有 HMS-20261104-001。
+- **没动**：只改文档。没有代码；G5 分支、正式库、cron、网关、飞书都没碰。
+- **下一步**：常浩在 ChatGPT 发「验收 HMS-20261104-001」，回执回来后处理。v5 没有待确认项。
+
 ## 2026-11-04 · 工程自检接入 Github·Tidings 健康检查（PR #51，`2f72576`）
 
 - **改了什么**：`ops/self_check.py` 每天在 github-center 下用 `~/.nvm/versions/node/v24.16.0/bin/node` 跑 `bin/health.js`，超时 120 秒；有输出原样作为一段，退出码非 0、超时、起不来报「Tidings 自检未完成（原因）」，没问题不输出。#50 已关。
