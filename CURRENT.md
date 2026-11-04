@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-04 · 映射 v6 已合并（PR #52，`0bcdf3e`），已登记送审 HMS-20261104-002
+
+- **已合并**：常浩说“合并”后 squash 合并为 `0bcdf3e`，主目录已拉齐，7 个文件的 blob 和 PR 分支一致。
+- **已送审**：登记 HMS-20261104-002，supersedes HMS-20261104-001，`addresses` 3 条（HMS005-P1-01、P2-01、P2-02），绑定 `0bcdf3e` 中 7 个文件的 sha。submission sha `f9d34c84…`。证据 `evidence/three-reports-batch0-mapping-v6-20261104/`。
+- **待审清单**：登记前 `pending.json` 还列着已复核的 HMS-20261104-001，脚本只接受这一种已知过期状态；重写后回读与扫描一致，待审只有 HMS-20261104-002。
+- **没动**：只改文档。没有代码；G5 分支、正式库、cron、网关、飞书都没碰。
+- **下一步**：常浩在 ChatGPT 发「验收 HMS-20261104-002」，回执回来后处理。v6 没有待确认项。
+
 ## 2026-11-04 · 映射 v5 复核：REWORK（HMS-20261104-001，1 条 P1）
 
 - **回执**：`collab-inbox/hermes/HMS-20261104-001/review.json`。编号、commit_sha（`acdd83b`）、submission_sha256（`a55db46b…`）都对得上，回执有效。按扫描已无待审项；`pending.json` 还列着 HMS-20261104-001，下次登记时一起重写。
