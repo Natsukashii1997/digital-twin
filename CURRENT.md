@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-11-04 · 工程自检接入 Github·Tidings 健康检查（PR #51，`2f72576`）
+
+- **改了什么**：`ops/self_check.py` 每天在 github-center 下用 `~/.nvm/versions/node/v24.16.0/bin/node` 跑 `bin/health.js`，超时 120 秒；有输出原样作为一段，退出码非 0、超时、起不来报「Tidings 自检未完成（原因）」，没问题不输出。#50 已关。
+- **已同步**：`~/.hermes/scripts/self_check.py` 已从 main 复制，逐字节一致；用安装副本在干净环境（`env -i`）跑，无输出（无漂移、Tidings 健康）。
+- **已验证**：282 项测试通过；空 data 副本会输出「🌟 Github·Tidings 自检」段，node 路径不对时报「无法启动」。没发飞书。
+- **注意**：nvm 升级 Node 后要改 `TIDINGS_NODE` 的默认路径，否则自检会每天报「Tidings 自检未完成（无法启动…）」。
+
 ## 2026-11-03 · 映射 v4 复核：REWORK（HMS-20261103-001，2 条 P1）
 
 - **回执**：`collab-inbox/hermes/HMS-20261103-001/review.json`。编号、commit_sha（`63ade37`）、submission_sha256（`53df036e…`）都对得上，回执有效。按扫描已无待审项；`pending.json` 还列着 001，下次登记时一起重写。
