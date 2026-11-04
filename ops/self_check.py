@@ -4,9 +4,11 @@
 由 Hermes 无模型定时任务每天 09:50 调用：stdout 原样发给常浩，空输出不发消息，退出码非 0 算任务失败。
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
 每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
+每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
 每月 1 号（或 --monthly）：另查沙盒超过 30 天没动的目录，和名册仓库自检（同目录 check_repos.py，只报失败项）。
 只读：不改文件、不发飞书、不写日志。安装时和 check_repos.py 同放 ~/.hermes/scripts/。
-环境变量：DT_REPO 仓库路径；HERMES_HOME、DT_BIN 两个安装根目录；DT_TODAY（YYYY-MM-DD）指定今天，自测用。
+环境变量：DT_REPO 仓库路径；HERMES_HOME、DT_BIN 两个安装根目录；DT_TODAY（YYYY-MM-DD）指定今天，自测用；
+TIDINGS_REPO、TIDINGS_NODE 改 github-center 目录和 node 路径，自测用。
 """
 import datetime as dt
 import json
@@ -25,6 +27,9 @@ SANDBOX_DIRS = [HOME / "Sandbox", HOME / "Documents/Codex"]   # M3-Q3：沙盒�
 SANDBOX_STALE_DAYS = 30
 CHECK_REPOS_SCRIPT = Path(__file__).with_name("check_repos.py")
 CHECK_REPOS_TIMEOUT = 600   # 名册有多个项目，每个项目会执行多次 gh / git 查询
+TIDINGS_REPO = Path(os.environ.get("TIDINGS_REPO", "~/Documents/ChatGPT/个人/work/github-center")).expanduser()
+TIDINGS_NODE = os.environ.get("TIDINGS_NODE", str(HOME / ".nvm/versions/node/v24.16.0/bin/node"))   # PATH 里没有 nvm
+TIDINGS_TIMEOUT = 120
 LIST_LIMIT = 10
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
@@ -126,6 +131,20 @@ def check_repos():
     return result["failed"]
 
 
+def check_tidings():
+    """health.js 有问题才打印；返回它的输出，或一句没跑完的原因。"""
+    try:
+        r = subprocess.run([TIDINGS_NODE, "bin/health.js"], cwd=TIDINGS_REPO, capture_output=True, text=True,
+                           timeout=TIDINGS_TIMEOUT, env={**os.environ, "PATH": PATH})
+    except subprocess.TimeoutExpired:
+        return f"Tidings 自检未完成（超过 {TIDINGS_TIMEOUT} 秒）"
+    except OSError as e:
+        return f"Tidings 自检未完成（无法启动：{e.strerror or e}）"
+    if r.returncode != 0:
+        return f"Tidings 自检未完成（退出码 {r.returncode}）"
+    return r.stdout.strip()
+
+
 def bullets(items):
     lines = [f"- {i}" for i in items[:LIST_LIMIT]]
     return lines + ([f"- ……另有 {len(items) - LIST_LIMIT} 项"] if len(items) > LIST_LIMIT else [])
@@ -141,6 +160,9 @@ def main():
     if drift:
         sections.append([f"🔁 安装副本不一致：{len(drift)} 项和仓库 main 对不上", *bullets(drift),
                          "处理：从仓库 main 复制到安装位置；技能、提示词改了要重启网关。"])
+    tidings = check_tidings()
+    if tidings:
+        sections.append([tidings])
     if today().day == 1 or "--monthly" in sys.argv:
         stale, errors = check_sandbox()
         if stale or errors:
