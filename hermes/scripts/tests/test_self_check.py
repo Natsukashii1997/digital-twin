@@ -24,6 +24,7 @@ spec.loader.exec_module(sc)
 SOURCES = {
     "hermes/scripts/a.py": "hermes/scripts/a.py",
     "hermes/scripts/notes.md": None,
+    "hermes/scripts/assets/banner.png": "hermes/scripts/assets/banner.png",
     "hermes/scripts/tests/test_a.py": None,
     "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
     "hermes/skills/workshop/references/r.md": "hermes/skills/autonomous-ai-agents/workshop/references/r.md",
@@ -95,6 +96,10 @@ class ScriptTest(unittest.TestCase):
                       "（源：hermes/skills/workshop/references/r.md）", out)
         self.assertIn("- ~/hermes/scripts/self_check.py 缺失（源：ops/self_check.py）", out)
         self.assertNotIn("多出", out)
+
+    def test_script_assets_checked(self):
+        (self.home / "hermes/scripts/assets/banner.png").unlink()
+        self.assertIn("- ~/hermes/scripts/assets/banner.png 缺失（源：hermes/scripts/assets/banner.png）", self.run_script())
 
     def test_check_repos_checked_in_both_install_places(self):
         (self.home / "hermes/scripts/check_repos.py").unlink()

@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 26 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 18 项，共 282 项），末尾显示 `Ran 282 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 27 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 18 项 + Tidings 周报推送 9 项，共 292 项），末尾显示 `Ran 292 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -62,12 +62,16 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 
 测的是 `ops/self_check.py`。漂移检查跑真实入口：临时 git 仓库当 `DT_REPO`，临时目录当 `HERMES_HOME`、`DT_BIN` 和 `HOME`，`DT_TODAY` 固定日期；git 用临时全局配置。覆盖：
 
-- 漂移：全部一致时无输出；安装缺文件、内容不同只报路径不报内容；`check_repos.py` 两处安装都查；`hermes/scripts/tests/`、非 `.py` 脚本、安装处多出的文件不管；工作区未提交改动和别的分支的提交不算漂移；仓库不在或不是 git 仓库记一条「取不到仓库 main」。
+- 漂移：全部一致时无输出；安装缺文件、内容不同只报路径不报内容；`check_repos.py` 两处安装都查；`hermes/scripts/assets/` 下的素材也查；`hermes/scripts/tests/`、其余非 `.py` 文件、安装处多出的文件不管；工作区未提交改动和别的分支的提交不算漂移；仓库不在或不是 git 仓库记一条「取不到仓库 main」。
 - 日期：非 1 号只查漂移；1 号或 `--monthly` 才查沙盒和仓库；端到端用空名册跑真的 `check_repos.py`，名册读不了报失败项。
 - 沙盒（从巡检迁来）：只算顶层、非隐藏、超过 30 天没动的；目录扫不了记一条「扫不了」，不崩。文案和「另有 N 项」截断不变。
 - 仓库自检（从巡检迁来，打桩 `subprocess.run`）：只返回失败项，全通过或只有提示返回空；用当前 Python 和同目录 `check_repos.py`、继承 `DT_ROSTER`、600 秒超时；空输出、损坏 / 不一致的 JSON、意外退出码、启动失败和超时都记「仓库自检未完成」，不带出 traceback。
 
 不联网，不碰真实仓库、`~/.hermes`、安装副本和 Vault。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_self_check.py -v`。
+
+## Tidings 周报推送（test_tidings_weekly.py）
+
+测的是 `hermes/scripts/tidings_weekly.py`，跑真实入口。假 `lark-cli`（`DT_LARK_CLI`）按预设回话应答并记下每次调用的参数、工作目录和环境；周报目录、状态文件、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时横幅插在最前面、bot 身份、去掉 `HERMES_*` 再调、成功不输出；同一期只发一次、横幅按内容缓存、换图才重传、`--force` 换幂等键再发；没有周报或数据过期只发一句说明且同天不重复；卡片为空、不是卡片、缺失都发说明；横幅上传失败照发不带图并提醒；发送失败退出码 1、下次再发、已上传的横幅缓存留着；发出后状态写不进不报失败只提醒；没有私聊 chat_id 报错不发；`--dry-run` 只打印。不联网、不碰真实周报、状态文件和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_tidings_weekly.py -v`。
 
 ## 仓库自检（test_check_repos.py）
 

@@ -64,6 +64,8 @@ def install_pairs(files):
         p = PurePosixPath(f)
         if p.parent == PurePosixPath("hermes/scripts") and p.suffix == ".py":
             pairs.append((f, HERMES / "scripts" / p.name))
+        elif f.startswith("hermes/scripts/assets/"):      # 脚本用的固定素材（如 Tidings 周报横幅，#55）
+            pairs.append((f, HERMES / "scripts" / p.relative_to("hermes/scripts")))
         elif f.startswith("hermes/skills/"):
             pairs.append((f, HERMES / "skills/autonomous-ai-agents" / p.relative_to("hermes/skills")))
         elif f.startswith("hermes/prompts/"):
