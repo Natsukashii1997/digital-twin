@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-06 · vault 技能 0.4.0 对齐 Vault AGENTS v2.1 与 vault-read 1.4（#54，PR #57 `953fccd`），已安装、网关已重启
+
+- **改了什么**：`hermes/skills/vault/SKILL.md` 0.3.0 → 0.4.0。查找顺序对齐 Vault AGENTS v2.1（个人上下文 → 决定 → 卡片 → 经历 → 主题 → 项目卡 → 收件箱 → GET）；问到常浩做过的工作项目先读 `30 知识/经历/` 档案；`search` 先带 `layers: ["我", "精华"]`，按问题带 `intent`；删掉已停用的 `综合/`。Vault 侧 2026-11-05 已编出 7 份经历档案、150 张卡片。
+- **合并**：常浩说“合并”后 squash 合并为 `953fccd`，issue #54 关闭，主目录拉齐，自检测试 26 项 OK。本地变基被权限拦下没做；合并前确认 main 新增的 3 个提交不碰这个文件，GitHub 显示 CLEAN。
+- **推送插曲**：远端分支名 `claude/54-vault-skill-v2.1`（带点）两次被 GitHub 拒（500、`fatal error in commit_refs_rules`），改推为 `claude/54-vault-skill` 一次成功；`gh pr create` 两次 GraphQL 报错，改用 REST 接口创建。
+- **已安装**：复制到 `~/.hermes/skills/autonomous-ai-agents/vault/SKILL.md`，`cmp` 与 main 一致；改前副本在证据目录 `vault-skill-0.4.0-20261106/`。重启网关（`launchctl kickstart -k`），00:11:04 `✓ feishu connected`，`hermes skills list` 里 vault 为 enabled。
+- **下一步**：常浩在飞书私聊问一个工作项目问题（例如「学业规划报告项目里我负责什么」）验收：应先加载 vault 技能、读 `30 知识/经历/` 档案、回复带档案路径和小节。
+
 ## 2026-11-05 · Tidings 周报改发飞书卡片（#55，PR #56 `ca685aa`），每周一 11:30 定时任务已装
 
 - **已合并**：先跑 code-review（两个仓库，各审规范、需求两条线），修了 4 处：自检也比对 `hermes/scripts/assets/` 素材；发出后状态写不进不再误报“没发出”；github-center 侧提示标题转义、提示正文并成一行（github-center PR #60 `04b2b36`，两个 PR 一起合并）。常浩说“合并”后 squash 合并，主目录已拉齐。测试：3.9.6 / 3.14.5 各 `Ran 292 tests OK`。
