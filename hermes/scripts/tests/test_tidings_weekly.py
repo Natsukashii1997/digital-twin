@@ -149,6 +149,15 @@ class TidingsWeekly(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 0)
         self.assertEqual(len(self.sent()), 2)
 
+    def test_发出后状态写不进_不报失败只提醒(self):
+        self.week("2026-11-08")
+        self.state.parent.mkdir()
+        self.state.mkdir()                                   # 状态文件位置被目录占着，写不进
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(self.sent()), 1)
+        self.assertRegex(r.stdout.strip(), r"^Tidings 周报已发出，但状态文件写不进（.+），下次可能重发一次。$")
+
     def test_没有私聊_chat_id_报错不发(self):
         self.week("2026-11-08")
         r = self.run_script(chat="")

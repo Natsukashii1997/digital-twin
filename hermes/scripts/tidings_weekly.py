@@ -178,7 +178,10 @@ def main(argv=None):
         print(f"Tidings 周报没发出：{e}")
         return 1
     sent[tag] = {"at": now.isoformat(timespec="seconds"), "message_id": mid}
-    write_state(state)
+    try:
+        write_state(state)
+    except OSError as e:            # 已经发出，不报“没发出”；只提醒下次可能重发
+        warnings.append(f"状态文件写不进（{e.strerror or type(e).__name__}），下次可能重发一次。")
     for w in warnings:
         print(f"Tidings 周报已发出，但{w}")
     return 0
