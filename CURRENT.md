@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-05 · Tidings 周报改发飞书卡片（#55，PR #56 `ca685aa`），每周一 11:30 定时任务已装
+
+- **已合并**：先跑 code-review（两个仓库，各审规范、需求两条线），修了 4 处：自检也比对 `hermes/scripts/assets/` 素材；发出后状态写不进不再误报“没发出”；github-center 侧提示标题转义、提示正文并成一行（github-center PR #60 `04b2b36`，两个 PR 一起合并）。常浩说“合并”后 squash 合并，主目录已拉齐。测试：3.9.6 / 3.14.5 各 `Ran 292 tests OK`。
+- **已安装**：`tidings_weekly.py`、`assets/tidings-banner.png` 复制到 `~/.hermes/scripts/`；`ops/self_check.py` 改了，同步到 `~/.hermes/scripts/self_check.py`（旧版备份在 `evidence/2026-11-05-tidings-weekly/backup/`）。三个文件与 `main` 逐字节一致。
+- **定时任务**：`hermes cron create` 装了 `18a21b2eb87a`（无模型，`30 11 * * 1`，script `tidings_weekly.py`，deliver 常浩私聊）；`hermes cron list` 读回配置一致，下次触发 `2026-11-09T11:30:00+08:00`，网关在跑。默认网关的 PATH 里有 `lark-cli`。成功不出声，没发出或数据过期会在私聊说一句。
+- **自检顺带发现（范围外，没动）**：`~/.hermes/skills/autonomous-ai-agents/progress/SKILL.md` 安装副本 11-05 21:19 被改过，和 `main` 的 `hermes/skills/progress/SKILL.md` 不一致；明早 09:50 自检会报。
+- **下一步**：11-09 11:30 后看私聊是否收到带横幅的卡片、`hermes cron list` 里 `18a21b2eb87a` 的 Last run 是否 ok。
+
 ## 2026-11-04 · 映射 v6 已合并（PR #52，`0bcdf3e`），已登记送审 HMS-20261104-002
 
 - **已合并**：常浩说“合并”后 squash 合并为 `0bcdf3e`，主目录已拉齐，7 个文件的 blob 和 PR 分支一致。
