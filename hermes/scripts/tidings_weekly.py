@@ -1,11 +1,18 @@
-"""Tidings 周报推送（#55）：每周一 11:30 把 github-center 写好的周报卡片，用猛鬼兽身份发到常浩私聊。纯脚本、不调用模型。
+"""Tidings 周报推送（#55）：到点把 github-center 写好的周报卡片，用猛鬼兽身份发到常浩私聊。纯脚本、不调用模型。
 
 用法：python3 tidings_weekly.py [--dry-run] [--force]
-由 Hermes 无模型定时任务调用：成功什么都不打印（不再多发一条消息），出错打印原因并以退出码 1 结束（定时任务会提醒）。
---dry-run 只打印要发的消息，不上传、不发送、不记状态；--force 本期已发过也再发一次。
+由 Hermes 无模型定时任务每 15 分钟调用一次：没到点、成功都什么都不打印（不多发消息），出错打印原因并以退出码 1 结束（定时任务会提醒）。
+--dry-run 只打印这次会怎么做（要发的消息，或为什么不发），不上传、不发送、不记状态；
+--force 不看设置和时间、本期已发过也再发一次（手动补发用）。
+
+什么时候发（#58，github-center #61）：读 github-center 设置页存的 data/settings.json 里的 weekly（开关、星期、时间）。
+- 没存过、读不出来或某项不合规，按默认值：开、周一、11:30（同 github-center src/settings/index.js 的 DEFAULTS.weekly）。
+- 关着不发；过了最近一次设定时刻，这一期还没发过才发。能发到设定那天结束（数据要等时可延到设定时刻后 3 小时 15 分），
+  过了就不补（整天错过不隔天补发）。
 
 先检查再发（github-center docs/handoff/weekly-hermes.md）：
-- 最新一份周报的统计日应是昨天（北京时间）。没有任何周报、统计日早于昨天、卡片文件为空或读不出来：只发一句说明，不发旧榜单。
+- 最新一份周报的统计日应是设定那天的前一天（北京时间）。还没有就先等，到设定时刻后 3 小时仍然没有、
+  统计日更早、卡片文件为空或读不出来：只发一句说明，不发旧榜单。
 - 卡片原样发出，只在最前面插一张固定横幅（同目录 assets/tidings-banner.png）。横幅按内容哈希缓存 image_key，换图才重传；
   上传失败照发不带图，并打印一句提醒。
 - 同一统计日只发一次：本机状态文件记已发的统计日，发送时还带飞书幂等键。
@@ -18,6 +25,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +38,10 @@ STATE = Path(os.environ.get("DT_TIDINGS_STATE", "~/Library/Application Support/D
 BANNER = Path(os.environ.get("DT_TIDINGS_BANNER") or Path(__file__).with_name("assets") / "tidings-banner.png")
 BJ = dt.timezone(dt.timedelta(hours=8))
 TIMEOUT = 60
+DEFAULT_WEEKLY = {"on": True, "day": 1, "at": "11:30"}   # 同 github-center DEFAULTS.weekly；day 0 = 周日
+DAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+WAIT = dt.timedelta(hours=3)                              # 到点后数据还没生成，最多等这么久再发说明
+TICK = dt.timedelta(minutes=15)                           # 定时任务的间隔：等满 3 小时后至少还有一次机会发说明
 
 
 class SendError(Exception):
@@ -96,18 +108,54 @@ def load_card(day):
     return card if ok else None
 
 
-def plan(now):
-    """决定这次发什么：("card", 统计日, 卡片) 或 ("text", 键, 一句说明)。"""
-    expected = (now.astimezone(BJ).date() - dt.timedelta(days=1)).isoformat()
+def read_weekly():
+    """设置页的周报推送设置；文件没有、读不出来或某项不合规，那一项用默认值（同 github-center 的 readSettings）。"""
+    try:
+        w = json.loads((REPO / "data/settings.json").read_text(encoding="utf-8")).get("weekly")
+    except (OSError, ValueError, AttributeError):
+        w = None
+    w = w if isinstance(w, dict) else {}
+    on, day, at = w.get("on"), w.get("day"), w.get("at")
+    return {
+        "on": on if isinstance(on, bool) else DEFAULT_WEEKLY["on"],
+        "day": day if type(day) is int and 0 <= day <= 6 else DEFAULT_WEEKLY["day"],
+        "at": at if isinstance(at, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at) else DEFAULT_WEEKLY["at"],
+    }
+
+
+def due(now, w, state):
+    """到点了返回 (这一期的设定时刻, None)，不发返回 (None, 原因)。
+    这一期 = 最近一次已过的设定时刻；从它起能发到那天结束，要等数据时延到它后 3 小时 15 分（设得很晚也能跨过午夜）。"""
+    local = now.astimezone(BJ)
+    if not w["on"]:
+        return None, "周报推送在设置页关着"
+    start = local.replace(hour=int(w["at"][:2]), minute=int(w["at"][3:]), second=0, microsecond=0)
+    start -= dt.timedelta(days=(local.isoweekday() % 7 - w["day"]) % 7)
+    if start > local:
+        start -= dt.timedelta(days=7)
+    end = max(dt.datetime.combine(start.date() + dt.timedelta(days=1), dt.time(), BJ), start + WAIT + TICK)
+    if local >= end:
+        return None, f"还没到{DAYS[w['day']]} {w['at']}"
+    if state.get("last_slot") == start.isoformat():
+        return None, "这一期已经发过"
+    return start, None
+
+
+def plan(now, start):
+    """决定这次发什么：("card", 统计日, 卡片)、("text", 键, 一句说明)，数据还没就绪、还在等返回 None。
+    start 是这一期的设定时刻；--force 时为 None，按现在算、不等。"""
+    expected = ((start or now).astimezone(BJ).date() - dt.timedelta(days=1)).isoformat()
     day = latest_weekly()
+    card = load_card(day) if day is not None and day >= expected else None
+    if card is not None:
+        return "card", day, card
+    if start is not None and now < start + WAIT:
+        return None
     if day is None:
         return "text", expected, "本周周报没有生成：没有找到任何周报文件，榜单可能没更新。"
     if day < expected:
         return "text", expected, f"本周周报没有生成：最新数据停在 {md(day)}，榜单可能没更新。"
-    card = load_card(day)
-    if card is None:
-        return "text", expected, f"本周周报没有生成：{md(day)}的卡片文件为空或读不出来。"
-    return "card", day, card
+    return "text", expected, f"本周周报没有生成：{md(day)}的卡片文件为空或读不出来。"
 
 
 def banner_key(state, warnings):
@@ -147,12 +195,26 @@ def send(chat, msg_type, content, key):
 
 def main(argv=None):
     a = argparse.ArgumentParser(description="把 Tidings 周报卡片发到常浩私聊")
-    a.add_argument("--dry-run", action="store_true", help="只打印要发的消息")
-    a.add_argument("--force", action="store_true", help="本期已发过也再发")
+    a.add_argument("--dry-run", action="store_true", help="只打印这次会怎么做")
+    a.add_argument("--force", action="store_true", help="不看设置和时间、本期已发过也再发")
     a = a.parse_args(argv)
     now = dt.datetime.fromisoformat(os.environ["DT_NOW"]) if os.environ.get("DT_NOW") else dt.datetime.now(BJ)
-    kind, day, payload = plan(now)
+    if now.tzinfo is None:          # DT_NOW 没写时区按北京时间
+        now = now.replace(tzinfo=BJ)
     state = read_state()
+    start = None
+    if not a.force:
+        start, why = due(now, read_weekly(), state)
+        if start is None:
+            if a.dry_run:
+                print(f"不发：{why}。")
+            return 0
+    picked = plan(now, start)
+    if picked is None:
+        if a.dry_run:
+            print("等数据：昨天那期周报还没生成，到设定时间后 3 小时仍没有再发说明。")
+        return 0
+    kind, day, payload = picked
     sent = state.setdefault("sent", {})
     tag = f"{kind}:{day}"
     if tag in sent and not (a.force or a.dry_run):
@@ -178,6 +240,8 @@ def main(argv=None):
         print(f"Tidings 周报没发出：{e}")
         return 1
     sent[tag] = {"at": now.isoformat(timespec="seconds"), "message_id": mid}
+    if start is not None:           # 这一期只发一次；--force 手动补发不算，不挡当期的正式推送
+        state["last_slot"] = start.isoformat()
     try:
         write_state(state)
     except OSError as e:            # 已经发出，不报“没发出”；只提醒下次可能重发
