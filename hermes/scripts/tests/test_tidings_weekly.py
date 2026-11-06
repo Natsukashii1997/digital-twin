@@ -1,4 +1,4 @@
-"""Tidings 周报推送（#55）自测：假 lark-cli 记下每次调用，不联网、不碰真实周报和状态文件。"""
+"""Tidings 周报推送（#55、#58 按设置页发）自测：假 lark-cli 记下每次调用，不联网、不碰真实周报和状态文件。"""
 import json
 import os
 import subprocess
@@ -52,6 +52,9 @@ class TidingsWeekly(unittest.TestCase):
         (self.repo / "data/weekly" / f"{day}.feishu.md").write_text("## 周报\n", encoding="utf-8")
         if card is not None:
             (self.repo / "data/weekly" / f"{day}.card.json").write_text(card if isinstance(card, str) else json.dumps(card), encoding="utf-8")
+
+    def settings(self, weekly):
+        (self.repo / "data/settings.json").write_text(weekly if isinstance(weekly, str) else json.dumps({"agent": "codex", "weekly": weekly}), encoding="utf-8")
 
     def run_script(self, *args, now="2026-11-09T11:30:00+08:00", chat=CHAT):
         env = {k: v for k, v in os.environ.items() if k != "FEISHU_HOME_CHANNEL"}
@@ -110,23 +113,27 @@ class TidingsWeekly(unittest.TestCase):
         self.assertIn("images", self.calls()[-2]["args"])
         self.assertEqual(json.loads(self.sent()[-1]["--content"])["body"]["elements"][0]["img_key"], "img_banner_2")
 
-    def test_数据过期或没有文件_只发一句说明_不发旧榜单(self):
-        r = self.run_script()
+    def test_数据过期或没有文件_等满3小时_只发一句说明_不发旧榜单(self):
+        for now in ("2026-11-09T11:30:00+08:00", "2026-11-09T14:15:00+08:00"):   # 3 小时内先等，不出声
+            self.assertEqual((self.run_script(now=now).returncode, self.run_script(now=now).stdout), (0, ""))
+        self.assertEqual(self.calls(), [])
+        r = self.run_script(now="2026-11-09T14:30:00+08:00")
         self.assertEqual(r.returncode, 0)
         (msg,) = self.sent()
         self.assertEqual([msg["--msg-type"], json.loads(msg["--content"])["text"], msg["--idempotency-key"]],
                          ["text", "本周周报没有生成：没有找到任何周报文件，榜单可能没更新。", "tidings-weekly-miss-2026-11-08"])
         self.week("2026-11-07")
-        self.run_script(now="2026-11-16T11:30:00+08:00")
+        self.run_script(now="2026-11-16T14:30:00+08:00")
         self.assertEqual(json.loads(self.sent()[-1]["--content"])["text"], "本周周报没有生成：最新数据停在 11 月 7 日，榜单可能没更新。")
         self.assertFalse(any(c["args"][2:4] == ["im", "images"] for c in self.calls()))
-        self.run_script(now="2026-11-16T12:00:00+08:00")       # 同一天再跑不重复说明
+        self.week("2026-11-15")
+        self.run_script(now="2026-11-16T15:00:00+08:00")       # 同一天说明发过了，数据后来到了也不再发
         self.assertEqual(len(self.sent()), 2)
 
     def test_卡片文件为空或坏或缺_发一句说明(self):
         for day, card in (("2026-11-08", ""), ("2026-11-15", "{\"schema\": \"2.0\"}"), ("2026-11-22", None)):
             self.week(day, card)
-            nxt = f"2026-11-{int(day[8:]) + 1:02d}T11:30:00+08:00"
+            nxt = f"2026-11-{int(day[8:]) + 1:02d}T14:30:00+08:00"
             self.assertEqual(self.run_script(now=nxt).returncode, 0)
             self.assertEqual(json.loads(self.sent()[-1]["--content"])["text"], f"本周周报没有生成：11 月 {int(day[8:])} 日的卡片文件为空或读不出来。")
 
@@ -163,6 +170,76 @@ class TidingsWeekly(unittest.TestCase):
         r = self.run_script(chat="")
         self.assertEqual((r.returncode, r.stdout.strip()), (1, "Tidings 周报没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL）。"))
         self.assertEqual(self.calls(), [])
+
+    def test_没存过设置_按默认周一1130(self):
+        self.week("2026-11-08")
+        self.run_script(now="2026-11-09T11:15:00+08:00")
+        self.run_script(now="2026-11-10T11:30:00+08:00")      # 周二
+        self.assertEqual(self.sent(), [])
+        self.run_script(now="2026-11-09T11:45:00+08:00")      # 周一过了 11:30，晚些也补
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_按设置页的开关星期时间发(self):
+        self.week("2026-11-10")
+        self.settings({"on": True, "day": 3, "at": "20:05"})  # 周三 20:05
+        self.run_script(now="2026-11-09T11:30:00+08:00")
+        self.run_script(now="2026-11-11T20:00:00+08:00")
+        self.assertEqual(self.sent(), [])
+        self.run_script(now="2026-11-11T20:15:00+08:00")
+        (msg,) = self.sent()
+        self.assertEqual(msg["--idempotency-key"], "tidings-weekly-2026-11-10")
+        self.settings({"on": True, "day": 3, "at": "21:00"})  # 当天改晚了时间，也不再发第二次
+        self.run_script(now="2026-11-11T21:00:00+08:00")
+        self.assertEqual(len(self.sent()), 1)
+
+    def test_开关关了不发不出声_整天错过不隔天补(self):
+        self.week("2026-11-08")
+        self.settings({"on": False, "day": 1, "at": "11:30"})
+        r = self.run_script()
+        self.assertEqual((r.returncode, r.stdout, self.calls()), (0, "", []))
+        self.settings({"on": True, "day": 1, "at": "11:30"})
+        self.week("2026-11-09")
+        self.run_script(now="2026-11-10T11:30:00+08:00")      # 周一错过了，周二不补
+        self.assertEqual(self.sent(), [])
+
+    def test_设置文件坏了或乱填_逐项按默认(self):
+        self.week("2026-11-08")
+        for bad in ("{坏的", "[]", json.dumps({"weekly": "x"}), json.dumps({"weekly": {"on": "yes", "day": 9, "at": "25:00"}})):
+            self.settings(bad)
+            r = self.run_script("--dry-run", now="2026-11-09T11:30:00+08:00")
+            self.assertEqual(json.loads(r.stdout)["msg_type"], "interactive", bad)
+        self.settings({"on": True, "day": True, "at": "9:00"})   # day 是布尔不算星期，at 要两位小时
+        self.assertEqual(json.loads(self.run_script("--dry-run").stdout)["msg_type"], "interactive")
+
+    def test_数据晚到_等待期内到了就发卡片(self):
+        self.settings({"on": True, "day": 1, "at": "09:00"})
+        self.run_script(now="2026-11-09T09:00:00+08:00")
+        self.assertEqual(self.calls(), [])
+        self.week("2026-11-08")
+        self.run_script(now="2026-11-09T10:30:00+08:00")
+        self.assertEqual(self.sent()[0]["--msg-type"], "interactive")
+
+    def test_很晚的设定时刻_最晚2345发说明(self):
+        self.settings({"on": True, "day": 1, "at": "22:00"})
+        self.run_script(now="2026-11-09T23:30:00+08:00")
+        self.assertEqual(self.calls(), [])
+        self.run_script(now="2026-11-09T23:45:00+08:00")
+        self.assertEqual(self.sent()[0]["--msg-type"], "text")
+
+    def test_force_不看设置直接发_不等数据(self):
+        self.settings({"on": False, "day": 3, "at": "20:00"})
+        self.run_script("--force", now="2026-11-09T11:30:00+08:00")
+        self.assertEqual(self.sent()[0]["--msg-type"], "text")
+
+    def test_dry_run_说明为什么不发(self):
+        self.settings({"on": False, "day": 1, "at": "11:30"})
+        self.assertEqual(self.run_script("--dry-run").stdout.strip(), "不发：周报推送在设置页关着。")
+        self.settings({"on": True, "day": 1, "at": "11:30"})
+        self.assertEqual(self.run_script("--dry-run", now="2026-11-10T11:30:00+08:00").stdout.strip(), "不发：今天不是周一。")
+        self.assertEqual(self.run_script("--dry-run", now="2026-11-09T11:00:00+08:00").stdout.strip(), "不发：还没到 11:30。")
+        self.assertTrue(self.run_script("--dry-run").stdout.startswith("等数据："))
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.state.exists())
 
     def test_dry_run_只打印不上传不发不记状态(self):
         self.week("2026-11-08")
