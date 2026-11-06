@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-06 · Tidings 周报推送按设置页发送（#58，PR #59 `378702e`），定时任务改为每 15 分钟
+
+- **改了什么**：`tidings_weekly.py` 每次先读 github-center `data/settings.json` 的 `weekly`（缺失或不合规逐项按默认：开、周一、11:30），关着不发；过了最近一次设定时刻、这一期没发过（状态文件 `last_slot`）才发，能发到设定那天结束，要等数据时延到设定时刻后 3 小时 15 分；整天错过不补。数据没就绪先等 3 小时再发说明。`--dry-run` 说明为什么不发；`--force` 不看设置、不记当期。配套 github-center #61 / PR #62。
+- **已安装**：`~/.hermes/scripts/tidings_weekly.py` 从 main 复制，`cmp` 一致；旧版备份在 `evidence/2026-11-06-tidings-weekly-settings/backup/`。
+- **定时任务**：`hermes cron edit 18a21b2eb87a --schedule '*/15 * * * *'`，改名「Tidings 周报卡片（每 15 分钟看一次，按 Tidings 设置页的时间发到私聊）」，读回一致。安装副本实跑（周五）：`--dry-run` 输出「不发：还没到周一 11:30。」，正式跑无输出、退出码 0、没发消息。
+- **已验证**：302 项测试通过；合并前两轴 code-review，修了设得很晚跨午夜发不出、`--force` 挡当期推送、`DT_NOW` 无时区报错。
+- **下一步**：11-09 11:30 后看私聊是否收到带横幅的卡片；之后 `hermes cron list` 里 `18a21b2eb87a` 每 15 分钟一次 Last run ok。
+
 ## 2026-11-06 · vault 技能 0.4.0 对齐 Vault AGENTS v2.1 与 vault-read 1.4（#54，PR #57 `953fccd`），已安装、网关已重启
 
 - **改了什么**：`hermes/skills/vault/SKILL.md` 0.3.0 → 0.4.0。查找顺序对齐 Vault AGENTS v2.1（个人上下文 → 决定 → 卡片 → 经历 → 主题 → 项目卡 → 收件箱 → GET）；问到常浩做过的工作项目先读 `30 知识/经历/` 档案；`search` 先带 `layers: ["我", "精华"]`，按问题带 `intent`；删掉已停用的 `综合/`。Vault 侧 2026-11-05 已编出 7 份经历档案、150 张卡片。
