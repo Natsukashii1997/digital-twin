@@ -7,5 +7,6 @@
 | `2026-10-30-V1.0-工程整合与实施总方案.md` | 《Hermes Digital Twin × ORCA 工程整合与实施总方案 V1.0》，常浩粘贴的文本 | `1b088ed8e8a7959b1336f4c9215befe2fbc3cde243c0f602779f0513a3dd5d0d` |
 | `2026-11-02-Claude-V2.0-数字分身工程化整合方案.md` | Claude《数字分身工程化整合方案 V2.0》 | `483f8d827c6a528f4f7e769a5abdcfbc70de16b638a01e53e1be54a74c1eee99` |
 | `2026-11-02-V3.0-数字分身工程化整合总架构.md` | 《DT-ORC 数字分身工程化整合总架构 V3.0》 | `115cb7aa8d42fc6f85854d1b97359527b603434110be9358193cc5e1d19a66dc` |
+| `2026-11-02-V3.1-A+-基于ORCA的总架构.md` | `ARCHITECTURE.md` V3.1.0 · A+（基于 ORCA，main 上最后一次改动 `8312458`），2026-11-07 被 V4.0（改用 Multica，见 [ADR-013](../adr/ADR-013-项目协同改用Multica.md)）取代 | `3f0b55f69703408a29e950cc1bfdaa1509622aa5e53fc9d51a0e3fee72a980ce` |
 
 `FRAMEWORK-V2.md` 目前只在未合并的 `claude/37-framework-v2-*` 分支上；按 ARCHITECTURE.md 10.2 节，等这些分支逐项核对后再决定是否归档到这里。
