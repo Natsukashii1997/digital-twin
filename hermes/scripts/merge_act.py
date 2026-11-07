@@ -11,6 +11,10 @@
   4. 登记了 ci 的仓库：这个 HEAD 的 GitHub 检查全部通过（还在跑、没过、一项都没有都停下），不在本机跑测试；
      没登记 ci 的：在干净 worktree 里检出这个 HEAD，先跑 setup（装依赖）再跑 test，通过；
   5. 合并命令带 --match-head-commit（服务端再校验一次 HEAD），合并后回读确认已合并。
+连 GitHub 的只读调用（取状态、回读）碰到网络瞬断（EOF、SSL_ERROR_SYSCALL、超时、connection reset）时隔 3 秒、5 秒各重试一次；
+合并、留言这类写操作不重试，合并靠 --match-head-commit 和回读确认，不会重复合并。
+没合并、没退回时固定说四件事（一两句话）：卡在哪一步（取 PR 状态、核对版本、跑测试、执行合并、合并后回读；退回另有留言退回）、
+为什么（人话的原因类别，括号里附不超过 80 字的原文）、现在的状态（PR 有没有被改）、怎么办（一个具体动作）。
 合并后主目录停在主分支、又没有未提交改动时才 git pull --ff-only；否则只说明为什么没拉。
 
 用法：
@@ -19,7 +23,8 @@
   merge_act.py return <仓库#PR@HEAD前缀> 原因   在 PR 里留言退回（不关 PR）
   merge_act.py button merge|return <仓库#PR@HEAD前缀> --chat <chat_id>
                                              卡片按钮（#78）：Hermes 的 /card 插件在后台调用；进度和结果直接发到常浩私聊
-环境变量同 merge_officer.py，另有 DT_MERGE_RUNS（测试运行目录，默认 DigitalTwin/merge-runs）。
+环境变量同 merge_officer.py，另有 DT_MERGE_RUNS（测试运行目录，默认 DigitalTwin/merge-runs）、
+DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）。
 """
 import argparse
 import contextlib
@@ -32,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import merge_officer as mo
@@ -44,10 +50,56 @@ REF = re.compile(r"^([\w.-]+)#(\d+)@([0-9a-f]{7,40})$")
 COLOR = {mo.MERGE: "green", mo.RETURN: "orange", mo.ASK: "red"}
 CHECK_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CHECK_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+NET_ERR = re.compile(r"\bEOF\b|SSL_ERROR_SYSCALL|timed? ?out|connection reset|reset by peer|no such host|"
+                     r"could not resolve host|temporary failure in name resolution|dial tcp: lookup", re.I)
+RATE_ERR = re.compile(r"rate limit", re.I)
+AUTH_ERR = re.compile(r"\b401\b|bad credentials|gh auth login|not logged in|authentication", re.I)
+DENY_ERR = re.compile(r"\b403\b|permission|not accessible|forbidden", re.I)
+GONE_ERR = re.compile(r"no pull requests found|could not resolve to a pullrequest|\b404\b|not found", re.I)
+UNCHANGED = "PR 没有任何改动"
+STEP = ["核对版本"]                                    # 现在做到哪一步，失败提示开头说卡在这里
+UNSURE = "不确定合上没有"
+
+
+def at(step):
+    STEP[0] = step
 
 
 class Stop(Exception):
-    """核对没过：不合并，把原因告诉常浩。"""
+    """核对没过或出错：不合并、不退回。按四段告诉常浩：卡在哪一步（创建时的 STEP）、为什么、现在的状态、怎么办。
+    todo 里的 {again} 输出时换成「再点一次合并」或「再说一次「退回 原因」」。"""
+
+    def __init__(self, why, todo, state=UNCHANGED, verdict=None):
+        super().__init__(why)
+        self.why, self.todo, self.state, self.verdict, self.step = why, todo, state, verdict, STEP[0]
+
+
+def fail_text(verb, e):
+    again = "再点一次合并" if verb == "merge" else "再说一次「退回 原因」"
+    head = e.verdict or ("没合并" if verb == "merge" else "没退回")
+    return f"{head}：在『{e.step}』这一步{e.why}。{e.state}。{e.todo.replace('{again}', again)}。"
+
+
+def clip(text, n=80):
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else "…" + text[-(n - 1):]
+
+
+def gh_stop(text, retried=0, other="gh 报了没归类的错"):
+    """把 gh 的报错归成人话的原因类别，配一个具体动作。"""
+    raw = clip(text)
+    if NET_ERR.search(text):
+        tried = f"已自动重试 {retried} 次仍失败，" if retried else ""
+        return Stop(f"连不上 GitHub（网络中途断开：{raw}）", tried + "隔一分钟{again}")
+    if RATE_ERR.search(text):
+        return Stop(f"被 GitHub 拒绝：超出频率限制（{raw}）", "过一小时{again}")
+    if AUTH_ERR.search(text):
+        return Stop(f"被 GitHub 拒绝：gh 登录失效（{raw}）", "需要常浩在电脑上重新登录 gh（gh auth login），之后{again}")
+    if DENY_ERR.search(text):
+        return Stop(f"被 GitHub 拒绝：权限不足（{raw}）", "在电脑上交给 Claude 会话查 gh 的权限")
+    if GONE_ERR.search(text):
+        return Stop(f"找不到这个 PR（{raw}）", "在电脑上看一下这个 PR 还在不在，这张卡片先不用再点")
+    return Stop(f"{other}（{raw}）", "在电脑上交给 Claude 会话看")
 
 
 # ---------- 卡片 ----------
@@ -139,14 +191,14 @@ def send_cards(rows, facts_by_key, chat=None):
 def find_card(ref):
     m = REF.match(ref.strip())
     if not m:
-        raise Stop(f"看不懂「{ref}」，要写成 仓库#PR@版本，例如 digital-twin#68@1a2b3c4")
+        raise Stop(f"看不懂「{ref}」（要写成 仓库#PR@版本，例如 digital-twin#68@1a2b3c4）", "引用飞书里的卡片{again}")
     name, pr, h = m.groups()
     hits = [c for c in read_cards()["cards"]
             if c["repo"].split("/")[-1] == name and str(c["pr"]) == pr and c["head"].startswith(h)]
     if not hits:
-        raise Stop(f"没发过 {ref} 这张卡片（只认发过的卡片上的版本）")
+        raise Stop(f"没发过 {ref} 这张卡片（只认发过的卡片上的版本）", "引用飞书里最新的卡片{again}，或等下一张卡片")
     if len({c["head"] for c in hits}) > 1:
-        raise Stop(f"{ref} 对得上不止一个版本，请写更长的版本号")
+        raise Stop(f"{ref} 对得上不止一个版本", "引用卡片、写更长的版本号{again}")
     return hits[-1]
 
 
@@ -162,11 +214,27 @@ def record_owner(card, decision):
 
 # ---------- 执行 ----------
 
+def gh_read(args, what):
+    """只读的 gh 调用：网络瞬断时按 DT_GH_RETRY_WAITS 等几秒再试（默认 3 秒、5 秒各一次），别的错误不重试；
+    最后还是失败就按原因类别变成 Stop。合并、留言这类写操作不走这里。"""
+    waits = [float(x) for x in os.environ.get("DT_GH_RETRY_WAITS", "3,5").split(",") if x.strip()]
+    for tried, wait in enumerate([*waits, None]):
+        try:
+            return mo.gh_json(args, what)
+        except mo.GhError as e:
+            text = str(e).split("：", 1)[-1]              # 去掉 gh_json 加的「做什么：」前缀，只留原文
+            if wait is None or not NET_ERR.search(text):
+                raise gh_stop(text, tried)
+            time.sleep(wait)
+
+
 def git(cwd, *args, timeout=120):
     r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         last = ((r.stderr or r.stdout).strip().splitlines() or ["未知"])[-1]
-        raise Stop(f"git {args[0]} 失败：{last}"[:300])
+        if NET_ERR.search(last):
+            raise gh_stop(last)
+        raise Stop(f"git {args[0]} 出错（{clip(last)}）", "在电脑上交给 Claude 会话看")
     return r.stdout.strip()
 
 
@@ -174,15 +242,16 @@ def project_of(name):
     for p in json.loads(mo.ROSTER.read_text(encoding="utf-8"))["projects"]:
         if (p.get("github") or "").split("/")[-1] == name:
             return Path(p["path"]).expanduser(), p.get("main") or "main"
-    raise Stop(f"名册里没有 {name}")
+    raise Stop(f"名册里没有 {name}", "在电脑上交给 Claude 会话登记名册")
 
 
 def require_ci_passed(p):
     """statusCheckRollup（只含当前 HEAD 的检查）全部通过才往下走，否则停下并说明哪项在跑、哪项没过。
     免费版私有仓库没有分支保护，GitHub 不拦，所以这里自己把 CI 当合并条件。"""
+    at("跑测试")
     checks = p.get("statusCheckRollup") or []
     if not checks:
-        raise Stop("这个版本没有任何 CI 检查结果（该有 CI 却没跑），在电脑上看一下")
+        raise Stop("这个版本没有任何 CI 检查结果（该有 CI 却没跑）", "在电脑上交给 Claude 会话看 CI 为什么没跑")
     failed, waiting = [], []
     for c in checks:
         name = c.get("name") or c.get("context") or "?"
@@ -193,39 +262,43 @@ def require_ci_passed(p):
         elif result not in CHECK_OK:
             failed.append(f"{name}（{result}）")
     if failed:
-        raise Stop("CI 没过：" + "、".join(failed) + "，交回开这个 PR 的会话修")
+        raise Stop("CI 没过：" + "、".join(failed), "交回开这个 PR 的会话修，修好会有新卡片")
     if waiting:
-        raise Stop("CI 还在跑：" + "、".join(waiting) + "，跑完再回「合并」")
+        raise Stop("CI 还在跑：" + "、".join(waiting), "等 CI 跑完{again}")
 
 
 def check_pr(card, rules, main, ci=False):
-    p = mo.gh_json(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", VIEW_FIELDS], f"{card['repo']}#{card['pr']} 取状态")
+    at("取 PR 状态")
+    p = gh_read(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", VIEW_FIELDS], f"{card['repo']}#{card['pr']} 取状态")
+    at("核对版本")
     if p.get("state") != "OPEN":
-        raise Stop(f"PR 已经是 {p.get('state')}，不用再合")
+        raise Stop(f"PR 已经是 {p.get('state')}", "不用再合，这张卡片可以不管了")
     if p.get("headRefOid") != card["head"]:
-        raise Stop(f"PR 在卡片之后又有提交（现在是 {str(p.get('headRefOid'))[:7]}），按新卡片再决定")
+        raise Stop(f"PR 在卡片之后又有提交（现在是 {str(p.get('headRefOid'))[:7]}）", "等新卡片再决定")
     if p.get("baseRefName") != main:
-        raise Stop(f"PR 不是合进 {main}（是 {p.get('baseRefName')}）")
+        raise Stop(f"PR 不是合进 {main}（是 {p.get('baseRefName')}）", "在电脑上交给 Claude 会话看")
     if p.get("isDraft"):
-        raise Stop("PR 还是草稿")
+        raise Stop("PR 还是草稿", "等开 PR 的会话转成正式 PR、发了新卡片再决定")
     tier = mo.tier_of(card["repo"], sorted(f.get("path", "") for f in p.get("files") or []), rules)
     if tier == "L3":
-        raise Stop("改动碰了敏感路径（L3），飞书里不合并，请在电脑上让 Claude 会话处理")
+        raise Stop("改动碰了敏感路径（L3），飞书里不合并", "在电脑上交给 Claude 会话处理")
     state = p.get("mergeStateStatus")
     if p.get("mergeable") == "CONFLICTING" or state == "DIRTY":
-        raise Stop("和主分支有冲突，要交回开这个 PR 的会话去变基")
+        raise Stop("和主分支有冲突", "在电脑上交给开这个 PR 的会话变基，变基后会有新卡片")
     if state == "BEHIND":
-        raise Stop("落后主分支，要交回开这个 PR 的会话去变基")
+        raise Stop("落后主分支", "在电脑上交给开这个 PR 的会话变基，变基后会有新卡片")
     if ci:
         require_ci_passed(p)                          # CI 没过或在跑时 GitHub 报 UNSTABLE，先说清楚是 CI
+        at("核对版本")
     if state != "CLEAN":
-        raise Stop(f"GitHub 现在的合并状态是 {state}，不是 CLEAN，稍后再试或在电脑上看")
+        raise Stop(f"GitHub 现在的合并状态是 {state}，不是 CLEAN", "隔几分钟{again}，还不行就在电脑上看")
     return p
 
 
 def run_tests(path, card, conf):
     cmd = " && ".join(c for c in (conf.get("setup"), conf["test"]) if c)
     timeout = int(conf.get("timeout", 900))
+    at("跑测试")
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     run = RUNS / f"{card['repo'].split('/')[-1]}-{card['pr']}-{card['head'][:7]}-{stamp}"
     run.mkdir(parents=True, exist_ok=True)
@@ -233,7 +306,7 @@ def run_tests(path, card, conf):
     git(path, "worktree", "prune")
     git(path, "fetch", "-q", "origin", f"refs/pull/{card['pr']}/head")
     if git(path, "rev-parse", "FETCH_HEAD") != card["head"]:
-        raise Stop("从 GitHub 取到的 PR 版本和卡片上的不一致")
+        raise Stop("从 GitHub 取到的 PR 版本和卡片上的不一致", "等新卡片再决定")
     git(path, "worktree", "add", "-q", "--detach", str(wt), card["head"])
     try:
         try:
@@ -245,8 +318,9 @@ def run_tests(path, card, conf):
         subprocess.run(["git", "-C", str(path), "worktree", "remove", "--force", str(wt)], capture_output=True)
     (run / "test.log").write_text(f"$ {cmd}\n{out}", encoding="utf-8")
     if code != 0:
-        tail = "\n".join(out.strip().splitlines()[-5:])
-        raise Stop(f"测试没过（日志 {run / 'test.log'}）：\n{tail}")
+        last = (out.strip().splitlines() or ["没有输出"])[-1]
+        raise Stop(f"测试没过（{clip(last)}）", "交回开这个 PR 的会话修，修好会有新卡片",
+                   state=f"{UNCHANGED}，测试日志在 {run / 'test.log'}")
     return run
 
 
@@ -268,28 +342,45 @@ def cmd_merge(ref):
     rules = mo.load_rules()
     conf = act_repos(rules).get(card["repo"].split("/")[-1])
     if not conf:
-        raise Stop("这个仓库还没开飞书合并（merge_rules.json 的 act.repos）")
+        raise Stop("这个仓库还没开飞书合并（merge_rules.json 的 act.repos）", "在电脑上交给 Claude 会话处理")
     path, main = project_of(card["repo"].split("/")[-1])
     ci = bool(conf.get("ci"))
     check_pr(card, rules, main, ci)
     git(path, "fetch", "-q", "origin")
     ahead = git(path, "rev-list", "--count", f"origin/{main}..{main}")
     if ahead != "0":
-        raise Stop(f"本机主目录的 {main} 有 {ahead} 个没推的提交，按《工程流程》第 5 节要先由你决定推不推")
+        raise Stop(f"本机主目录的 {main} 有 {ahead} 个没推的提交", "按《工程流程》第 5 节在电脑上决定推不推，处理完{again}")
     if ci:
         tested = "CI 通过"
     elif not conf.get("test"):
-        raise Stop("这个仓库没登记 CI，也没登记测试命令（merge_rules.json 的 act.repos）")
+        at("跑测试")
+        raise Stop("这个仓库没登记 CI，也没登记测试命令（merge_rules.json 的 act.repos）", "在电脑上交给 Claude 会话登记")
     else:
         run = run_tests(path, card, conf)
         tested = f"测试通过，日志在 {run / 'test.log'}"
         check_pr(card, rules, main)                   # 测试要几分钟，合并前再读一次
-    mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
-                         "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT)
-    after = mo.gh_json(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,mergeCommit"], "合并后回读")
-    if after.get("state") != "MERGED":
+    at("执行合并")
+    try:                                              # 合并命令不重试：没收到回应也可能已经合上，以回读为准
+        mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
+                             "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT)
         why = ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
-        raise Stop(f"合并没成（gh：{why[:200]}），回读 PR 还是 {after.get('state')}")
+    except subprocess.TimeoutExpired:
+        why = f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
+    at("合并后回读")
+    try:
+        after = gh_read(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,mergeCommit"], "合并后回读")
+    except Stop as e:
+        e.verdict, e.state = UNSURE, "合并命令已经发出，但回读没成功，不知道合上没有"
+        e.todo = "隔一分钟{again}：会先查 PR 状态，已经合上会直接说，不会重复合并"
+        raise
+    if after.get("state") != "MERGED":
+        at("执行合并")
+        if "Head branch was modified" in why:
+            stop = Stop(f"被 GitHub 拒绝：PR 版本变了（{clip(why)}）", "等新卡片再决定")
+        else:
+            stop = gh_stop(why, other="GitHub 没执行合并")
+        stop.state = f"回读确认 PR 还是 {after.get('state')}，{UNCHANGED}"
+        raise stop
     record_owner(card, "合并")
     sha = ((after.get("mergeCommit") or {}).get("oid") or "")[:7]
     print(f"已合并 {card_ref(card['repo'], card['pr'], card['head'])}（{card['title']}）→ {sha}。{tested}。")
@@ -301,15 +392,23 @@ def cmd_return(ref, reason):
     card = find_card(ref)
     reason = (reason or "").strip()
     if not reason:
-        raise Stop("退回要写原因")
-    p = mo.gh_json(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,headRefOid"], "取状态")
+        raise Stop("没写退回原因", "回「退回 原因」")
+    at("取 PR 状态")
+    p = gh_read(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,headRefOid"], "取状态")
+    at("核对版本")
     if p.get("state") != "OPEN":
-        raise Stop(f"PR 已经是 {p.get('state')}")
+        raise Stop(f"PR 已经是 {p.get('state')}", "不用退回了")
     body = f"常浩在飞书退回（Hermes 代发）：{reason}\n\n针对的版本：`{card['head']}`"
     r = subprocess.run([mo.GH, "pr", "comment", str(card["pr"]), "--repo", card["repo"], "--body", body],
                        capture_output=True, text=True, timeout=mo.TIMEOUT)
     if r.returncode != 0:
-        raise Stop("留言没发出去：" + ((r.stderr or "").strip().splitlines()[-1:] or ["gh 失败"])[0])
+        at("留言退回")
+        last = ((r.stderr or r.stdout or "").strip().splitlines() or ["没有输出"])[-1]
+        stop = gh_stop(last, other="留言没发出去")
+        if NET_ERR.search(last):                      # 留言不重试：请求可能已经到了 GitHub
+            stop.state = "不确定留言发出去没有"
+            stop.todo = "先在 GitHub 的 PR 页面看一眼这条留言在不在，不在再说一次「退回 原因」"
+        raise stop
     record_owner(card, "退回")
     print(f"已在 {card['repo']}#{card['pr']} 留言退回：{reason}。PR 没关，等开 PR 的会话改。")
     return 0
@@ -354,7 +453,7 @@ def cmd_button(verb, ref, chat):
             try:
                 card = find_card(ref)
             except Stop as e:
-                say(f"没退回：{e}")
+                say(fail_text("return", e))
                 return 1
             say(f"↩️ 退回 {ref} 的原因是？直接回「退回 原因」就行，不用引用卡片。")
             ask_return(card)                # 问出去了才打标记
@@ -392,6 +491,7 @@ def main(argv=None):
     b.add_argument("ref")
     b.add_argument("--chat", default="")
     a = a.parse_args(argv)
+    at("核对版本")
     if a.cmd == "button":
         try:
             return cmd_button(a.verb, a.ref, a.chat)
@@ -405,10 +505,14 @@ def main(argv=None):
             return cmd_merge(a.ref)
         return cmd_return(a.ref, " ".join(a.reason))
     except Stop as e:
-        print(f"没{'合并' if a.cmd == 'merge' else '退回'}：{e}")
+        print(fail_text(a.cmd, e))
         return 1
     except (mo.GhError, OSError, ValueError, KeyError, subprocess.SubprocessError) as e:
-        print(f"没{'合并' if a.cmd == 'merge' else '退回'}：{type(e).__name__}：{e}")
+        stop = Stop(f"本机出错（{type(e).__name__}：{clip(e)}）", "在电脑上交给 Claude 会话看")
+        if stop.step in ("执行合并", "合并后回读"):
+            stop.verdict, stop.state = UNSURE, "合并命令可能已经发出"
+            stop.todo = "先在 GitHub 看一眼 PR 状态，再交给 Claude 会话看"
+        print(fail_text(a.cmd, stop))
         return 1
 
 
