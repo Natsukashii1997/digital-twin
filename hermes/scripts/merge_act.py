@@ -25,6 +25,7 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -333,11 +334,11 @@ def cmd_button(verb, ref, chat):
     if not chat or chat != home_chat():
         print(f"不处理：点击不是来自常浩私聊（{chat or '没有 chat_id'}）")
         return 1
-    stamp = dt.datetime.now().strftime("%Y%m%d%H%M%S%f")
+    click = hashlib.sha1(f"{verb} {ref} {dt.datetime.now().isoformat()}".encode()).hexdigest()[:16]
     said = []
 
-    def say(text):
-        send(chat, "text", {"text": text}, f"merge-btn-{verb}-{ref}-{stamp}-{len(said)}")
+    def say(text):                          # lark-cli 的幂等键最长 50 个字符
+        send(chat, "text", {"text": text}, f"merge-btn-{click}-{len(said)}")
         said.append(text)
 
     mo.SHADOW.mkdir(parents=True, exist_ok=True)
@@ -351,11 +352,12 @@ def cmd_button(verb, ref, chat):
     try:
         if verb == "return":
             try:
-                ask_return(ref)
+                card = find_card(ref)
             except Stop as e:
                 say(f"没退回：{e}")
                 return 1
             say(f"↩️ 退回 {ref} 的原因是？直接回「退回 原因」就行，不用引用卡片。")
+            ask_return(card)                # 问出去了才打标记
             return 0
         say(f"⏳ 在核对 {ref}，稍后告诉你结果。")
         out = io.StringIO()
@@ -367,9 +369,8 @@ def cmd_button(verb, ref, chat):
         lock.close()
 
 
-def ask_return(ref):
+def ask_return(card):
     """记下「常浩点了退回、等他说原因」：merge-officer 技能看到他没引用卡片说「退回 原因」时，用 cards 里这个标记认卡片。"""
-    card = find_card(ref)
     data = read_cards()
     for c in data["cards"]:
         if (c["repo"], str(c["pr"]), c["head"]) == (card["repo"], str(card["pr"]), card["head"]):

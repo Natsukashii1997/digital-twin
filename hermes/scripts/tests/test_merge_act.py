@@ -45,6 +45,9 @@ FAKE_LARK = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 root = Path(os.environ["FAKE_DIR"])
+args = sys.argv[1:]
+if "--idempotency-key" in args and len(args[args.index("--idempotency-key") + 1]) > 50:   # 和真 lark-cli 一样
+    print(json.dumps({"ok": False, "error": {"message": "--idempotency-key exceeds the maximum of 50 characters"}})); sys.exit(1)
 with open(root / "lark.jsonl", "a", encoding="utf-8") as f:
     f.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\n")
 n = sum(1 for _ in open(root / "lark.jsonl"))
