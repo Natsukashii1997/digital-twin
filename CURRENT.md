@@ -6,6 +6,21 @@
 
 ---
 
+## 2026-11-07 · Hermes 影子合并官 + 每周提案收口（批 D，#61，PR #64 `61a47a0`），已安装、两个定时任务已注册
+
+- **改了什么**：
+  - 新增 `merge_officer.py`：只读影子合并官。按 `merge_rules.json` v1 给名册活跃仓库的 open PR 判「建议合并 / 退回 / 问常浩」，读真实结局算一致率；`replay` 回放改规则前后的一致率；放权门槛（同类 20 次、≥90%）只报告，不放权。
+  - 新增 `proposal_digest.py` 和草稿入口 `proposal_digest_draft.py`：每周一汇总会话复盘和牛马之家每周整理的待决提案，Hermes 给每条写推荐，再发私聊卡片。常浩回「按推荐」或逐条回复后，写回各来源的结论。LESSONS 升级候选默认不列。
+  - 新增 Hermes 技能 `proposal-digest` 0.2.0。
+- **记录在哪**：影子判定在 `DigitalTwin/shadow/agreement.csv` 和 `facts.jsonl`（13 条实时判定 + 225 条回填，回填不计入门槛）；期号和回复在 `DigitalTwin/proposals/digest.json`，Hermes 写的推荐在同目录 `rec-<日期>.json`；安装 sha256 在 `evidence/2026-11-07-批D-安装/install.txt`。
+- **已安装**：4 个脚本和技能从 main 复制，`cmp` 一致；网关已重启（`hermes gateway restart`，它顺带重写了 `ai.hermes.gateway.plist`，重写前没备份，新的结构正常）。
+- **端到端验证**：第 1 期 18 条，Hermes 写推荐后发出；常浩引用卡片回「按照你的推荐完成」，Hermes 跑 `apply "按推荐"`（这一轮主模型超时，由回退模型完成）。写回核对：复盘 3 条结论行、`decisions.md` 追加 15 行（W2026-10-23-8 随 -30-3 记采纳）、`digest.json` 记下这次回复。首次实测因卡片没有推荐、Hermes 会话看不到卡片而没记下，改成方案一后跑通。
+- **定时任务**：
+  - `8994fb76d03e` 影子合并官：`30 9 * * *`，无模型，投递私聊，成功不输出；
+  - `81464e7ea4e3` 待决提案：`0 10 * * 1`，带模型，script `proposal_digest_draft.py`、技能 proposal-digest；正常结果投递 local，失败投递私聊。
+- **已知缺口**：名册仓库都没有 CI，影子判不了测试是否通过；v1 规则的回填一致率只有 17%–71%，主要因为早期 PR 没写 `Closes #`。按第 8 节第 4 条，等常浩推翻实时判定后再出规则补丁。自检只比对 `.py`，`merge_rules.json` 不在比对范围内。
+- **下一步**：11-09 10:00 后看私聊是否收到带推荐的第 2 期（8 条延期的会再列），`hermes cron list` 里 `81464e7ea4e3` Last run ok。
+
 ## 2026-11-06 · Tidings 周报推送按设置页发送（#58，PR #59 `378702e`），定时任务改为每 15 分钟
 
 - **改了什么**：`tidings_weekly.py` 每次先读 github-center `data/settings.json` 的 `weekly`（缺失或不合规逐项按默认：开、周一、11:30），关着不发；过了最近一次设定时刻、这一期没发过（状态文件 `last_slot`）才发，能发到设定那天结束，要等数据时延到设定时刻后 3 小时 15 分；整天错过不补。数据没就绪先等 3 小时再发说明。`--dry-run` 说明为什么不发；`--force` 不看设置、不记当期。配套 github-center #61 / PR #62。
