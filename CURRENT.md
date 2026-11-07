@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-07 · 名册 v1.5：加 type，登记 multi-agent、ui-system（#84）
+
+- **来由**：常浩转来《项目体系重构 V1.3》定稿并要求按批次推进；本单是执行单 I-DT-1。决定记录、V1.2/V1.3 原文与执行单已放进 `docs/项目体系重构/`（I-DT-2，`1211b4e`，直接进 main）。
+- **projects.json v1.5**：16 个活跃（product 10、capability 3、infrastructure 3），每条加 `type`，顶层加 `types` 说明；`category` 等原字段、inventory 都没动（机器逐条比对 v1.4 一致）。
+- **两个新能力项目**：`multi-agent`（`b49082e`）、`ui-system`（`fdc6168`），私有仓库，协作骨架和「边界」一节已铺；`write_allowed=false`，常浩批准前不派写入单；项目卡暂无。
+- **测试**：见 PR。
+- **唯一下一步**：批 2（my-skills 机器索引 I-MS-1、GitHub 中心 README I-GC-1）与数码世界定位文档 I-DW-1。
+
 ## 2026-11-07 · 名册 v1.4：Obsidian 知识库登记为活跃，另建工程仓库（#82）
 
 - **来由**：常浩看盘点时发现知识库没算进项目（Vault 只在 inventory「只登记」），说「登记为活跃，并建立 github 仓库」。Vault 1248 个文件里 112 篇受限、979 篇没标注，「决定/Vault 只开放给本人本地入口」和 Vault AGENTS 的禁推规矩都挡着整库上 GitHub；常浩选「另建工程仓库」，Vault 正文照旧只在本机，两条规矩不变。

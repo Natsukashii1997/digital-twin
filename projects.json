@@ -1,10 +1,11 @@
 {
-  "version": "v1.4 · 2026-11-07",
-  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。",
+  "version": "v1.5 · 2026-11-07",
+  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。 2026-11-07 起 projects 每条带 type（product / capability / infrastructure，《项目体系重构 V1.3》第 2.1 节），category 仍表示存续分类。",
   "projects": [
     {
       "id": "work-desk",
       "name": "牛马之家",
+      "type": "product",
       "aliases": [
         "牛马之家",
         "work-desk",
@@ -25,6 +26,7 @@
     {
       "id": "personal-ai-workbench",
       "name": "个人 AI 工作台（数码世界）",
+      "type": "product",
       "aliases": [
         "数码世界",
         "个人AI工作台",
@@ -46,6 +48,7 @@
     {
       "id": "trainee-hub",
       "name": "管培生工作台",
+      "type": "product",
       "aliases": [
         "管培生工作台",
         "trainee-hub",
@@ -67,6 +70,7 @@
     {
       "id": "agent-kit",
       "name": "agent-kit",
+      "type": "infrastructure",
       "aliases": [
         "agent-kit",
         "全局坑",
@@ -86,6 +90,7 @@
     {
       "id": "my-skills",
       "name": "自建技能库",
+      "type": "capability",
       "aliases": [
         "my-skills",
         "自建技能库",
@@ -106,6 +111,7 @@
     {
       "id": "github-center",
       "name": "GitHub 快速中心",
+      "type": "product",
       "aliases": [
         "github-center",
         "GitHub 快速中心"
@@ -124,6 +130,7 @@
     {
       "id": "digital-twin",
       "name": "数字分身",
+      "type": "product",
       "aliases": [
         "数字分身",
         "digital-twin",
@@ -143,6 +150,7 @@
     {
       "id": "carvomoto",
       "name": "CarvoMOTO-汽配",
+      "type": "product",
       "aliases": [
         "CarvoMOTO-汽配",
         "CarvoMOTO",
@@ -164,6 +172,7 @@
     {
       "id": "postpane",
       "name": "驿窗 PostPane",
+      "type": "product",
       "aliases": [
         "驿窗",
         "PostPane",
@@ -184,6 +193,7 @@
     {
       "id": "chatgpt-clipper",
       "name": "ChatGPT 回答收藏器",
+      "type": "product",
       "aliases": [
         "ChatGPT 回答收藏器",
         "回答收藏器",
@@ -204,6 +214,7 @@
     {
       "id": "disk-slim",
       "name": "磁盘瘦身",
+      "type": "product",
       "aliases": [
         "磁盘瘦身",
         "disk-slim"
@@ -222,6 +233,7 @@
     {
       "id": "get-index",
       "name": "GET 索引维护",
+      "type": "infrastructure",
       "aliases": [
         "GET 索引维护",
         "GET 索引",
@@ -242,6 +254,7 @@
     {
       "id": "little-steps",
       "name": "Little Steps 育儿记录",
+      "type": "product",
       "aliases": [
         "Little Steps",
         "little-steps",
@@ -263,6 +276,7 @@
     {
       "id": "obsidian-kb",
       "name": "Obsidian 知识库",
+      "type": "infrastructure",
       "aliases": [
         "Obsidian 知识库",
         "知识库",
@@ -280,6 +294,49 @@
       "notes": "知识库项目的工程仓库：进度、交接、验收结论和维护脚本。知识正文在 ~/Documents/Obsidian Vault，只在本机，不进本仓库、不推 GitHub（Vault「决定/Vault 只开放给本人本地入口」，Vault AGENTS 禁止 git push）；写 Vault 照 Vault 自己的 AGENTS。vault-read 在 Vault 的 .claude/scripts/，Hermes vault 技能在本仓库 hermes/skills/vault/，GET 索引见 get-index。2026-11-07 常浩定登记为活跃并另建这个工程仓库。没有 CI。",
       "category": "活跃",
       "github": "Natsukashii1997/obsidian-kb"
+    },
+    {
+      "id": "multi-agent",
+      "name": "多 Agent 协同",
+      "type": "capability",
+      "aliases": [
+        "多 Agent 协同",
+        "多 Agent",
+        "多Agent",
+        "协同模式",
+        "multi-agent"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/multi-agent",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": false,
+      "notes": "跨项目协同模式的契约、角色协议、接力约定与模式评测（思维评审、工程审查、独立验证、并行研究、自治委派等）。Hermes 控制面与 Multica 实施归 digital-twin（DT-ORC），可执行方法归 my-skills，界面传信归驿窗。2026-11-07 按《项目体系重构 V1.3》新建；write_allowed=false，常浩批准后再开放写入单。没有 CI。",
+      "category": "活跃",
+      "github": "Natsukashii1997/multi-agent"
+    },
+    {
+      "id": "ui-system",
+      "name": "UI 设计体系",
+      "type": "capability",
+      "aliases": [
+        "UI 设计体系",
+        "UI 体系",
+        "设计体系",
+        "ui-system"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/ui-system",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": false,
+      "notes": "跨项目 UI 设计原则、资产索引、可复用模式与界面验收标准；ui-styles、excel-aura 等可执行 Skill 留在 my-skills，只做引用。2026-11-07 按《项目体系重构 V1.3》新建；write_allowed=false，常浩批准后再开放写入单。没有 CI。",
+      "category": "活跃",
+      "github": "Natsukashii1997/ui-system"
     }
   ],
   "categories": {
@@ -609,5 +666,10 @@
       "todo": "可删：只是 Little Steps 8 月的打包产物，没开 GitHub Pages；源码在 work/little-steps 与私有仓库 Natsukashii1997/little-steps；需常浩删除",
       "why": "Little Steps 的网页成品（PWA 打包产物）"
     }
-  ]
+  ],
+  "types": {
+    "product": "对用户交付独立产品或业务结果",
+    "capability": "跨项目可选复用的方法、模式或设计能力",
+    "infrastructure": "持续的工程、知识或治理支撑"
+  }
 }
