@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-11-07 · 阶段 1：活跃仓库统一 CI，合并官以 CI 通过为合并条件（#71 PR #72 `cbe4652`、#73 PR #74 `1e68496`），已安装
+
+- **CI 已统一**：7 个仓库的 GitHub Actions CI 在 main 上都是绿的：trainee-hub `93d1d1a`、agent-kit `4951ac0`、digital-twin `cbe4652`、github-center `df2a45c`、my-skills `d28453c`、niuma-home `a636869`、digiworld `5a19d84`。都只在 ubuntu 上跑，不用 macOS 跑（额度按 10 倍扣）。niuma-home 有 4 项测试、digiworld 有 98 项测试依赖 macOS 才有的系统工具（PlistBuddy、sips、diskutil、plutil，以及产品本身对非 macOS 的拒绝），只在 Linux 上跳过并写明原因，macOS 上照常运行；逐条核实过，没有发现 Linux 才会出的缺陷。
+- **postpane 例外**：仓库的 Actions 在设置里是关着的，它的 AGENTS.md 第 102 行写着「GitHub Actions 已停用」；它的 CI 矩阵还带 macOS 和 Windows。常浩定：不开，postpane 退出飞书合并（#73），由电脑上的会话合并。
+- **合并官改了什么**：`merge_rules.json` 的 `act.repos` 从 2 个仓库扩到上面 7 个，都写 `ci: true`。`merge_act.py` 读当前 HEAD 的 `statusCheckRollup`：全部通过才合并，不在本机跑测试；CI 还在跑、没过、一项检查都没有都停下并说明原因。没有 CI 的仓库，在干净副本里先跑 `setup` 再跑 `test`。`merge-officer` 技能同步改了覆盖范围。《工程流程》第 5 节同步改了（agent-kit#26、#30），电脑上合并前也要先看 `gh pr checks`。
+- **已安装**：`merge_act.py`、`merge_rules.json`、`merge-officer` 技能从 main `1e68496` 复制，`cmp` 一致，校验值和旧版备份在 `evidence/2026-11-07-合并官CI-安装/`。复制时 zsh 把 `$C:hermes` 里的 `:h` 当成修饰符，三个文件被写空了几秒，12:32 用 `${C}:path` 的写法重装；这段时间合并官定时任务没有运行（12:30 跑完，下次 13:00）。网关用 `launchctl kickstart -k` 重启（没用 `hermes gateway restart`，plist 没被重写），PID 10035 → 40151，12:33:29 `✓ feishu connected`，`merge-officer` 为 enabled；在安装位置跑 `merge_act.py cards`，退出码 0。
+- **要记住（ARCHITECTURE 5.5 第 6 条）**：免费版私有仓库设不了分支保护，GitHub 那边不会因为 CI 没过而拦合并，只有合并官和《工程流程》在守。所以阶段 4 自动放权（`owner_approve`）之前，要单独评估这一点：是否接受「只靠脚本把关」，还是升级、换做法。
+- **未验证**：还没有在飞书里对一个有 CI 的仓库 PR 回「合并」，做端到端试跑。
+- **下一步**：下一个走飞书的 PR，常浩回「合并」时看回复里是不是「CI 通过」，而不是「测试通过，日志在…」。
+
 ## 2026-11-07 · 飞书一句话合并（#67，PR #68 `fa81bc8`），已安装，端到端试跑通过
 
 - **改了什么**：`merge_officer.py scan` 给 `merge_rules.json` 的 `act.repos`（digital-twin、agent-kit）里每个新「PR × 版本」发卡片「🔀 待你决定 · 仓库#PR@版本」。常浩引用卡片回「合并」后，`merge-officer` 技能调新脚本 `merge_act.py`：核对版本、冲突、是否落后、本机主分支、风险档（L3 不走飞书），在干净 worktree 跑测试，带 `--match-head-commit` 合并，回读确认，主目录干净时再拉齐。回「退回 原因」就在 PR 里留言。常浩的决定记进 `agreement.csv` 的 `owner` 列。授权是单次的 `owner_direct`，不放权。
