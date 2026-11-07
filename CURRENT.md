@@ -13,8 +13,8 @@
 - **实测**：隔离派单目录（真实 Claude / Codex、真实名册，选择文件也在证据目录）：出厂默认开单 → codex；`set default claude` 后开单 → claude，跑完回执 `Claude Code · 本机 CLI · claude-opus-5-5 · AI 接入默认执行方（常浩切换过）`。记录在 `evidence/2026-11-07-AI接入实测/`。
 - **测试**：见 PR。
 - **已合并、已安装（11-08 00:39）**：常浩点「合并并安装」。PR #89 CI 通过后 squash 合并为 `1b30bcc`，主目录 `pull --ff-only`；`ai_access.py`、`dispatch.py`、`run_worker.py`、`report_publish.py`、`twin_state.py`、`self_check.py` 复制到 `~/.hermes/scripts/`，workshop 技能复制到安装位置，`cmp` 一致；装前核对旧副本都等于合并前的 main，备份在 `evidence/2026-11-08-AI接入安装/`。网关用 `launchctl kickstart -k` 重启（PID 86840 → 39597），飞书第一次连接超时，重试后 `running connected`；workshop 为 enabled。在安装位置跑 `ai_access.py status`：默认 Codex（出厂），Claude、Codex、Hermes 都可用。
-- **范围外**：安装后的工程自检报 `progress` 技能安装副本和 main 不同：Hermes 11-05 后台复盘时自己往安装副本里加了「个人当日回顾与技能成果问法」一节，没回写仓库。没动，由常浩定是收进仓库还是覆盖。
-- **唯一下一步**：常浩定 progress 技能那一节是收进仓库还是覆盖。
+- **范围外，已处理**：安装后的工程自检报 `progress` 技能安装副本和 main 不同：Hermes 11-05 后台复盘时自己往安装副本里加了「个人当日回顾与技能成果问法」一节，没回写仓库。常浩 11-08 选「收进仓库」，#90 把安装副本原样收进 `hermes/skills/progress/SKILL.md`（安装副本本来就是这份，不用重装、不重启网关）。
+- **唯一下一步**：常浩看 #90 的 PR，回复「合并」。
 
 ## 2026-11-07 · 名册 v1.5：加 type，登记 multi-agent、ui-system（#84）
 
