@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-11-07 · 飞书一句话合并（#67，PR #68 `fa81bc8`），已安装，端到端试跑通过
+
+- **改了什么**：`merge_officer.py scan` 给 `merge_rules.json` 的 `act.repos`（digital-twin、agent-kit）里每个新「PR × 版本」发卡片「🔀 待你决定 · 仓库#PR@版本」。常浩引用卡片回「合并」后，`merge-officer` 技能调新脚本 `merge_act.py`：核对版本、冲突、是否落后、本机主分支、风险档（L3 不走飞书），在干净 worktree 跑测试，带 `--match-head-commit` 合并，回读确认，主目录干净时再拉齐。回「退回 原因」就在 PR 里留言。常浩的决定记进 `agreement.csv` 的 `owner` 列。授权是单次的 `owner_direct`，不放权。
+- **已安装**：`merge_officer.py`、`merge_act.py`、`merge_rules.json`、`merge-officer` 技能从 main 复制，`cmp` 一致；旧版备份在 `evidence/2026-11-07-飞书合并-安装/backup/`。网关用 `kickstart -k` 重启，飞书首连超时，10:46 自动重连成功。定时任务 `8994fb76d03e` 改为 `*/30 9-23 * * *`。
+- **端到端**：agent-kit PR #20（《工程流程》第 5 节补「飞书对 Hermes 说合并也算」，issue #19）。卡片 10:49 发出，常浩 10:56 引用回「合并」。Hermes 调 `merge_act.py merge 'agent-kit#20@01ec412'`；它的终端前台上限 600 秒，超了就自动转后台，再等进程结束。39 项测试通过（日志在 `merge-runs/agent-kit-20-01ec412-…/test.log`），合并为 `f90358a`，issue #19 关闭；`owner=合并`；agent-kit 主目录拉齐到 `f90358a`；测试用的 worktree 已删。
+- **下一步**：之后数字分身、agent-kit 的新 PR 都会来卡片。等某一档攒到 20 次、一致率 ≥90%（同时看「退回且一致」），再另开 issue 申请写 `owner_approved_policy` 放权。
+
 ## 2026-11-07 · 自检也比对 hermes/scripts 下的 .json（#65，PR #66 `cfb8ef1`），已安装
 
 - **改了什么**：`ops/self_check.py` 的 `install_pairs` 除了 `hermes/scripts/*.py`，也比对顶层 `*.json`，目前只有 `merge_rules.json`，是批 D 那条缺口；`tests/` 下的 json 不比对。新增 1 项测试，全量 340 项通过。
