@@ -13,7 +13,8 @@
 放权门槛（同类 20 次、一致率 ≥90%）只报告达标与否，不自动放权；放权要常浩批准、写成策略记录。
 
 用法：
-  merge_officer.py [scan] [--verbose]    判定新的 open PR，并给已关闭的 PR 补上结局（不带子命令就是 scan，定时任务这样跑；成功不输出）
+  merge_officer.py [scan] [--verbose]    判定新的 open PR，并给已关闭的 PR 补上结局（不带子命令就是 scan，定时任务这样跑；成功不输出）；
+                                         merge_rules.json 的 act.repos 里的仓库，每个新判定发一张飞书卡片（#67，执行在 merge_act.py）
   merge_officer.py backfill              回填名册仓库的历史 PR（只做一次；已记过的不重复）
   merge_officer.py report [--json]       按风险档报告一致率和是否达标
   merge_officer.py replay --rules 新.json  用记下的 PR 状态按新旧两版规则重判，给出一致率前后对比（只读）
@@ -46,7 +47,7 @@ MERGE, RETURN, ASK = "建议合并", "退回", "问常浩"
 MERGED, CLOSED = "合并", "关闭"
 TIERS = ("L0", "L1", "L2", "L3")
 FIELDS = ["evaluated_at", "source", "repo", "pr", "title", "head_sha", "base_sha", "rules_version",
-          "tier", "suggestion", "reasons", "outcome", "outcome_at", "outcome_head", "agree"]
+          "tier", "suggestion", "reasons", "outcome", "outcome_at", "outcome_head", "agree", "owner", "owner_at"]
 PR_FIELDS = ("number,title,state,isDraft,mergeable,headRefOid,baseRefOid,labels,files,"
              "statusCheckRollup,body,closingIssuesReferences,mergedAt,closedAt")
 END_FIELDS = "number,state,headRefOid,mergedAt,closedAt"
@@ -296,6 +297,10 @@ def cmd_scan(verbose=False):
             settle(r, end)
     append_facts(facts)
     write_rows(rows)
+    if added and not os.environ.get("DT_NO_CARDS"):         # act.repos 里的仓库发卡片，等常浩在飞书决定（#67）
+        import merge_act
+        by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in facts}
+        errors += merge_act.send_cards(added, by_key)
     if verbose:
         for r in added:
             print(f"{r['repo']}#{r['pr']} {r['tier']} {r['suggestion']}  {r['title'][:40]}"
