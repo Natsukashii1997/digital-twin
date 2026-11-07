@@ -14,6 +14,9 @@ OFFICER = HERE.parent / "merge_officer.py"
 ACT = HERE.parent / "merge_act.py"
 
 # 假 gh：PR 状态在 FAKE_DIR/prs.json（{仓库: {号: PR}}），每次调用记进 calls.jsonl。
+# FAKE_DIR/fail.json 模拟网络或 GitHub 报错：{种类: {"n": 次数, "msg": 报错}}，每次调用用掉一次。
+#   view：任何 pr view；view_merged：合并之后的 pr view；merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
+#   comment：留言。
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -30,13 +33,36 @@ if args[:2] == ["pr", "list"]:
 pr = mine.get(args[2])
 if pr is None:
     sys.stderr.write("no pull requests found\n"); sys.exit(1)
+def fail(kind):
+    f = root / "fail.json"
+    plan = json.loads(f.read_text()) if f.exists() else {}
+    if plan.get(kind, {}).get("n", 0) <= 0:
+        return None
+    plan[kind]["n"] -= 1
+    f.write_text(json.dumps(plan))
+    return plan[kind]["msg"]
+def die(msg):
+    sys.stderr.write(msg + "\n"); sys.exit(1)
+if args[:2] == ["pr", "view"]:
+    msg = fail("view") or (pr["state"] == "MERGED" and fail("view_merged"))
+    if msg:
+        die(msg)
+if args[:2] == ["pr", "merge"] and fail("merge"):
+    die('Post "https://api.github.com/graphql": EOF')
+if args[:2] == ["pr", "comment"]:
+    msg = fail("comment")
+    if msg:
+        die(msg)
 if args[:2] == ["pr", "view"]:
     print(json.dumps(pr)); sys.exit(0)
 if args[:2] == ["pr", "merge"]:
     if (root / "merge_fail").exists() or args[args.index("--match-head-commit") + 1] != pr["headRefOid"]:
         sys.stderr.write("Head branch was modified. Review and try the merge again.\n"); sys.exit(1)
     pr["state"], pr["mergeCommit"] = "MERGED", {"oid": "f" * 40}
-    (root / "prs.json").write_text(json.dumps(prs)); sys.exit(0)
+    (root / "prs.json").write_text(json.dumps(prs))
+    if fail("merge_lost"):
+        die('Post "https://api.github.com/graphql": EOF')
+    sys.exit(0)
 if args[:2] == ["pr", "comment"]:
     sys.exit(0)
 sys.stderr.write("fake gh: 不该调用 " + " ".join(args) + "\n"); sys.exit(2)
@@ -130,7 +156,7 @@ class MergeAct(unittest.TestCase):
         e = {**os.environ, "FAKE_DIR": str(self.fake), "DT_GH": str(self.fake / "gh"), "DT_LARK_CLI": str(self.fake / "lark-cli"),
              "DT_ROSTER": str(self.roster), "DT_SHADOW_DIR": str(self.shadow), "DT_MERGE_RULES": str(self.rules),
              "DT_MERGE_RUNS": str(self.tmp / "runs"), "FEISHU_HOME_CHANNEL": "oc_test0001", "DT_NOW": "2026-11-07T10:00:00+08:00",
-             "DT_HERMES_ENV": str(self.tmp / "no.env"), **(env or {})}
+             "DT_HERMES_ENV": str(self.tmp / "no.env"), "DT_GH_RETRY_WAITS": "0,0", **(env or {})}
         return subprocess.run([sys.executable, "-B", str(script), *args], capture_output=True, text=True, env=e, timeout=120)
 
     def calls(self, name="calls.jsonl"):
@@ -194,47 +220,56 @@ class MergeAct(unittest.TestCase):
         self.assertIn("check.py", log.read_text())
         self.assertNotIn(self.ref, self.cli(ACT, "cards").stdout)
 
-    def assert_stopped(self, word, *, before=None):
+    def assert_four(self, text, step, why, state, todo, head="没合并"):
+        """失败提示四段都在：卡在哪一步、为什么、现在的状态、怎么办。"""
+        text = text.strip()
+        self.assertTrue(text.startswith(f"{head}：在『{step}』这一步"), text)
+        for part in (why, state, todo):
+            self.assertIn(part, text)
+        self.assertLess(text.index(why), text.index(state), text)
+        self.assertLess(text.index(state), text.rindex(todo), text)
+        self.assertTrue(text.endswith("。"), text)
+
+    def assert_stopped(self, word, *, step="核对版本", todo="", before=None):
         self.scan()
         if before:
             before()
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertTrue(r.stdout.startswith("没合并："), r.stdout)
-        self.assertIn(word, r.stdout)
+        self.assert_four(r.stdout, step, word, "PR 没有任何改动", todo)
         self.assertNotIn(["pr", "merge"], [c[:2] for c in self.calls()])
         self.assertEqual(self.ledger()[0]["owner"], "")
         return r
 
     def test_stop_when_head_moved(self):
-        self.assert_stopped("又有提交", before=lambda: self.update_pr(headRefOid="1" * 40))
+        self.assert_stopped("又有提交", todo="等新卡片", before=lambda: self.update_pr(headRefOid="1" * 40))
 
     def test_stop_when_behind_or_conflict(self):
-        self.assert_stopped("落后主分支", before=lambda: self.update_pr(mergeStateStatus="BEHIND"))
+        self.assert_stopped("落后主分支", todo="变基", before=lambda: self.update_pr(mergeStateStatus="BEHIND"))
 
     def test_stop_when_conflict(self):
-        self.assert_stopped("有冲突", before=lambda: self.update_pr(mergeable="CONFLICTING", mergeStateStatus="DIRTY"))
+        self.assert_stopped("有冲突", todo="变基", before=lambda: self.update_pr(mergeable="CONFLICTING", mergeStateStatus="DIRTY"))
 
     def test_stop_when_not_clean(self):
-        self.assert_stopped("BLOCKED", before=lambda: self.update_pr(mergeStateStatus="BLOCKED"))
+        self.assert_stopped("BLOCKED", todo="隔几分钟再点一次合并", before=lambda: self.update_pr(mergeStateStatus="BLOCKED"))
 
     def test_stop_when_draft_or_closed(self):
         self.assert_stopped("草稿", before=lambda: self.update_pr(isDraft=True))
 
     def test_stop_when_l3(self):
-        self.assert_stopped("L3", before=lambda: self.update_pr(files=[{"path": ".github/workflows/x.yml"}]))
+        self.assert_stopped("L3", todo="在电脑上交给 Claude 会话处理", before=lambda: self.update_pr(files=[{"path": ".github/workflows/x.yml"}]))
 
     def test_stop_when_local_main_unpushed(self):
         def local_commit():
             (self.main / "local.md").write_text("x")
             sh(self.main, "add", ".")
             sh(self.main, "commit", "-qm", "没推的")
-        self.assert_stopped("没推的提交", before=local_commit)
+        self.assert_stopped("没推的提交", todo="决定推不推", before=local_commit)
 
     def test_stop_when_tests_fail(self):
         self.head = self.pr_commit(5, {"docs/a.md": "hi\n", "fail": "x"})
         self.update_pr(headRefOid=self.head)
-        r = self.assert_stopped("测试没过")
+        r = self.assert_stopped("测试没过", step="跑测试", todo="交回开这个 PR 的会话修")
         self.assertIn("test.log", r.stdout)
         self.assertEqual(len(sh(self.main, "worktree", "list").splitlines()), 1)
 
@@ -262,18 +297,18 @@ class MergeAct(unittest.TestCase):
         self.assertEqual(self.ledger()[0]["owner"], "合并")
 
     def test_ci_running_stops(self):
-        self.assert_stopped("CI 还在跑：test", before=lambda: self.ci_mode(
+        self.assert_stopped("CI 还在跑：test", step="跑测试", todo="等 CI 跑完再点一次合并", before=lambda: self.ci_mode(
             [{"name": "test", "status": "IN_PROGRESS", "conclusion": ""},
              {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}], state="UNSTABLE"))
 
     def test_ci_failed_stops(self):
-        r = self.assert_stopped("CI 没过：test（FAILURE）", before=lambda: self.ci_mode(
+        r = self.assert_stopped("CI 没过：test（FAILURE）", step="跑测试", todo="交回开这个 PR 的会话修", before=lambda: self.ci_mode(
             [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
              {"name": "build", "status": "QUEUED", "conclusion": ""}], state="UNSTABLE"))
         self.assertNotIn("还在跑", r.stdout)                              # 有没过的，先说没过
 
     def test_ci_no_checks_stops(self):
-        self.assert_stopped("没有任何 CI 检查结果", before=lambda: self.ci_mode([]))
+        self.assert_stopped("没有任何 CI 检查结果", step="跑测试", before=lambda: self.ci_mode([]))
         self.assertFalse((self.tmp / "runs").exists())
 
     def test_local_fallback_runs_setup_before_test(self):
@@ -286,15 +321,15 @@ class MergeAct(unittest.TestCase):
         self.assertIn("测试通过，日志在", r.stdout)
 
     def test_no_ci_and_no_test_stops(self):
-        self.assert_stopped("没登记 CI，也没登记测试命令", before=lambda: self.set_act({"timeout": 60}))
+        self.assert_stopped("没登记 CI，也没登记测试命令", step="跑测试", before=lambda: self.set_act({"timeout": 60}))
 
     def test_stop_when_merge_rejected_by_server(self):
         self.scan()
         (self.fake / "merge_fail").write_text("1")
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("合并没成", r.stdout)
-        self.assertIn("Head branch was modified", r.stdout)
+        self.assert_four(r.stdout, "执行合并", "被 GitHub 拒绝：PR 版本变了（Head branch was modified",
+                         "回读确认 PR 还是 OPEN，PR 没有任何改动", "等新卡片再决定")
         self.assertEqual(self.ledger()[0]["owner"], "")
 
     def test_only_cards_that_were_sent(self):
@@ -318,6 +353,130 @@ class MergeAct(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("主目录没拉齐：有未提交的改动", r.stdout)
         self.assertEqual((self.main / "README.md").read_text(), "改了没提交\n")
+
+    # ---------- 网络瞬断 ----------
+
+    EOF = 'Post "https://api.github.com/graphql": EOF'
+
+    def fail(self, **plan):
+        (self.fake / "fail.json").write_text(json.dumps({k: {"n": n, "msg": m} for k, (n, m) in plan.items()}))
+
+    def kinds(self):
+        return [c[:2] for c in self.calls() if c[:2] != ["pr", "list"]]
+
+    def test_read_retries_through_network_blip(self):
+        self.scan()
+        self.fail(view=(2, self.EOF))
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"已合并 {self.ref}", r.stdout)
+        self.assertEqual(self.kinds().count(["pr", "merge"]), 1)
+        self.assertEqual(self.kinds()[:3], [["pr", "view"]] * 3)          # 失败两次，第三次取到
+
+    def test_other_transient_errors_also_retried(self):
+        self.scan()
+        for msg in ("curl: (35) LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to api.github.com:443",
+                    'Post "https://api.github.com/graphql": net/http: TLS handshake timeout',
+                    "read tcp 127.0.0.1:50000->127.0.0.1:8086: read: connection reset by peer",
+                    'Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host'):
+            with self.subTest(msg=msg):
+                self.fail(view=(1, msg))
+                r = self.cli(ACT, "return", self.ref, "试")                 # 退回不改 PR 状态，可以连试几种
+                self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_network_down_said_in_four_parts(self):
+        self.scan()
+        self.fail(view=(3, self.EOF))                                     # 一次加两次重试都断
+        r = self.cli(ACT, "button", "merge", self.ref, "--chat", "oc_test0001")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.texts()[-1], "没合并：在『取 PR 状态』这一步连不上 GitHub（网络中途断开：Post "
+                         '"https://api.github.com/graphql": EOF）。PR 没有任何改动。已自动重试 2 次仍失败，隔一分钟再点一次合并。')
+        self.assertNotIn("GhError", self.texts()[-1])
+        self.assertEqual(self.kinds(), [["pr", "view"]] * 3)
+        self.assertEqual(self.ledger()[0]["owner"], "")
+
+    def test_github_refusals_not_retried(self):
+        self.scan()
+        for msg, why, todo in (
+                ("HTTP 401: Bad credentials (https://api.github.com/graphql)", "被 GitHub 拒绝：gh 登录失效", "重新登录 gh"),
+                ("HTTP 403: Resource not accessible by integration", "被 GitHub 拒绝：权限不足", "查 gh 的权限"),
+                ("HTTP 403: API rate limit exceeded for user ID 1", "被 GitHub 拒绝：超出频率限制", "过一小时再点一次合并")):
+            with self.subTest(msg=msg):
+                before = len(self.kinds())
+                self.fail(view=(3, msg))
+                r = self.cli(ACT, "merge", self.ref)
+                self.assertEqual(r.returncode, 1)
+                self.assert_four(r.stdout, "取 PR 状态", why, "PR 没有任何改动", todo)
+                self.assertIn(msg[:20], r.stdout)                         # 括号里附原文
+                self.assertEqual(len(self.kinds()) - before, 1)           # 不是网络问题，不重试
+
+    def test_long_raw_error_clipped_to_80(self):
+        self.scan()
+        self.fail(view=(1, "HTTP 401: " + "x" * 200))
+        r = self.cli(ACT, "merge", self.ref)
+        raw = r.stdout.split("gh 登录失效（", 1)[1].split("）。", 1)[0]
+        self.assertEqual(len(raw), 80)
+        self.assertTrue(raw.startswith("…"))
+
+    def test_pr_gone_or_closed(self):
+        self.scan()
+        self.set_prs({"o/app": {}})
+        self.assert_four(self.cli(ACT, "merge", self.ref).stdout, "取 PR 状态", "找不到这个 PR（no pull requests found）",
+                         "PR 没有任何改动", "在电脑上看一下这个 PR 还在不在")
+        self.set_prs({"o/app": {"5": self.pr(5, self.head, ["docs/a.md"], state="CLOSED")}})
+        self.assert_four(self.cli(ACT, "merge", self.ref).stdout, "核对版本", "PR 已经是 CLOSED", "PR 没有任何改动", "不用再合")
+
+    def test_merge_request_lost_is_not_retried(self):
+        self.scan()
+        self.fail(merge=(1, self.EOF))
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 1)
+        self.assert_four(r.stdout, "执行合并", "连不上 GitHub（网络中途断开：", "回读确认 PR 还是 OPEN，PR 没有任何改动",
+                         "隔一分钟再点一次合并")
+        self.assertNotIn("重试", r.stdout)                                # 合并命令本身不重试
+        self.assertEqual(self.kinds().count(["pr", "merge"]), 1)
+        self.assertEqual(self.kinds()[-1], ["pr", "view"])                # 先回读，确认还开着才说没改
+        self.assertEqual(self.ledger()[0]["owner"], "")
+
+    def test_merged_but_reply_lost_counts_as_merged(self):
+        self.scan()
+        self.fail(merge_lost=(1, self.EOF))
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn(f"已合并 {self.ref}（PR 5）→ fffffff", r.stdout)
+        self.assertEqual(self.kinds().count(["pr", "merge"]), 1)
+        self.assertEqual(self.ledger()[0]["owner"], "合并")
+
+    def test_readback_down_after_merge_says_unsure(self):
+        self.scan()
+        self.fail(view_merged=(3, self.EOF))
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 1)
+        self.assert_four(r.stdout, "合并后回读", "连不上 GitHub", "合并命令已经发出，但回读没成功，不知道合上没有",
+                         "不会重复合并", head="不确定合上没有")
+        self.assertNotIn("没有任何改动", r.stdout)
+        self.assertEqual(self.kinds().count(["pr", "merge"]), 1)
+        r = self.cli(ACT, "merge", self.ref)                              # 再点一次：查到已合并，不重复合并
+        self.assert_four(r.stdout, "核对版本", "PR 已经是 MERGED", "PR 没有任何改动", "不用再合")
+        self.assertEqual(self.kinds().count(["pr", "merge"]), 1)
+
+    def test_return_network_down_said_in_four_parts(self):
+        self.scan()
+        self.fail(view=(3, self.EOF))
+        r = self.cli(ACT, "return", self.ref, "标题不清楚")
+        self.assertEqual(r.returncode, 1)
+        self.assert_four(r.stdout, "取 PR 状态", "连不上 GitHub", "PR 没有任何改动",
+                         "已自动重试 2 次仍失败，隔一分钟再说一次「退回 原因」", head="没退回")
+        self.assertNotIn(["pr", "comment"], self.kinds())
+
+    def test_return_comment_lost_says_unsure(self):
+        self.scan()
+        self.fail(comment=(1, self.EOF))
+        r = self.cli(ACT, "return", self.ref, "标题不清楚")
+        self.assertEqual(r.returncode, 1)
+        self.assert_four(r.stdout, "留言退回", "连不上 GitHub", "不确定留言发出去没有", "看一眼这条留言在不在", head="没退回")
+        self.assertEqual(self.kinds().count(["pr", "comment"]), 1)        # 留言不重试，免得发两条
+        self.assertEqual(self.ledger()[0]["owner"], "")
 
     # ---------- 退回 ----------
 
