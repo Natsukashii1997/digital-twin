@@ -1,5 +1,5 @@
 {
-  "version": "v1.3 · 2026-11-07",
+  "version": "v1.4 · 2026-11-07",
   "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。",
   "projects": [
     {
@@ -259,6 +259,27 @@
       "notes": "家庭育儿记录 PWA 与微信小程序（React + Vite）。2026-11-07 常浩定转为活跃：目录从 ~/Documents/AI 项目/baby-care-workbench 挪来，同日建私有远端；仓库含宝宝姓名与出生数据，常浩同意放私有库，不得公开。端到端 npx playwright test 要先装 Playwright 浏览器，没放进 test。没有 CI。",
       "category": "活跃",
       "github": "Natsukashii1997/little-steps"
+    },
+    {
+      "id": "obsidian-kb",
+      "name": "Obsidian 知识库",
+      "aliases": [
+        "Obsidian 知识库",
+        "知识库",
+        "第二大脑",
+        "Obsidian 第二大脑",
+        "obsidian-kb"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/obsidian-kb",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": "10 项目/Obsidian 第二大脑改造.md",
+      "test": "node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "知识库项目的工程仓库：进度、交接、验收结论和维护脚本。知识正文在 ~/Documents/Obsidian Vault，只在本机，不进本仓库、不推 GitHub（Vault「决定/Vault 只开放给本人本地入口」，Vault AGENTS 禁止 git push）；写 Vault 照 Vault 自己的 AGENTS。vault-read 在 Vault 的 .claude/scripts/，Hermes vault 技能在本仓库 hermes/skills/vault/，GET 索引见 get-index。2026-11-07 常浩定登记为活跃并另建这个工程仓库。没有 CI。",
+      "category": "活跃",
+      "github": "Natsukashii1997/obsidian-kb"
     }
   ],
   "categories": {
@@ -279,7 +300,7 @@
     {
       "path": "~/Documents/Obsidian Vault",
       "category": "只登记",
-      "todo": "M4",
+      "todo": "正文只在本机，不推 GitHub；项目进度与工程仓库见活跃项目 obsidian-kb（2026-11-07）",
       "why": "正式知识库，含受限内容，不推 GitHub"
     },
     {
