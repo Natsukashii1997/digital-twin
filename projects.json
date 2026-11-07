@@ -222,10 +222,10 @@
       "why": "外层仓库没有提交，里面套着 5 个仓库"
     },
     {
-      "path": "~/Documents/AI 项目/outputs/管培生带教-AI协同",
+      "path": "~/Archive/repos/待删/管培生带教-AI协同",
       "category": "待删",
-      "todo": "常浩 11-07 定：是管培生工作台的一部分，实质内容提取到 trainee-hub docs/research/来源项目/（#30）后删除；先停相关 launchd 服务再移到 ~/Archive/repos/待删/",
-      "why": "管培生带教飞书机器人；launchd ai.trainee-collab.worker.codex、ai.automation-health.codex 指向这里，ai.lark-channel-bridge.bot.codex 也从这里的 node_modules 启动"
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；实质内容已提取到 trainee-hub docs/research/来源项目/（#30）",
+      "why": "管培生带教飞书机器人；launchd ai.trainee-collab.worker.codex、ai.automation-health.codex 原来指向这里，ai.lark-channel-bridge.bot.codex 也从这里启动；11-07 服务已停，plist 移到 ~/Archive/repos/待删/_launchd/"
     },
     {
       "path": "~/Archive/repos/待删/公司战略系统",
@@ -240,16 +240,16 @@
       "why": "Little Steps 育儿记录 PWA 与微信小程序体验版，10-24 还有提交；源码只在本地。GitHub 上的 little-steps-private 是打包后的网页成品，不是源码"
     },
     {
-      "path": "~/Documents/AI 项目/营销战役AI协同MVP",
+      "path": "~/Archive/repos/待删/营销战役AI协同MVP",
       "category": "待删",
-      "todo": "常浩 11-07 定：是管培生工作台的一部分，实质内容提取到 trainee-hub docs/research/来源项目/（#30）后删除；先停相关 launchd 服务再移到 ~/Archive/repos/待删/",
-      "why": "营销战役飞书协同闭环；ai.lark-channel-bridge.bot.codex 和 cn.lumiedu.marketing-campaign-* 四个 launchd 任务指向这里"
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；实质内容已提取到 trainee-hub docs/research/来源项目/（#30）",
+      "why": "营销战役飞书协同闭环；ai.lark-channel-bridge.bot.codex 和 cn.lumiedu.marketing-campaign-* 四个 launchd 任务原来指向这里；11-07 服务已停，plist 移到 ~/Archive/repos/待删/_launchd/"
     },
     {
-      "path": "~/Documents/AI 项目/marketing-campaign-card-gateway",
+      "path": "~/Archive/repos/待删/marketing-campaign-card-gateway",
       "category": "待删",
-      "todo": "常浩 11-07 定：是管培生工作台的一部分，实质内容提取到 trainee-hub docs/research/来源项目/（#30）后删除；先停相关 launchd 服务再移到 ~/Archive/repos/待删/",
-      "why": "营销战役卡片网关，远端在飞书妙搭"
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；实质内容已提取到 trainee-hub docs/research/来源项目/（#30）",
+      "why": "营销战役卡片网关，远端在飞书妙搭；11-07 服务已停，plist 移到 ~/Archive/repos/待删/_launchd/（妙搭上的远端应用要常浩自己在妙搭里处理）"
     },
     {
       "path": "~/Documents/ChatGPT/Fmode/lumi-sales-sidebar",
