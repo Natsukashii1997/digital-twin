@@ -20,14 +20,15 @@ hermes/
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
     tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 11:30）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
-    merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列
+    merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列
     proposal_digest.py 每周提案收口（#61）：每周一把会话复盘、牛马之家每周整理的待决提案按编号发到常浩私聊（LESSONS 升级候选默认不列，DT_LESSONS_MIN_PROJECTS 打开）；每条附 Hermes 的推荐（带模型定时任务经 proposal_digest_draft.py 取草稿、写推荐后 send --recommend），常浩回「按推荐」或逐条回复后由 proposal-digest 技能调用 apply 写回各来源的结论；期号状态在 DigitalTwin/proposals/digest.json
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
     workshop/          车间派单（F5）
     progress/          项目进展现查（F6）
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
-    merge-officer/     常浩引用 PR 卡片回「合并 / 退回」时调 merge_act.py（#67）
+    merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
     proposal-digest/   记下常浩对每周待决提案的选择（#61，调 proposal_digest.py apply）
+  plugins/merge-buttons/ PR 卡片按钮（#78）：注册 /card，把「合并 / 退回」点击转给 merge_act.py button（不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是三报规则
   samples/             样稿

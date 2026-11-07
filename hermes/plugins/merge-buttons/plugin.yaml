@@ -1,0 +1,4 @@
+name: merge-buttons
+version: 0.1.0
+description: "PR 卡片的「合并 / 退回」按钮（digital-twin #78）：接网关转来的 /card 点击，在后台调 merge_act.py button，不经过模型。"
+author: "常浩 · digital-twin"

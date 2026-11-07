@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""飞书一句话合并（#67）：影子合并官给新 PR 发卡片，常浩引用卡片回「合并」或「退回 原因」后，由 Hermes 调用本脚本执行。
+"""飞书一句话合并（#67）：影子合并官给新 PR 发卡片，常浩点卡片上的「合并」「退回」按钮（#78），或引用卡片回「合并」「退回 原因」后，由 Hermes 调用本脚本执行。
 
 授权是单次的 owner_direct：每次都是常浩本人对一张卡片（仓库、PR、完整 HEAD）说了话；本脚本只认发过的卡片，不认别的 PR 或版本。
 不放权、不变基、不改代码、不安装、不写 CURRENT。
@@ -17,10 +17,16 @@
   merge_act.py cards                         列出还没处理的卡片（Hermes 技能核对用）
   merge_act.py merge <仓库#PR@HEAD前缀>        例如 digital-twin#68@1a2b3c4
   merge_act.py return <仓库#PR@HEAD前缀> 原因   在 PR 里留言退回（不关 PR）
+  merge_act.py button merge|return <仓库#PR@HEAD前缀> --chat <chat_id>
+                                             卡片按钮（#78）：Hermes 的 /card 插件在后台调用；进度和结果直接发到常浩私聊
 环境变量同 merge_officer.py，另有 DT_MERGE_RUNS（测试运行目录，默认 DigitalTwin/merge-runs）。
 """
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
+import hashlib
+import io
 import json
 import os
 import re
@@ -75,14 +81,26 @@ def build_card(row, facts, url):
              f"风险档 **{row['tier']}** · Hermes 建议 **{row['suggestion']}**" + (f"：{row['reasons']}" if row["reasons"] else ""),
              f"改了 {len(paths)} 个文件：" + "、".join(f"`{p}`" for p in paths[:5]) + ("…" if len(paths) > 5 else ""),
              f"版本 `{row['head_sha'][:7]}`", ""]
+    buttons = []
     if row["tier"] == "L3":
         lines.append("⚠️ 高风险（L3），飞书里不合并。请在电脑上让 Claude 会话处理。")
     else:
-        lines.append("长按这张卡片选「回复」：回 **合并**，Hermes 核对版本、跑测试后合并；回 **退回 原因**，它把原因留言到 PR。")
+        lines.append("点 **合并**：Hermes 核对版本、跑测试后合并；点 **退回**：它问你原因，再留言到 PR。")
+        buttons = [button("✅ 合并", "primary_filled", "merge", ref), button("↩️ 退回", "default", "return", ref)]
+    elements = [{"tag": "markdown", "content": "\n".join(lines)}]
+    if buttons:
+        elements.append({"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "8px",
+                         "columns": [{"tag": "column", "width": "auto", "elements": [b]} for b in buttons]})
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text", "content": f"🔀 待你决定 · {ref}"},
                        "template": COLOR.get(row["suggestion"], "blue")},
-            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}]}}
+            "body": {"elements": elements}}
+
+
+def button(label, style, verb, ref):
+    """点按钮时网关把 value 转成一条 `/card button {"merge_officer": verb, "ref": ref}` 交给 Hermes（merge-officer 技能认它）。"""
+    return {"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": style,
+            "behaviors": [{"type": "callback", "value": {"merge_officer": verb, "ref": ref}}]}
 
 
 def home_chat():
@@ -303,8 +321,61 @@ def cmd_cards():
     if not left:
         print("没有等你决定的 PR 卡片。")
     for c in left:
-        print(f"{card_ref(c['repo'], c['pr'], c['head'])}  {c['tier']} {c['suggestion']}  {c['title']}（{c['sent_at'][:16]}）")
+        wait = "  【等你说退回原因】" if c.get("return_asked_at") else ""
+        print(f"{card_ref(c['repo'], c['pr'], c['head'])}  {c['tier']} {c['suggestion']}  {c['title']}（{c['sent_at'][:16]}）{wait}")
     return 0
+
+
+# ---------- 卡片按钮（#78） ----------
+
+def cmd_button(verb, ref, chat):
+    """点卡片按钮后由 /card 插件在后台调用。网关回复按钮点击会失败（拿回调 token 当消息号），所以进度和结果都由这里直接发到私聊。
+    只认常浩私聊里的点击；同一张卡片同时只跑一个。"""
+    if not chat or chat != home_chat():
+        print(f"不处理：点击不是来自常浩私聊（{chat or '没有 chat_id'}）")
+        return 1
+    click = hashlib.sha1(f"{verb} {ref} {dt.datetime.now().isoformat()}".encode()).hexdigest()[:16]
+    said = []
+
+    def say(text):                          # lark-cli 的幂等键最长 50 个字符
+        send(chat, "text", {"text": text}, f"merge-btn-{click}-{len(said)}")
+        said.append(text)
+
+    mo.SHADOW.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^\w.-]", "_", ref)
+    lock = open(mo.SHADOW / f"button-{safe}.lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        say(f"{ref} 已经在处理了，等上一次的结果就好。")
+        return 1
+    try:
+        if verb == "return":
+            try:
+                card = find_card(ref)
+            except Stop as e:
+                say(f"没退回：{e}")
+                return 1
+            say(f"↩️ 退回 {ref} 的原因是？直接回「退回 原因」就行，不用引用卡片。")
+            ask_return(card)                # 问出去了才打标记
+            return 0
+        say(f"⏳ 在核对 {ref}，稍后告诉你结果。")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["merge", ref])
+        say(out.getvalue().strip() or f"没合并：{ref} 没有输出")
+        return code
+    finally:
+        lock.close()
+
+
+def ask_return(card):
+    """记下「常浩点了退回、等他说原因」：merge-officer 技能看到他没引用卡片说「退回 原因」时，用 cards 里这个标记认卡片。"""
+    data = read_cards()
+    for c in data["cards"]:
+        if (c["repo"], str(c["pr"]), c["head"]) == (card["repo"], str(card["pr"]), card["head"]):
+            c["return_asked_at"] = mo.now()
+    write_cards(data)
 
 
 def main(argv=None):
@@ -316,7 +387,17 @@ def main(argv=None):
     r = sub.add_parser("return")
     r.add_argument("ref")
     r.add_argument("reason", nargs="+")
+    b = sub.add_parser("button")
+    b.add_argument("verb", choices=["merge", "return"])
+    b.add_argument("ref")
+    b.add_argument("--chat", default="")
     a = a.parse_args(argv)
+    if a.cmd == "button":
+        try:
+            return cmd_button(a.verb, a.ref, a.chat)
+        except SendError as e:
+            print(f"按钮结果没发出去：{e}")
+            return 1
     try:
         if a.cmd == "cards":
             return cmd_cards()
