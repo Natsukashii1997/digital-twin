@@ -62,7 +62,7 @@ def install_pairs(files):
     pairs = []
     for f in files:
         p = PurePosixPath(f)
-        if p.parent == PurePosixPath("hermes/scripts") and p.suffix == ".py":
+        if p.parent == PurePosixPath("hermes/scripts") and p.suffix in (".py", ".json"):   # .json：脚本读的规则（如 merge_rules.json，#65）
             pairs.append((f, HERMES / "scripts" / p.name))
         elif f.startswith("hermes/scripts/assets/"):      # 脚本用的固定素材（如 Tidings 周报横幅，#55）
             pairs.append((f, HERMES / "scripts" / p.relative_to("hermes/scripts")))
