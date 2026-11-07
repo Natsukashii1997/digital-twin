@@ -163,7 +163,8 @@ class Digest(unittest.TestCase):
         env = {"DT_RETRO_ROOT": str(t / "retro"), "DT_NIUMA_REVIEW": str(t / "niuma"),
                "DT_LESSONS": str(t / "LESSONS.md"), "AGENT_KIT_STATE_DIR": str(t / "kit"), "DT_ROSTER": str(t / "projects.json"),
                "DT_PROPOSAL_DIR": str(t / "prop"), "DT_SHADOW_DIR": str(self.shadow), "DT_LARK_CLI": str(t / "fake/lark-cli"),
-               "FAKE_DIR": str(t / "fake"), "DT_NOW": now, "FEISHU_HOME_CHANNEL": chat}
+               "FAKE_DIR": str(t / "fake"), "DT_NOW": now, "FEISHU_HOME_CHANNEL": chat,
+               "DT_HERMES_ENV": str(t / "hermes.env")}
         if lessons is not None:
             env["DT_LESSONS_MIN_PROJECTS"] = lessons
         return env
@@ -336,6 +337,16 @@ class Digest(unittest.TestCase):
         r = self.run_cli("send", chat="")
         self.assertEqual(r.returncode, 1)
         self.assertIn("FEISHU_HOME_CHANNEL", r.stdout)
+        (self.tmp / "hermes.env").write_text('FEISHU_APP_SECRET=xxx\nFEISHU_HOME_CHANNEL="oc_fromenvfile01"\n', encoding="utf-8")
+        r = self.run_cli("send", "--dry-run", chat="")                  # dry-run 不读
+        self.assertEqual(r.returncode, 0)
+        subprocess.run(["rm", "-f", str(self.state)], check=False)
+        (self.tmp / "fake/fail").write_text("1")
+        self.run_cli("send", chat="")                                     # 环境变量没有，从 .env 只读这一项
+        self.assertEqual(self.calls()[-1][self.calls()[-1].index("--chat-id") + 1], "oc_fromenvfile01")
+        (self.tmp / "fake/fail").unlink()
+        (self.tmp / "hermes.env").unlink()
+        (self.tmp / "fake/calls.jsonl").unlink()
         (self.tmp / "fake/fail").write_text("1")
         r = self.run_cli("send")
         self.assertEqual(r.returncode, 1)

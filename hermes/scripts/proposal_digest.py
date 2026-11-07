@@ -22,7 +22,8 @@
 以「按推荐」开头表示先全部照卡片上的推荐，后面写的覆盖推荐，如「按推荐，2 改否」；没推荐的编号保持待决。
 
 环境变量：DT_RETRO_ROOT、DT_NIUMA_REVIEW、DT_LESSONS、AGENT_KIT_STATE_DIR（读 lessons-hits.jsonl）、DT_ROSTER、
-DT_PROPOSAL_DIR（期号状态）、DT_SHADOW_DIR（lessons-decisions.md）、FEISHU_HOME_CHANNEL（私聊 chat_id）、
+DT_PROPOSAL_DIR（期号状态）、DT_SHADOW_DIR（lessons-decisions.md）、FEISHU_HOME_CHANNEL（私聊 chat_id；没有时只从
+DT_HERMES_ENV，默认 ~/.hermes/.env，读这一项）、
 DT_LARK_CLI（换 lark-cli，自测用）、DT_NOW（ISO 时间），DT_LESSONS_MIN_PROJECTS（默认 0 = 不列 LESSONS 候选）。
 """
 import argparse
@@ -46,6 +47,7 @@ STATE_DIR = Path(os.environ.get("DT_PROPOSAL_DIR", "~/Library/Application Suppor
 SHADOW = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/DigitalTwin/shadow")).expanduser()
 STATE = STATE_DIR / "digest.json"
 LESSONS_LEDGER = SHADOW / "lessons-decisions.md"
+HERMES_ENV = Path(os.environ.get("DT_HERMES_ENV", "~/.hermes/.env")).expanduser()
 MIN_PROJECTS = int(os.environ.get("DT_LESSONS_MIN_PROJECTS", "0"))   # 0 = 不列
 BJ = dt.timezone(dt.timedelta(hours=8))
 OVERDUE_DAYS = 7
@@ -414,6 +416,17 @@ def write_item(item, verdict, day, note):
 
 # ---------- 命令 ----------
 
+def home_chat():
+    """私聊 chat_id：先看环境变量；Hermes 带模型任务的终端里没有它，再从 ~/.hermes/.env 只读这一项。"""
+    chat = os.environ.get("FEISHU_HOME_CHANNEL", "")
+    if not chat and HERMES_ENV.exists():
+        for line in HERMES_ENV.read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("=")
+            if k.strip() == "FEISHU_HOME_CHANNEL":
+                chat = v.strip().strip("'\"")
+    return chat
+
+
 def cmd_draft():
     """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）的 JSON；没有待决提案时不输出。"""
     now = today()
@@ -451,9 +464,9 @@ def cmd_send(dry_run=False, force=False, recommend=None):
     if dry_run:
         print(json.dumps({"msg_type": "interactive", "content": card}, ensure_ascii=False, indent=2))
         return 0
-    chat = os.environ.get("FEISHU_HOME_CHANNEL", "")
+    chat = home_chat()
     if not chat.startswith("oc_"):
-        print("待决提案没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL）。")
+        print("待决提案没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）。")
         return 1
     idem = f"proposal-digest-{day}" + (f"-{int(now.timestamp())}" if force else "")
     try:
