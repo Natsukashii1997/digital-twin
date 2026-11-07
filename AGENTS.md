@@ -8,10 +8,12 @@
 
 ```
 PRD.md / CURRENT.md / AGENTS.md
+ai_access.json         AI 接入配置（P-13，代替设置页）：执行方、功能清单、例外、对外开放、数据对象和出厂默认值；见下面「AI 接入」
 projects.json          项目名册：Hermes 只往 projects 里的活跃仓库派单（run_worker.py 也会拦）；inventory 是 M3 盘点的其余仓库及去留，不派单
 hermes/
   scripts/             给 Hermes 用的脚本（源文件）；安装副本在 ~/.hermes/scripts/
-    run_worker.py      车间包装：统一调用 Claude / Codex，写回执、查护栏
+    run_worker.py      车间包装：统一调用 Claude / Codex，开跑前查执行方能不能用，写回执（含执行方、接入方式、模型、怎么选的）、查护栏
+    ai_access.py       AI 接入自检与切换：status 打印四块，check 查一家，set 切换（常浩的选择存在 DigitalTwin/ai-access.json）
     brief_data.py      晨报取数（第 4 批挂起中）
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
     report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口
@@ -43,6 +45,35 @@ ops/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
+
+## AI 接入
+
+全局规则 P-13 要求：本应用里 AI 产出的东西，谁做的、怎么接进来的、读什么、写到哪里都看得清，改设置就能切换。本项目没有图形界面，所以用配置文件代替设置页，用自检命令代替状态页：
+
+- 配置：仓库根目录 [ai_access.json](ai_access.json)（功能清单、出厂默认值，改了要和本节一起改）；常浩切换后的选择存在 `~/Library/Application Support/DigitalTwin/ai-access.json`，只由 `ai_access.py set` 写，下一次调用生效，不用改代码、不用重启。
+- 自检命令：`python3 ~/.hermes/scripts/ai_access.py status`（`--json` 给机器读）。每天 09:50 的工程自检会跑它，车间默认执行方不能用时才在飞书说。
+- 切换车间默认执行方：`python3 ~/.hermes/scripts/ai_access.py set default claude|codex`。Hermes 自己的模型用 `hermes config set model.default …` 切换，要重启网关。
+
+功能清单（id 和 ai_access.json 一致）：
+
+| id | 功能 | 执行方 | 接入方式 | 读 | 写到 |
+|---|---|---|---|---|---|
+| `workshop` | 车间派单 | 常浩点名的；没点名跟随默认执行方（出厂 Codex） | 本机 CLI | worktree、任务文件 | 分支提交、PR、issue、派单回执、状态库 |
+| `scheduler` | 持久调度自动开单（默认关闭） | 每个任务的负责方 claude / codex | 本机 CLI（经派单脚本） | 状态库 | 同车间派单 |
+| `chat` | 飞书对话（含 progress、vault、merge-officer、proposal-digest 技能） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、Vault（MCP vault-read 只读）、名册、仓库 | 飞书回复、Hermes 记忆 |
+| `hermes-aux` | Hermes 辅助任务（压缩、审批判断、后台复盘） | Hermes | Hermes 派单 | 当前会话 | Hermes 记忆和技能 |
+| `report` | 日报 / 周报并跑 | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、群、会议妙记、日程、任务、项目进展 | 飞书并跑文档、evidence/reports |
+| `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
+| `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
+
+不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、三个自检脚本、晨报取数（挂起）。
+
+- **不可用就报错，不换家**：派单开跑前 run_worker 按配置查执行方（`claude auth status`、`codex login status`）；不能用就写 `refused: executor_unavailable` 回执、退出码 4，派单返回「没开跑」和原因，不改用另一家。额度用尽没法提前查，开跑时车间报错写进回执。AI 接入配置读不了时，没点名的派单直接拒绝开单，不猜默认值。
+- **已登记的例外**：Hermes 主模型失败或额度不够时自动回退到 deepseek-flash（PRD F10.2；常浩 2026-11-07 定保留）。回复里注明，每日巡检报前一天的回退次数，自检命令显示近 7 天的回退次数。
+- **留痕**：派单回执有 `executor`、`access`、`model`（Claude 取实际用的模型；Codex 取 ~/.codex/config.toml 的配置）、`chosen_by`，飞书回报第二行照抄；日报 / 周报标题下一行写「生成：Hermes（实际用的模型，含回退）｜接入：Hermes 派单｜时间」；Hermes 对话和定时任务的模型用量在 ~/.hermes/state.db、~/.hermes/cron/usage_audit.jsonl。
+- **对外开放**：无。vault-read 是 Hermes 作为客户端读 Vault，不算本项目对外开放。
+- **数据对象**：Hermes 模型用量（state.db 的 session_model_usage，巡检统计回退）；Hermes 定时任务用量（usage_audit.jsonl）。
+- **密钥**：本项目不保存 AI 密钥；Claude、Codex 用本机登录，Hermes 的凭证在 Hermes 自己那里，自检只显示可用 / 未登录。
 
 ## Agent skills
 

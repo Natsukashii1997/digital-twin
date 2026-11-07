@@ -87,6 +87,26 @@ class ScriptTest(unittest.TestCase):
     def test_all_consistent_prints_nothing(self):
         self.assertEqual(self.run_script(), "")
 
+    def fake_ai_access(self, body):
+        self.write(self.home / "hermes/scripts/ai_access.py", body)   # 安装处多出的文件不算不一致
+
+    def test_ai_access_default_available_prints_nothing(self):
+        self.fake_ai_access('import json\nprint(json.dumps({"default_worker": "codex", '
+                            '"workers": {"codex": {"name": "Codex", "state": "可用"}}}))\n')
+        self.assertEqual(self.run_script(), "")
+
+    def test_ai_access_default_unavailable_is_reported(self):
+        self.fake_ai_access('import json\nprint(json.dumps({"default_worker": "codex", "workers": {"codex": '
+                            '{"name": "Codex", "state": "未登录", "detail": "codex login status 退出码 1"}}}))\n')
+        out = self.run_script()
+        self.assertIn("🤖 AI 接入提醒", out)
+        self.assertIn("车间默认执行方 Codex 现在未登录（codex login status 退出码 1）", out)
+        self.assertIn("不会换成另一家", out)
+
+    def test_ai_access_broken_config_is_reported(self):
+        self.fake_ai_access('import sys\nprint("AI 接入：读不了 AI 接入配置", file=sys.stderr)\nsys.exit(2)\n')
+        self.assertIn("AI 接入自检未完成：AI 接入：读不了 AI 接入配置", self.run_script())
+
     def test_missing_installed_files_listed_by_path(self):
         for dst in ("hermes/skills/autonomous-ai-agents/workshop/references/r.md", "bin/health_check.py",
                     "hermes/scripts/self_check.py"):

@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-11-07 · AI 接入按全局规则 P-13 补齐：配置文件、自检命令、不可用报错不换家、留痕
+
+- **来由**：常浩 11-07 新定全局规则 P-13（AI 接入写进设置、讲清来源、能切换）；母会话分项目补齐，本项目没有图形界面，按例外用配置文件 + 自检命令。盘点后常浩「按推荐开工」，三项决定：Hermes 回退 deepseek 保留并登记为例外；车间只设一个默认执行方（出厂 Codex），点名优先；常浩的选择存在 DigitalTwin/ai-access.json，不改仓库文件。
+- **改了什么**：新增 `ai_access.json`（功能清单、执行方、例外、对外开放、数据对象）和 `hermes/scripts/ai_access.py`（status / check / set）；`dispatch.py new` 的 `--tool` 可不填，按配置选，台账记 `tool_source`；`run_worker.py` 开跑前查执行方（`claude auth status` / `codex login status`），不能用就写 refused 回执、退出码 4，不换家；回执加 `executor`、`access`、`model`、`chosen_by`，状态库一并保留；`report_publish.py` 在日报 / 周报标题下一行写「生成：Hermes（实际模型）｜接入：Hermes 派单｜时间」；`self_check.py` 每天查车间默认执行方，不能用才说；workshop 技能改为没点名不带 `--tool`、回报第二行写留痕、不可用不换家；AGENTS.md 加「AI 接入」一节。
+- **实测**：隔离派单目录（真实 Claude / Codex、真实名册，选择文件也在证据目录）：出厂默认开单 → codex；`set default claude` 后开单 → claude，跑完回执 `Claude Code · 本机 CLI · claude-opus-5-5 · AI 接入默认执行方（常浩切换过）`。记录在 `evidence/2026-11-07-AI接入实测/`。
+- **测试**：见 PR。
+- **没安装**：等合并后从 main 复制 `ai_access.py`、`dispatch.py`、`run_worker.py`、`report_publish.py`、`twin_state.py`、`self_check.py` 到 `~/.hermes/scripts/`，workshop 技能到安装位置；技能改了要重启网关，常浩同意后再做。
+- **唯一下一步**：常浩看 PR，回复「合并」后安装并重启网关。
+
 ## 2026-11-07 · 名册 v1.5：加 type，登记 multi-agent、ui-system（#84）
 
 - **来由**：常浩转来《项目体系重构 V1.3》定稿并要求按批次推进；本单是执行单 I-DT-1。决定记录、V1.2/V1.3 原文与执行单已放进 `docs/项目体系重构/`（I-DT-2，`1211b4e`，直接进 main）。

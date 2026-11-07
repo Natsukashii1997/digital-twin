@@ -2,6 +2,8 @@
 
 用法：python3 report_publish.py daily|weekly <Markdown 文件>
 检查：第一行标题格式和星期对得上；日报六段和覆盖行都在；不含表格；同一标题文档里还没有。
+留痕（P-13）：标题下一行插入「生成：Hermes（实际用的模型）｜接入：Hermes 派单｜时间」；模型取 Hermes 会话库里
+最近 3 小时内同名定时任务会话用过的主模型（含回退），不是定时任务写的就写「模型查不到」。
 不通过或写入失败：输出 {"ok": false, "error": …}，退出码 1，不重试。成功另存一份到证据目录。
 """
 import datetime as dt
@@ -13,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import report_data as rd  # noqa: E402
+import ai_access  # noqa: E402
 
 EVIDENCE = Path(os.environ.get("DT_REPORT_EVIDENCE", "~/Library/Application Support/DigitalTwin/evidence/reports")).expanduser()
 DAILY_TITLE = re.compile(r"^## 📅 (\d{4}-\d{2}-\d{2})（周([一二三四五六日])）$")
@@ -48,6 +51,14 @@ def check(kind, text):
     return title
 
 
+def with_trace(kind, text):
+    """标题下一行加上「生成：」留痕；放在第一个 ### 之前，不影响 report_data 按段取上一篇。"""
+    title, _, rest = text.partition("\n")
+    models = ai_access.session_models("日报" if kind == "daily" else "周报")
+    who = "、".join(models) if models else "模型查不到：不是这份报告的定时任务写的"
+    return f"{title}\n\n生成：Hermes（{who}）｜接入：Hermes 派单｜{dt.datetime.now():%Y-%m-%d %H:%M}\n{rest}"
+
+
 def main():
     if len(sys.argv) != 3 or sys.argv[1] not in ("daily", "weekly"):
         print(__doc__)
@@ -59,6 +70,7 @@ def main():
         # 项目名粗体行紧跟在列表后面时，飞书会把它并进上一条；前后补空行
         text = re.sub(r"\n+(\*\*[^*\n]+\*\*)\n+", r"\n\n\1\n\n", text)
         title = check(kind, text)
+        text = with_trace(kind, text)
         if title in rd.fetch_doc(doc).splitlines():
             raise ValueError(f"文档里已经有「{title}」，不重写")
         xml = rd.lark("docs", "+fetch", "--doc", doc, "--detail", "with-ids")["document"]["content"]

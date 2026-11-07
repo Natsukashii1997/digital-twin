@@ -93,7 +93,8 @@ SUMMARY_CLIP = 1000        # 回执里的车间总结最多存多少字
 RECEIPT_REQUIRED = ("exit_code", "ended")  # 回执缺这些字段就不能判成功（run_worker 一定会写）
 RECEIPT_KEEP = ("project", "tool", "mode", "cwd", "started", "ended", "exit_code", "timed_out", "worker_error",
                 "session_id", "need_decision", "branch", "head_before", "head_after", "committed_files", "uncommitted",
-                "guard_main_changed", "guard_remote_changed", "note_main_moved", "note_remote_moved", "summary")
+                "guard_main_changed", "guard_remote_changed", "note_main_moved", "note_remote_moved", "summary",
+                "executor", "access", "model", "chosen_by", "refused", "reason")   # 后六项：AI 接入留痕（P-13）
 
 TASK_TRANSITIONS = {
     ("observed", "ready"), ("observed", "blocked"), ("observed", "canceled"),
