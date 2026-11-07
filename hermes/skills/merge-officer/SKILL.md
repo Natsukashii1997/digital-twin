@@ -12,7 +12,7 @@ metadata:
 
 # 合并官：按常浩对卡片的一句话合并或退回 PR
 
-影子合并官每 30 分钟扫一次 PR，给覆盖仓库（`merge_rules.json` 的 `act.repos`，目前是 8 个活跃仓库：digital-twin、agent-kit、my-skills、github-center、trainee-hub、niuma-home、digiworld、postpane）的新 PR 或新提交各发一张「🔀 待你决定 · 仓库#PR@版本」卡片，卡片上写着 Hermes 的建议。常浩引用这张卡片回复时用这个技能。依据：#67、#71，ARCHITECTURE 5.5 的单次 `owner_direct` 授权。
+影子合并官每 30 分钟扫一次 PR，给覆盖仓库（`merge_rules.json` 的 `act.repos`，目前是 7 个仓库：digital-twin、agent-kit、my-skills、github-center、trainee-hub、niuma-home、digiworld；postpane 没有 CI，不走飞书合并）的新 PR 或新提交各发一张「🔀 待你决定 · 仓库#PR@版本」卡片，卡片上写着 Hermes 的建议。常浩引用这张卡片回复时用这个技能。依据：#67、#71、#73，ARCHITECTURE 5.5 的单次 `owner_direct` 授权。
 
 下面用 `M` 代表 `/usr/bin/python3 ~/.hermes/scripts/merge_act.py`。
 
