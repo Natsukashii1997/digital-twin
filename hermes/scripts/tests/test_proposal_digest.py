@@ -110,6 +110,19 @@ class ParseReply(unittest.TestCase):
     def test_same_verb_twice_ok(self):
         self.assertEqual(pd.parse_reply("采纳 1，采纳 1", 2), {1: "采纳"})
 
+    def test_follow_recommendation(self):
+        recs = {1: "采纳", 2: "采纳", 3: "否决"}
+        for text in ("按推荐", "按照你的推荐完成", "都按推荐。", "全部按推荐来"):
+            self.assertEqual(pd.parse_reply(text, 4, recs), recs, text)
+        self.assertEqual(pd.parse_reply("按推荐，2 改否", 4, recs), {1: "采纳", 2: "否决", 3: "否决"})
+        self.assertEqual(pd.parse_reply("按推荐，2号改成延期，采纳 4", 4, recs), {1: "采纳", 2: "待定", 3: "否决", 4: "采纳"})
+        self.assertEqual(pd.parse_reply("按推荐，延期 其余", 4, recs), {1: "采纳", 2: "采纳", 3: "否决", 4: "待定"})
+        with self.assertRaises(pd.ReplyError) as cm:
+            pd.parse_reply("按推荐", 4, {})
+        self.assertIn("没有推荐", str(cm.exception))
+        with self.assertRaises(pd.ReplyError):
+            pd.parse_reply("按推荐，9 改否", 4, recs)
+
 
 class Digest(unittest.TestCase):
     def setUp(self):
@@ -145,15 +158,19 @@ class Digest(unittest.TestCase):
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
 
-    def run_cli(self, *args, now="2026-11-09T10:00:00+08:00", chat=CHAT, lessons="2"):
+    def env(self, now="2026-11-09T10:00:00+08:00", chat=CHAT, lessons="2"):
         t = self.tmp
-        env = {**os.environ, "DT_RETRO_ROOT": str(t / "retro"), "DT_NIUMA_REVIEW": str(t / "niuma"),
+        env = {"DT_RETRO_ROOT": str(t / "retro"), "DT_NIUMA_REVIEW": str(t / "niuma"),
                "DT_LESSONS": str(t / "LESSONS.md"), "AGENT_KIT_STATE_DIR": str(t / "kit"), "DT_ROSTER": str(t / "projects.json"),
                "DT_PROPOSAL_DIR": str(t / "prop"), "DT_SHADOW_DIR": str(self.shadow), "DT_LARK_CLI": str(t / "fake/lark-cli"),
                "FAKE_DIR": str(t / "fake"), "DT_NOW": now, "FEISHU_HOME_CHANNEL": chat}
-        env.pop("DT_LESSONS_MIN_PROJECTS", None)
         if lessons is not None:
             env["DT_LESSONS_MIN_PROJECTS"] = lessons
+        return env
+
+    def run_cli(self, *args, now="2026-11-09T10:00:00+08:00", chat=CHAT, lessons="2"):
+        env = {k: v for k, v in os.environ.items() if k != "DT_LESSONS_MIN_PROJECTS"}
+        env.update(self.env(now, chat, lessons))
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
 
     def calls(self):
@@ -229,6 +246,74 @@ class Digest(unittest.TestCase):
         self.assertNotIn("B1", text)
         self.assertNotIn("W2026-10-30-3", text)
         self.assertIn("W2026-10-23-6", text)
+
+    def recommend(self, data):
+        f = self.tmp / "rec.json"
+        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return str(f)
+
+    def test_draft_for_hermes(self):
+        r = self.run_cli("draft")
+        d = json.loads(r.stdout)
+        self.assertEqual([i["id"] for i in d["items"]][:3], ["A1", "B1", "W2026-10-23-6"])
+        a1 = d["items"][0]
+        self.assertEqual(a1["key"], "retro:2026-10-30_2026-11-06:A1")
+        self.assertIn("- 落点：CLAUDE.md", a1["body"])
+        self.assertIn("本条取代 W2026-10-23-8", d["items"][5]["body"])
+        env_script = SCRIPT.with_name("proposal_digest_draft.py")          # 定时任务用的无参数入口
+        r2 = subprocess.run([sys.executable, "-B", str(env_script)], capture_output=True, text=True,
+                            env={**os.environ, **self.env()}, timeout=60)
+        self.assertEqual(json.loads(r2.stdout), d)
+        self.assertEqual(self.calls(), [])
+        for dd in ("retro", "niuma"):
+            subprocess.run(["rm", "-rf", str(self.tmp / dd)], check=True)
+        self.assertEqual(self.run_cli("draft", lessons=None).stdout, "")
+
+    def test_send_with_recommendation_then_follow(self):
+        keys = json.loads(self.run_cli("draft").stdout)["items"]
+        rec = self.recommend({keys[0]["key"]: {"verdict": "采纳", "why": "4 个会话 3 个项目都踩过"},
+                              keys[1]["key"]: {"verdict": "否", "why": "工具层小坑，成本低"},
+                              keys[5]["key"]: {"verdict": "延期", "why": "等 -1 先定"}})
+        r = self.run_cli("send", "--recommend", rec)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        card = json.loads(self.calls()[0][self.calls()[0].index("--content") + 1])
+        text = card["body"]["elements"][0]["content"]
+        self.assertIn("1. A1 给参考物时只借鉴点名的维度 · 部分已有 · 多次 / 跨会话\n　→ 推荐**采纳**：4 个会话 3 个项目都踩过", text)
+        self.assertIn("　→ 推荐**否**：工具层小坑，成本低", text)
+        self.assertIn("直接回「按推荐」", text)
+        self.assertIn("长按这张卡片选「回复」", text)
+        items = json.loads(self.state.read_text())["issues"][0]["items"]
+        self.assertEqual([i.get("rec") for i in items[:2]], ["采纳", "否决"])
+        self.assertTrue(all("body" not in i for i in items))
+        self.assertIn("→ 推荐采纳：4 个会话", self.run_cli("list").stdout)
+
+        r = self.run_cli("apply", "按照你的推荐完成")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("已记下第 1 期：采纳 1（A1）；否 2（B1）；延期 6（W2026-10-30-3）。", r.stdout)
+        self.assertIn("没提到的 4 条下周一再列：3、4、5、7", r.stdout)
+        self.assertIn("- 结论：采纳（", self.retro.read_text(encoding="utf-8"))
+        self.assertTrue(self.decisions.read_text(encoding="utf-8").rstrip().endswith("- W2026-10-23-8　待定　2026-11-09　随 W2026-10-30-3（已被它取代）"))
+        self.assertIn("已回复 1 次，最近一次：按照你的推荐完成", self.run_cli("list").stdout)
+
+    def test_bad_recommend_file_sends_nothing(self):
+        keys = json.loads(self.run_cli("draft").stdout)["items"]
+        bad = [{"retro:不存在:A9": {"verdict": "采纳", "why": "x"}},
+               {keys[0]["key"]: {"verdict": "好", "why": "x"}},
+               {keys[0]["key"]: {"verdict": "采纳"}}, ["不是对象"]]
+        for data in bad:
+            r = self.run_cli("send", "--recommend", self.recommend(data))
+            self.assertEqual(r.returncode, 1, data)
+            self.assertIn("推荐文件不对", r.stdout)
+        r = self.run_cli("send", "--recommend", str(self.tmp / "没有.json"))
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.state.exists())
+
+    def test_follow_without_recommendation_rejected(self):
+        self.run_cli("send")
+        r = self.run_cli("apply", "按推荐")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("没有推荐", r.stdout)
 
     def test_bad_reply_writes_nothing(self):
         self.run_cli("send")

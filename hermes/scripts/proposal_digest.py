@@ -12,11 +12,14 @@
 
 用法：
   proposal_digest.py [send] [--dry-run] [--force] 汇总并发卡片（不带子命令就是 send，定时任务每周一这样跑；没有待决提案或本期已发时不输出）
-  proposal_digest.py list                         打印最近一期的编号（Hermes 技能核对用）
+  proposal_digest.py draft                        打印本期待决提案和原文摘录（JSON），给 Hermes 写推荐
+  proposal_digest.py send --recommend 推荐.json    卡片每条带上 Hermes 的推荐（{提案 key: {verdict, why}}），常浩可回「按推荐」
+  proposal_digest.py list                         打印最近一期的编号、推荐和回复次数（Hermes 技能核对用）
   proposal_digest.py apply "采纳 1 3，否 2，延期 其余" [--dry-run]   写回结论（只在常浩本人私聊回复后由 Hermes 调用）
 
 回复的写法（脚本只认这一种，Hermes 技能先把常浩的话整理成这样）：动词后跟编号，动词有 采纳 / 否（否决）/ 延期（待定）；
 编号用空格、逗号或顿号隔开，可写范围「4-6」，「其余」指这一期还没点到的全部编号。
+以「按推荐」开头表示先全部照卡片上的推荐，后面写的覆盖推荐，如「按推荐，2 改否」；没推荐的编号保持待决。
 
 环境变量：DT_RETRO_ROOT、DT_NIUMA_REVIEW、DT_LESSONS、AGENT_KIT_STATE_DIR（读 lessons-hits.jsonl）、DT_ROSTER、
 DT_PROPOSAL_DIR（期号状态）、DT_SHADOW_DIR（lessons-decisions.md）、FEISHU_HOME_CHANNEL（私聊 chat_id）、
@@ -117,12 +120,14 @@ def collect_retro():
             if m and section_ok:
                 cur = {"key": f"retro:{run}:{m.group(1)}", "source": "retro", "group": f"会话复盘（{run.replace('_', ' 至 ')}）",
                        "id": m.group(1), "title": short(m.group(2)) + (f" · {m.group(3)}" if m.group(3) else ""),
-                       "date": day, "file": str(f), "decided": False}
+                       "date": day, "file": str(f), "decided": False, "body": [line]}
                 items.append(cur)
             elif line.startswith("#"):
                 cur = None
             elif cur and line.startswith("- 结论："):
                 cur["decided"] = line[len("- 结论："):].startswith((ADOPT, REJECT))   # 延期的下周再列
+            elif cur:
+                cur["body"].append(line)
     return [i for i in items if not i["decided"]]
 
 
@@ -144,16 +149,18 @@ def collect_niuma():
         m = NIUMA_HEAD.match(line)
         if m:
             cur = {"key": f"niuma:{m.group(1)}", "source": "niuma", "group": f"牛马之家每周整理（{latest.stem}）",
-                   "id": m.group(1), "title": "", "date": m.group(1)[1:11], "file": str(NIUMA / "decisions.md")}
+                   "id": m.group(1), "title": "", "date": m.group(1)[1:11], "file": str(NIUMA / "decisions.md"),
+                   "body": [line]}
             items.append(cur)
             continue
         m = NIUMA_OPEN.match(line)
         if m and "上次未决" in section:
             items.append({"key": f"niuma:{m.group(1)}", "source": "niuma", "group": "牛马之家上次未决",
                           "id": m.group(1), "title": short(m.group(2)), "date": m.group(1)[1:11],
-                          "file": str(NIUMA / "decisions.md")})
+                          "file": str(NIUMA / "decisions.md"), "body": [line]})
             continue
         if cur:
+            cur["body"].append(line)
             if not cur["title"] and line.startswith("- **建议**："):
                 cur["title"] = short(line.split("：", 1)[1])
             for old in SUPERSEDE.findall(line):
@@ -211,7 +218,8 @@ def collect_lessons(now):
             continue
         out.append({"key": f"lessons:{gid}", "source": "lessons", "group": "LESSONS 升级候选（hook 命中，不等于真出过事）",
                     "id": gid, "title": short(info["title"]) + f"（{len(projects)} 个项目：{'、'.join(sorted(projects))}）",
-                    "date": now.date().isoformat(), "file": str(LESSONS_LEDGER)})
+                    "date": now.date().isoformat(), "file": str(LESSONS_LEDGER),
+                    "body": [f"## {gid} {info['title']}", f"近 7 天被 hook 碰到的名册项目：{'、'.join(sorted(projects))}"]})
     return out
 
 
@@ -241,7 +249,13 @@ def build_card(issue_no, items, now):
             group = i["group"]
             lines += ["", f"**{group}**"]
         lines.append(f"{i['n']}. {'⏰ ' if overdue(i, now) else ''}{i['id']} {i['title']}")
-    lines += ["", "回复写法：**采纳 1 3，否 2，延期 4**（可写范围 4-6、「其余」）。没提到的编号下周一再列；采纳只记结论，落地另开单。"]
+        if i.get("rec"):
+            lines.append(f"　→ 推荐**{verb_label(i['rec'])}**：{i.get('why', '')}")
+    if any(i.get("rec") for i in items):
+        lines += ["", "**直接回「按推荐」**就全部照推荐记；要改个别的：「按推荐，2 改否」；也可以逐条：「采纳 1 3，否 2，延期 其余」。"]
+    else:
+        lines += ["", "回复写法：**采纳 1 3，否 2，延期 4**（可写范围 4-6、「其余」）。"]
+    lines.append("请长按这张卡片选「回复」，Hermes 才知道你在回哪一期。没提到的编号下周一再列；采纳只记结论，落地另开单。")
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text", "content": f"📮 待决提案 · 第 {issue_no} 期（{now:%m/%d}）"},
                        "template": "blue"},
@@ -269,10 +283,35 @@ TOKEN = re.compile(r"(?P<verb>" + "|".join(v for v, _ in VERBS) + r")|(?P<a>\d+)
                    r"|(?P<num>\d+)|(?P<rest>其余|其他|剩下的|剩下)|(?P<sep>[\s,，、;；。.第号条]+)")
 
 
-def parse_reply(text, total):
-    """「采纳 1 3，否 2，延期 其余」→ {1: 采纳, 3: 采纳, 2: 否决, ...}。看不懂或编号不对抛 ReplyError。"""
-    verb, out, pos, rest_verb, verb_used = None, {}, 0, None, True
+FOLLOW = re.compile(r"^\s*(?:全部|都|全)?\s*按照?\s*(?:你的|你)?\s*推荐\s*(?:完成|执行|来|办|记)?")
+CHANGE = re.compile(r"(\d+)\s*(?:号|条)?\s*改(?:成|为)?\s*(" + "|".join(v for v, _ in VERBS) + ")")
+
+
+def parse_reply(text, total, recs=None):
+    """「采纳 1 3，否 2，延期 其余」→ {1: 采纳, 3: 采纳, 2: 否决, ...}。看不懂或编号不对抛 ReplyError。
+    以「按推荐」开头时先套用 recs（{编号: 结论}），后面写的编号覆盖推荐，如「按推荐，2 改否」。"""
     text = (text or "").strip()
+    base = {}
+    m = FOLLOW.match(text)
+    if m:
+        if not recs:
+            raise ReplyError("这一期卡片上没有推荐，请按编号回复")
+        base, text = dict(recs), text[m.end():]
+        text = CHANGE.sub(r"\2 \1", text)
+        if not re.sub(r"[\s,，、;；。.!！]+", "", text):
+            return base
+    out, rest_verb = _parse_numbers(text, total)
+    merged = {**base, **out}
+    if rest_verb:
+        for n in range(1, total + 1):
+            merged.setdefault(n, rest_verb)
+    if not merged:
+        raise ReplyError("没写任何编号")
+    return merged
+
+
+def _parse_numbers(text, total):
+    verb, out, pos, rest_verb, verb_used = None, {}, 0, None, True
 
     def put(n, v):
         if not 1 <= n <= total:
@@ -310,11 +349,30 @@ def parse_reply(text, total):
                 put(n, verb)
     if verb is not None and not verb_used:
         raise ReplyError(f"「{verb_label(verb)}」后面没写编号")
-    if rest_verb:
-        for n in range(1, total + 1):
-            out.setdefault(n, rest_verb)
-    if not out:
-        raise ReplyError("没写任何编号")
+    return out, rest_verb
+
+
+def load_recommend(path, items):
+    """推荐文件：{提案 key: {"verdict": 采纳/否/延期, "why": 一句理由}}。返回带上 rec/why 的 items；格式不对抛 ValueError。"""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("推荐文件不是 JSON 对象")
+    words = {**dict(VERBS), "延期": DEFER}
+    keys = {i["key"] for i in items}
+    unknown = sorted(k for k in data if k not in keys)
+    if unknown:
+        raise ValueError("推荐里有本期没有的提案：" + "、".join(unknown[:3]))
+    out = []
+    for i in items:
+        r = data.get(i["key"])
+        if r is None:
+            out.append(i)
+            continue
+        v = words.get(str(r.get("verdict", "")).strip()) if isinstance(r, dict) else None
+        why = str(r.get("why", "")).strip() if isinstance(r, dict) else ""
+        if v is None or not why:
+            raise ValueError(f"{i['key']} 的推荐要有 verdict（采纳 / 否 / 延期）和 why")
+        out.append({**i, "rec": v, "why": why[:60]})
     return out
 
 
@@ -356,7 +414,20 @@ def write_item(item, verdict, day, note):
 
 # ---------- 命令 ----------
 
-def cmd_send(dry_run=False, force=False):
+def cmd_draft():
+    """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）的 JSON；没有待决提案时不输出。"""
+    now = today()
+    items = number(collect(now))
+    if not items:
+        return 0
+    print(json.dumps({"date": now.date().isoformat(), "items": [
+        {"n": i["n"], "key": i["key"], "group": i["group"], "id": i["id"], "title": i["title"],
+         "overdue": overdue(i, now), "body": "\n".join(i.get("body") or [])[:1500]} for i in items]},
+        ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_send(dry_run=False, force=False, recommend=None):
     now = today()
     state = read_state()
     day = now.date().isoformat()
@@ -368,6 +439,13 @@ def cmd_send(dry_run=False, force=False):
         if dry_run:
             print("没有待决提案，这周不发。")
         return 0
+    if recommend:
+        try:
+            items = load_recommend(recommend, items)
+        except (OSError, ValueError) as e:
+            print(f"待决提案没发出：推荐文件不对（{e}）。")
+            return 1
+    items = [{k: v for k, v in i.items() if k != "body"} for i in items]
     no = issues[-1]["no"] if issues and issues[-1]["date"] == day else len(issues) + 1
     card = build_card(no, items, now)
     if dry_run:
@@ -408,7 +486,10 @@ def cmd_list():
         return 1
     print(f"第 {issue['no']} 期（{issue['date']}），共 {len(issue['items'])} 条：")
     for i in issue["items"]:
-        print(f"{i['n']}. [{i['source']}] {i['id']} {i['title']}")
+        print(f"{i['n']}. [{i['source']}] {i['id']} {i['title']}"
+              + (f"  → 推荐{verb_label(i['rec'])}：{i.get('why', '')}" if i.get("rec") else ""))
+    answers = issue.get("answers") or []
+    print(f"已回复 {len(answers)} 次" + (f"，最近一次：{answers[-1]['reply']}" if answers else "") + "。")
     return 0
 
 
@@ -421,7 +502,7 @@ def cmd_apply(reply, dry_run=False):
     issue = issues[-1]
     items = {i["n"]: i for i in issue["items"]}
     try:
-        picks = parse_reply(reply, len(items))
+        picks = parse_reply(reply, len(items), {n: i["rec"] for n, i in items.items() if i.get("rec")})
     except ReplyError as e:
         print(f"没记下：{e}。一条都没写，请按「采纳 1 3，否 2」重说。")
         return 1
@@ -463,6 +544,8 @@ def main(argv=None):
     s = sub.add_parser("send")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--recommend", help="Hermes 写的推荐文件（JSON）")
+    sub.add_parser("draft")
     sub.add_parser("list")
     p = sub.add_parser("apply")
     p.add_argument("reply")
@@ -470,7 +553,9 @@ def main(argv=None):
     a = a.parse_args(argv)
     try:
         if a.cmd in (None, "send"):
-            return cmd_send(a.dry_run, a.force)
+            return cmd_send(a.dry_run, a.force, getattr(a, "recommend", None))
+        if a.cmd == "draft":
+            return cmd_draft()
         if a.cmd == "list":
             return cmd_list()
         return cmd_apply(a.reply, a.dry_run)
