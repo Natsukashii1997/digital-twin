@@ -24,6 +24,8 @@ spec.loader.exec_module(sc)
 SOURCES = {
     "hermes/scripts/a.py": "hermes/scripts/a.py",
     "hermes/scripts/notes.md": None,
+    "hermes/scripts/rules.json": "hermes/scripts/rules.json",
+    "hermes/scripts/tests/fixture.json": None,
     "hermes/scripts/assets/banner.png": "hermes/scripts/assets/banner.png",
     "hermes/scripts/tests/test_a.py": None,
     "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
@@ -100,6 +102,14 @@ class ScriptTest(unittest.TestCase):
     def test_script_assets_checked(self):
         (self.home / "hermes/scripts/assets/banner.png").unlink()
         self.assertIn("- ~/hermes/scripts/assets/banner.png 缺失（源：hermes/scripts/assets/banner.png）", self.run_script())
+
+    def test_script_rules_json_checked(self):
+        self.write(self.home / "hermes/scripts/rules.json", "装的是旧规则\n")
+        out = self.run_script()
+        self.assertIn("- ~/hermes/scripts/rules.json 和 hermes/scripts/rules.json 内容不同", out)
+        self.assertNotIn("fixture.json", out)                     # tests/ 下的 json 不安装、不比对
+        (self.home / "hermes/scripts/rules.json").unlink()
+        self.assertIn("- ~/hermes/scripts/rules.json 缺失（源：hermes/scripts/rules.json）", self.run_script())
 
     def test_check_repos_checked_in_both_install_places(self):
         (self.home / "hermes/scripts/check_repos.py").unlink()
