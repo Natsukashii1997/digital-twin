@@ -6,7 +6,10 @@
   multica_night.py plan PLAN.json                     建父单和子单（子单停在 backlog），记为当前夜跑
   multica_night.py start --approved-by 常浩 [--hours 4] [--max-runs 20]
                                                       开跑前核对，记下授权，把第 1 个 stage 移出 backlog
-  multica_night.py tick                               Hermes 无模型定时任务每 5 分钟调一次：对账、导出、查上限、推进或停机
+  multica_night.py approve --by Hermes --start-at 2026-11-08T22:00 [--hours 4] [--max-runs 20]
+                                                      记下“几点开跑”的批准，到点由 tick 执行 start（过了 30 分钟还没开就不开）
+  multica_night.py tick                               Hermes 无模型定时任务每 5 分钟调一次（经 multica_night_tick.py，定时任务不能带参数）：
+                                                      到点开跑；对账、导出、查上限、推进或停机
   multica_night.py stop --reason 文字                 人工停机（撤销授权），步骤同自动停机
   multica_night.py status                             打印当前夜跑的状态
   multica_night.py report                             早上的摘要：时长、做了什么、出错和处理、GitHub 越界核对、待常浩定的事
@@ -620,10 +623,52 @@ def guard_frozen(night):
     return ""
 
 
+START_WINDOW = dt.timedelta(minutes=30)   # 定时开跑：过了批准的时刻这么久还没开（比如电脑睡了），就不开
+
+
+def cmd_approve(night, by, start_at, hours, max_runs):
+    """记下“几点开跑”的批准，到点由 tick 开跑（定时任务不能带参数，也不在会话里干等，G-12）。"""
+    if night.state.get("auth"):
+        print("这次夜跑已经开跑过。")
+        return 1
+    t = dt.datetime.fromisoformat(start_at)
+    t = t if t.tzinfo else t.replace(tzinfo=BJ)
+    night.state["approval"] = {"by": by, "start_at": iso(t), "hours": hours, "max_runs": max_runs, "at": iso(now())}
+    night.save()
+    night.log("approve", by=by, start_at=iso(t), hours=hours, max_runs=max_runs)
+    print(f"已记下：{by} 批准夜跑 {night.id} 在 {bj(t)} 开跑（过了 {bj(t + START_WINDOW)} 还没开就不开）。")
+    return 0
+
+
+def scheduled_start(night, t):
+    ap = night.state.get("approval")
+    if not ap or ap.get("result"):
+        return 0, ""
+    at_ = parse(ap["start_at"])
+    if t < at_:
+        return 0, ""
+    if t - at_ > START_WINDOW:
+        ap["result"] = "missed"
+        night.save()
+        night.log("start_missed", start_at=ap["start_at"])
+        return 1, f"夜跑 {night.id} 没开跑：批准在 {bj(at_)} 开跑，主控 {bj(t)} 才检查到，已过开跑窗口。"
+    ap["result"] = "started"     # 先记账：start 本身失败也不每 5 分钟重来一次
+    night.save()
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = cmd_start(night, ap["by"], ap.get("hours"), ap.get("max_runs"))
+    if code:
+        ap["result"] = "refused"
+        night.save()
+    return code, buf.getvalue().strip()
+
+
 def cmd_tick(night):
     st, t = night.state, now()
     if not st.get("auth"):
-        return 0, ""
+        return scheduled_start(night, t)
     if st.get("frozen"):
         try:
             return 0, guard_frozen(night)
@@ -759,6 +804,11 @@ def main(argv=None):
     s.add_argument("--approved-by", required=True)
     s.add_argument("--hours", type=float)
     s.add_argument("--max-runs", type=int)
+    ap = sub.add_parser("approve")
+    ap.add_argument("--by", required=True)
+    ap.add_argument("--start-at", required=True, help="开跑时刻，ISO 格式；不写时区按北京时间")
+    ap.add_argument("--hours", type=float)
+    ap.add_argument("--max-runs", type=int)
     sub.add_parser("tick")
     x = sub.add_parser("stop")
     x.add_argument("--reason", required=True)
@@ -766,7 +816,7 @@ def main(argv=None):
     sub.add_parser("report")
     r = sub.add_parser("release")
     r.add_argument("--by", required=True)
-    for q in (s, x, r, sub.choices["tick"], sub.choices["status"], sub.choices["report"]):
+    for q in (s, ap, x, r, sub.choices["tick"], sub.choices["status"], sub.choices["report"]):
         q.add_argument("--night", help="夜跑 id；默认当前夜跑")
     a = a.parse_args(argv)
     if a.cmd == "plan":
@@ -803,6 +853,8 @@ def main(argv=None):
         return code
     if a.cmd == "start":
         return cmd_start(night, a.approved_by, a.hours, a.max_runs)
+    if a.cmd == "approve":
+        return cmd_approve(night, a.by, a.start_at, a.hours, a.max_runs)
     if a.cmd == "stop":
         if not night.state.get("auth") or night.state.get("outcome"):
             print("夜跑没在进行，不用停。")

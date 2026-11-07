@@ -398,6 +398,45 @@ class MulticaNight(unittest.TestCase):
         self.assertFalse((self.root / "night-current").exists())
         self.assertEqual(self.run_cli("tick", now=at(305)), (0, ""))
 
+    # ---- 定时开跑 ----
+    def approved(self, start_at="2026-11-08T22:00:00+08:00"):
+        self.assertEqual(self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")[0], 0)
+        code, out = self.run_cli("approve", "--by", "Hermes（常浩委托）", "--start-at", start_at, "--hours", "3",
+                                 now="2026-11-08T13:30:00Z")
+        self.assertEqual(code, 0, out)
+        self.assertIn("11-08 22:00", out)
+
+    def test_approved_night_starts_on_time_via_tick_wrapper(self):
+        self.approved()
+        self.assertEqual(self.run_cli("tick", now="2026-11-08T13:55:00Z"), (0, ""), "没到点：不出声、不动")
+        self.assertEqual(self.issue("A")["status"], "backlog")
+        self.edit(lambda w: w.update(now=at(2)))
+        r = subprocess.run([sys.executable, "-B", str(HERE.parent / "multica_night_tick.py")], capture_output=True,
+                           text=True, env={**self.env, "DT_NOW": at(2)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("已开跑", r.stdout)
+        self.assertEqual(self.state()["auth"]["limits"]["hours"], 3)
+        self.assertEqual(self.state()["auth"]["approved_by"], "Hermes（常浩委托）")
+        self.assertEqual(self.issue("A")["status"], "todo")
+        self.assertEqual(self.run_cli("tick", now=at(7)), (0, ""))
+
+    def test_missed_start_window_does_not_start(self):
+        self.approved()
+        code, out = self.run_cli("tick", now=at(45))
+        self.assertEqual(code, 1)
+        self.assertIn("已过开跑窗口", out)
+        self.assertEqual(self.issue("A")["status"], "backlog")
+        self.assertEqual(self.run_cli("tick", now=at(50)), (0, ""), "只说一次")
+
+    def test_scheduled_start_refused_by_preflight_says_once(self):
+        self.approved()
+        self.edit(lambda w: w["issues"][self.ident("B")].update(status="todo"))
+        code, out = self.run_cli("tick", now=at(1))
+        self.assertEqual(code, 1)
+        self.assertIn("开跑前核对没通过", out)
+        self.assertEqual(self.run_cli("tick", now=at(6)), (0, ""))
+        self.assertNotIn("auth", self.state())
+
     # ---- 其他 ----
     def test_tick_gap_is_noted(self):
         self.started()

@@ -140,4 +140,4 @@ ChatGPT 2026-10-29 评审 F1 / F2 与返修终审 P0 的负向用例，18 项。
 
 ## Multica 夜跑主控（test_multica_night.py，#92）
 
-28 项。假 multica（`fake_multica.py`）用一个 JSON 世界模拟 issue、run、消息、Wakeup、Autopilot，假 gh 回分支和 PR；每次调用主控都是新进程，计数只能从夜跑目录的 `state.json` 恢复。不联网、不碰真实 Multica、执行器容器和 `~/Library`。覆盖：建单（父单指派成员、子单 backlog、跨 stage 引用、幂等、每条命令都带沙盒工作区）、计划校验、开跑前核对（含名册 `sandbox: true` 门禁）、按 stage 推进与全部交付、run 还在跑时不推进、各停机条件（时长、run 总数、连续失败跨进程累计、blocked、停滞、run 不见了、消息序号缺口、家族外 issue 被改、未授权 Wakeup / Autopilot、脚本自身异常）、停机时只在父单留言且子单用 `--no-start`、waiting_local_directory 的 run 被取消、取消不掉就冻结、冻结后容器重启也不续跑、release、检查间隔异常、report 的 GitHub 越界核对。
+31 项。假 multica（`fake_multica.py`）用一个 JSON 世界模拟 issue、run、消息、Wakeup、Autopilot，假 gh 回分支和 PR；每次调用主控都是新进程，计数只能从夜跑目录的 `state.json` 恢复。不联网、不碰真实 Multica、执行器容器和 `~/Library`。覆盖：建单（父单指派成员、子单 backlog、跨 stage 引用、幂等、每条命令都带沙盒工作区）、计划校验、开跑前核对（含名册 `sandbox: true` 门禁）、按 stage 推进与全部交付、run 还在跑时不推进、各停机条件（时长、run 总数、连续失败跨进程累计、blocked、停滞、run 不见了、消息序号缺口、家族外 issue 被改、未授权 Wakeup / Autopilot、脚本自身异常）、停机时只在父单留言且子单用 `--no-start`、waiting_local_directory 的 run 被取消、取消不掉就冻结、冻结后容器重启也不续跑、定时开跑（到点由 tick 开跑、过窗口不开、核对不过只说一次）、release、检查间隔异常、report 的 GitHub 越界核对。
