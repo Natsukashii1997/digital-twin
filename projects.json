@@ -1,6 +1,6 @@
 {
-  "version": "v1 · 2026-10-26",
-  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起 5 个活跃项目都有私有远端，默认分支 main，只允许 squash 合并。",
+  "version": "v1.1 · 2026-11-07",
+  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。",
   "projects": [
     {
       "id": "work-desk",
@@ -42,6 +42,27 @@
       "notes": "PRD 决定已收缩为看板和资产库，调度、接力、提醒类功能不再做。",
       "category": "活跃",
       "github": "Natsukashii1997/digiworld"
+    },
+    {
+      "id": "trainee-hub",
+      "name": "管培生工作台",
+      "aliases": [
+        "管培生工作台",
+        "trainee-hub",
+        "团队工作台",
+        "aibp-desk",
+        "AIBP Desk"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/trainee-hub",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "2026-11-06 起步，需求见 docs/PRD.md。2026-11-07 常浩定：aibp-desk（AI 通识培训课件、行业调研）并入本项目「我的」板块，资料在 materials/aibp/；旧项目「管培生带教-AI协同」「营销战役AI协同MVP」「营销战役卡片网关」是本项目的一部分，实质内容提取在 docs/research/来源项目/，原项目删除（trainee-hub #30）。",
+      "category": "活跃",
+      "github": "Natsukashii1997/trainee-hub"
     },
     {
       "id": "agent-kit",
@@ -139,6 +160,26 @@
       "notes": "出海项目（ATV/UTV 汽配，首批美国 B2B）。2026-10-27 开通，只有本地仓库、没有远端；原 carvomoto-leads 并入 leads/，客户名单与令牌不进仓库。协作骨架待 project-starter 补。",
       "category": "活跃",
       "github": null
+    },
+    {
+      "id": "postpane",
+      "name": "驿窗 PostPane",
+      "aliases": [
+        "驿窗",
+        "PostPane",
+        "postpane",
+        "Agent HUD"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/postpane",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "pnpm test",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "源自 Agent HUD 917df21，不与上游同步。打包只用 --bundles app；安装前先退出旧应用再 ditto 到 /Applications。",
+      "category": "活跃",
+      "github": "Natsukashii1997/postpane"
     }
   ],
   "categories": {
@@ -146,14 +187,14 @@
     "只登记": "原地不动，不在 M3 处理；todo 写由谁定",
     "沙盒": "第三方克隆、探针；已移到 ~/Sandbox/，每月 1 号巡检提醒超过 30 天的",
     "拆外壳": "空仓库或套着别的仓库的外层仓库；.git 已移到 ~/Archive/repos/拆外壳/，文件原地保留",
-    "待删": "空目录；已移到 ~/Archive/repos/待删/，真正删除由常浩动手",
+    "待删": "空目录或常浩定删除的项目；已移到 ~/Archive/repos/待删/（移入记录.tsv），真正删除由常浩动手；github: 开头的是只在 GitHub 上的仓库",
     "常浩自删": "营销战役相关，常浩整体删除，本计划不处理"
   },
   "inventory": [
     {
       "path": "~/Documents/ChatGPT/个人/work/get-index",
       "category": "只登记",
-      "todo": "M4 定",
+      "todo": "常浩 11-07 定：保留",
       "why": "GET NOTES 索引工具，09-16 后没动；和 C3 消化流程相关"
     },
     {
@@ -169,10 +210,10 @@
       "why": "正式知识库，含受限内容，不推 GitHub"
     },
     {
-      "path": "~/Documents/Obsidian Second Brain",
-      "category": "只登记",
-      "todo": "M4 已定：停用，整目录移到 ~/Archive/（M4 执行）",
-      "why": "知识库搭建项目，10-09 建、没有提交，基于已停用的 wiki.py 门禁"
+      "path": "~/Archive/repos/待删/Obsidian Second Brain",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "知识库搭建项目，10-09 建、没有提交，基于已停用的 wiki.py 门禁；M4 已定停用"
     },
     {
       "path": "~/Documents/AI 项目",
@@ -181,40 +222,40 @@
       "why": "外层仓库没有提交，里面套着 5 个仓库"
     },
     {
-      "path": "~/Documents/AI 项目/outputs/管培生带教-AI协同",
-      "category": "只登记",
-      "todo": "M5",
-      "why": "launchd ai.trainee-collab.worker.codex 在用；M5 迁飞书身份时定"
+      "path": "~/Archive/repos/待删/管培生带教-AI协同",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；实质内容已提取到 trainee-hub docs/research/来源项目/（#30）",
+      "why": "管培生带教飞书机器人；launchd ai.trainee-collab.worker.codex、ai.automation-health.codex 原来指向这里，ai.lark-channel-bridge.bot.codex 也从这里启动；11-07 服务已停，plist 移到 ~/Archive/repos/待删/_launchd/"
     },
     {
-      "path": "~/Documents/AI 项目/outputs/公司战略系统/robot-cards",
-      "category": "只登记",
-      "todo": "M5",
-      "why": "launchd ai.strategy-cards.worker.codex 指向这里；M5 定"
+      "path": "~/Archive/repos/待删/公司战略系统",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "公司战略系统（含 robot-cards 卡片机器人），9-07 后停；常浩 11-07 定删除。launchd ai.strategy-cards.worker.codex 没在加载，plist 一并移到 _launchd/"
     },
     {
       "path": "~/Documents/AI 项目/baby-care-workbench",
       "category": "只登记",
       "todo": "常浩定",
-      "why": "Little Steps，10-24 还有提交；GitHub 上的 little-steps-private 可能是它的远端"
+      "why": "Little Steps 育儿记录 PWA 与微信小程序体验版，10-24 还有提交；源码只在本地。GitHub 上的 little-steps-private 是打包后的网页成品，不是源码"
     },
     {
-      "path": "~/Documents/AI 项目/营销战役AI协同MVP",
-      "category": "常浩自删",
-      "todo": "—",
-      "why": "营销战役项目，launchd 还在用"
+      "path": "~/Archive/repos/待删/营销战役AI协同MVP",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；实质内容已提取到 trainee-hub docs/research/来源项目/（#30）",
+      "why": "营销战役飞书协同闭环；ai.lark-channel-bridge.bot.codex 和 cn.lumiedu.marketing-campaign-* 四个 launchd 任务原来指向这里；11-07 服务已停，plist 移到 ~/Archive/repos/待删/_launchd/"
     },
     {
-      "path": "~/Documents/AI 项目/marketing-campaign-card-gateway",
-      "category": "常浩自删",
-      "todo": "—",
-      "why": "营销战役卡片网关，远端在飞书妙搭"
+      "path": "~/Archive/repos/待删/marketing-campaign-card-gateway",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；实质内容已提取到 trainee-hub docs/research/来源项目/（#30）",
+      "why": "营销战役卡片网关，远端在飞书妙搭；11-07 服务已停，plist 移到 ~/Archive/repos/待删/_launchd/（妙搭上的远端应用要常浩自己在妙搭里处理）"
     },
     {
       "path": "~/Documents/ChatGPT/Fmode/lumi-sales-sidebar",
       "category": "只登记",
-      "todo": "—",
-      "why": "远端在 git.fmode.cn，保留（M3-Q4）"
+      "todo": "常浩 11-07：半成品，回头再整理（要提醒常浩）",
+      "why": "LUMI 学员助手，企业微信学员信息侧边栏；远端在 git.fmode.cn，已上线 Fmode，10-12 后停"
     },
     {
       "path": "~/Documents/ChatGPT/Fmode/销售案例库",
@@ -223,16 +264,10 @@
       "why": "远端在 git.fmode.cn，保留（M3-Q4）"
     },
     {
-      "path": "~/Documents/ChatGPT/Fmode/用户案例库",
-      "category": "只登记",
-      "todo": "—",
-      "why": "Fmode 项目，没有远端"
-    },
-    {
-      "path": "~/Documents/ChatGPT/Fmode/用户案例库/docs/share-site",
-      "category": "只登记",
-      "todo": "—",
-      "why": "Fmode 用户案例库的分享站点，跟着它走"
+      "path": "~/Archive/repos/待删/Fmode-用户案例库",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "Fmode 用户案例库，只铺了契约文档；常浩 11-07 定删除"
     },
     {
       "path": "~/Documents/AI实验室 2",
@@ -401,6 +436,102 @@
       "todo": "已移（M3 批 2）",
       "why": "第三方克隆 multica-ai/multica",
       "from": "~/Documents/Codex/2026-10-16/https-github-com-multica-ai-multica/work/multica-source"
+    },
+    {
+      "path": "~/Archive/repos/待删/ops-desk",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "业务管理工作台，只有需求文档和设计稿，没有 git；常浩 11-07：不是自己的项目，删除"
+    },
+    {
+      "path": "~/Archive/repos/待删/knowledge-base",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "原 ~/knowledge-base，LLM Wiki 知识库实验，已被 Obsidian Vault 取代"
+    },
+    {
+      "path": "~/Archive/repos/待删/brain",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "原 ~/brain，GBrain 管理的个人知识库实验"
+    },
+    {
+      "path": "~/Archive/repos/待删/Claudecode-项目推进系统",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "原 ~/Claudecode-项目推进系统，路觅项目推进系统前后端，没有 git，10-16 后没动"
+    },
+    {
+      "path": "~/Archive/repos/待删/ai-studio-feishu-integration",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "原 ~/ai-studio-feishu-integration，AI Studio 应用接飞书（OpenClaw 时期）"
+    },
+    {
+      "path": "~/Archive/repos/待删/csv-amount-sorter",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
+      "why": "原 ~/csv-amount-sorter，CSV 按金额排序的小工具"
+    },
+    {
+      "path": "~/Documents/ChatGPT/个人/work/aibp-desk",
+      "category": "待删",
+      "todo": "常浩 11-07 定：并入 trainee-hub（materials/aibp/，#30）；GitHub 仓库归档，本地移到 ~/Archive/repos/待删/",
+      "why": "AIBP 培训课件与行业调研，Natsukashii1997/aibp-desk"
+    },
+    {
+      "path": "~/Documents/ChatGPT/个人/work/chatgpt-clipper",
+      "category": "只登记",
+      "todo": "是否转为活跃（可派单）由常浩定",
+      "why": "ChatGPT / Claude 回答收藏器，Chrome MV3 插件，存长图 + HTML + Markdown 进 Obsidian；有 AGENTS，测试 node --test tests/*.test.mjs；只在本地、没有远端"
+    },
+    {
+      "path": "~/Documents/ChatGPT/个人/work/disk-slim",
+      "category": "只登记",
+      "todo": "是否转为活跃（可派单）由常浩定",
+      "why": "磁盘瘦身，macOS 菜单栏工具，已挂进驿窗侧栏；有 AGENTS，测试 scripts/test.sh；只在本地、没有远端；feat/postpane-pendant 还没合回 main"
+    },
+    {
+      "path": "github:Natsukashii1997/my-app-lumist",
+      "category": "待删",
+      "todo": "11-07 已归档，删除由常浩动手",
+      "why": "AI Studio 生成的应用，5 月后没动；常浩 11-07 定删除"
+    },
+    {
+      "path": "github:Natsukashii1997/digital-twin-old-to-delete",
+      "category": "待删",
+      "todo": "删除由常浩动手",
+      "why": "数字分身旧仓库"
+    },
+    {
+      "path": "github:Natsukashii1997/digital-twin-old-to-delete-2",
+      "category": "待删",
+      "todo": "删除由常浩动手",
+      "why": "数字分身旧仓库"
+    },
+    {
+      "path": "github:Natsukashii1997/orca-chatgpt-sandbox-20261030",
+      "category": "沙盒",
+      "todo": "删除由常浩定",
+      "why": "一次性自动化测试仓库"
+    },
+    {
+      "path": "github:Natsukashii1997/hud-dock",
+      "category": "只登记",
+      "todo": "已归档",
+      "why": "驿窗前身，fork 自 jazzenchen/agent-hud-open"
+    },
+    {
+      "path": "github:Natsukashii1997/dt-sandbox",
+      "category": "沙盒",
+      "todo": "—",
+      "why": "DT-ORC V4.0 Multica 沙盒，公开仓库，只放合成内容"
+    },
+    {
+      "path": "github:Natsukashii1997/little-steps-private",
+      "category": "只登记",
+      "todo": "跟着 baby-care-workbench 走",
+      "why": "Little Steps 的网页成品（PWA 打包产物）"
     }
   ]
 }

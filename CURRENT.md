@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-11-07 · 名册按全量项目盘点更新（#75），常浩「全部执行」后合并
+
+- **来由**：常浩让 Claude 盘点本地和 GitHub 上的全部项目，然后定了去留：aibp-desk 并入管培生工作台；业务管理工作台（ops-desk）、用户案例库、公司战略系统，以及 Obsidian Second Brain、knowledge-base、brain、Claudecode-项目推进系统、ai-studio-feishu-integration、csv-amount-sorter、my-app-lumist 这 7 个停滞项目删除；「管培生带教-AI协同」「营销战役AI协同MVP」「营销战役卡片网关」提取后删除；get-index 保留；LUMI 学员助手是半成品，回头再整理。
+- **projects.json v1.1**：活跃项目 9 个。补登 trainee-hub、postpane 两条：这两条从 11-06 起就在正式目录里生效，但一直没提交。trainee-hub 的备注写明并入关系，别名加 aibp-desk。inventory 54 条，每个删除项写明移到了哪里；新增 `github:` 开头的条目，登记只在 GitHub 上的仓库；chatgpt-clipper、disk-slim 只登记，是否转为活跃由常浩定。合并官扫的范围不变（仍是 8 个有远端的活跃仓库）。
+- **已执行的删除**：13 个目录和 11 个 launchd plist 都移到了 `~/Archive/repos/待删/`（plist 在 `_launchd/`），原路径记在 `移入记录.tsv` 里，真正删除由常浩动手。GitHub 上的 my-app-lumist、aibp-desk 已归档。常浩回复「全部执行」后，先 `launchctl bootout` 停掉 ai.lark-channel-bridge.bot.codex（机械邪龙兽 Bridge）和 ai.trainee-collab.worker.codex，确认进程都已退出，再移走三个旧协同项目。机械邪龙兽从此在飞书里下线，与「飞书统一用猛鬼兽」的决定一致。
+- **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` 结果 `Ran 362 tests … OK`；`orca/tests` 结果 `Ran 48 tests … OK`。
+- **主目录**：正式目录里的 `projects.json` 带着上面那两条没提交的改动，和本 PR 改的是同一个文件。按《工程流程》第 5 节，常浩已同意（「全部执行」）：合并后丢掉这份改动，再 `git pull --ff-only`。
+- **唯一下一步**：常浩真正删除 `~/Archive/repos/待删/`，以及 GitHub 上 digital-twin-old-to-delete 两个仓库（时间由常浩定）；LUMI 学员助手回头整理。
+
 ## 2026-11-07 · 阶段 1：活跃仓库统一 CI，合并官以 CI 通过为合并条件（#71 PR #72 `cbe4652`、#73 PR #74 `1e68496`），已安装
 
 - **CI 已统一**：7 个仓库的 GitHub Actions CI 在 main 上都是绿的：trainee-hub `93d1d1a`、agent-kit `4951ac0`、digital-twin `cbe4652`、github-center `df2a45c`、my-skills `d28453c`、niuma-home `a636869`、digiworld `5a19d84`。都只在 ubuntu 上跑，不用 macOS 跑（额度按 10 倍扣）。niuma-home 有 4 项测试、digiworld 有 98 项测试依赖 macOS 才有的系统工具（PlistBuddy、sips、diskutil、plutil，以及产品本身对非 macOS 的拒绝），只在 Linux 上跳过并写明原因，macOS 上照常运行；逐条核实过，没有发现 Linux 才会出的缺陷。
