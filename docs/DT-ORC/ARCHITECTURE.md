@@ -23,7 +23,7 @@ V4.0 是一次 MAJOR 变更（按 12.3：执行架构变化），决议见 ADR-0
 2. **ChatGPT 送审改走驿窗（postpane）的 Chrome 插件通道**（`relay_to_chatgpt`，自动往返最多 2 轮），不再走 ORCA 内嵌浏览器。
 3. **事实所有权三分**：Hermes `twin_state` 管业务，Multica 管执行，GitHub 管交付（2.2）。
 4. **Multica 不推送也不合并**：agent 只推自己的 `agent/` 分支并开 PR；合并归 Hermes 合并官加策略记录（7.2、5.5）。
-5. **保留 V3.1 中与执行平台无关的部分**：A+ 双模式、`run_authorization` 签发与消耗规则、L0–L3 风险分级、审核契约、异议机制、不确定结果不重发、低风险自动合并的六项条件。
+5. **保留 V3.1 中与执行平台无关的部分**：A+ 双模式、`run_authorization` 签发与消耗规则、L0–L3 风险分级、审核契约、异议机制、不确定结果不重发、低风险自动合并的六项条件（本版扩为八项，见 5.5）。
 6. **唯一总纲仍是本文件**：后续以本文件的 PR、ADR、版本号升级，不另起平行总方案。
 
 ### 0.2 本文不等于操作授权
@@ -129,7 +129,7 @@ flowchart TB
 | （无对应） | **Workspace** | 一个本机工作区承载全部个人工程项目；issue 标识形如 `<前缀>-<序号>`，前缀只能是大写字母和数字、最长 10 位，批 E 建工作区时定 |
 | Run（一次受控工程运行） | **Project** + **父 Issue** | Project 对应名册里的一个仓库；一次运行（含一夜长跑）= 一个父 issue，下挂若干子 issue（`multica issue create --parent`） |
 | Task | **Issue**（子 issue = stage） | 内置 7 个状态：`backlog / todo / in_progress / in_review / done / blocked / cancelled`；工作区可自定义状态，本项目不自定义 |
-| Dispatch | **指派**：`multica issue assign <id> --to <agent 或 squad>` | 指派给 agent 即产生一次 Run；指派给 squad 先唤醒 leader 再分派 |
+| Dispatch | **指派**：`multica issue assign <id> --to <agent 或 squad>` | 指派给 agent 且 issue 不在 `backlog` 时立即排队产生一次 Run；在 `backlog` 的 issue 离开 `backlog` 时才开跑；指派给 squad 先唤醒 leader 再分派 |
 | Worker | **Run**（CLI 字段 `task_id`） | 8 个状态：`deferred / queued / dispatched / waiting_local_directory / running / completed / failed / cancelled` |
 | Worker 的宿主进程 | **Runtime** | 本机 daemon 在 PATH 上发现的 AI CLI，一个 CLI 一个 runtime；`multica runtime list` 查看 |
 | Worktree | daemon 的**任务目录** | 位于 `MULTICA_WORKSPACES_ROOT`（默认 `~/multica_workspaces`）；是共享 bare 仓库的 `git worktree`，分支名 `agent/<agent 名>/<issue 标识小写>`（如 `agent/j/mul-6881`），同一 issue 的后续 run 续用同一分支 |
@@ -137,7 +137,7 @@ flowchart TB
 | gate（决策挂起） | Issue 状态 `in_review` / `blocked` + Hermes 飞书私聊决策 | Multica 里不放审批；审批只在 Hermes |
 | Coordinator | **Squad**（leader 必须是 agent） | `multica squad create --name --leader`；SUPERVISED 下只在一次性授权里列明时使用 |
 | ORCA 自动化 / 定时 | **Autopilot** | cron（5 段加 IANA 时区）、webhook、手动；模式 `create_issue` 或 `run_only` |
-| Worker 完成后续跑 | **Wakeup** | 挂在 issue 上的规则，类型 `event / at / every / cron`；条件满足时唤醒指定 agent 在该 issue 上开一次普通 run；agent 可在 run 里给自己排下一次 |
+| Worker 完成后续跑 | **Wakeup**（含系统内置的 **Child-Done** 规则） | 挂在 issue 上的规则，类型 `event / at / every / cron` 或 `--until-*` 条件；条件满足时唤醒指定 agent 在该 issue 上开一次普通 run；agent 可在 run 里给自己排下一次。父 issue 有子 issue 时自带系统规则：某个 stage 的子 issue 全部关闭时唤醒父 issue 的负责人（7.3） |
 | ORCA 的 Skill 加载 | **Skill** | 主文件 `SKILL.md`，可挂到多个 agent；来源只认 my-skills（8.4） |
 
 ### 2.4 必须有的跨系统映射
@@ -197,9 +197,9 @@ Hermes 可按**明确规则**排序任务、重试白名单内可确认幂等的
 - **自动往返最多 2 轮**：回信最后一行「结论：通过」→ 自动结束；「结论：需修改」且不到 2 轮 → 把回信全文转回 Claude，Claude 改完再调 `relay_to_chatgpt`；第 2 轮仍需修改、或回信没写结论 → 停下交还常浩。这与 agent-kit《工程流程》第 8 节第 3 条一致：**同一份送审 2 轮未过就由常浩拍板，不开第 3 轮**。
 - ChatGPT 30 分钟没回信、Claude 2 小时没交回复审，驿窗都停下交还常浩。
 
-**送审包必须绑定版本**（6.2）：brief 第一段固定写 `repo / PR / head_sha（完整 40 位）/ base_sha（完整 40 位）/ multica_issue / packet_sha256`。审查员把驿窗返回的 `handoffId` 和最终结论，以「`head_sha` + 结论 + `handoffId`」三项写进 PR 评论和 Multica issue 评论，让合并官能核对「同一 HEAD 已通过」。HEAD 一变，旧结论作废（6.4）。
+**送审包必须绑定版本**（6.2）：brief 第一段固定写 `repo / PR / head_sha（完整 40 位）/ base_sha（完整 40 位）/ multica_issue / packet_sha256`。审查员把驿窗返回的 `handoffId` 和最终结论，以「`head_sha` + 结论 + `handoffId` + 审核模式」写进 PR 评论和 Multica issue 评论，作为**索引**；合并官据 `handoffId` 回到驿窗接力记录核实，PR 评论本身不是证据（5.5 第 1 条）。HEAD 一变，旧结论作废（6.4）。
 
-**「High」目前没有机器核对**：V3.1 的 RELAY-01/02 在发送前核对聊天模式并把思考强度调到「高」；驿窗通道的协议里没有这一步，新会话按驿窗设置放进登记的 ChatGPT 项目，模型和思考强度取决于常浩在 ChatGPT 侧的默认设置。在驿窗补上“发送前核对模型与强度、写进接力记录”之前，送审回执**不能证明**是 High 审的；首跑前由常浩确认 ChatGPT 默认设置，回执里如实写“强度未经机器核对”〔待实测 / 待驿窗补〕。
+**「High」目前没有机器核对**：V3.1 的 RELAY-01/02 在发送前核对聊天模式并把思考强度调到「高」；驿窗通道的协议里没有这一步，新会话按驿窗设置放进登记的 ChatGPT 项目，模型和思考强度取决于常浩在 ChatGPT 侧的默认设置。在驿窗补上“发送前核对模型与强度、写进接力记录”之前，送审回执**不能证明**是 High 审的，一律记为 `REVIEW_MODE_UNVERIFIED`；常浩人工确认过的记为 `HIGH_OWNER_CONFIRMED` 并留确认记录（5.5 第 8 条）〔待驿窗补〕。
 
 **三项〔待实测〕，首跑前必须逐项验证**：
 
@@ -229,18 +229,20 @@ Hermes 可按**明确规则**排序任务、重试白名单内可确认幂等的
 
 | 等级 | 含义 | 默认审核要求 |
 |---|---|---|
-| `L0` | 不改变代码行为的管理与低风险文档 | 机械检查，不送 ChatGPT High（《工程流程》第 8 节第 3 条） |
+| `L0` | 不改变代码行为的管理与低风险文档 | 机械检查，不送 ChatGPT High（《工程流程》第 8 节第 3 条）；但写进架构基线的执行身份、授权、合并规则不算 L0 |
 | `L1` | 小范围低风险代码 | Claude 自测 + ChatGPT High 增量审查 |
 | `L2` | 标准研发、跨文件非敏感功能 | Claude 设计/编码、自测/回归 + ChatGPT High 主审，Codex 按需 |
 | `L3` | 身份、安全、持久状态、正式系统、不可控副作用 | 设计/威胁与回退分析、必要专项验证、独立技术审核、动作授权 |
 
 **级别不是授权**。路径和标签可自动**上调**风险，不能仅凭“代码不到 200 行”下调风险。
 
+**文档的级别不传给它的落地工单**：本文 V4.0 作为文档变更按 DESIGN / L2 审；把它落成真实执行权限的工单（10.1 的 M1 部署、M2 首跑、M4 合并策略、M5 无人值守）涉及执行身份、持久状态和外部副作用，按 **L3** 评定。
+
 ### 4.3 两种运行模式（决定哪些真实动作可开始）
 
 | 模式 | Multica 里的形态 | 前提 |
 |---|---|---|
-| `SUPERVISED` | 常浩在场时**手动指派**（在 Multica 界面指派，或由 Hermes 按本次授权调用 `issue assign`）；或一次性授权里列明的 squad | 有效的 `run_authorization`（5.2a 来源） |
+| `SUPERVISED` | 常浩在场时**手动指派**（在 Multica 界面指派，或由 Hermes 按本次授权调用 `issue assign`）；或一次性授权里列明的 squad | 有效的 `run_authorization`（5.2a 来源）；实现之前只允许 5.2a 末条的“人工指派例外”；首跑另需 5.2c |
 | `UNATTENDED` | **Autopilot**（定时 / webhook）和 **Wakeup**（事件 / 定时唤醒）自动开跑 | 只限名册里登记为沙盒的项目（《工程流程》第 8 节第 5 条）+ 持续策略 + 5.3 全部门禁 |
 
 两模式共享同一 issue、证据和审核协议，不复制两套开发系统。**看见 Multica 界面、聊天里的普通“继续”、或本文被合并，都不单独构成授权。**
@@ -294,7 +296,8 @@ flowchart TB
 - 两种来源生成同一 `dt-orc.run-authorization/1` 记录，带一次性动作消耗账本与有效期；过期、超额或来源无法核验时拒绝。
 - **威胁模型边界**：防模型自报、文本冒充、重放和超范围动作；**不防同一 macOS 用户下的恶意本地进程**。
 - (b) 依赖猛鬼兽网关在线；断线时只能用 (a)，不得降级为接受未核验的消息。
-- 截至本版，`run_authorization` **尚未实现**（main 上没有相应代码，见 9 节）。实现之前，SUPERVISED 只能由常浩在 Multica 界面亲手指派，如实标注“人工触发”。
+- 截至本版，`run_authorization` **尚未实现**（main 上没有相应代码，见 9 节）。
+- **人工指派例外**（实现之前唯一允许的 SUPERVISED 形态）：常浩在 Multica 界面亲手把**一张** issue 指派或移出 `backlog`，这是一次独立的人为授权，**只授权这一次指派**；它不产生任何可供 Hermes 或 agent 复用的授权凭据，不授权该 run 之外的指派、Wakeup、Autopilot、合并或部署；“常浩在场”本身不是动作许可。run-log 和晨报如实标注“人工触发”。首跑仍须满足 5.2c。
 
 ### 5.2b SUPERVISED 的最小执行桥（替代 V3.1 的 ORCA 执行桥）
 
@@ -303,17 +306,47 @@ flowchart TB
 - **结果不明**：`assign` 返回不明时，用 `multica issue runs <id> --active --output json` 只读对账，**不重复指派**（7.6）。
 - 启用执行桥本身是一次代码变更（Hermes 侧），须经 ChatGPT High 审核并通过反向测试后才能接真实 Multica；不得用一个“总开关”无条件放开。
 
+### 5.2c 首跑执行环境的硬前提（M2 之前必须成立）
+
+5.2b 的授权只管住 Hermes 发起的动作；进入 agent 执行后，Multica 以 `bypassPermissions` 拉起 Claude Code，agent 继承运行它的系统用户的全部本机权限和 git/gh 凭据，并持有 `MULTICA_TOKEN`。instructions 和 Hermes 的事后核对都不能撤销已发生的副作用。因此 **M2 首跑（以及之后任何 Multica agent 运行）MUST 满足**：
+
+1. **受限执行身份**：daemon 不以常浩的日常 macOS 用户运行，二选一：(a) 单独的 macOS 用户，其主目录里只有沙盒仓库和本次所需的 CLI 登录；(b) 容器或虚拟机（2026-10-16 试装用的就是容器执行器）。该身份**拿不到**常浩的个人 git/gh 凭据、SSH agent、Vault、`~/.hermes`、驿窗数据目录和其他正式项目。
+2. **受限仓库凭据**：该身份的 GitHub 凭据只对首跑仓库有写权限（fine-grained token 或仓库级 deploy key）；首跑仓库是专用沙盒仓库，或名册里登记 `sandbox: true` 且只授予该仓库凭据的项目。首跑仓库的 main 由远端分支保护或规则集拒绝直接推送；该仓库做不到时换一个做得到的沙盒仓库〔待实测〕。
+3. **权限矩阵实测**（结果写进 `migration/`，作为 M2 的准入证据），逐项给出实际命令与结果：
+   - agent 读写任务目录之外的文件（常浩主目录、其他仓库）→ 必须被操作系统拒绝；
+   - agent 推 main、推非 `agent/` 分支 → 必须被远端拒绝；
+   - agent 用 `MULTICA_TOKEN` 指派其他 issue、创建 Wakeup / Autopilot、改其他 issue 状态 → 记录能否被拒绝；**不能被拒绝时**，首跑必须放在只含沙盒项目的专用 Multica 工作区，越权只能波及沙盒，并由 5.3a 的停机检查兜底；
+   - 本机 Claude Code 的 deny 规则与 hook 在 `bypassPermissions` 下是否生效（只记录，不作为防线）。
+4. **未成立时的降级**：以上任一条未成立，只允许常浩人工操作的最小沙盒试验（人工指派例外 + 沙盒仓库 + 无个人凭据），**不得让 Multica agent 运行在带常浩正式个人凭据的环境中**。
+
 ### 5.3 无人值守的附加门禁
 
 `UNATTENDED`（Autopilot、Wakeup 自动开跑）在 5.2 的基础上还必须：
 
 - **只在沙盒项目**：项目名册 `projects.json` 中登记 `sandbox: true` 的项目（字段在批 E 加，加之前确认 `roster_lookup`、`check_repos` 对未知字段不报错）；首批只登记 postpane 或 github-center 之一。独立任务目录，只推 `agent/` 分支，不碰 main、凭据、正式数据、安装和部署。
-- **持续策略写明上限**：时长上限、失败上限（同一子 issue 连续 2 次 `failed` 即停整条长跑）；Wakeup 用 `--until-status` 或 `at` 限定终点；可撤销（`multica issue wakeup disable`、`multica autopilot update` / `delete`）。
+- **持续策略写明上限**：时长上限、失败上限（同一子 issue 连续 2 次 `failed` 即停整条长跑）；自建的 Wakeup 一律带期限（`--expires-in` / `--expires-at`，CLI 不会自动加），重复型再加 `--max-fires`；可撤销（`multica issue wakeup disable`、`multica autopilot update --status paused` / `delete`）。注意 `--until-status` 是**唤醒条件**（“等到 issue 变成某状态时唤醒”），不是终止参数；issue 进入 `done / cancelled` 时 Multica 才自动关掉它的全部 Wakeup 并撤回未开始的 run，`blocked` 不会。
+- **独立停机检查**（5.3a）已上线并演练过。
 - **结果不明只收回执，不重发**（《工程流程》第 8 节第 5 条）。
 - **机器条件**：电脑不睡、Chrome 和驿窗开着（送审依赖它们，见 14 节 R7）；不满足时长跑只做到“开 PR 待审”，不送审。
 - **常驻服务**：`multica daemon autostart enable`（launchd `ai.multica.daemon.plist`）是 OPS 安装，首跑后再定，单独批准。
 
 V3.1 中 B6–B11 的 Secure Enclave、签名挑战、状态根设计仍可作为持续授权的候选素材，不认定为唯一实现。
+
+### 5.3a 独立停机检查（不依赖 agent 自觉）
+
+agent instructions 里的停机条件（7.3）只在 agent 还活着时有效；run 因进程崩溃、CLI 异常或 daemon 中断失败时，agent 没机会执行它。因此 M5 无人值守试跑前 MUST 有一个**独立于 agent 的确定性停机检查**，由 Hermes 侧的监控脚本承担（与 5.2b 执行桥同一处，不另建编排平台）：
+
+1. **对账**：定时读 `multica issue runs <父> --siblings --output json` 和授权记录，算出连续失败次数、累计运行时长、授权是否过期；计数持久化在 Hermes 状态里，进程或机器重启后从持久记录恢复，不清零。
+2. **触发上限后的动作**，按顺序：
+   - 禁用这条长跑上的全部自建 Wakeup（`multica issue wakeup list` 后逐条 `disable`），关掉父 issue 的系统 Child-Done 规则〔命令待实测；做不到时把父 issue 改为 `cancelled`，由 Multica 关闭其全部 Wakeup 并撤回未开始的 run〕；
+   - 相关 Autopilot 改 `paused`；
+   - 对排队中和运行中的 run 发 `multica issue cancel-task <run-id>`；
+   - 把还在 `backlog / todo` 的子 issue 留在原处不再推进，当前子 issue 改 `blocked` 并评论原因；
+   - 回读确认：没有 `queued / dispatched / running` 的 run、没有启用中的 Wakeup。
+3. **取消结果不明**（命令超时、回读仍见运行中）：进入冻结——停 daemon（`multica daemon stop`），记录 `UNRECONCILED`，飞书私聊常浩，**不自动继续、不自动重试**。
+4. 每次触发都写进 run-log（触发原因、执行的命令、回读结果）。
+
+SUPERVISED 下的多 stage 运行也应开着这个检查；它在 M2 期间先以“只告警”方式试跑。
 
 ### 5.4 运行授权记录的最低契约
 
@@ -344,16 +377,20 @@ V3.1 中 B6–B11 的 Secure Enclave、签名挑战、状态根设计仍可作�
 
 **合并官**（`merge_officer.py`，批 D 在做）**先影子运行**：只给「建议合并 / 退回 / 问常浩」，不执行，由常浩决定；同类累计 20 次、一致率 ≥ 90%，才申请把这一类写成 `owner_approved_policy` 策略记录（《工程流程》第 8 节第 4 条）。每次被常浩推翻，写一条带版本号的规则补丁并回放历史重算一致率。
 
-合并必须同时满足（沿用 V3.1）：
+合并必须同时满足（第 1–6 条沿用 V3.1 并改写第 1 条，第 7、8 条为本版新增）：
 
-1. **绑定正确**：远端 PR 仍是已审核的完整 HEAD/base；送审包 SHA-256 未变；PR 评论里有同一 `head_sha` 的「结论：通过」和 `handoffId`；
+1. **绑定正确、来源可信**：远端 PR 仍是已审核的完整 HEAD/base；送审包 SHA-256 未变；合并官**从驿窗的接力记录**（而不是 PR 评论）核实该 `handoffId`：送出那一步的原话里有同一 `head_sha / base_sha / packet_sha256`，回信那一步结论为通过，回信时间晚于该 HEAD 的提交时间。PR 评论只是索引，任何人（包括开发 agent）都能写，**不作为证据**；
 2. **测试与审核成立**：机械回归通过；Codex 如按规则被触发，其关键验证已完成；
 3. **范围受限**：只限策略里的仓库、分支（`agent/` 前缀）、路径和风险档；禁止敏感路径、凭据、安装/部署/配置/正式数据及范围外变更；
 4. **授权可验**：存在有效的 `owner_approved_policy` 或本次 `run_authorization`，且**明确包含合并权限**；「结论：通过」、本文件批准、模型自报都不是许可；
 5. **副作用已知**：合并会触发的 CI、发布、部署、通知已核对；
-6. **环境确认**：现读远端 PR 状态与合并权限，成功后回读 main 和合并 SHA。保护规则读不到（API 403）时记录“不可依赖远端保护”。
+6. **环境确认**：现读远端 PR 状态与合并权限。保护规则读不到（API 403）时记录“不可依赖远端保护”；
+7. **合并操作本身带 HEAD 校验（原子性）**：合并命令必须携带审过的 HEAD，由 GitHub 在服务端拒绝不匹配的 HEAD，例如 `gh pr merge <号> --squash --match-head-commit <审过的 head_sha>`（REST 合并接口的 `sha` 参数同义）。GitHub 报 HEAD 不匹配就停止，**不自动重试**；base（目标分支）在审核后变化的，按 6.4 旧结论失效，先重新核对再走流程。合并后回读 main 和合并 SHA，只用于确认结果，不能代替事前的版本约束；
+8. **审核模式可证**：回执的审核模式记为 `HIGH_VERIFIED`（驿窗在发送前机器核对了模型与思考强度并写进接力记录）、`HIGH_OWNER_CONFIRMED`（常浩人工确认，记录确认人、确认的接力 `handoffId`、时间和适用范围）或 `REVIEW_MODE_UNVERIFIED`。**`REVIEW_MODE_UNVERIFIED` 不能放行自动合并**，只能由常浩说「合并」；`HIGH_OWNER_CONFIRMED` 只作临时替代，适用范围写在确认记录里。
 
 任一不满足时**停在“技术通过 / 待合并授权”**，其他无依赖任务继续。L3 默认不自动合并。
+
+驿窗当前的接力记录只保留最新 200 条，送出那一步只存原话摘录、不存完整送审包的 SHA-256，也不记审核模式。第 1、8 条要求的可信核对，需要驿窗补上“完整送审包指纹 + 审核模式写入记录 + 超出保留上限前归档”（另开 postpane issue）。**补齐之前，合并官只能影子运行，自动合并不启用。**
 
 `merge_gate.py` 的判定逻辑（区分 `owner_direct` 单次许可与 `owner_approved_policy` 范围许可）可作为合并官的素材，但它**不在 main 上**（见 9 节），不能被当作已有的检查。
 
@@ -363,14 +400,14 @@ V3.1 中 B6–B11 的 Secure Enclave、签名挑战、状态根设计仍可作�
 |---|---|---|
 | 只读检查、`issue get / runs / run-messages` | 依既有访问权限 | 依既有访问权限 |
 | 建单（`backlog`） | Hermes 可做 | Hermes 可做 |
-| 指派 / 改 `todo` 开跑 | 仅在本次授权次数内（5.2b）；授权未实现前由常浩亲手指派 | 只在沙盒项目、持续策略内 |
+| 指派 / 改 `todo` 开跑 | 仅在本次授权次数内（5.2b）；授权未实现前只允许人工指派例外（5.2a），且执行环境满足 5.2c | 只在沙盒项目、持续策略内 |
 | Autopilot / Wakeup 创建 | 默认不用；一次性授权列明才可 | 只在沙盒项目、持续策略内 |
 | agent 开发、自测（任务目录内） | 授权范围内自动 | 策略范围内自动 |
 | @ Codex 验证 | 按风险触发 | 同左，受策略额度约束 |
 | ChatGPT High 送审（驿窗） | 现行由常浩桌面 Claude 会话发起；审查员 agent 待 3.3 实测 | 3.3 实测通过且机器条件满足才可 |
 | 推 `agent/` 分支 / 开 PR | 授权内自动 | 策略内自动 |
 | 推 main / 推非 `agent/` 分支 | **禁止** | **禁止** |
-| L0–L2 squash merge | 合并官 + 5.5 全条件；策略生效前由常浩说「合并」 | 5.5 + 5.3 全条件 |
+| L0–L2 squash merge | 合并官 + 5.5 全部 8 条（含 `--match-head-commit`）；策略生效前、或审核模式为 `REVIEW_MODE_UNVERIFIED` 时，由常浩说「合并」 | 5.5 + 5.3 全条件 |
 | Multica 部署/升级、daemon autostart、ORCA 卸载 | OPS 变更单 | 不由持续策略泛化 |
 | 正式 Obsidian Vault 写入 | Obsidian 主线独立授权 | 同左 |
 | 企业飞书 / 企业数据 | **禁止跨域** | **禁止跨域** |
@@ -413,7 +450,7 @@ sequenceDiagram
     H->>GH: 合并官判断（影子：只建议）
     H-->>Owner: 晨报 / 只需本人定的事
     Owner->>H: 「合并」（策略生效前）
-    H->>GH: squash merge，回读 SHA
+    H->>GH: squash merge --match-head-commit（审过的 HEAD），回读 SHA
 ```
 
 L0 管理文档不送 ChatGPT；L1/L2 研发以 Claude + ChatGPT High 为固定主线；Codex 不是固定第三站。
@@ -470,20 +507,22 @@ Claude 对阻断项选择：`ACCEPT`（修复 + 新 HEAD）、`CHALLENGE`（指�
 - **合并归 Hermes 合并官 + 策略记录**（5.5）；策略生效前由常浩说「合并」，按《工程流程》第 5 节的顺序做。
 - **对《工程流程》第 2 节分支命名的补充**：Multica agent 的分支用 Multica 生成的 `agent/…` 名，PR 描述写上 Multica issue 标识和 GitHub issue 号（与 Hermes 派单的 `hermes/<单号>` 同理）。本条在本 PR 合并后另向 agent-kit 提补丁。
 
-### 7.3 长跑：父 issue + 子 issue + Wakeup
+### 7.3 长跑：父 issue + 分 stage 的子 issue + 系统 Child-Done 唤醒
 
-一次长跑（如一夜）= **一个父 issue**，下挂若干**子 issue（stage）**，每个子 issue 是一个能独立验收、独立开 PR 的小步。
+一次长跑（如一夜）= **一个父 issue**，下挂若干**子 issue**，用 Multica 原生的 **stage**（`--stage 1/2/3…`）分批推进；每个子 issue 是一个能独立验收、独立开 PR 的小步。**接力用 Multica 内置的系统 Child-Done 规则，不自建“子 issue 完成”类 Wakeup**（官方文档明确要求不要为同一目的重复创建）。
 
-1. Hermes 建父 issue 和子 issue（`backlog`），子 issue 按顺序写好依赖和验收。
-2. 授权后 Hermes 把第一个子 issue 指派给「Claude 开发」。
-3. 子 issue 完成后由 **Wakeup** 唤醒下一步：在父 issue 上建 `event` 类 Wakeup，条件为“子 issue 完成”，被唤醒的 agent 读父 issue，把下一个 ready 的子 issue 改为 `todo` 并指派。事件名以 `multica issue wakeup events` 的输出为准〔待实测〕；用 `--until-status` 让父 issue 进入 `done / cancelled` 时规则失效。
-4. **停机条件写进 agent instructions**（每次 run 都会用）：
-   - 超过授权的时长上限；
-   - 同一子 issue 连续 2 次 run `failed`；
-   - 需要越出 instructions 边界的动作（推 main、改凭据、安装、部署、碰正式数据）；
-   - 结果不明（推送是否成功、PR 是否已开说不清），只读核对后仍核不清；
-   - 停机时把当前子 issue 改为 `blocked`，评论写明原因和已做到哪，不再排 Wakeup。
-5. 长跑只在 UNATTENDED 条件下自动续跑；SUPERVISED 下可由常浩逐个指派子 issue，跑法相同。
+v0.8.1 中该规则的行为（`issue-wakeups.mdx`「Wake the parent when sub-issues finish」）：父 issue 有子 issue 时自动带一条 System 规则；某个 stage 的子 issue 全部关闭（`done` 或 `cancelled`）且后面还有 stage 时，唤醒**父 issue 的负责人**，全部关闭时再唤醒一次；没有 stage 的子 issue 只在最后一个关闭时唤醒一次；负责人是 agent 就唤醒 agent，是 squad 就唤醒 leader，是成员就只发收件箱通知，没有负责人就不唤醒；父 issue 在 `backlog` 时不唤醒，离开后补上。默认指令是“检查依赖，把下一 stage 的子 issue 移出 `backlog`”。
+
+1. **建单**：Hermes 建父 issue，再建子 issue：`multica issue create --parent <父> --stage <N> --assignee <agent> --status backlog …`。子 issue **预先指派好、停在 `backlog`**（指派给 agent 的 issue 只有离开 `backlog` 才开跑）；每张写清依赖、验收和下一步的 ready 判定。
+2. **父 issue 的负责人决定谁来推进下一 stage**：
+   - SUPERVISED：父 issue 指派给**常浩（成员）**——stage 关闭时只收到收件箱通知，由常浩或 Hermes（按授权）把下一 stage 移出 `backlog`。agent 不推进 stage，与 5.2b “agent 不得自行开跑其他 issue”一致。
+   - UNATTENDED：父 issue 指派给一个专职推进的 agent（可用 squad leader），被系统规则唤醒后按默认指令检查依赖、推进下一 stage。父 issue 本身不进 `backlog`。
+3. **开跑**：授权后把 stage 1 的子 issue 移出 `backlog`（`multica issue status <id> todo`，消耗授权，5.2b）。
+4. **自建 Wakeup 只用于系统规则覆盖不到的事**（如定时自检），必须带 `--expires-in` / `--expires-at`，重复型带 `--max-fires`；不得与系统 Child-Done 规则做同一件事。注意 `--until-status` 是“等到某状态时唤醒”的条件，不是终止参数；Multica 还会在一小时触发超过 12 次或唤醒链绕回同一规则第三次时自动暂停规则，每个 issue 最多 32 条启用中的 Wakeup。
+5. **停机**：两层。
+   - agent instructions（每次 run 都会用）写明：超过授权时长、同一子 issue 连续 2 次 run `failed`、需要越界动作（推 main、改凭据、安装、部署、碰正式数据）、结果不明且核不清时，把当前子 issue 改为 `blocked`、评论原因和进度、不推进下一 stage。
+   - 独立停机检查（5.3a）兜底：agent 没机会执行上面那条时（崩溃、daemon 中断），由 Hermes 侧按 run 记录停下整条长跑。`blocked` 不会关掉 Wakeup，真正的“停”以 5.3a 的禁用、取消和回读为准。
+6. stage 1 → 2 的推进细节（预先指派的子 issue 移出 `backlog` 是否立即排队、系统规则能否用 CLI 关闭）在批 E 首跑前实测〔待实测〕。
 
 ### 7.4 运行记录：run-log.jsonl
 
@@ -494,9 +533,12 @@ multica issue runs <父 issue> --siblings --full-id --output json
 multica issue run-messages <run-id> --output json   # 每个 run 一次，可用 --since 增量
 ```
 
-- Hermes 侧导出脚本（批 E 实现）把每个 run 写成一行 JSON：`parent_issue / issue / run_id / agent / status / started_at / ended_at / duration_s / failure_reason / pr_ref / head_sha / summary / messages_ref`；这些字段在 v0.8.1 JSON 输出中的真实名字〔待实测〕。`--siblings` 一次最多 20 行，超出时逐个子 issue 查。
+- Hermes 侧导出脚本（批 E 实现）把每个 run 写成一行 JSON：`parent_issue / issue / run_id / agent / status / started_at / ended_at / duration_s / failure_reason / pr_ref / head_sha / summary / messages_ref`；这些字段在 v0.8.1 JSON 输出中的真实名字〔待实测〕。
+- **边跑边导**：停机检查（5.3a）每次对账时顺带增量导出（`run-messages --since`），不等长跑结束，避免 GC 或中断前丢记录。
+- **完整性检测**：`--siblings` 一次最多 20 行，超出时逐个子 issue 查；单个 issue 的 run 超过 20 次时能否取全〔待实测：`multica agent tasks` 或分页〕。导出后对账：每个子 issue 的 run 数与 Multica 界面一致、run-messages 的序号连续。有缺口就在该行写 `incomplete: true` 和缺口说明，**晨报不得把不完整的记录称为完整运行证据**。
+- **GC 与证据保全**：M2 首跑期间设 `MULTICA_GC_ENABLED=false`（或把 `MULTICA_GC_TTL` 调到覆盖整个观察期）；重新打开 GC 前，逐个任务目录核对：没有未提交改动、`agent/` 分支已推到远端、run 状态已终结、run-log 已导出。核对不过的目录先手工保全再开 GC。
 - 存放：`~/Library/Application Support/DigitalTwin/runs/<父 issue 标识>/run-log.jsonl`（本机，不入库）；原始消息另存同目录，按需引用，不整段进晨报。
-- Hermes 晨报读 run-log：时长、做了什么、出错与处理、PR 和审核状态、待常浩定的事。
+- Hermes 晨报读 run-log：时长、做了什么、出错与处理、PR 和审核状态、记录是否完整、待常浩定的事。
 - 审核往返的记录在驿窗 `handoffs.json`，run-log 里只记 `handoffId` 指针。
 
 ### 7.5 最小 Task / Handoff 契约
@@ -506,7 +548,7 @@ multica issue run-messages <run-id> --output json   # 每个 run 一次，可用
 | Task Contract（issue 描述） | `objective / scope / acceptance / dependencies / lane / risk / mode / allowed_actions` |
 | Claude 交接（issue 评论） | `multica_issue / run_id / head_sha / branch / pr_ref / changed_paths / test_summary / known_issues` |
 | Codex（触发时） | `target_head / test_scope / actual_command / actual_result / reproduction / evidence_ref` |
-| 审核回执（PR 评论） | `head_sha / base_sha / packet_sha256 / handoff_id / verdict / findings` |
+| 审核回执（PR 评论，仅作索引） | `head_sha / base_sha / packet_sha256 / handoff_id / verdict / review_mode / findings` |
 | 动作结果（Hermes 账本） | `action_id / authorization_ref / multica_run_id / result / remote_readback / side_effects` |
 
 不为每张小任务生成长 PRD；背景放 GitHub/Obsidian，按引用读取。
@@ -520,6 +562,8 @@ multica issue run-messages <run-id> --output json   # 每个 run 一次，可用
 | 推送或开 PR 结果不明 | 现读远端分支和 PR | 重新推一遍或再开一个 PR |
 | 驿窗送审结果不明 | 看接力记录的阶段（`delivered / working`），等回信或超时停下 | 换会话重发同一份包 |
 | 审核包或远端 HEAD 改变 | 原结论作废、重新送审 | 用旧结论合并新代码 |
+| 合并时 GitHub 报 HEAD 不匹配 | 停止，重新核对 PR 与审核 | 自动重试、去掉 `--match-head-commit` 再合 |
+| 停机检查发出的取消或禁用结果不明 | 冻结：停 daemon、记 `UNRECONCILED`、私聊常浩（5.3a） | 自动继续下一 stage |
 | 跨系统账本冲突 | `UNRECONCILED`、停受影响动作 | 模型自信选一个 |
 | 普通任务失败 | 停本 issue 及依赖，其他继续 | 局部失败升级为全局停 |
 | 身份/权限/证据完整性破坏 | 冻结相关安全域，停 daemon | 以效率为由忽略 |
@@ -601,24 +645,29 @@ flowchart LR
 | 里程碑 | 工作包 | 真实验收定义 | 依赖 |
 |---|---|---|---|
 | **M0 · 基线** | 本文 V4.0 + ADR-013 经 ChatGPT High 审查（≤2 轮），常浩合并 | PR 合并；审查回执绑定同一 HEAD | 先做 |
-| **M1 · Multica 部署**（批 E 1–3） | 备份数据库卷 → 服务端升 v0.8.1，`MULTICA_IMAGE_TAG` 锁版本，设 `DO_NOT_TRACK=1`；装原生 CLI 与 daemon（安装方式以 v0.8.1 文档为准〔待实测〕），`multica login` 连本机服务；`MULTICA_WORKSPACES_ROOT` 设单独目录，调 GC；名册加 `sandbox: true` | `multica daemon status`、`multica runtime list` 正常；回读环境变量 | M0 后；OPS 变更单 |
-| **M2 · SUPERVISED 首跑**（批 E 4） | 建 agent（Claude 开发、Codex 验证）；拆 6 张 ready 单，常浩在场跑 2 小时；送审走桌面 Claude 会话 + 驿窗；导出 run-log | run-log 有时长、做了什么、出错和处理；至少一单经驿窗「结论：通过」；Hermes 晨报读到 run-log | M1 后 |
+| **M1 · Multica 部署**（批 E 1–3，**L3**） | 备份数据库卷 → 服务端升 v0.8.1，`MULTICA_IMAGE_TAG` 锁版本，设 `DO_NOT_TRACK=1`；按 5.2c 准备受限执行身份（单独 macOS 用户或容器）和只对首跑仓库有效的 GitHub 凭据，在该身份下装 CLI 与 daemon（安装方式以 v0.8.1 文档为准〔待实测〕），`multica login` 连本机服务；`MULTICA_WORKSPACES_ROOT` 设单独目录，首跑期间关 GC（7.4）；名册加 `sandbox: true` | `multica daemon status`、`multica runtime list` 正常；回读环境变量；**5.2c 权限矩阵实测全部记录在 `migration/`** | M0 后；OPS 变更单 |
+| **M2 · SUPERVISED 首跑**（批 E 4，**L3**） | 建 agent（Claude 开发、Codex 验证）；拆 6 张 ready 单（分 stage，父 issue 指派给常浩），按人工指派例外开跑，常浩在场跑 2 小时；送审走桌面 Claude 会话 + 驿窗；边跑边导 run-log；5.3a 停机检查以“只告警”试跑 | run-log 有时长、做了什么、出错和处理，并标明是否完整；至少一单经驿窗「结论：通过」；Hermes 晨报读到 run-log。**通过只证明有人值守的这一次运行成立**，不等于全架构 `OPERATIONALLY_VERIFIED`，也不代表无人值守或 High 模式已验收 | M1 后，且 5.2c 成立 |
 | **M3 · 审查员 agent** | 3.3 三项〔待实测〕逐项验证；需驿窗改动的另开 postpane issue | 审查员 agent 独立完成一次送审，并把结论写回 PR | M2 后，可与 M4 并行 |
 | **M4 · 合并官与策略** | 合并官影子运行（批 D）；同类 20 次、一致率 ≥ 90% 后申请策略记录 | `agreement.csv` 一致率；策略记录经常浩批准 | 与 M2 并行起步 |
-| **M5 · UNATTENDED 夜跑** | 沙盒项目 4 小时夜跑：父子 issue + Wakeup | run-log 完整；停机条件真实触发过或被验证；无越界动作 | M2 后两周内 |
+| **M5 · UNATTENDED 夜跑**（**L3**） | 沙盒项目 4 小时夜跑：父 issue 指派给推进 agent + 分 stage 子 issue + 系统 Child-Done 唤醒 | run-log 完整；5.3a 停机检查真实触发过或经演练验证（含重启后计数不清零）；无越界动作 | M2 后两周内，且 5.3a 已上线 |
 | **M6 · 知识/Skills 闭环** | Skill 快照导入、盲测、CHANGELOG（批 C） | 导入记录与复用记录 | 可并行 |
 
 ### 10.2 资产治理（不“顺手合并 / 清空”）
 
-- **RELAY-02（PR #40）**：以「被 V4.0 取代」关闭。可复用的部分已写进本文：结果不明只收不重发 → 7.6；送审前核对聊天模式与 High 强度 → 驿窗通道尚无此步，暂由常浩确认 ChatGPT 默认设置，待驿窗补（3.3）；中断续跑不重复通知 → 7.3、7.4。关闭动作在本 PR 合并后、常浩同意时执行，关闭评论指向本文与 ADR-013。
+- **RELAY-02（PR #40）**：以「被 V4.0 取代」关闭。可复用的部分已写进本文：结果不明只收不重发 → 7.6；送审前核对聊天模式与 High 强度 → 驿窗通道尚无此步，暂由常浩确认 ChatGPT 默认设置，待驿窗补（3.3）；中断续跑不重复通知 → 7.3、7.4。关闭动作在本 PR 合并后、常浩同意时执行，关闭评论写明 `superseded by V4.0 / ADR-013`，保留原有审查记录，**不按“已完成验收”处理**。
 - **Legacy**：`orca/chatgpt_relay.py`、`hermes/scripts/dispatch.py`、`hermes/scripts/run_worker.py` 自本版起标 Legacy：不再加功能，只修阻断性缺陷；M2 首跑成立且常浩同意后，另开 PR 删除或归档，删除前跑一次回退演练。
 - **Framework V2、B6–B11 各分支**：逐项读取完整 HEAD、Diff、测试与审核结论，再定保留、返修、简化或存档；**不为让未合并数量下降而批量合并**。ORCA 专属的（ORCA worker 适配器、`pilot_executor` 等）存档；与平台无关的（`merge_gate` 判定、授权记录、文件隔离）作为合并官和 `run_authorization` 的素材。
 - 历史未提交 worktree、审计证据、正式目录误写租约**不主动清理**；需单独确认归属和授权。
 
 ### 10.3 ORCA 退役
 
-- **停用**：本文合并即停用 ORCA——不再为它写代码、不再在流程中调用它。
-- **卸载的前提（缺一不可）**：① M2 首跑中至少一单经驿窗送审拿到「结论：通过」；② 常浩同意卸载变更单。
+- **架构停用 ≠ 运行停机**：本文合并即在架构上停用 ORCA——不再为它写代码、不再把它接进新流程。真实运行中的 ORCA 进程、LaunchAgent、定时任务的停止，仍按 OPS 变更单操作，不因本文合并自动发生。
+- **卸载的前提（缺一不可）**：① M2 首跑中至少一单经驿窗送审拿到「结论：通过」；② 下面的运行依赖盘点全部完成且无遗留；③ 常浩同意卸载变更单。
+- **运行依赖盘点（变更单必查项）**：
+  - ORCA 相关的运行进程、LaunchAgent、定时任务（launchd / hermes cron / crontab）和所有调用方（脚本、技能、Hermes 配置）逐项列出；
+  - Legacy 脚本（`dispatch.py`、`run_worker.py`、`orca/chatgpt_relay.py`）是否仍隐式依赖 ORCA，依赖的写明卸载后的处置；
+  - 活跃任务、未提交 worktree、relay 租约与审计记录已保全；
+  - 用备份做一次恢复演练，证明回退可执行。
 - **卸载方式（OPS 变更单）**：列出要删的 ORCA 应用、`/usr/local/bin/orca`、`~/.orca`；**先整体备份再删**（含 relay 租约目录）；删后回读确认。挂在 ORCA 工作区（如 `~/orca/workspaces/`）下的 git worktree 先按 10.2 盘点归属，不随卸载删除。
 - **回退**：
   - Multica 首跑不成立（部署失败、run 不稳定、送审回不来）：回到**人工流程**——常浩在桌面 Claude 会话里开发，经驿窗送审，常浩说「合并」后按《工程流程》第 5 节合并；必要时 Hermes 继续用 Legacy 的 `dispatch.py` 派单。该流程不依赖 ORCA，也不依赖 Multica。
@@ -627,7 +676,7 @@ flowchart LR
 
 ### 10.4 第一张施工工单
 
-**批 E 首跑**（本 PR 合并后、常浩在场）：按 10.1 的 M1、M2 执行。部署和 autostart 属于 OPS，先给常浩看变更单，批准后再做；首跑只在名册登记的沙盒项目或常浩点名的单子上进行；送审走桌面 Claude 会话 + 驿窗；不合并，等常浩说「合并」。
+**批 E 首跑**（本 PR 合并后、常浩在场）：按 10.1 的 M1、M2 执行。部署和 autostart 属于 OPS，先给常浩看变更单，批准后再做；首跑前先完成 5.2c 的受限执行身份与权限矩阵实测，未成立就只做人工沙盒试验；首跑只在专用沙盒仓库或名册登记 `sandbox: true` 且只授予该仓库凭据的项目上进行；送审走桌面 Claude 会话 + 驿窗；不合并，等常浩说「合并」。
 
 ---
 
@@ -638,7 +687,7 @@ flowchart LR
 | 层级 | 必须满足 |
 |---|---|
 | 开发完成 | Task Contract 明确；`agent/` 分支 HEAD 与 PR 可查；Claude 自测与必要机械测试通过 |
-| 技术验收完成 | 指定 HEAD/base/包经 ChatGPT High「结论：通过」；P0/P1 有关闭证据；专项测试如被触发已完成 |
+| 技术验收完成 | 指定 HEAD/base/包经 ChatGPT「结论：通过」，且来源经驿窗接力记录核实；审核模式如实记录（`HIGH_VERIFIED` / `HIGH_OWNER_CONFIRMED` / `REVIEW_MODE_UNVERIFIED`），只有前两种可称“High 审核通过”；P0/P1 有关闭证据；专项测试如被触发已完成 |
 | 工程操作完成 | 当前动作有可信授权；远端回执及状态回读；必要的回滚/恢复证据 |
 | 运行可证 | **run-log 已导出，PR 正文写明记录在哪**（《工程流程》第 8 节第 1 条；没写的不合并） |
 | 项目阶段完成 | Hermes 核对全部依赖与交付；剩余风险、外部阻塞和技术债各有归属 |
@@ -724,11 +773,13 @@ digital-twin/
 | R1 | **许可证** | Multica License = Apache 2.0 + 附加条件（source-available）：单一组织内部自用不需商业许可；无商业许可不得给第三方托管或嵌入对外产品；带 UI 使用不得去掉 LOGO 和版权信息 | 只做个人自用；不对外提供实例；不改品牌标识；企业场景使用前另行评估 |
 | R2 | **版本节奏快** | 2026-09-07 至 11-06 共 19 个 release，约 3 天一版 | 锁定 v0.8.1（服务端 `MULTICA_IMAGE_TAG`、CLI 固定版本）；升级走 OPS：先备份数据库卷、读变更、补事实核实（12.3），可回退 |
 | R3 | **`MULTICA_TOKEN` 被子进程继承** | daemon 给每个 run 注入任务级令牌 `MULTICA_TOKEN`（`mat_` 前缀）及 `MULTICA_SERVER_URL` 等；agent 拉起的任何子进程都能拿到并调 Multica API | 该令牌按（agent, run）签发，不是 daemon 自己的令牌；它能调哪些接口、何时失效〔待实测〕。instructions 禁止外传与越权调用；Hermes 读 runs 核对越界动作；工作区里不放与个人工程无关的数据 |
-| R4 | **agent 实际权限大于 instructions** | daemon 以 `--permission-mode bypassPermissions` 启动 Claude Code；agent 继承本机用户的 git/gh 凭据，技术上能推 main | 远端分支保护读不到（403），不能依赖；合并官同时审计「main 上出现不经 PR 的提交」并告警；UNATTENDED 只在沙盒项目；本机 Claude Code 的 deny 规则与 hook 在该模式下是否仍生效〔待实测〕；后续可评估给 agent 单独签发只能推 `agent/` 分支的 GitHub 令牌 |
-| R5 | **GC 删除未推送的工作** | GC 删除过期任务目录时会丢弃“未提交或未推送”的工作，并对已无 worktree 的 `agent/` 分支执行 `git branch -D`；`MULTICA_GC_TTL` 默认 24h（issue `done / cancelled` 且闲置后） | instructions 要求每个小步提交并推 `agent/` 分支后才能结束 run；`MULTICA_GC_TTL` 调大（批 E 定具体值），并保持大于 `MULTICA_GC_INTERVAL`；`MULTICA_WORKSPACES_ROOT` 用单独目录 |
+| R4 | **agent 实际权限大于 instructions** | daemon 以 `--permission-mode bypassPermissions` 启动 Claude Code；agent 继承本机用户的 git/gh 凭据，技术上能推 main | **首跑硬前提 5.2c**：受限执行身份（单独 macOS 用户或容器）、只对首跑仓库有效的 GitHub 凭据、首跑仓库 main 由远端规则拒绝直推、权限矩阵实测记录在案；未成立只做人工沙盒试验。另外合并官审计「main 上出现不经 PR 的提交」并告警；本机 deny 规则与 hook 在该模式下是否生效只记录，不作为防线 |
+| R5 | **GC 删除未推送的工作** | GC 删除过期任务目录时会丢弃“未提交或未推送”的工作，并对已无 worktree 的 `agent/` 分支执行 `git branch -D`；`MULTICA_GC_TTL` 默认 24h（issue `done / cancelled` 且闲置后） | M2 首跑期间关 GC（`MULTICA_GC_ENABLED=false`），重开前逐目录核对未提交 / 未推送 / run-log 已导出（7.4）；平时 instructions 要求每个小步提交并推 `agent/` 分支后才能结束 run，`MULTICA_GC_TTL` 调大并保持大于 `MULTICA_GC_INTERVAL`；run-log 边跑边导；`MULTICA_WORKSPACES_ROOT` 用单独目录 |
 | R6 | **遥测** | 匿名部署遥测**默认开启**，每 UTC 日一次发往 `telemetry.multica.ai`；在 API 服务上设 `DO_NOT_TRACK=1` 关闭；PostHog 在 `POSTHOG_API_KEY` 为空时不发送，另有 `ANALYTICS_DISABLED` | 部署时设 `DO_NOT_TRACK=1`、`ANALYTICS_DISABLED=1`，并回读容器实际环境；不声称做过完整网络审计 |
 | R7 | **驿窗依赖 Chrome 开着、电脑不睡** | 驿窗经常浩 Chrome 里登录的 chatgpt.com 送审；插件或页面掉线时通道不可用；页面改版时插件报 `no-composer` 等原因，驿窗退回半自动 | 无人值守长跑只做到“开 PR 待审”，送审在常浩在场或机器条件满足时进行；ChatGPT 30 分钟不回、Claude 2 小时不交回，驿窗停下交还常浩；未回信、接连 fail/stop 等问题以驿窗侧排查结论为准 |
-| R8 | **调用方身份、回信回流、High 强度未打通** | 见 3.3：三项〔待实测〕；驿窗发送前不核对模型与思考强度 | 实测前送审由桌面 Claude 会话发起；回执如实写“强度未经机器核对”；需驿窗改动的另开 postpane issue |
+| R8 | **调用方身份、回信回流、High 强度、审核证据未打通** | 见 3.3：三项〔待实测〕；驿窗发送前不核对模型与思考强度；接力记录只留最新 200 条、不存完整送审包指纹 | 实测前送审由桌面 Claude 会话发起；回执按 5.5 第 8 条标审核模式；合并官以驿窗记录（非 PR 评论）为证据，驿窗补齐前只影子运行、不自动合并；需驿窗改动的另开 postpane issue |
+| R11 | **合并竞态** | 读 PR 与执行合并之间，agent 仍可能推新 HEAD | 合并带 `--match-head-commit <审过的 head_sha>`，不匹配即停、不重试（5.5 第 7 条） |
+| R12 | **长跑停不下来** | agent 崩溃时执行不了 instructions 里的停机；`blocked` 不关 Wakeup | 5.3a 独立停机检查：禁用 Wakeup、暂停 Autopilot、取消 run、回读；结果不明即冻结 |
 | R9 | **数据与模型出境** | 本地部署不等于模型离线；任务、上下文和工具结果会送往 Anthropic / OpenAI | 工作区只放个人工程任务；不接企业数据、Vault 正文、凭据 |
 | R10 | **Multica 飞书渠道被误开** | 自托管下设 `MULTICA_LARK_SECRET_KEY` 即开启 | 部署配置不设该变量；部署回读时检查 |
 

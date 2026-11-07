@@ -20,9 +20,10 @@ V3.1 把 ORCA 定为工程执行真源，ChatGPT 送审走 ORCA 内嵌浏览器�
 1. **项目协同（执行层）改用本机自托管 Multica，锁定 v0.8.1**，daemon 原生跑在 Mac。ORCA 整体移除，不再作为任何流程的依赖。
 2. **事实所有权三分**：Hermes `twin_state` 管业务（目标、优先级、授权、收口）；Multica 管执行（issue 的执行状态、agent、run、runtime）；GitHub 管交付（分支、PR、HEAD/base、合并）。三者之间只同步 ID 和摘要。
 3. **角色即 agent**：在 Multica 里建「Claude 开发」「Codex 验证」「审查员」三个 agent；审查员把送审包经驿窗通道送 ChatGPT 聊天模式 High。**Hermes 不当 Multica agent**，只经 Multica CLI/API 建单、读 run、发晨报；飞书只走猛鬼兽一个机器人。
-4. **Multica 不推送也不合并**：agent 只推 `agent/<issue>` 分支并开 PR；合并归 Hermes 合并官（先影子运行）加 `owner_approved_policy` 策略记录，常浩说「合并」前一律不合。
-5. **双模式与 `run_authorization` 保留**：SUPERVISED = 常浩在场手动指派；UNATTENDED = Autopilot / Wakeup，只限名册里登记为沙盒的项目。
-6. ChatGPT 送审改走驿窗通道；`orca/chatgpt_relay.py`（RELAY-01）、`hermes/scripts/dispatch.py`、`hermes/scripts/run_worker.py` 标为 Legacy；RELAY-02（PR #40）以「被 V4.0 取代」关闭。
+4. **Multica 不推送也不合并**：agent 只推 Multica 分配的 `agent/…` 分支并开 PR；合并归 Hermes 合并官（先影子运行）加 `owner_approved_policy` 策略记录，合并命令必须带审过的 HEAD（`--match-head-commit`），审核来源以驿窗接力记录为准；常浩说「合并」前一律不合。
+5. **agent 不在常浩的个人权限下运行**：Multica 以 `bypassPermissions` 拉起 Claude Code，instructions 不是隔离。首跑前必须有受限执行身份（单独 macOS 用户或容器）、只对沙盒仓库有效的凭据和实测过的权限矩阵（ARCHITECTURE 5.2c）。
+6. **双模式与 `run_authorization` 保留**：SUPERVISED = 常浩在场手动指派（授权实现前只允许“人工指派例外”，只授权那一次）；UNATTENDED = Autopilot / Wakeup（长跑用原生 stage + 系统 Child-Done 唤醒），只限名册里登记为沙盒的项目，并须有独立于 agent 的停机检查（ARCHITECTURE 5.3a）。
+7. ChatGPT 送审改走驿窗通道；`orca/chatgpt_relay.py`（RELAY-01）、`hermes/scripts/dispatch.py`、`hermes/scripts/run_worker.py` 标为 Legacy；RELAY-02（PR #40）以「被 V4.0 取代」关闭。
 
 ## 理由
 
@@ -32,11 +33,12 @@ V3.1 把 ORCA 定为工程执行真源，ChatGPT 送审走 ORCA 内嵌浏览器�
 
 ## 代价与风险
 
-见 ARCHITECTURE V4.0 第 14 节。要点：许可证、版本节奏快（锁 v0.8.1，升级走 OPS）、`MULTICA_TOKEN` 被 agent 子进程继承、工作目录 GC 可能删掉没推送的工作、遥测须关、驿窗依赖 Chrome 开着且电脑不睡。
+见 ARCHITECTURE V4.0 第 14 节。要点：许可证、版本节奏快（锁 v0.8.1，升级走 OPS）、`MULTICA_TOKEN` 被 agent 子进程继承、agent 以 `bypassPermissions` 运行、工作目录 GC 可能删掉没推送的工作、遥测须关、驿窗依赖 Chrome 开着且电脑不睡、审核模式（High）暂无机器证据、合并竞态、长跑停机依赖独立检查。
 
 ## 迁移与回退
 
-- **卸载 ORCA 的前提**（缺一不可）：① V4.0 首跑里至少一单经驿窗送审拿到「结论：通过」；② 常浩同意卸载变更单。之前 ORCA 只停用、不卸载。
+- **停用与停机分开**：本 ADR 生效即在架构上停用 ORCA（不再写代码、不接新流程）；真实进程、LaunchAgent、定时任务的停止走 OPS 变更单。
+- **卸载 ORCA 的前提**（缺一不可）：① V4.0 首跑里至少一单经驿窗送审拿到「结论：通过」；② 运行依赖盘点完成（进程、LaunchAgent、定时任务、调用方、Legacy 脚本的隐式依赖、活跃任务与审计记录保全、备份恢复演练，见 ARCHITECTURE 10.3）；③ 常浩同意卸载变更单。之前 ORCA 只停用、不卸载。
 - **卸载方式**：OPS 变更单，ORCA 应用、`/usr/local/bin/orca`、`~/.orca` 先备份再删。
 - **回退**：Multica 首跑不成立时，回到「常浩手动在驿窗发起送审 + Claude 会话开发 + 常浩手动合并」的人工流程（不依赖 ORCA，也不依赖 Multica）；ORCA 已卸载的，从备份恢复后按 V3.1（history 里的原件）执行。Legacy 脚本在退役前一直留在 main，不删。
 
