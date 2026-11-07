@@ -1,5 +1,5 @@
 {
-  "version": "v1.2 · 2026-11-07",
+  "version": "v1.3 · 2026-11-07",
   "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。",
   "projects": [
     {
@@ -215,9 +215,50 @@
       "test": "scripts/test.sh",
       "default_worker": null,
       "write_allowed": true,
-      "notes": "macOS 菜单栏小工具（Swift），清理下载与缓存、构建产物，空间暴涨时提醒，已挂进驿窗侧栏。测试用 scripts/test.sh，不要直接 swift test（L-04）；只能在 macOS 上跑，没有 CI。2026-11-07 常浩定转为活跃，同日建私有远端；第 0–9 批在 feat/* 分支链上，合回 main 见 disk-slim PR #1。",
+      "notes": "macOS 菜单栏小工具（Swift），清理下载与缓存、构建产物，空间暴涨时提醒，已挂进驿窗侧栏。测试用 scripts/test.sh，不要直接 swift test（L-04）；只能在 macOS 上跑，没有 CI。2026-11-07 常浩定转为活跃，同日建私有远端；第 0–9 批经 disk-slim PR #1 合回 main（19adc49）。",
       "category": "活跃",
       "github": "Natsukashii1997/disk-slim"
+    },
+    {
+      "id": "get-index",
+      "name": "GET 索引维护",
+      "aliases": [
+        "GET 索引维护",
+        "GET 索引",
+        "get 笔记索引",
+        "get-index"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/get-index",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "python3 -m unittest discover -s tests && node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "Obsidian 知识库 KB-04 的 GET NOTES 索引增量维护工具（Python，本机确定性执行，不调模型不联网）；GET NOTES 严格只读。2026-11-07 常浩定转为活跃，同日建私有远端：只放代码，索引数据 part-*.jsonl、state/、.runtime/ 不入库（含受限笔记元数据），远端是去掉数据后新起的历史，旧历史打包在 ~/Archive/repos/备份/。没有 CI。",
+      "category": "活跃",
+      "github": "Natsukashii1997/get-index"
+    },
+    {
+      "id": "little-steps",
+      "name": "Little Steps 育儿记录",
+      "aliases": [
+        "Little Steps",
+        "little-steps",
+        "育儿记录",
+        "婴儿工作台",
+        "baby-care-workbench"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/little-steps",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "npx tsc --noEmit && node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "家庭育儿记录 PWA 与微信小程序（React + Vite）。2026-11-07 常浩定转为活跃：目录从 ~/Documents/AI 项目/baby-care-workbench 挪来，同日建私有远端；仓库含宝宝姓名与出生数据，常浩同意放私有库，不得公开。端到端 npx playwright test 要先装 Playwright 浏览器，没放进 test。没有 CI。",
+      "category": "活跃",
+      "github": "Natsukashii1997/little-steps"
     }
   ],
   "categories": {
@@ -229,12 +270,6 @@
     "常浩自删": "营销战役相关，常浩整体删除，本计划不处理"
   },
   "inventory": [
-    {
-      "path": "~/Documents/ChatGPT/个人/work/get-index",
-      "category": "只登记",
-      "todo": "常浩 11-07 定：保留",
-      "why": "GET NOTES 索引工具，09-16 后没动；和 C3 消化流程相关"
-    },
     {
       "path": "~/Documents/ChatGPT/个人",
       "category": "拆外壳",
@@ -270,12 +305,6 @@
       "category": "待删",
       "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除",
       "why": "公司战略系统（含 robot-cards 卡片机器人），9-07 后停；常浩 11-07 定删除。launchd ai.strategy-cards.worker.codex 没在加载，plist 一并移到 _launchd/"
-    },
-    {
-      "path": "~/Documents/AI 项目/baby-care-workbench",
-      "category": "只登记",
-      "todo": "常浩定",
-      "why": "Little Steps 育儿记录 PWA 与微信小程序体验版，10-24 还有提交；源码只在本地。GitHub 上的 little-steps-private 是打包后的网页成品，不是源码"
     },
     {
       "path": "~/Archive/repos/待删/营销战役AI协同MVP",
@@ -556,7 +585,7 @@
     {
       "path": "github:Natsukashii1997/little-steps-private",
       "category": "待删",
-      "todo": "可删：只是 Little Steps 的打包产物，没开 GitHub Pages，源码和 dist 都在本地 baby-care-workbench；需常浩删除",
+      "todo": "可删：只是 Little Steps 8 月的打包产物，没开 GitHub Pages；源码在 work/little-steps 与私有仓库 Natsukashii1997/little-steps；需常浩删除",
       "why": "Little Steps 的网页成品（PWA 打包产物）"
     }
   ]
