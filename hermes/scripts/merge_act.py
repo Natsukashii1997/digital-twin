@@ -8,7 +8,8 @@
   1. 仓库在 merge_rules.json 的 act.repos 里；风险档不是 L3（L3 不走飞书）；
   2. PR 还开着、不是草稿、HEAD 仍是卡片上的、base 是主分支、没冲突、不落后（mergeStateStatus 为 CLEAN）；
   3. 本机主目录的主分支没有没推的提交；
-  4. 在干净 worktree 里检出这个 HEAD 跑 act.repos 里登记的测试命令，通过；
+  4. 登记了 ci 的仓库：这个 HEAD 的 GitHub 检查全部通过（还在跑、没过、一项都没有都停下），不在本机跑测试；
+     没登记 ci 的：在干净 worktree 里检出这个 HEAD，先跑 setup（装依赖）再跑 test，通过；
   5. 合并命令带 --match-head-commit（服务端再校验一次 HEAD），合并后回读确认已合并。
 合并后主目录停在主分支、又没有未提交改动时才 git pull --ff-only；否则只说明为什么没拉。
 
@@ -35,6 +36,8 @@ RUNS = Path(os.environ.get("DT_MERGE_RUNS", "~/Library/Application Support/Digit
 VIEW_FIELDS = mo.PR_FIELDS + ",baseRefName,mergeStateStatus,url"
 REF = re.compile(r"^([\w.-]+)#(\d+)@([0-9a-f]{7,40})$")
 COLOR = {mo.MERGE: "green", mo.RETURN: "orange", mo.ASK: "red"}
+CHECK_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CHECK_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
 
 class Stop(Exception):
@@ -156,7 +159,28 @@ def project_of(name):
     raise Stop(f"名册里没有 {name}")
 
 
-def check_pr(card, rules, main):
+def require_ci_passed(p):
+    """statusCheckRollup（只含当前 HEAD 的检查）全部通过才往下走，否则停下并说明哪项在跑、哪项没过。
+    免费版私有仓库没有分支保护，GitHub 不拦，所以这里自己把 CI 当合并条件。"""
+    checks = p.get("statusCheckRollup") or []
+    if not checks:
+        raise Stop("这个版本没有任何 CI 检查结果（该有 CI 却没跑），在电脑上看一下")
+    failed, waiting = [], []
+    for c in checks:
+        name = c.get("name") or c.get("context") or "?"
+        status = str(c.get("status") or "").upper()
+        result = str(c.get("conclusion") or c.get("state") or "").upper()
+        if (status and status != "COMPLETED") or result in CHECK_WAIT or not result:
+            waiting.append(name)
+        elif result not in CHECK_OK:
+            failed.append(f"{name}（{result}）")
+    if failed:
+        raise Stop("CI 没过：" + "、".join(failed) + "，交回开这个 PR 的会话修")
+    if waiting:
+        raise Stop("CI 还在跑：" + "、".join(waiting) + "，跑完再回「合并」")
+
+
+def check_pr(card, rules, main, ci=False):
     p = mo.gh_json(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", VIEW_FIELDS], f"{card['repo']}#{card['pr']} 取状态")
     if p.get("state") != "OPEN":
         raise Stop(f"PR 已经是 {p.get('state')}，不用再合")
@@ -174,12 +198,16 @@ def check_pr(card, rules, main):
         raise Stop("和主分支有冲突，要交回开这个 PR 的会话去变基")
     if state == "BEHIND":
         raise Stop("落后主分支，要交回开这个 PR 的会话去变基")
+    if ci:
+        require_ci_passed(p)                          # CI 没过或在跑时 GitHub 报 UNSTABLE，先说清楚是 CI
     if state != "CLEAN":
         raise Stop(f"GitHub 现在的合并状态是 {state}，不是 CLEAN，稍后再试或在电脑上看")
     return p
 
 
-def run_tests(path, card, cmd, timeout):
+def run_tests(path, card, conf):
+    cmd = " && ".join(c for c in (conf.get("setup"), conf["test"]) if c)
+    timeout = int(conf.get("timeout", 900))
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     run = RUNS / f"{card['repo'].split('/')[-1]}-{card['pr']}-{card['head'][:7]}-{stamp}"
     run.mkdir(parents=True, exist_ok=True)
@@ -224,13 +252,20 @@ def cmd_merge(ref):
     if not conf:
         raise Stop("这个仓库还没开飞书合并（merge_rules.json 的 act.repos）")
     path, main = project_of(card["repo"].split("/")[-1])
-    check_pr(card, rules, main)
+    ci = bool(conf.get("ci"))
+    check_pr(card, rules, main, ci)
     git(path, "fetch", "-q", "origin")
     ahead = git(path, "rev-list", "--count", f"origin/{main}..{main}")
     if ahead != "0":
         raise Stop(f"本机主目录的 {main} 有 {ahead} 个没推的提交，按《工程流程》第 5 节要先由你决定推不推")
-    run = run_tests(path, card, conf["test"], int(conf.get("timeout", 900)))
-    check_pr(card, rules, main)                       # 测试要几分钟，合并前再读一次
+    if ci:
+        tested = "CI 通过"
+    elif not conf.get("test"):
+        raise Stop("这个仓库没登记 CI，也没登记测试命令（merge_rules.json 的 act.repos）")
+    else:
+        run = run_tests(path, card, conf)
+        tested = f"测试通过，日志在 {run / 'test.log'}"
+        check_pr(card, rules, main)                   # 测试要几分钟，合并前再读一次
     mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
                          "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT)
     after = mo.gh_json(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,mergeCommit"], "合并后回读")
@@ -239,7 +274,7 @@ def cmd_merge(ref):
         raise Stop(f"合并没成（gh：{why[:200]}），回读 PR 还是 {after.get('state')}")
     record_owner(card, "合并")
     sha = ((after.get("mergeCommit") or {}).get("oid") or "")[:7]
-    print(f"已合并 {card_ref(card['repo'], card['pr'], card['head'])}（{card['title']}）→ {sha}。测试通过，日志在 {run / 'test.log'}。")
+    print(f"已合并 {card_ref(card['repo'], card['pr'], card['head'])}（{card['title']}）→ {sha}。{tested}。")
     print(sync_main(path, main) + "。如果要安装或写 CURRENT，交给 Claude 会话。")
     return 0
 
