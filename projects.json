@@ -1,5 +1,5 @@
 {
-  "version": "v1.1 · 2026-11-07",
+  "version": "v1.2 · 2026-11-07",
   "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。",
   "projects": [
     {
@@ -180,6 +180,44 @@
       "notes": "源自 Agent HUD 917df21，不与上游同步。打包只用 --bundles app；安装前先退出旧应用再 ditto 到 /Applications。",
       "category": "活跃",
       "github": "Natsukashii1997/postpane"
+    },
+    {
+      "id": "chatgpt-clipper",
+      "name": "ChatGPT 回答收藏器",
+      "aliases": [
+        "ChatGPT 回答收藏器",
+        "回答收藏器",
+        "chatgpt-clipper",
+        "收藏器"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/chatgpt-clipper",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "node --test tests/*.test.mjs",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "Chrome 桌面版 MV3 插件，常浩自用：把 ChatGPT / Claude 的回答存成长图 PNG + 离线 HTML + Markdown 放进 Obsidian。2026-11-07 常浩定转为活跃，同日建私有远端。没有 CI。",
+      "category": "活跃",
+      "github": "Natsukashii1997/chatgpt-clipper"
+    },
+    {
+      "id": "disk-slim",
+      "name": "磁盘瘦身",
+      "aliases": [
+        "磁盘瘦身",
+        "disk-slim"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/disk-slim",
+      "main": "main",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "scripts/test.sh",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "macOS 菜单栏小工具（Swift），清理下载与缓存、构建产物，空间暴涨时提醒，已挂进驿窗侧栏。测试用 scripts/test.sh，不要直接 swift test（L-04）；只能在 macOS 上跑，没有 CI。2026-11-07 常浩定转为活跃，同日建私有远端；第 0–9 批在 feat/* 分支链上，合回 main 见 disk-slim PR #1。",
+      "category": "活跃",
+      "github": "Natsukashii1997/disk-slim"
     }
   ],
   "categories": {
@@ -258,10 +296,10 @@
       "why": "LUMI 学员助手，企业微信学员信息侧边栏；远端在 git.fmode.cn，已上线 Fmode，10-12 后停"
     },
     {
-      "path": "~/Documents/ChatGPT/Fmode/销售案例库",
-      "category": "只登记",
-      "todo": "—",
-      "why": "远端在 git.fmode.cn，保留（M3-Q4）"
+      "path": "~/Archive/repos/待删/Fmode-销售案例库",
+      "category": "待删",
+      "todo": "已移到 ~/Archive/repos/待删/（11-07），待常浩删除；远端 git.fmode.cn 和线上 app.fmode.cn/dev/BKFgBuzMZk 由常浩处理",
+      "why": "路觅销售素材库 v2；常浩 11-07 定删除"
     },
     {
       "path": "~/Archive/repos/待删/Fmode-用户案例库",
@@ -480,57 +518,45 @@
       "why": "AIBP 培训课件与行业调研，Natsukashii1997/aibp-desk"
     },
     {
-      "path": "~/Documents/ChatGPT/个人/work/chatgpt-clipper",
-      "category": "只登记",
-      "todo": "是否转为活跃（可派单）由常浩定",
-      "why": "ChatGPT / Claude 回答收藏器，Chrome MV3 插件，存长图 + HTML + Markdown 进 Obsidian；有 AGENTS，测试 node --test tests/*.test.mjs；只在本地、没有远端"
-    },
-    {
-      "path": "~/Documents/ChatGPT/个人/work/disk-slim",
-      "category": "只登记",
-      "todo": "是否转为活跃（可派单）由常浩定",
-      "why": "磁盘瘦身，macOS 菜单栏工具，已挂进驿窗侧栏；有 AGENTS，测试 scripts/test.sh；只在本地、没有远端；feat/postpane-pendant 还没合回 main"
-    },
-    {
       "path": "github:Natsukashii1997/my-app-lumist",
       "category": "待删",
-      "todo": "11-07 已归档，删除由常浩动手",
+      "todo": "可删：已归档，常浩 11-07 定删除；需常浩删除",
       "why": "AI Studio 生成的应用，5 月后没动；常浩 11-07 定删除"
     },
     {
       "path": "github:Natsukashii1997/digital-twin-old-to-delete",
       "category": "待删",
-      "todo": "删除由常浩动手",
+      "todo": "可删：HEAD 0510eb1 已在 digital-twin 历史里，内容全被包含；需常浩删除（gh 没有 delete_repo 权限）",
       "why": "数字分身旧仓库"
     },
     {
       "path": "github:Natsukashii1997/digital-twin-old-to-delete-2",
       "category": "待删",
-      "todo": "删除由常浩动手",
+      "todo": "可删：HEAD f7d7057 已在 digital-twin 历史里，内容全被包含；需常浩删除",
       "why": "数字分身旧仓库"
     },
     {
       "path": "github:Natsukashii1997/orca-chatgpt-sandbox-20261030",
-      "category": "沙盒",
-      "todo": "删除由常浩定",
+      "category": "待删",
+      "todo": "可删：一次性测试，只有 README；需常浩删除",
       "why": "一次性自动化测试仓库"
     },
     {
       "path": "github:Natsukashii1997/hud-dock",
-      "category": "只登记",
-      "todo": "已归档",
+      "category": "待删",
+      "todo": "可删：已归档；唯一的自有提交（安装副本负责客户端回调、给 agent-hud-mcp 重签名）驿窗已经包含；需常浩删除",
       "why": "驿窗前身，fork 自 jazzenchen/agent-hud-open"
     },
     {
       "path": "github:Natsukashii1997/dt-sandbox",
       "category": "沙盒",
-      "todo": "—",
+      "todo": "保留：DT-ORC M1 权限矩阵、M2 首跑都用它",
       "why": "DT-ORC V4.0 Multica 沙盒，公开仓库，只放合成内容"
     },
     {
       "path": "github:Natsukashii1997/little-steps-private",
-      "category": "只登记",
-      "todo": "跟着 baby-care-workbench 走",
+      "category": "待删",
+      "todo": "可删：只是 Little Steps 的打包产物，没开 GitHub Pages，源码和 dist 都在本地 baby-care-workbench；需常浩删除",
       "why": "Little Steps 的网页成品（PWA 打包产物）"
     }
   ]

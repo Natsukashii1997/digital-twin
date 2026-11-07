@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-11-07 · 名册 v1.2：收藏器、磁盘瘦身转为活跃；销售素材库删除；GitHub 杂项判定去留
+
+- **来由**：常浩看过盘点后说：路觅销售素材库也删除；ChatGPT 回答收藏器和磁盘瘦身是单独的两个小项目，转为活跃，没建库就建上；GitHub 上不用的杂项，没价值的删掉。
+- **两个小项目**：协作骨架原本就齐（AGENTS、CURRENT、LESSONS、交接模板与格式测试、check-rules、docs/agents 三份）。缺的是远端：已建私有仓库 `Natsukashii1997/chatgpt-clipper`、`Natsukashii1997/disk-slim`，设置和其他仓库一致（默认 main、只允许 squash、合并后删分支、5 个分流标签），issue 看板说明改成「已建」。disk-slim 的 main 上只有起步那 1 个提交，第 0–9 批在 feat/* 分支链上，已经全部推送，并提了 disk-slim PR #1 把链尾合回 main，等常浩说「合并」。两个仓库都没加 CI：disk-slim 的测试只能在 macOS 上跑；收藏器要不要加 CI 另定。名册新增两条活跃项目，合并官扫的仓库从 8 个变成 10 个（act.repos 没改，这两个仓库只给建议，不会自动合并）。
+- **销售素材库**：本地 `Fmode/销售案例库` 移到了 `~/Archive/repos/待删/Fmode-销售案例库`。远端 git.fmode.cn 和线上 app.fmode.cn 由常浩处理。
+- **GitHub 杂项判定**：可删 7 个，即 digital-twin-old-to-delete 和 -2（两个 HEAD 都已在本仓库历史里）、orca-chatgpt-sandbox-20261030、hud-dock（唯一的自有修复驿窗已经包含）、my-app-lumist、aibp-desk、little-steps-private（打包产物，没开 Pages）。保留 dt-sandbox（DT-ORC 在用）。gh 令牌没有 delete_repo 权限，删除由常浩动手。
+- **测试**：见 PR 描述。
+- **唯一下一步**：常浩在 GitHub 上删掉这 7 个仓库；disk-slim PR #1 等常浩说「合并」。
+
 ## 2026-11-07 · 名册按全量项目盘点更新（#75），常浩「全部执行」后合并
 
 - **来由**：常浩让 Claude 盘点本地和 GitHub 上的全部项目，然后定了去留：aibp-desk 并入管培生工作台；业务管理工作台（ops-desk）、用户案例库、公司战略系统，以及 Obsidian Second Brain、knowledge-base、brain、Claudecode-项目推进系统、ai-studio-feishu-integration、csv-amount-sorter、my-app-lumist 这 7 个停滞项目删除；「管培生带教-AI协同」「营销战役AI协同MVP」「营销战役卡片网关」提取后删除；get-index 保留；LUMI 学员助手是半成品，回头再整理。
