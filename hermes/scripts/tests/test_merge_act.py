@@ -1,4 +1,4 @@
-"""飞书一句话合并（#67）自测：发卡片、合并前的每一种停下、测试关、HEAD 绑定、退回留言。
+"""飞书一句话合并（#67）自测：发卡片、合并前的每一种停下、测试关、CI 关（#71）、HEAD 绑定、退回留言。
 真 git（临时裸仓库当 GitHub、临时主目录）、假 gh、假 lark-cli，不联网、不碰真实仓库和记录。"""
 import csv
 import json
@@ -229,6 +229,56 @@ class MergeAct(unittest.TestCase):
         r = self.assert_stopped("测试没过")
         self.assertIn("test.log", r.stdout)
         self.assertEqual(len(sh(self.main, "worktree", "list").splitlines()), 1)
+
+    # ---------- CI 关（#71） ----------
+
+    def set_act(self, conf):
+        rules = json.loads(self.rules.read_text())
+        rules["act"]["repos"] = {"app": conf}
+        self.rules.write_text(json.dumps(rules))
+
+    def ci_mode(self, checks, state="CLEAN"):
+        """仓库登记 ci；PR 带这些检查。测试命令故意会失败，跑了就露馅。"""
+        self.set_act({"ci": True, "test": f"{sys.executable} -c 'raise SystemExit(1)'"})
+        self.update_pr(statusCheckRollup=checks, mergeStateStatus=state)
+
+    def test_ci_passed_merges_without_local_tests(self):
+        self.ci_mode([{"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                      {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                      {"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS"}])
+        self.scan()
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"已合并 {self.ref}（PR 5）→ fffffff。CI 通过。", r.stdout)
+        self.assertFalse((self.tmp / "runs").exists())                    # 没在本机跑测试
+        self.assertEqual(self.ledger()[0]["owner"], "合并")
+
+    def test_ci_running_stops(self):
+        self.assert_stopped("CI 还在跑：test", before=lambda: self.ci_mode(
+            [{"name": "test", "status": "IN_PROGRESS", "conclusion": ""},
+             {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}], state="UNSTABLE"))
+
+    def test_ci_failed_stops(self):
+        r = self.assert_stopped("CI 没过：test（FAILURE）", before=lambda: self.ci_mode(
+            [{"name": "test", "status": "COMPLETED", "conclusion": "FAILURE"},
+             {"name": "build", "status": "QUEUED", "conclusion": ""}], state="UNSTABLE"))
+        self.assertNotIn("还在跑", r.stdout)                              # 有没过的，先说没过
+
+    def test_ci_no_checks_stops(self):
+        self.assert_stopped("没有任何 CI 检查结果", before=lambda: self.ci_mode([]))
+        self.assertFalse((self.tmp / "runs").exists())
+
+    def test_local_fallback_runs_setup_before_test(self):
+        self.set_act({"setup": f"{sys.executable} -c \"open('deps','w').write('ok')\"",
+                      "test": f"{sys.executable} -c \"import sys; sys.exit(0 if open('deps').read() == 'ok' else 1)\"",
+                      "timeout": 60})
+        self.scan()
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("测试通过，日志在", r.stdout)
+
+    def test_no_ci_and_no_test_stops(self):
+        self.assert_stopped("没登记 CI，也没登记测试命令", before=lambda: self.set_act({"timeout": 60}))
 
     def test_stop_when_merge_rejected_by_server(self):
         self.scan()
