@@ -156,7 +156,11 @@ class MergeAct(unittest.TestCase):
         self.assertEqual(content["header"]["title"]["content"], f"🔀 待你决定 · {self.ref}")
         text = content["body"]["elements"][0]["content"]
         self.assertIn("风险档 **L0** · Hermes 建议 **建议合并**", text)
-        self.assertIn("回 **合并**", text)
+        self.assertIn("点 **合并**", text)
+        buttons = [col["elements"][0] for col in content["body"]["elements"][1]["columns"]]
+        self.assertEqual([b["text"]["content"] for b in buttons], ["✅ 合并", "↩️ 退回"])
+        self.assertEqual([b["behaviors"] for b in buttons],
+                         [[{"type": "callback", "value": {"merge_officer": v, "ref": self.ref}}] for v in ("merge", "return")])
         self.assertEqual(card[card.index("--idempotency-key") + 1], f"merge-card-app-5-{self.head[:12]}")
         self.scan()
         self.assertEqual(len(self.calls("lark.jsonl")), 1)            # 同一个版本不重发
@@ -166,9 +170,10 @@ class MergeAct(unittest.TestCase):
         self.update_pr(files=[{"path": "ops/x.sh"}])
         self.scan()
         card = self.calls("lark.jsonl")[0]
-        text = json.loads(card[card.index("--content") + 1])["body"]["elements"][0]["content"]
-        self.assertIn("飞书里不合并", text)
-        self.assertNotIn("回 **合并**", text)
+        elements = json.loads(card[card.index("--content") + 1])["body"]["elements"]
+        self.assertIn("飞书里不合并", elements[0]["content"])
+        self.assertNotIn("点 **合并**", elements[0]["content"])
+        self.assertEqual(len(elements), 1)                              # L3 不带按钮
 
     # ---------- 合并 ----------
 

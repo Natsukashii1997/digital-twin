@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""飞书一句话合并（#67）：影子合并官给新 PR 发卡片，常浩引用卡片回「合并」或「退回 原因」后，由 Hermes 调用本脚本执行。
+"""飞书一句话合并（#67）：影子合并官给新 PR 发卡片，常浩点卡片上的「合并」「退回」按钮（#78），或引用卡片回「合并」「退回 原因」后，由 Hermes 调用本脚本执行。
 
 授权是单次的 owner_direct：每次都是常浩本人对一张卡片（仓库、PR、完整 HEAD）说了话；本脚本只认发过的卡片，不认别的 PR 或版本。
 不放权、不变基、不改代码、不安装、不写 CURRENT。
@@ -75,14 +75,26 @@ def build_card(row, facts, url):
              f"风险档 **{row['tier']}** · Hermes 建议 **{row['suggestion']}**" + (f"：{row['reasons']}" if row["reasons"] else ""),
              f"改了 {len(paths)} 个文件：" + "、".join(f"`{p}`" for p in paths[:5]) + ("…" if len(paths) > 5 else ""),
              f"版本 `{row['head_sha'][:7]}`", ""]
+    buttons = []
     if row["tier"] == "L3":
         lines.append("⚠️ 高风险（L3），飞书里不合并。请在电脑上让 Claude 会话处理。")
     else:
-        lines.append("长按这张卡片选「回复」：回 **合并**，Hermes 核对版本、跑测试后合并；回 **退回 原因**，它把原因留言到 PR。")
+        lines.append("点 **合并**：Hermes 核对版本、跑测试后合并；点 **退回**：它问你原因，再留言到 PR。")
+        buttons = [button("✅ 合并", "primary_filled", "merge", ref), button("↩️ 退回", "default", "return", ref)]
+    elements = [{"tag": "markdown", "content": "\n".join(lines)}]
+    if buttons:
+        elements.append({"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "8px",
+                         "columns": [{"tag": "column", "width": "auto", "elements": [b]} for b in buttons]})
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text", "content": f"🔀 待你决定 · {ref}"},
                        "template": COLOR.get(row["suggestion"], "blue")},
-            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}]}}
+            "body": {"elements": elements}}
+
+
+def button(label, style, verb, ref):
+    """点按钮时网关把 value 转成一条 `/card button {"merge_officer": verb, "ref": ref}` 交给 Hermes（merge-officer 技能认它）。"""
+    return {"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": style,
+            "behaviors": [{"type": "callback", "value": {"merge_officer": verb, "ref": ref}}]}
 
 
 def home_chat():
