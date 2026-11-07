@@ -1,0 +1,30 @@
+{
+  "version": "1",
+  "date": "2026-11-07",
+  "note": "影子合并官的判定规则（#61）。思路取自 orca/merge_gate.py（在 claude/37-* 分支）和 docs/DT-ORC/ARCHITECTURE.md 4.2、5.5：完整 HEAD/base 绑定、敏感路径交给人、有硬性问题一律退回、路径只能上调风险。每次被常浩推翻，改这里、版本号加一，并用 merge_officer.py replay 回放历史。",
+  "sensitive": [
+    "^\\.github/",
+    "^ops/",
+    "\\.plist$",
+    "(^|/)\\.env",
+    "\\.(pem|key|p12)$",
+    "secret",
+    "credential",
+    "token",
+    "password"
+  ],
+  "repo_sensitive": {
+    "digital-twin": ["^hermes/", "^orca/executor-settings\\.json$", "^orca/merge_gate\\.py$", "^projects\\.json$"]
+  },
+  "l0_paths": ["\\.md$"],
+  "rule_docs": ["(^|/)AGENTS\\.md$", "(^|/)CLAUDE\\.md$", "(^|/)PRD\\.md$", "(^|/)LESSONS\\.md$", "(^|/)SKILL\\.md$"],
+  "l1_max_files": 3,
+  "return_when": {
+    "draft": true,
+    "conflicting": true,
+    "failing_checks": true,
+    "missing_closes": true
+  },
+  "ask_labels": ["needs-info"],
+  "threshold": {"min_samples": 20, "min_rate": 0.9}
+}
