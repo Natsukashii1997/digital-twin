@@ -28,6 +28,7 @@ hermes/
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
     proposal-digest/   记下常浩对每周待决提案的选择（#61，调 proposal_digest.py apply）
+  plugins/merge-buttons/ PR 卡片按钮（#78）：注册 /card，把「合并 / 退回」点击转给 merge_act.py button（不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是三报规则
   samples/             样稿

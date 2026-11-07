@@ -329,6 +329,65 @@ class MergeAct(unittest.TestCase):
         self.assertEqual(self.ledger()[0]["owner"], "退回")
         self.assertIn("没有等你决定", self.cli(ACT, "cards").stdout)
 
+    # ---------- 卡片按钮（#78） ----------
+
+    def texts(self):
+        """卡片之后发到私聊的文字消息。"""
+        return [json.loads(c[c.index("--content") + 1])["text"] for c in self.calls("lark.jsonl")
+                if c[c.index("--msg-type") + 1] == "text"]
+
+    def test_button_merge_says_checking_then_result(self):
+        self.scan()
+        r = self.cli(ACT, "button", "merge", self.ref, "--chat", "oc_test0001")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        checking, result = self.texts()
+        self.assertEqual(checking, f"⏳ 在核对 {self.ref}，稍后告诉你结果。")
+        self.assertIn(f"已合并 {self.ref}（PR 5）→ fffffff", result)
+        self.assertEqual(self.ledger()[0]["owner"], "合并")
+        keys = [c[c.index("--idempotency-key") + 1] for c in self.calls("lark.jsonl")[1:]]
+        self.assertEqual(len(set(keys)), 2)                                  # 两条消息各用各的幂等键
+
+    def test_button_merge_stop_is_reported(self):
+        self.scan()
+        self.update_pr(headRefOid="b" * 40)
+        r = self.cli(ACT, "button", "merge", self.ref, "--chat", "oc_test0001")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(self.texts()[-1].startswith("没合并："), self.texts())
+        self.assertNotIn(["pr", "merge"], [c[:2] for c in self.calls()])
+
+    def test_button_from_other_chat_does_nothing(self):
+        self.scan()
+        r = self.cli(ACT, "button", "merge", self.ref, "--chat", "oc_someone_else")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("不是来自常浩私聊", r.stdout)
+        self.assertEqual(self.texts(), [])
+        self.assertNotIn(["pr", "merge"], [c[:2] for c in self.calls()])
+
+    def test_button_unknown_card_is_refused(self):
+        self.scan()
+        r = self.cli(ACT, "button", "merge", "app#0@0000000", "--chat", "oc_test0001")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("没发过", self.texts()[-1])
+
+    def test_button_busy_while_same_card_running(self):
+        import fcntl
+        self.scan()
+        self.shadow.mkdir(parents=True, exist_ok=True)
+        with open(self.shadow / f"button-app_5_{self.head[:7]}.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            r = self.cli(ACT, "button", "merge", self.ref, "--chat", "oc_test0001")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.texts(), [f"{self.ref} 已经在处理了，等上一次的结果就好。"])
+
+    def test_button_return_asks_reason_and_marks_card(self):
+        self.scan()
+        r = self.cli(ACT, "button", "return", self.ref, "--chat", "oc_test0001")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.texts(), [f"↩️ 退回 {self.ref} 的原因是？直接回「退回 原因」就行，不用引用卡片。"])
+        self.assertIn("【等你说退回原因】", self.cli(ACT, "cards").stdout)
+        self.assertNotIn(["pr", "comment"], [c[:2] for c in self.calls()])    # 没原因不留言
+        self.assertEqual(self.ledger()[0]["owner"], "")
+
 
 if __name__ == "__main__":
     unittest.main()
