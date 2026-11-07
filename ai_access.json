@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "about": "数字分身的「AI 接入」配置（全局规则 P-13）。本项目没有图形界面：这份文件代替设置页，自检命令 `python3 ~/.hermes/scripts/ai_access.py status` 打印当前状态。这里写功能清单和出厂默认值；常浩切换后的选择存在 ~/Library/Application Support/DigitalTwin/ai-access.json（用 ai_access.py set 改，下一次调用生效），不改这份文件。和 AGENTS.md「AI 接入」一节保持一致，两处一起改。",
+  "default_worker": "codex",
+  "executors": {
+    "claude": {
+      "name": "Claude Code",
+      "access": "本机 CLI",
+      "how": "claude -p，用本机登录的 Claude 订阅；run_worker.py 清掉第三方 Anthropic 变量、走本机代理",
+      "check": {"cmd": ["claude", "auth", "status"], "ok": "\"loggedIn\": true", "not_logged_in": "未登录"},
+      "switchable": true
+    },
+    "codex": {
+      "name": "Codex",
+      "access": "本机 CLI",
+      "how": "codex exec，用本机登录的 ChatGPT 订阅",
+      "check": {"cmd": ["codex", "login", "status"], "ok": "Logged in", "not_logged_in": "未登录"},
+      "switchable": true
+    },
+    "hermes": {
+      "name": "Hermes（猛鬼兽）",
+      "access": "Hermes 派单",
+      "how": "飞书对话和带模型的定时任务由 Hermes 自己的模型做；底层模型在 ~/.hermes/config.yaml 的 model 段，用 `hermes config set model.default …` 切换，改完要重启网关",
+      "switchable": false
+    },
+    "chatgpt-web": {
+      "name": "ChatGPT 网页",
+      "access": "网页桥",
+      "how": "orca/chatgpt_relay.py 在 ORCA 内嵌浏览器的 ChatGPT 聊天页里发送审包、收回执",
+      "switchable": false
+    }
+  },
+  "features": [
+    {
+      "id": "workshop",
+      "name": "车间派单（dispatch.py + run_worker.py，workshop 技能）",
+      "executor": "default",
+      "choices": ["claude", "codex"],
+      "reads": "目标仓库的 worktree 或主目录、派单任务文件 task.md",
+      "writes": "worktree 分支上的提交、PR 和 issue、~/.hermes/dispatch/<单号>/out/receipt.json（回执）、状态库 Run",
+      "note": "常浩在飞书点名 Claude 或 Codex 时听点名；没点名时用这里的执行方。开跑前先查执行方能不能用，不能用就报错停下，不换另一家。"
+    },
+    {
+      "id": "scheduler",
+      "name": "持久调度自动开单（twin_scheduler.py，自动开单默认关闭）",
+      "executor": "per-task",
+      "choices": ["claude", "codex"],
+      "reads": "状态库 twin-state.db 里任务的负责方（owner）",
+      "writes": "同车间派单",
+      "note": "每个任务的负责方单独定，不跟随默认；经派单脚本开单，开跑前同样查可用性。"
+    },
+    {
+      "id": "chat",
+      "name": "飞书对话（猛鬼兽；含 progress 项目进展现查、vault 关于常浩的问答、merge-officer 与 proposal-digest 技能）",
+      "executor": "hermes",
+      "reads": "常浩的飞书私聊消息；Vault（经 MCP vault-read 只读）；项目名册；各仓库 git / GitHub",
+      "writes": "飞书私聊回复；Hermes 记忆（~/.hermes 下）",
+      "note": "仅支持 Hermes：飞书入口就是 Hermes 本身。"
+    },
+    {
+      "id": "hermes-aux",
+      "name": "Hermes 辅助任务（压缩上下文、命令审批判断、后台复盘）",
+      "executor": "hermes",
+      "reads": "当前会话",
+      "writes": "Hermes 记忆和技能（~/.hermes 下）",
+      "note": "模型在 ~/.hermes/config.yaml 的 auxiliary 段。"
+    },
+    {
+      "id": "report",
+      "name": "日报 / 周报并跑（Hermes 带模型定时任务，report_daily.py / report_weekly.py 取数，report_publish.py 发布）",
+      "executor": "hermes",
+      "reads": "用 lark-cli 读常浩的飞书私聊、群聊、会议和妙记、日程、任务；项目进展（progress_data.py）；并跑文档里的上一篇",
+      "writes": "飞书并跑日报 / 周报文档；~/Library/Application Support/DigitalTwin/evidence/reports/",
+      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。"
+    },
+    {
+      "id": "proposal-digest",
+      "name": "每周待决提案的推荐（Hermes 带模型定时任务，每周一 10:00）",
+      "executor": "hermes",
+      "reads": "~/session-retro/*/提案.md、牛马之家每周整理（proposal_digest_draft.py 取草稿）",
+      "writes": "推荐文件、飞书私聊卡片；常浩回复后写回各来源的结论",
+      "note": "仅支持 Hermes（Hermes 定时任务）。"
+    },
+    {
+      "id": "relay",
+      "name": "ORCA ChatGPT 送审（orca/chatgpt_relay.py）",
+      "executor": "chatgpt-web",
+      "reads": "送审包 Markdown",
+      "writes": "回执文件、~/Library/Application Support/DigitalTwin/relay/；结论是返工时把回执路径交给 ORCA 终端里的 Claude",
+      "note": "仅支持 ChatGPT 网页：送审本身就是要另一家独立审；可用性在送审时用 chatgpt_relay.py status 查。"
+    }
+  ],
+  "no_ai": [
+    "影子合并官 merge_officer.py、飞书一句话合并 merge_act.py、PR 卡片按钮插件 merge-buttons：按规则判断，不调用 AI",
+    "Tidings 周报推送 tidings_weekly.py：只转发 github-center 写好的周报卡片",
+    "工程自检 self_check.py、每日巡检 health_check.py、仓库自检 check_repos.py：纯脚本",
+    "晨报取数 brief_data.py：挂起中，不在运行"
+  ],
+  "exceptions": [
+    {
+      "what": "Hermes 主模型失败或额度不够时自动回退到 deepseek-flash（~/.hermes/config.yaml 的 fallback_model）",
+      "why": "Hermes 是飞书里唯一的入口，完全不回话代价太大；回退不是悄悄的：回复里注明，每日巡检 health_check.py 报前一天的回退次数，自检命令显示近 7 天的回退次数",
+      "approved": "常浩 2026-11-07 选「保留，登记为例外」（PRD F10.2）"
+    }
+  ],
+  "open": [],
+  "open_note": "本项目不对外开放 MCP 或其他接口。vault-read 是 Hermes 作为客户端去读 Vault，不算对外开放。",
+  "data_objects": [
+    {"name": "Hermes 模型用量", "source": "~/.hermes/state.db 的 session_model_usage", "used_by": "health_check.py 统计前一天的回退次数；ai_access.py status 显示最近实际用的模型和近 7 天回退次数"},
+    {"name": "Hermes 定时任务用量", "source": "~/.hermes/cron/usage_audit.jsonl", "used_by": "ai_access.py status 显示带模型定时任务最近一次用的模型"}
+  ]
+}

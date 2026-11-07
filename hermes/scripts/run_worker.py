@@ -12,7 +12,9 @@
   别的远端引用变化（别的会话 push、fetch）也不算违规，只记在 note_remote_moved。
 - 只接项目名册（digital-twin/projects.json）里登记的仓库；worktree 按所属主仓库匹配
 - 一启动就把自己的进程身份写进 结果目录/worker.json（B2.2：调度器判断真在跑还是残留、取消前核对身份用）
-退出码：0 正常；1 车间失败或超时；2 护栏被触发（主分支或远端被动过）；3 不在名册里或名册不允许写入。
+- 开跑前按 AI 接入配置（ai_access.py）查执行方能不能用；不能用就写一份 refused 回执、退出码 4，不换另一家（P-13）
+- 回执留痕：执行方、接入方式、模型（Claude 取输出里的 modelUsage；Codex 取 ~/.codex/config.toml 的 model）、怎么选的（--chosen-by）
+退出码：0 正常；1 车间失败或超时；2 护栏被触发（主分支或远端被动过）；3 不在名册里或名册不允许写入；4 执行方不可用。
 """
 import argparse
 import datetime as dt
@@ -22,7 +24,11 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ai_access  # noqa: E402
 
 PROXY = os.environ.get("DT_PROXY", "http://127.0.0.1:8086")
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
@@ -138,6 +144,35 @@ def parse(tool, stdout, out):
     return sid, last.read_text() if last.exists() else "", err
 
 
+def worker_model(tool, stdout):
+    """车间实际（Claude）或配置（Codex）的模型；拿不到返回 None。"""
+    if tool == "claude":
+        try:
+            usage = json.loads(stdout.strip().splitlines()[-1]).get("modelUsage") or {}
+            return "、".join(usage) or None
+        except (ValueError, IndexError, AttributeError):
+            return None
+    try:
+        for line in (Path.home() / ".codex/config.toml").read_text(encoding="utf-8").splitlines():
+            k, _, v = line.partition("=")
+            if k.strip() == "model" and v.strip():
+                return v.strip().strip('"\'') + "（~/.codex/config.toml）"
+            if line.strip().startswith("["):
+                break
+    except OSError:
+        pass
+    return None
+
+
+def preflight(tool):
+    """开跑前查执行方；能用返回 None，不能用返回给常浩看的一句话。"""
+    try:
+        st = ai_access.check(tool)
+    except ai_access.AccessError as e:
+        return f"查不了 {tool} 能不能用：{e}。这单没有开跑，也没有换成另一家。"
+    return None if st["state"] == "可用" else ai_access.unavailable_msg(st)
+
+
 def write_identity(out):
     """worker 的进程身份：pid、进程组、会话、启动时间（ps lstart，防 PID 复用）、主机、结果目录。原子写入；写不成不影响干活。"""
     pid = os.getpid()
@@ -168,6 +203,7 @@ def main():
     p.add_argument("--resume")
     p.add_argument("--timeout", type=int, default=3600)
     p.add_argument("--main", help="主分支名，默认取名册里的配置")
+    p.add_argument("--chosen-by", default="未说明", help="执行方怎么选的（点名 / AI 接入默认执行方 / 调度器任务负责方），写进回执")
     a = p.parse_args()
 
     a.cwd = git(a.cwd, "rev-parse", "--show-toplevel") or a.cwd
@@ -180,6 +216,15 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     write_identity(out)
+    trace = {"tool": a.tool, "executor": "Claude Code" if a.tool == "claude" else "Codex", "access": "本机 CLI",
+             "chosen_by": a.chosen_by}
+    why = preflight(a.tool)
+    if why:
+        receipt = {"project": proj["id"], **trace, "mode": a.mode, "cwd": a.cwd, "refused": "executor_unavailable",
+                   "reason": why, "session_id": a.resume, "checked_at": dt.datetime.now().isoformat(timespec="seconds")}
+        (out / "receipt.json").write_text(json.dumps(receipt, ensure_ascii=False, indent=2))
+        print(json.dumps(receipt, ensure_ascii=False))
+        raise SystemExit(4)
     task = PREAMBLE + (WRITE_RULES if a.mode == "write" else READ_RULES) + "\n任务：\n" + Path(a.task_file).read_text()
     before = snapshot(a.cwd, a.main)
     cmd = claude_cmd(a, task) if a.tool == "claude" else codex_cmd(a, task, out)
@@ -215,7 +260,7 @@ def main():
                      if l.strip().startswith("NEED_DECISION:")), None)
     changed = git(a.cwd, "diff", "--name-only", f"{before['head']}..HEAD") if before["head"] else ""
     receipt = {
-        "project": proj["id"], "tool": a.tool, "mode": a.mode, "cwd": a.cwd, "started": started,
+        "project": proj["id"], **trace, "model": worker_model(a.tool, stdout), "mode": a.mode, "cwd": a.cwd, "started": started,
         "ended": dt.datetime.now().isoformat(timespec="seconds"),
         "exit_code": code, "timed_out": timed_out, "worker_error": err,
         "session_id": sid, "need_decision": decision,

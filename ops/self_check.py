@@ -5,6 +5,7 @@
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
 每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
+每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
 每月 1 号（或 --monthly）：另查沙盒超过 30 天没动的目录，和名册仓库自检（同目录 check_repos.py，只报失败项）。
 只读：不改文件、不发飞书、不写日志。安装时和 check_repos.py 同放 ~/.hermes/scripts/。
 环境变量：DT_REPO 仓库路径；HERMES_HOME、DT_BIN 两个安装根目录；DT_TODAY（YYYY-MM-DD）指定今天，自测用；
@@ -30,6 +31,8 @@ CHECK_REPOS_TIMEOUT = 600   # 名册有多个项目，每个项目会执行多�
 TIDINGS_REPO = Path(os.environ.get("TIDINGS_REPO", "~/Documents/ChatGPT/个人/work/github-center")).expanduser()
 TIDINGS_NODE = os.environ.get("TIDINGS_NODE", str(HOME / ".nvm/versions/node/v24.16.0/bin/node"))   # PATH 里没有 nvm
 TIDINGS_TIMEOUT = 120
+AI_ACCESS_SCRIPT = Path(os.environ.get("DT_AI_ACCESS_SCRIPT", HERMES / "scripts/ai_access.py")).expanduser()
+AI_ACCESS_TIMEOUT = 120
 LIST_LIMIT = 10
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
@@ -147,6 +150,29 @@ def check_tidings():
     return r.stdout.strip()
 
 
+def check_ai_access():
+    """车间默认执行方能不能用；能用返回空列表。"""
+    if not AI_ACCESS_SCRIPT.exists():
+        return []
+    try:
+        r = run([sys.executable, "-B", str(AI_ACCESS_SCRIPT), "status", "--json"], timeout=AI_ACCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return [f"AI 接入自检未完成（超过 {AI_ACCESS_TIMEOUT} 秒）"]
+    except OSError as e:
+        return [f"AI 接入自检未完成（无法启动：{e.strerror or e}）"]
+    if r.returncode != 0:
+        return [f"AI 接入自检未完成：{(r.stderr or r.stdout).strip()[-200:] or f'退出码 {r.returncode}'}"]
+    try:
+        st = json.loads(r.stdout)
+        w = st["workers"][st["default_worker"]]
+    except (ValueError, KeyError, TypeError):
+        return ["AI 接入自检未完成（输出不是预期的 JSON）"]
+    if w.get("state") == "可用":
+        return []
+    return [f"车间默认执行方 {w.get('name')} 现在{w.get('state')}（{w.get('detail')}）。没点名的派单会报错停下，不会换成另一家",
+            "处理：在终端登录它，或改默认：python3 ~/.hermes/scripts/ai_access.py set default 另一家"]
+
+
 def bullets(items):
     lines = [f"- {i}" for i in items[:LIST_LIMIT]]
     return lines + ([f"- ……另有 {len(items) - LIST_LIMIT} 项"] if len(items) > LIST_LIMIT else [])
@@ -162,6 +188,9 @@ def main():
     if drift:
         sections.append([f"🔁 安装副本不一致：{len(drift)} 项和仓库 main 对不上", *bullets(drift),
                          "处理：从仓库 main 复制到安装位置；技能、提示词改了要重启网关。"])
+    ai = check_ai_access()
+    if ai:
+        sections.append(["🤖 AI 接入提醒", *bullets(ai)])
     tidings = check_tidings()
     if tidings:
         sections.append([tidings])

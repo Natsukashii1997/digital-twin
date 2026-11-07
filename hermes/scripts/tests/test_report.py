@@ -4,9 +4,11 @@ report_data.py / report_publish.py 用假 lark-cli（fake_lark.py）和临时目
 """
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -68,7 +70,8 @@ class Base(unittest.TestCase):
         progress.write_text("print('# 项目进展（假）')\n", encoding="utf-8")
         self.env = {**os.environ, "FAKE_LARK_DIR": str(self.root), "DT_LARK_CLI": str(HERE / "fake_lark.py"),
                     "DT_DAILY_DOC": DAILY, "DT_WEEKLY_DOC": WEEKLY, "DT_LEDGER_SEED": str(self.seed),
-                    "DT_PROGRESS": str(progress), "DT_REPORT_EVIDENCE": str(self.root / "evidence")}
+                    "DT_PROGRESS": str(progress), "DT_REPORT_EVIDENCE": str(self.root / "evidence"),
+                    "HERMES_HOME": str(self.root / "hermes")}   # 留痕读的 Hermes 会话库换成临时目录
         self.state({})
 
     def tearDown(self):
@@ -188,6 +191,35 @@ class Publish(Base):
         doc = self.doc(DAILY)
         self.assertLess(doc.index("2026-10-27"), doc.index("2026-10-26"))
         self.assertTrue(any((self.root / "evidence").iterdir()))
+
+    def test_publish_writes_trace_line_under_title(self):
+        hermes = self.root / "hermes"
+        hermes.mkdir()
+        con = sqlite3.connect(hermes / "state.db")
+        con.execute("create table sessions (id text, source text, title text, started_at real)")
+        con.execute("create table session_model_usage (session_id text, model text, billing_provider text, task text, "
+                    "first_seen real)")
+        t = time.time()
+        con.executemany("insert into sessions values (?,?,?,?)", [
+            ("cron_d", "cron", "日报（新结构·并跑） · Nov 07 07:34", t - 120),
+            ("cron_w", "cron", "周报（新结构·并跑） · Nov 07 07:45", t - 60)])
+        con.executemany("insert into session_model_usage values (?,?,?,?,?)", [
+            ("cron_d", "gpt-main", "openai-codex", "", t - 100), ("cron_d", "deepseek-flash", "deepseek", "", t - 90),
+            ("cron_d", "gpt-aux", "openai-codex", "compression", t - 80), ("cron_w", "gpt-week", "openai-codex", "", t - 50)])
+        con.commit()
+        con.close()
+        r = self.run_py(PUBLISH, "daily", self.write(DAILY_OK))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        doc = self.doc(DAILY)
+        self.assertRegex(doc, r"## 📅 2026-10-27（周二）\n\n生成：Hermes（gpt-main · openai-codex、deepseek-flash · deepseek）"
+                              r"｜接入：Hermes 派单｜\d{4}-\d{2}-\d{2} \d{2}:\d{2}\n")
+        self.assertNotIn("gpt-aux", doc)
+        self.assertNotIn("gpt-week", doc)
+
+    def test_publish_trace_without_cron_session(self):
+        r = self.run_py(PUBLISH, "daily", self.write(DAILY_OK))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("生成：Hermes（模型查不到：不是这份报告的定时任务写的）｜接入：Hermes 派单｜", self.doc(DAILY))
 
     def test_project_label_gets_blank_lines(self):
         text = DAILY_OK.replace("### 一、今天的变化\n", "### 一、今天的变化\n**中台**\n").replace(

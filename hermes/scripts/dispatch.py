@@ -1,6 +1,7 @@
 """派单：开单、跑单、合并、清理、列表（只用标准库）。Hermes 的 workshop 技能调用它。
 
-  python3 dispatch.py new   --project ID --tool claude|codex --mode read|write --task-file F
+  python3 dispatch.py new   --project ID [--tool claude|codex] --mode read|write --task-file F
+                           （不带 --tool 就用 AI 接入配置里车间的执行方，见 ai_access.py；回执和台账记下怎么选的）
   python3 dispatch.py run   单号 [--followup 追加说明文件]   （放在后台跑；结束后读 out/receipt.json）
   python3 dispatch.py pr    单号     （写入单跑完、回报前调用：推分支、开 PR）
   python3 dispatch.py merge 单号 [--push-main 提交号]   （常浩说“合并”后才调用）
@@ -248,7 +249,20 @@ def next_no():
     return f"D{day}-{max(seq, default=0) + 1}"
 
 
+def pick_tool(a):
+    """返回 (车间, 怎么选的)。点名优先；调度器开单带的是任务负责方；都没有就读 AI 接入配置，读不了就停（不猜）。"""
+    if a.tool:
+        return a.tool, "调度器任务负责方" if a.sched_key else "点名"
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import ai_access
+    try:
+        return ai_access.resolve("workshop")
+    except ai_access.AccessError as e:
+        done(False, f"没点名车间，又{e}，没有开单")
+
+
 def cmd_new(a):
+    a.tool, chosen_by = pick_tool(a)
     p = project(a.project)
     if a.mode == "write" and not p.get("write_allowed"):
         done(False, f"名册不允许往 {p['name']} 写入")
@@ -267,7 +281,7 @@ def cmd_new(a):
         if a.sched_key:     # 关联键先落盘：开单中途失败也能被恢复按键找到
             (d / "sched_key").write_text(a.sched_key)
     shutil.copy(a.task_file, d / "task.md")
-    o = {"no": no, "project": p["id"], "tool": a.tool, "mode": a.mode, "status": "new",
+    o = {"no": no, "project": p["id"], "tool": a.tool, "tool_source": chosen_by, "mode": a.mode, "status": "new",
          "created": dt.datetime.now().isoformat(timespec="seconds"), "cwd": p["path"]}
     if a.sched_key:
         o["sched_key"] = a.sched_key
@@ -293,7 +307,7 @@ def cmd_new(a):
             o["issue_error"] = gh_err(r)
             note = f"，issue 没建成：{o['issue_error']}"
     save(o)
-    done(True, f"已开单 {no}（{p['name']} · {a.tool} · {'写入' if a.mode == 'write' else '只读'}）{note}", order=o)
+    done(True, f"已开单 {no}（{p['name']} · {a.tool}，{chosen_by} · {'写入' if a.mode == 'write' else '只读'}）{note}", order=o)
 
 
 def archive_receipt(receipt, content):
@@ -354,7 +368,8 @@ def cmd_run(a):
                  run_host=socket.gethostname(), dispatch_pid=os.getpid())
         save(o)
     cmd = [sys.executable, str(WORKER), "--tool", o["tool"], "--cwd", o["cwd"], "--task-file", str(task),
-           "--out", str(ROOT / a.no / "out"), "--mode", o["mode"], "--timeout", str(a.timeout)]
+           "--out", str(ROOT / a.no / "out"), "--mode", o["mode"], "--timeout", str(a.timeout),
+           "--chosen-by", o.get("tool_source") or "未记录"]
     if resume:
         cmd += ["--resume", resume]
     r = subprocess.run(cmd, capture_output=True, text=True, start_new_session=True)   # 车间自成进程组，取消时只停它
@@ -362,6 +377,8 @@ def cmd_run(a):
     o["exit_code"] = r.returncode
     save(o)
     rc = json.loads(receipt.read_text()) if receipt.exists() else {}
+    if r.returncode == 4 and rc.get("refused") == "executor_unavailable":   # 执行方不可用：没开跑，原样报给常浩
+        done(False, f"{a.no} 没开跑：{rc.get('reason')}", receipt=rc, unavailable=True)
     done(r.returncode == 0, f"{a.no} 跑完：{o['status']}", receipt={k: v for k, v in rc.items() if k != "summary"},
          stderr_tail=r.stderr[-500:] if r.returncode else "")
 
@@ -546,7 +563,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("new")
     s.add_argument("--project", required=True)
-    s.add_argument("--tool", choices=["claude", "codex"], required=True)
+    s.add_argument("--tool", choices=["claude", "codex"], help="点名车间；不带就用 AI 接入配置里车间的执行方")
     s.add_argument("--mode", choices=["read", "write"], required=True)
     s.add_argument("--task-file", required=True)
     s.add_argument("--sched-key", help="调度器开单时的关联键（B2.2）；手工派单不带")

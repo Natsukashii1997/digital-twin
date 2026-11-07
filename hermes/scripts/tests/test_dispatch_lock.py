@@ -153,13 +153,15 @@ class SchedKeyTests(Base):
         no = out["order"]["no"]
         self.assertEqual(self.order(no)["sched_key"], "S20000101-T1-abc")
         self.assertEqual((self.ledger / no / "sched_key").read_text(), "S20000101-T1-abc")
+        self.assertEqual(self.order(no)["tool_source"], "调度器任务负责方")
 
     def test_manual_new_unchanged(self):
         no = self.new()
         o = self.order(no)
         self.assertNotIn("sched_key", o)
         self.assertFalse((self.ledger / no / "sched_key").exists())
-        self.assertEqual(set(o), {"no", "project", "tool", "mode", "status", "created", "cwd", "updated"})
+        self.assertEqual(set(o), {"no", "project", "tool", "tool_source", "mode", "status", "created", "cwd", "updated"})
+        self.assertEqual(o["tool_source"], "点名")   # AI 接入留痕：手工带 --tool 记为点名
 
     def test_bad_sched_key_rejected_before_numbering(self):
         code, out = self.run_cmd("new", "--project", "fixture", "--tool", "claude", "--mode", "read", "--task-file",
