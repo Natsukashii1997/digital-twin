@@ -70,7 +70,7 @@ class Unclear(Exception):
 
 def now():
     v = os.environ.get("DT_NOW")
-    t = dt.datetime.fromisoformat(v) if v else dt.datetime.now(UTC)
+    t = parse(v) if v else dt.datetime.now(UTC)
     return t if t.tzinfo else t.replace(tzinfo=BJ)
 
 
@@ -79,7 +79,14 @@ def iso(t):
 
 
 def parse(s):
-    return dt.datetime.fromisoformat(s.replace("Z", "+00:00")) if s else None
+    """Hermes 用系统自带的 Python 3.9 跑脚本，它的 fromisoformat 不认结尾的 Z，也不认 6 位以外的小数秒。"""
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    m = re.match(r"^(.*T\d\d:\d\d:\d\d)\.(\d+)(.*)$", s)
+    if m:
+        s = f"{m.group(1)}.{(m.group(2) + '000000')[:6]}{m.group(3)}"
+    return dt.datetime.fromisoformat(s)
 
 
 def bj(t):
@@ -631,7 +638,7 @@ def cmd_approve(night, by, start_at, hours, max_runs):
     if night.state.get("auth"):
         print("这次夜跑已经开跑过。")
         return 1
-    t = dt.datetime.fromisoformat(start_at)
+    t = parse(start_at)
     t = t if t.tzinfo else t.replace(tzinfo=BJ)
     night.state["approval"] = {"by": by, "start_at": iso(t), "hours": hours, "max_runs": max_runs, "at": iso(now())}
     night.save()
