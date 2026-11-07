@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-11-07 · 名册 v1.4：Obsidian 知识库登记为活跃，另建工程仓库（#82）
+
+- **来由**：常浩看盘点时发现知识库没算进项目（Vault 只在 inventory「只登记」），说「登记为活跃，并建立 github 仓库」。Vault 1248 个文件里 112 篇受限、979 篇没标注，「决定/Vault 只开放给本人本地入口」和 Vault AGENTS 的禁推规矩都挡着整库上 GitHub；常浩选「另建工程仓库」，Vault 正文照旧只在本机，两条规矩不变。
+- **工程仓库**：新建 `work/obsidian-kb`，私有远端 `Natsukashii1997/obsidian-kb`（`89443ae`），用「项目起步」铺了骨架；AGENTS 写明两个仓库怎么分、Vault 内容不进本仓库（只写结论和笔记路径）。Vault 一个文件没改。
+- **projects.json v1.4**：活跃 14 个，合并官扫的仓库 13 个；obsidian-kb 的 card 指 Vault 项目卡；inventory 里 Vault 那条改为指向 obsidian-kb。
+- **测试**：见 PR；`check_repos` 对 obsidian-kb 11 项全过（含项目卡）。
+- **唯一下一步**：常浩在 GitHub 上删掉可删的 7 个仓库（含 little-steps-private）。
+
 ## 2026-11-07 · 名册 v1.3：get-index、Little Steps 转为活跃（#80）
 
 - **来由**：常浩看过最终盘点后说「get-index、Little Steps 调为活跃，GitHub 上仓库」。推之前查出两边都有私人内容，常浩选了：get-index 只推代码；Little Steps 照原样推私有库，目录挪进 work/。
