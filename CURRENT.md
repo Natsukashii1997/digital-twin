@@ -6,6 +6,13 @@
 
 ---
 
+## 2026-11-07 · 自检也比对 hermes/scripts 下的 .json（#65，PR #66 `cfb8ef1`），已安装
+
+- **改了什么**：`ops/self_check.py` 的 `install_pairs` 除了 `hermes/scripts/*.py`，也比对顶层 `*.json`，目前只有 `merge_rules.json`，是批 D 那条缺口；`tests/` 下的 json 不比对。新增 1 项测试，全量 340 项通过。
+- **已安装**：`~/.hermes/scripts/self_check.py` 从 main 复制，`cmp` 一致；旧版备份在 `evidence/2026-11-07-批D-安装/self_check.py.before-65`。它是无模型定时任务，不用重启网关。
+- **实跑**：新版自检没报 `merge_rules.json`；只报出 11-05 记过的 `progress/SKILL.md` 安装副本不一致，范围外，没动。
+- **下一步**：明早 09:50 自检照常跑；`progress/SKILL.md` 不一致仍待常浩决定按哪边为准。
+
 ## 2026-11-07 · Hermes 影子合并官 + 每周提案收口（批 D，#61，PR #64 `61a47a0`），已安装、两个定时任务已注册
 
 - **改了什么**：
