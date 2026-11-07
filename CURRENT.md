@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-11-07 · 名册 v1.3：get-index、Little Steps 转为活跃（#80）
+
+- **来由**：常浩看过最终盘点后说「get-index、Little Steps 调为活跃，GitHub 上仓库」。推之前查出两边都有私人内容，常浩选了：get-index 只推代码；Little Steps 照原样推私有库，目录挪进 work/。
+- **get-index**：索引数据 `part-*.jsonl` 和 `state/accepted-snapshot.json`（177 条 GET 笔记的标题与分类，部分受限）移出跟踪、留在本机；旧历史带着这些数据，远端改用新起的单提交历史 `c9e020a`，旧历史打包在 `~/Archive/repos/备份/get-index-旧历史含数据-20261107.tgz`。9-20～9-28 没提交的多行 tags 兼容等改动一并提交，`unittest` 108 项 OK。用「项目起步」补了骨架，AGENTS 里「不连接远程仓库」改为「远端只放代码」。
+- **Little Steps**：`~/Documents/AI 项目/baby-care-workbench` 挪到 `work/little-steps`（挪前查过只有名册引用旧路径），补骨架后推到私有仓库 `little-steps`（`8223ddf`）；`tsc` 通过，`node --test` 8 项通过，Playwright 端到端因本机没装浏览器没跑。原有没跟踪的 zip 和两份复盘文档没动，由常浩定。
+- **两个新仓库**：私有、只允许 squash、合并后删分支、5 个分流标签、PR 模板都已设好，`ops/check_repos.py` 这几项都过。
+- **projects.json v1.3**：活跃 13 个，合并官扫的仓库 12 个；两条「只登记」删掉；little-steps-private 仍可删，说明里的源码位置改为新仓库；disk-slim 说明改为 PR #1 已合并（`19adc49`）。
+- **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` 原样 `Ran 372 tests` / `OK`；`orca/tests` OK；别名回读见 PR。
+- **范围外发现**：`check_repos` 报 6 个活跃项目没有 Vault 项目卡（trainee-hub、postpane、chatgpt-clipper、disk-slim、get-index、little-steps）；trainee-hub 仓库还允许 merge commit 和 rebase、合并后不删分支，主目录检出的是 feat/ui-prototype。都没动。
+- **唯一下一步**：常浩在 GitHub 上删掉可删的 7 个仓库（含 little-steps-private）。
+
 ## 2026-11-07 · 名册 v1.2：收藏器、磁盘瘦身转为活跃；销售素材库删除；GitHub 杂项判定去留
 
 - **来由**：常浩看过盘点后说：路觅销售素材库也删除；ChatGPT 回答收藏器和磁盘瘦身是单独的两个小项目，转为活跃，没建库就建上；GitHub 上不用的杂项，没价值的删掉。
