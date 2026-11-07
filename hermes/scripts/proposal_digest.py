@@ -5,7 +5,8 @@
   会话复盘   ~/session-retro/*/提案.md 里的「### A1 …」条目；结论写成条目标题下一行「- 结论：采纳（日期，说明）」
   牛马之家   每周整理目录里最新一期（YYYY-MM-DD.md）的「### W…」条目和「上次未决」；结论按该目录 decisions.md
              自己的约定追加一行「- 编号　采纳/否决/待定　日期　说明」。被新条目「取代」的旧编号不单列，新条目定了一并记上
-  LESSONS    agent-kit LESSONS.md 里「升级：未升级」、近 7 天被 hook 在 2 个以上名册项目碰到的全局坑（只是候选）；
+  LESSONS    默认不列（常浩 2026-11-07：hook 命中只是关键词匹配，太吵）。设 DT_LESSONS_MIN_PROJECTS=N 才列：agent-kit
+             LESSONS.md 里「升级：未升级」、近 7 天被 hook 在 N 个以上名册项目碰到的全局坑（只是候选）；
              结论记在影子目录 lessons-decisions.md（同上格式）
 「延期」记成「待定」，下周一还会再列；没提到的编号保持待决。采纳只记结论，不替常浩落地那条规则。
 
@@ -19,7 +20,7 @@
 
 环境变量：DT_RETRO_ROOT、DT_NIUMA_REVIEW、DT_LESSONS、AGENT_KIT_STATE_DIR（读 lessons-hits.jsonl）、DT_ROSTER、
 DT_PROPOSAL_DIR（期号状态）、DT_SHADOW_DIR（lessons-decisions.md）、FEISHU_HOME_CHANNEL（私聊 chat_id）、
-DT_LARK_CLI（换 lark-cli，自测用）、DT_NOW（ISO 时间），DT_LESSONS_MIN_PROJECTS（默认 2）。
+DT_LARK_CLI（换 lark-cli，自测用）、DT_NOW（ISO 时间），DT_LESSONS_MIN_PROJECTS（默认 0 = 不列 LESSONS 候选）。
 """
 import argparse
 import datetime as dt
@@ -42,7 +43,7 @@ STATE_DIR = Path(os.environ.get("DT_PROPOSAL_DIR", "~/Library/Application Suppor
 SHADOW = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/DigitalTwin/shadow")).expanduser()
 STATE = STATE_DIR / "digest.json"
 LESSONS_LEDGER = SHADOW / "lessons-decisions.md"
-MIN_PROJECTS = int(os.environ.get("DT_LESSONS_MIN_PROJECTS", "2"))
+MIN_PROJECTS = int(os.environ.get("DT_LESSONS_MIN_PROJECTS", "0"))   # 0 = 不列
 BJ = dt.timezone(dt.timedelta(hours=8))
 OVERDUE_DAYS = 7
 TITLE_MAX = 48
@@ -172,7 +173,7 @@ def roster_paths():
 
 
 def collect_lessons(now):
-    if not LESSONS.exists():
+    if MIN_PROJECTS <= 0 or not LESSONS.exists():
         return []
     lessons, cur = {}, None
     for line in LESSONS.read_text(encoding="utf-8").splitlines():

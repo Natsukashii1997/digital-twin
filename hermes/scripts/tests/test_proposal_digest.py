@@ -145,12 +145,15 @@ class Digest(unittest.TestCase):
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
 
-    def run_cli(self, *args, now="2026-11-09T10:00:00+08:00", chat=CHAT):
+    def run_cli(self, *args, now="2026-11-09T10:00:00+08:00", chat=CHAT, lessons="2"):
         t = self.tmp
         env = {**os.environ, "DT_RETRO_ROOT": str(t / "retro"), "DT_NIUMA_REVIEW": str(t / "niuma"),
                "DT_LESSONS": str(t / "LESSONS.md"), "AGENT_KIT_STATE_DIR": str(t / "kit"), "DT_ROSTER": str(t / "projects.json"),
                "DT_PROPOSAL_DIR": str(t / "prop"), "DT_SHADOW_DIR": str(self.shadow), "DT_LARK_CLI": str(t / "fake/lark-cli"),
                "FAKE_DIR": str(t / "fake"), "DT_NOW": now, "FEISHU_HOME_CHANNEL": chat}
+        env.pop("DT_LESSONS_MIN_PROJECTS", None)
+        if lessons is not None:
+            env["DT_LESSONS_MIN_PROJECTS"] = lessons
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
 
     def calls(self):
@@ -174,6 +177,12 @@ class Digest(unittest.TestCase):
         self.assertIn("G-01 验证证据放 /tmp（2 个项目：app、kit）", text)
         self.assertEqual(self.calls(), [])                            # dry-run 不发
         self.assertFalse(self.state.exists())
+
+    def test_lessons_off_by_default(self):
+        text = self.card_text(self.run_cli("send", "--dry-run", lessons=None).stdout)
+        self.assertNotIn("G-01", text)
+        self.assertNotIn("LESSONS", text)
+        self.assertIn("W2026-10-30-3", text)
 
     def test_send_once_per_day_then_apply(self):
         r = self.run_cli()                                             # 定时任务不带参数调用 = send

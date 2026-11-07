@@ -20,7 +20,7 @@ hermes/
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
     tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 11:30）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
-    proposal_digest.py 每周提案收口（#61）：每周一把会话复盘、牛马之家每周整理、LESSONS 升级候选的待决提案按编号发到常浩私聊；常浩回复后由 proposal-digest 技能调用 apply 写回各来源的结论；期号状态在 DigitalTwin/proposals/digest.json
+    proposal_digest.py 每周提案收口（#61）：每周一把会话复盘、牛马之家每周整理的待决提案按编号发到常浩私聊（LESSONS 升级候选默认不列，DT_LESSONS_MIN_PROJECTS 打开）；常浩回复后由 proposal-digest 技能调用 apply 写回各来源的结论；期号状态在 DigitalTwin/proposals/digest.json
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
     workshop/          车间派单（F5）
     progress/          项目进展现查（F6）
