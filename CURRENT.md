@@ -9,8 +9,8 @@
 ## 2026-11-08 · M5 首夜：Hermes 主控的 Multica 夜跑与独立停机检查（#92）
 
 - **来由**：常浩要今晚做 Hermes 主导的 Multica 无人值守测试，11-08 选「方案甲」（Hermes 外部推进，父单指派给常浩）。约 02:00 常浩说「我要去睡了，剩下所有的需要批准的内容都让 Hermes 去批准。」
-- **改了什么**：新增 `hermes/scripts/multica_night.py`（plan / start / tick / stop / status / report / release）：按计划建单、按 stage 推进、边跑边导 run-log 和消息、到上限按 5.3a 停机、回读不过就冻结执行器容器，计数持久化、重启不清零；`tests/fake_multica.py` + `test_multica_night.py` 31 项；`multica_night_tick.py` 是定时任务入口；`approve` 记下几点开跑，到点由 tick 开跑；名册 v1.6 给 dt-sandbox 标 `sandbox: true` 和 Multica 工作区；今晚计划 `hermes/samples/multica-night-2026-11-08.json`；执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md`（写明和架构 7.3 等处的差异、批准来源、开跑前清单、时间线、验收）。
-- **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` → `Ran 433 tests` / `OK`；`orca/tests` → `OK`。真实 multica 只读冒烟：issue get / runs / wakeup list / autopilot list / run-messages --since / issue list --updated-since 的拼法和输出格式都对。
+- **改了什么**：新增 `hermes/scripts/multica_night.py`（plan / start / tick / stop / status / report / release）：按计划建单、按 stage 推进、边跑边导 run-log 和消息、到上限按 5.3a 停机、回读不过就冻结执行器容器，计数持久化、重启不清零；`tests/fake_multica.py` + `test_multica_night.py` 43 项；`multica_night_tick.py` 是定时任务入口；`approve` 记下几点开跑，到点由 tick 开跑；名册 v1.6 给 dt-sandbox 标 `sandbox: true` 和 Multica 工作区；今晚计划 `hermes/samples/multica-night-2026-11-08.json`；执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md`（写明和架构 7.3 等处的差异、批准来源、开跑前清单、时间线、验收）。
+- **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` → `Ran 445 tests`（系统 Python 3.9，和 Hermes、CI 同版本） / `OK`；`orca/tests` → `OK`。真实 multica 只读冒烟：issue get / runs / wakeup list / autopilot list / run-messages --since / issue list --updated-since 的拼法和输出格式都对。
 - **未做**：合并、安装、Hermes 定时任务、真实演练、建单、开跑（按执行单第四节，逐项经 Hermes 批准后做）。
 - **范围外发现**：`hermes/scripts/tests/README.md` 里的总数「共 356 项」早已过时（合并前就是 402），没改。
 - **唯一下一步**：Hermes 批准后合并本 PR 并安装，按执行单第三节核对，22:00 开跑。

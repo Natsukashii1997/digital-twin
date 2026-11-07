@@ -5,7 +5,8 @@ world：
   issues     {identifier: {id, identifier, title, description, status, assignee_type, assignee_id, stage, parent_issue_id, updated_at}}
   runs       [{id, issue, status, created_at, started_at, completed_at, attempt, agent_id, error, result}]
   messages   {run_id: [{seq, type, content}]}
-  wakeups    {identifier: [{id, status}]}
+  wakeups    {identifier: [{id, enabled}]}（真实返回体是 enabled 布尔值）
+  weird_wakeups  wakeup list 返回读不懂的形状
   autopilots [{id, status}]
   now        假时间（改动 issue 时写进 updated_at）
   owner      成员 id（指派给它的是 member，其余是 agent）
@@ -95,11 +96,13 @@ if p[:2] == ["issue", "get"]:
 if p[:2] == ["issue", "runs"]:
     emit([r for r in w.get("runs", []) if r["issue"] == p[2]])
 if p[:3] == ["issue", "wakeup", "list"]:
+    if w.get("weird_wakeups"):
+        emit({"bad": 1})
     emit(w.get("wakeups", {}).get(p[3], []))
 if p[:3] == ["issue", "wakeup", "disable"]:
     for x in w.get("wakeups", {}).get(p[3], []):
         if x["id"] == p[4]:
-            x["status"] = "disabled"
+            x["enabled"] = False
     emit({"ok": True})
 if p[:2] == ["autopilot", "list"]:
     aps = w.get("autopilots", [])
@@ -131,6 +134,16 @@ if p[:3] == ["issue", "comment", "add"]:
     w.setdefault("comments", []).append({"issue": p[3], "content": stdin})
     touch(issues[p[3]])
     emit({"ok": True})
+if p[:2] == ["agent", "tasks"]:
+    ids = {k: v["id"] for k, v in issues.items()}
+    rows = [{**r, "issue_id": ids.get(r["issue"])} for r in w.get("runs", []) if r.get("agent_id") == p[2]]
+    emit(sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)[:int(opt("--limit", "200"))])
+if p[:2] == ["issue", "assign"]:
+    i = issues[p[2]]
+    i["assignee_id"] = opt("--to-id")
+    i["assignee_type"] = "member" if i["assignee_id"] == w.get("owner") else "agent"
+    touch(i)
+    emit(i)
 if p[:2] == ["issue", "list"]:
     lo, hi = opt("--updated-since"), opt("--updated-until")
     off, lim = int(opt("--offset", "0")), int(opt("--limit", "50"))

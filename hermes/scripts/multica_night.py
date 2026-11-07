@@ -246,6 +246,13 @@ def cmd_plan(path):
     if errs:
         print("计划不合规，没建单：" + "；".join(errs))
         return 1
+    cur = current_id()
+    if cur and cur != plan["id"] and (ROOT / cur / "state.json").exists():
+        old = load(ROOT / cur / "state.json")
+        pending = (old.get("approval") or {}) and not old["approval"].get("result")
+        if (old.get("auth") or pending) and not old.get("released"):
+            print(f"当前夜跑 {cur} 已开跑或已批准开跑、还没 release：不能换成新的夜跑，否则它没人看守。")
+            return 1
     d = ROOT / plan["id"]
     d.mkdir(parents=True, exist_ok=True)
     (d / "messages").mkdir(exist_ok=True)
@@ -415,8 +422,16 @@ def violations(night, snap, t):
             why.append(f"{night.ident(k)} 上出现了未授权的 Wakeup")
     if any(str(a.get("status")).lower() == "active" for a in snap["autopilots"]):
         why.append("工作区里有启用中的 Autopilot")
-    if snap["issues"]["PARENT"].get("assignee_type") != "member":
-        why.append("父单不再指派给成员（Child-Done 会唤醒 agent）")
+    if not owner_parent(night, snap["issues"]["PARENT"]):
+        why.append("父单不再指派给常浩（Child-Done 会唤醒 agent）")
+    strays = stray_runs(night)
+    if strays:
+        why.append("计划里的 agent 在家族外开了 run：" + "、".join(f"{n} {str(r.get('id'))[:8]}" for n, r in strays[:3]))
+    for c in night.children():   # 后面的 stage 必须还在 backlog、没有 run
+        if c["stage"] > st.get("stage", 0):
+            k = c["key"]
+            if snap["issues"][k].get("status") != "backlog" or snap["runs"][k]:
+                why.append(f"{night.ident(k)}（stage {c['stage']}）被提前移出 backlog 或开过 run")
     other = out_of_family(night, t)
     if other:
         why.append("父单之外的 issue 在开跑后被改动：" + "、".join(other[:5]))
@@ -439,7 +454,7 @@ def advance(night, n, t):
     """把第 n 个 stage 的子单移出 backlog。先记账再动手；命令结果不明就抛 Unclear，由调用方停机，不重发。"""
     st = night.state
     st["stage"] = n
-    st.setdefault("advanced", {})[str(n)] = iso(t)
+    st.setdefault("advanced", {}).setdefault(str(n), iso(t))   # 补推进时不改最初的推进时刻（停滞按它算）
     night.save()
     moved = []
     for k in night.stage_keys(n):
@@ -452,42 +467,68 @@ def advance(night, n, t):
     return moved
 
 
+def stray_runs(night):
+    """计划里的 agent 在开跑后、家族之外开出的 run（别的 issue、chat 都算）。一页 200 条还没翻到开跑前，就当核不清。"""
+    if not night.state.get("auth"):
+        return []
+    start = night.state["auth"]["started_at"]
+    fam = {v["id"] for v in night.state["issues"].values()}
+    out = []
+    for name, aid in night.plan["agents"].items():
+        runs = items(night.mc("agent", "tasks", aid, "--limit", "200"), "tasks")
+        newer = [r for r in runs if (r.get("created_at") or "") >= start]
+        if len(runs) >= 200 and len(newer) == len(runs):
+            raise Unclear(f"{name} 开跑后的 run 超过 200 条，核不全")
+        out += [(name, r) for r in newer if r.get("issue_id") not in fam]
+    return out
+
+
+def owner_parent(night, parent):
+    return parent.get("assignee_type") == "member" and parent.get("assignee_id") == night.plan["owner_member_id"]
+
+
 def stop(night, reasons, finished=False):
-    """5.3a 停机。返回要打印的文字；没停干净就冻结。"""
+    """5.3a 停机。返回要打印的文字；没停干净就冻结。任何一步出错都只记下来、接着做后面的步骤，最后由回读判定。"""
     st, errs = night.state, []
-    st["stopping"] = {"at": iso(now()), "reasons": reasons}
+    st["stopping"] = {"at": iso(now()), "reasons": reasons, "finished": finished}
     night.save()
     night.log("stop_begin", reasons=reasons, finished=finished)
     fam = night.family()
 
-    def safe(desc, *args, **kw):
+    def step(desc, fn):
         try:
-            return night.mc(*args, **kw)
-        except Unclear as e:
-            errs.append(f"{desc}：{e}")
+            return fn()
+        except Exception as e:      # noqa: BLE001 —— 停机路上不能因为任何一步的意外停下
+            errs.append(f"{desc}：{type(e).__name__}: {e}")
+            return None
 
     for k in fam:   # ① 禁用 Wakeup
-        ws = safe(f"读 {night.ident(k)} 的 Wakeup", "issue", "wakeup", "list", night.ident(k))
-        for w in (items(ws, "wakeups") if ws is not None else []):
+        for w in step(f"读 {night.ident(k)} 的 Wakeup", lambda k=k: items(night.mc("issue", "wakeup", "list", night.ident(k)), "wakeups")) or []:
             if wakeup_on(w):
-                safe(f"禁用 Wakeup {w.get('id')}", "issue", "wakeup", "disable", night.ident(k), w["id"])
-    aps = safe("读 Autopilot", "autopilot", "list")          # ② 暂停 Autopilot
-    for a in (items(aps, "autopilots") if aps is not None else []):
+                step(f"禁用 {night.ident(k)} 的 Wakeup", lambda k=k, w=w: night.mc("issue", "wakeup", "disable", night.ident(k), w["id"]))
+    for a in step("读 Autopilot", lambda: items(night.mc("autopilot", "list"), "autopilots")) or []:   # ② 暂停 Autopilot
         if str(a.get("status")).lower() == "active":
-            safe(f"暂停 Autopilot {a.get('id')}", "autopilot", "update", a["id"], "--status", "paused")
-    for k in fam:   # ③ 取消非终态 run
-        runs = safe(f"读 {night.ident(k)} 的 run", "issue", "runs", night.ident(k))
-        for r in (items(runs, "runs") if runs is not None else []):
+            step("暂停 Autopilot", lambda a=a: night.mc("autopilot", "update", a["id"], "--status", "paused"))
+    for k in fam:   # ③ 取消家族里的非终态 run
+        for r in step(f"读 {night.ident(k)} 的 run", lambda k=k: items(night.mc("issue", "runs", night.ident(k)), "runs")) or []:
             if r.get("status") in ACTIVE:
-                safe(f"取消 run {r['id'][:8]}", "issue", "cancel-task", r["id"])
-    if not finished:   # ④ 没交付的子单改 blocked，原因写在父单
-        for k in night.stage_keys(st.get("stage", 0)):
-            iss = safe(f"读 {night.ident(k)}", "issue", "get", night.ident(k))
-            if iss and iss.get("status") not in DELIVERED + ("backlog", "blocked"):
-                safe(f"把 {night.ident(k)} 改为 blocked", "issue", "status", night.ident(k), "blocked", "--no-start")
-        safe("在父单写停机原因", "issue", "comment", "add", night.ident("PARENT"), "--content-stdin",
-             stdin="夜跑主控停机：" + "；".join(reasons) + "。后面的 stage 留在 backlog，不再推进。")
-    ok, left = readback(night, errs)   # ⑤ 回读
+                step(f"取消 {night.ident(k)} 的 run", lambda r=r: night.mc("issue", "cancel-task", r["id"]))
+    for _, r in step("列家族外的 run", lambda: stray_runs(night)) or []:   # ③b 家族外的也取消
+        if r.get("status") in ACTIVE:
+            step("取消家族外的 run", lambda r=r: night.mc("issue", "cancel-task", r["id"]))
+    parent = step("读父单", lambda: night.mc("issue", "get", night.ident("PARENT")))   # ④ Child-Done 保持中和：父单指派给常浩
+    if isinstance(parent, dict) and not owner_parent(night, parent):
+        step("父单改回指派给常浩", lambda: night.mc("issue", "assign", night.ident("PARENT"), "--to-id",
+                                             night.plan["owner_member_id"], "--no-start"))
+    if not finished:   # ⑤ 没交付的子单改 blocked（--no-start，不在子单上评论），原因写在父单
+        for c in night.children():
+            k = c["key"]
+            iss = step(f"读 {night.ident(k)}", lambda k=k: night.mc("issue", "get", night.ident(k)))
+            if isinstance(iss, dict) and iss.get("status") not in DELIVERED + ("backlog", "blocked"):
+                step(f"把 {night.ident(k)} 改为 blocked", lambda k=k: night.mc("issue", "status", night.ident(k), "blocked", "--no-start"))
+        step("在父单写停机原因", lambda: night.mc("issue", "comment", "add", night.ident("PARENT"), "--content-stdin",
+                                          stdin="夜跑主控停机：" + "；".join(reasons) + "。后面的 stage 留在 backlog，不再推进。"))
+    ok, left = readback(night, errs)   # ⑥ 回读
     night.log("stop_readback", ok=ok, left=left, errors=errs)
     if ok:
         st["outcome"] = "FINISHED" if finished else "STOPPED"
@@ -501,7 +542,8 @@ def stop(night, reasons, finished=False):
 
 
 def readback(night, errs):
-    tries, gap = (int(x) for x in os.environ.get("DT_NIGHT_READBACK", "6,5").split(","))
+    """停机成功 = 家族内外的相关 run 全部终态，且 Wakeup、Autopilot 都停了、父单仍指派给常浩（Child-Done 不唤醒 agent）。"""
+    tries, gap = (int(x) for x in os.environ.get("DT_NIGHT_READBACK", "12,5").split(","))
     left = []
     for i in range(max(tries, 1)):
         left = []
@@ -509,13 +551,19 @@ def readback(night, errs):
             for k in night.family():
                 for r in items(night.mc("issue", "runs", night.ident(k)), "runs"):
                     if r.get("status") not in TERMINAL:
-                        left.append(f"{night.ident(k)} 的 run {r['id'][:8]} 仍是 {r.get('status')}")
+                        left.append(f"{night.ident(k)} 的 run {str(r.get('id'))[:8]} 仍是 {r.get('status')}")
                 if any(wakeup_on(w) for w in items(night.mc("issue", "wakeup", "list", night.ident(k)), "wakeups")):
                     left.append(f"{night.ident(k)} 上仍有启用中的 Wakeup")
+            for name, r in stray_runs(night):
+                if r.get("status") not in TERMINAL:
+                    left.append(f"{name} 在家族外的 run {str(r.get('id'))[:8]} 仍是 {r.get('status')}")
             if any(str(a.get("status")).lower() == "active" for a in items(night.mc("autopilot", "list"), "autopilots")):
                 left.append("仍有启用中的 Autopilot")
-        except Unclear as e:
-            left.append(f"回读失败：{e}")
+            parent = night.mc("issue", "get", night.ident("PARENT"))
+            if not (isinstance(parent, dict) and owner_parent(night, parent)):
+                left.append("父单没有指派给常浩，Child-Done 可能唤醒 agent")
+        except Exception as e:      # noqa: BLE001 —— 回读读不清一律当没停干净
+            left.append(f"回读失败：{type(e).__name__}: {e}")
         if not left:
             return True, []
         if i + 1 < tries:
@@ -613,21 +661,36 @@ def cmd_start(night, by, hours, max_runs):
     return 0
 
 
-def guard_frozen(night):
-    """冻结期间：发现有 run 在跑（比如容器被重启了）就再取消一次并告警，绝不推进。"""
-    left = []
-    for k in night.family():
-        for r in items(night.mc("issue", "runs", night.ident(k)), "runs"):
-            if r.get("status") in ACTIVE:
-                try:
-                    night.mc("issue", "cancel-task", r["id"])
-                    left.append(f"{night.ident(k)} 的 run {r['id'][:8]}（{r.get('status')}，已再次取消）")
-                except Unclear as e:
-                    left.append(f"{night.ident(k)} 的 run {r['id'][:8]}（{r.get('status')}，取消失败：{e}）")
-    if left:
+def watch_after(night):
+    """夜跑结束后、常浩 release 之前继续看着：
+    冻结时发现有 run 在跑（比如容器被重启了）就再取消一次并告警；正常停机或全部交付后只告警（每个 run 说一次），
+    不取消——早上常浩自己在单上评论、送审触发的 run 是正常的。绝不推进。"""
+    st = night.state
+    found = [(night.ident(k), r) for k in night.family() for r in items(night.mc("issue", "runs", night.ident(k)), "runs")]
+    found += [(f"{n}（家族外）", r) for n, r in stray_runs(night)]
+    found = [(who, r) for who, r in found if r.get("status") in ACTIVE]
+    if st.get("frozen"):
+        left = []
+        for who, r in found:
+            try:
+                night.mc("issue", "cancel-task", r["id"])
+                left.append(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}，已再次取消）")
+            except Unclear as e:
+                left.append(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}，取消失败：{e}）")
+        if not left:
+            return 0, ""
         night.log("frozen_guard", runs=left)
-        return "⚠️ 夜跑处于冻结状态，却发现有 run 在跑：" + "；".join(left) + "。请核对容器是不是被重启了。"
-    return ""
+        return 1, "⚠️ 夜跑处于冻结状态，却发现有 run 在跑：" + "；".join(left) + "。请核对容器是不是被重启了。"
+    told = st.setdefault("alerted", [])
+    new = [(who, r) for who, r in found if r["id"] not in told]
+    if not new:
+        return 0, ""
+    told += [r["id"] for _, r in new]
+    night.save()
+    night.log("after_end_runs", runs=[f"{who}:{r['id']}" for who, r in new])
+    return 0, (f"注意：夜跑已结束（{st['outcome']}），又有 run 开跑：" +
+               "；".join(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}）" for who, r in new) +
+               "。是你早上触发的就不用管；不是的话 stop 不了已结束的夜跑，请直接在 Multica 里取消。")
 
 
 START_WINDOW = dt.timedelta(minutes=30)   # 定时开跑：过了批准的时刻这么久还没开（比如电脑睡了），就不开
@@ -676,13 +739,11 @@ def cmd_tick(night):
     st, t = night.state, now()
     if not st.get("auth"):
         return scheduled_start(night, t)
-    if st.get("frozen"):
-        try:
-            return 0, guard_frozen(night)
-        except Unclear as e:
-            return 1, f"⚠️ 夜跑冻结中，核对 run 失败：{e}"
     if st.get("outcome"):
-        return 0, ""
+        try:
+            return watch_after(night)
+        except Exception as e:      # noqa: BLE001
+            return 1, f"⚠️ 夜跑已结束（{st['outcome']}），核对 run 失败：{type(e).__name__}: {e}"
     out = []
     last = parse(st.get("last_tick"))
     if last and t - last > TICK_GAP:
@@ -693,7 +754,7 @@ def cmd_tick(night):
     st["ticks"] = st.get("ticks", 0) + 1
     night.save()
     if st.get("stopping"):   # 上次停机做到一半（进程被杀）：接着停，不推进
-        out.append(stop(night, st["stopping"]["reasons"] + ["上次停机没做完，接着做"]))
+        out.append(stop(night, st["stopping"]["reasons"] + ["上次停机没做完，接着做"], st["stopping"].get("finished", False)))
         return 0, "\n".join(out)
     try:
         snap = collect(night)
@@ -705,6 +766,15 @@ def cmd_tick(night):
         return (1 if night.state.get("frozen") else 0), "\n".join(out)
     n = st["stage"]
     keys = night.stage_keys(n)
+    behind = [k for k in keys if snap["issues"][k].get("status") == "backlog"]
+    if behind:   # 上次推进做到一半就中断了：补推进（advance 只动还在 backlog 的单）
+        try:
+            moved = advance(night, n, t)
+        except Unclear as e:
+            out.append(stop(night, [f"补推进 stage {n} 时结果不明：{e}"]))
+            return (1 if night.state.get("frozen") else 0), "\n".join(out)
+        out.append(f"夜跑 stage {n} 上次推进没做完，已补上：{'、'.join(moved)}。")
+        return 0, "\n".join(out)
     if all(snap["issues"][k].get("status") in DELIVERED for k in keys) and not active_runs(snap, keys):
         if n < night.last_stage():
             try:
@@ -802,6 +872,38 @@ def cmd_release(night, by):
     return 0
 
 
+LOCK_WAIT = 120                          # 人工命令最多等主控 2 分钟
+LOCK_STALE = dt.timedelta(minutes=15)    # tick 持锁超过这么久就告警（多半卡在 multica 超时上）
+_LOCKS = []                              # 持有到进程结束
+
+
+def grab_lock(path, wait):
+    """拿到锁返回 None；拿不到返回要打印的文字（tick 拿不到且对方没卡住时返回空串，静默跳过）。"""
+    f = open(path, "a+")
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            f.seek(0)
+            f.truncate()
+            f.write(iso(now()))
+            f.flush()
+            _LOCKS.append(f)
+            return None
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(2)
+    f.seek(0)
+    since = parse(f.read().strip() or None)
+    held = int((now() - since).total_seconds() // 60) if since else None
+    if wait:
+        return f"主控正忙（已持锁 {held if held is not None else '?'} 分钟），稍后再试；急停可直接停执行器容器。"
+    if since and now() - since > LOCK_STALE:
+        return f"⚠️ 夜跑主控上一次检查已卡住 {held} 分钟（多半是 multica 不响应），这期间没有对账和停机检查。"
+    return ""
+
+
 def main(argv=None):
     a = argparse.ArgumentParser(description="Multica 夜跑主控（DT-ORC M5）")
     sub = a.add_subparsers(dest="cmd", required=True)
@@ -835,11 +937,11 @@ def main(argv=None):
         print("没有当前夜跑。")
         return 1
     ROOT.mkdir(parents=True, exist_ok=True)
-    lock = open(ROOT / nid / "tick.lock", "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if a.cmd == "tick" else 0))
-    except BlockingIOError:
-        return 0          # 上一次 tick 还没跑完（比如在停机回读），这次跳过
+    held = grab_lock(ROOT / nid / "tick.lock", wait=0 if a.cmd == "tick" else LOCK_WAIT)
+    if isinstance(held, str):
+        if held:
+            print(held)
+        return 1 if (held or a.cmd != "tick") else 0
     night = Night(nid)
     if a.cmd == "tick":
         try:
@@ -847,13 +949,17 @@ def main(argv=None):
         except Exception as e:     # 主控自己出错也要停（5.3a：不依赖任何一方“还活着”）
             night = Night(nid)
             night.log("crash", error=traceback.format_exc()[-1500:])
+            why = [f"主控脚本异常：{type(e).__name__}: {e}"]
             try:
                 if night.state.get("auth") and not night.state.get("outcome"):
-                    text = stop(night, [f"主控脚本异常：{type(e).__name__}: {e}"])
+                    text = stop(night, why)
                 else:
                     text = f"⚠️ 夜跑主控异常：{type(e).__name__}: {e}"
-            except Exception as e2:
-                text = f"⚠️ 夜跑主控异常，停机也失败了，请立刻手动停容器：{type(e2).__name__}: {e2}"
+            except Exception as e2:      # noqa: BLE001 —— 停机本身也崩了：直接冻结（只依赖计划和本机命令）
+                try:
+                    text = freeze(Night(nid), why, [f"停机过程异常：{type(e2).__name__}: {e2}"])
+                except Exception as e3:  # noqa: BLE001
+                    text = f"⚠️ 夜跑主控异常，停机和冻结都失败了，请立刻手动停容器：{type(e3).__name__}: {e3}"
             code = 1
         if text:
             print(text)
@@ -863,6 +969,13 @@ def main(argv=None):
     if a.cmd == "approve":
         return cmd_approve(night, a.by, a.start_at, a.hours, a.max_runs)
     if a.cmd == "stop":
+        ap = night.state.get("approval")
+        if not night.state.get("auth") and ap and not ap.get("result"):
+            ap["result"] = "revoked"
+            night.save()
+            night.log("approval_revoked", reason=a.reason)
+            print(f"已撤销 {bj(ap['start_at'])} 开跑的批准，不会开跑。原因：{a.reason}")
+            return 0
         if not night.state.get("auth") or night.state.get("outcome"):
             print("夜跑没在进行，不用停。")
             return 1
