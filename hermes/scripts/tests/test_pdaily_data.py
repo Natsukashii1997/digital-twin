@@ -93,7 +93,8 @@ class TimeTests(unittest.TestCase):
     def test_inside_handles_utc_z(self):
         w = pd.window(D)
         self.assertTrue(pd.inside("2026-11-08T16:09:00Z", w))   # 北京 11-09 00:09，算 11-08
-        self.assertFalse(pd.inside("2026-11-08T19:59:59Z", (w[1], w[1])))
+        self.assertFalse(pd.inside("2026-11-08T20:00:00Z", w))   # 北京 11-09 04:00 整：窗口右端不含
+        self.assertTrue(pd.inside("2026-11-08T19:59:59Z", w))
         self.assertFalse(pd.inside("2026-11-07T19:59:00Z", w))  # 北京 11-08 03:59，算 11-07
 
 
@@ -223,6 +224,27 @@ class RepoTests(Base):
         self.assertTrue(any("统计日结束前还没有提交" in e for e in rec["errors"]))
         self.assertIsNone(rec["freshness"]["stale"])
 
+    def test_bad_section_date_does_not_crash(self):
+        r = make_repo(self.root, "bd", {"README.md": "x", "CURRENT.md": "# 当前状态\n\n## 记（2026-11-31）\n- 下一步：x\n"})
+        self.gh()
+        out = self.run_one(r)
+        rec = out["projects"][0]
+        self.assertIsNone(rec["freshness"]["top_section_date"])
+        self.assertTrue(any("没有日期" in n for n in rec["notes"]))
+        self.assertEqual(rec["errors"], [])
+
+    def test_show_tells_missing_file_from_git_failure(self):
+        r = make_repo(self.root, "sh", {"CURRENT.md": "x"})
+        self.assertIsNone(pd.show(r, "main", "README.md"))
+        self.assertEqual(pd.show(r, "main", "CURRENT.md"), "x")
+        with self.assertRaises(pd.Fail):
+            pd.show(r, "没有这个分支", "CURRENT.md")
+        with mock.patch.object(pd, "goal", side_effect=pd.Fail("坏了")):
+            self.gh()
+            rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["objective"]["kind"], "未知")
+        self.assertTrue(any("读阶段目标失败" in e for e in rec["errors"]))
+
     def test_branch_named_like_a_directory(self):
         r = make_repo(self.root, "amb", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
         (r / "docs").mkdir()
@@ -232,6 +254,24 @@ class RepoTests(Base):
         rec = self.run_one(r)["projects"][0]
         self.assertEqual(rec["yesterday_delta"]["commits"], {"main": 1})
         self.assertEqual(rec["errors"], [])
+
+    def test_branch_deleted_mid_run(self):
+        r = make_repo(self.root, "del", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        sh(r, "checkout", "-q", "-b", "gone")
+        commit(r, "分支上", "2026-11-08 11:00:00 +0800")
+        sh(r, "checkout", "-q", "main")
+        real = pd.git
+
+        def git(root, *args):   # 列完分支，别的会话马上把 gone 删了
+            out = real(root, *args)
+            if args[0] == "for-each-ref":
+                sh(r, "branch", "-q", "-D", "gone")
+            return out
+        self.gh()
+        with mock.patch.object(pd, "git", side_effect=git):
+            rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["errors"], [])
+        self.assertEqual(rec["yesterday_delta"]["commits"], {"gone": 1})
 
     def test_local_git_failure_is_unknown(self):
         r = self.root / "notgit"
@@ -356,9 +396,14 @@ class GitHubTests(Base):
                "下一步：常浩装机", "等合并后装机", "需要重新装机", "装机命令见下", "是否已安装要再确认",
                "如果已安装就重启网关", "撤掉已安装的旧版", "等常浩验收通过", "需要常浩实机验收通过才能装",
                "常浩验收通过后合并", "若常浩验收通过即可装", "交接：常浩实机验收通过后装机。",
-               "已安装，但回读不一致", "已安装，随后回滚", "已安装；后发现没生效，已卸载"]
+               "已安装，但回读不一致", "已安装，随后回滚", "已安装；后发现没生效，已卸载",
+               # 第三轮审查：白名单之外的写法一律不算
+               "已安装：否", "已安装：❌", "[ ] 已安装", "~~已安装~~", "状态：已安装？", "已安装吗", "应已安装", "可能已安装",
+               "Codex 声称已安装", "已安装 → 已回退", "**已安装（失败）**：x", "实机验收无法通过", "实机验收部分通过",
+               "实机验收 3/5 通过", "常浩验收只通过了一半", "实机验收应能通过", "常浩验收：通过？", "Claude 实机验收通过",
+               "Codex 自测实机验收通过", "常浩实机验收 3/5 通过", "已安装：装好了吗", "~~已安装：x~~"]
         secs = "".join(f"## 事{i}（#{100 + i}）（2026-11-08）\n- {t}\n\n" for i, t in enumerate(bad))
-        secs += ("## 自述（#30）（2026-11-08）\n- 已安装，没回读\n- 另一行：cmp 过别的文件\n\n"
+        secs += ("## 自述（#30）（2026-11-08）\n- 已安装：复制过去了\n- 另一行：cmp 过别的文件\n\n"
                  "## 回读（#31）（2026-11-08）\n- 已安装：从 main 复制，cmp 一致\n- 常浩实机验收通过\n")
         r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n{secs}"})
         pr = lambda n, title=None: {"number": n, "title": title or f"做（#{n}）", "url": "", "body": "",
@@ -378,7 +423,7 @@ class GitHubTests(Base):
     def test_only_own_title_and_closing_refs_link_evidence(self):
         cur = ("# 当前状态\n\n## 别的（#60）（2026-11-08）\n- 已安装：cmp 一致\n\n"
                "## 甲（#49）（2026-11-08）\n- 已安装：cmp 一致\n\n"
-               "## 自己（#52）（2026-11-08）\n- 已安装，cmp 一致\n\n## 关联（#51）（2026-11-08）\n- 已安装\n")
+               "## 自己（#52）（2026-11-08）\n- 已安装：cmp 一致\n\n## 关联（#51）（2026-11-08）\n- 已安装：没核\n")
         r = make_repo(self.root, "refs", {"CURRENT.md": cur})
         pr = lambda n, title, body: {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
         self.gh(prs=[pr(50, "做乙", "参考 #60 的做法"), pr(53, "做甲", "Closes #49"), pr(52, "做丙（#51）", "")])
@@ -386,8 +431,66 @@ class GitHubTests(Base):
         self.assertEqual(prs[50]["delivery"], "未知")                       # 正文顺带提到 #60 不继承
         self.assertEqual(prs[53]["delivery"], "已安装或已发布")               # Closes #49 算
         self.assertEqual(prs[52]["delivery_basis"], "有回读或 cmp 记录")      # 自己的号优先，不随 set 顺序变
-        self.assertIn("自己（#52）", prs[52]["evidence"][1])
+        self.assertIn("安装：CURRENT「自己（#52）", prs[52]["evidence"][1])
         self.assertIn("节级证据", prs[52]["evidence"][1])
+
+    def test_real_formats_are_recognised(self):
+        cur = ("# 当前状态\n\n"
+               "## 2026-11-08 · 甲（#61，PR #62 `61a47a0`），已安装、网关已重启\n"
+               "- **已安装（11-08 22:56，常浩说「安装并重启」）**：\n  - `x.py` 从 main 复制，`cmp` 一致\n\n"
+               "## 乙（#63）（2026-11-08，Claude；已提交、squash 合并、已发布 `b18150e21b61` 回读通过）\n- 改了 x\n\n"
+               "## 丙（#65）（2026-11-08，已发布 655）\n- 改了 y\n\n"
+               "## 丁（#67）（2026-11-08，Claude）\n- 发布与回读：打包装机，产物 `70ad4a4648bb` / 已装 `70ad4a4648bb`，回滚：`open x`\n\n"
+               "## 戊（#69）（2026-11-08）\n- 发布与回读：产物 `70ad4a4648bb` / 已装 `11114a4648bb`\n\n"
+               "## 己（#71）（2026-11-08，未提交、视觉稿已发布为 Artifact；已发布 Artifact）\n- 改了 z\n\n"
+               "## 庚（#73）（2026-11-08）\n- **已安装**：shadow 合并官\n\n"
+               "## 辛（#75）（2026-11-08）\n- **已安装**：从 main 复制，~~cmp 一致~~\n")
+        r = make_repo(self.root, "fmt", {"CURRENT.md": cur})
+        pr = lambda n: {"number": n, "title": f"做（#{n - 1}）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(n) for n in (62, 64, 66, 68, 70, 72, 74, 76)])
+        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
+        got = {n: (p["delivery"], p["delivery_basis"]) for n, p in prs.items()}
+        self.assertEqual(got, {
+            62: ("已安装或已发布", "有回读或 cmp 记录"),    # 节标题自己的号 #62；条目行加缩进子条目里的 cmp
+            64: ("已安装或已发布", "有回读或 cmp 记录"),    # 已发布 <哈希> 回读通过
+            66: ("已安装或已发布", "仅自述"),              # 已发布 <版本号>
+            68: ("已安装或已发布", "有回读或 cmp 记录"),    # 产物哈希 = 已装哈希
+            70: ("未知", None),                          # 两个哈希不一致
+            72: ("未知", None),                          # 已发布 Artifact 不是发布
+            74: ("已安装或已发布", "仅自述"),              # shadow 里的 sha 不算校验值
+            76: ("已安装或已发布", "仅自述"),              # 划掉的 cmp 不算回读
+        })
+
+    def test_incidental_title_refs_and_shared_issue_do_not_inherit(self):
+        cur = ("# 当前状态\n\n## 修 #196 引入的问题（#200）（2026-11-08，常浩实点 #196 后说点不动）\n"
+               "- **已安装**：cmp 一致\n- 常浩实机验收通过\n\n"
+               "## 1a（#110）（2026-11-08）\n- **已安装**：cmp 一致\n")
+        r = make_repo(self.root, "inc", {"CURRENT.md": cur})
+        pr = lambda n, title: {"number": n, "title": title, "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(197, "做（#196）"), pr(201, "修（#200）"), pr(120, "1a（#110）"), pr(121, "1b（#110）")])
+        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
+        self.assertEqual((prs[197]["delivery"], prs[197]["acceptance"]), ("未知", "未知"))   # #196 只是顺带提到
+        self.assertEqual((prs[201]["delivery"], prs[201]["acceptance"]), ("已安装或已发布", "已通过"))
+        self.assertEqual(prs[201]["evidence"][2][:3], "验收：")
+        for n in (120, 121):   # 同一个 #110 当天两个 PR：分不清是哪一个装的
+            self.assertEqual(prs[n]["delivery"], "未知")
+            self.assertTrue(any("关联 2 个 PR" in e for e in prs[n]["evidence"]))
+
+    def test_template_label_and_rollback_plan_are_not_revocation(self):
+        cur = ("# 当前状态\n\n## 甲（#82）（2026-11-08）\n- **已安装**：cmp 一致\n"
+               "- 与授权不一致之处、遗留问题、范围外发现：无\n- 回滚：`open old.app`；临时配置用完已还原\n")
+        r = make_repo(self.root, "tpl", {"CURRENT.md": cur})
+        self.gh(prs=[{"number": 83, "title": "做（#82）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}])
+        p = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]
+        self.assertEqual((p["delivery"], p["delivery_basis"]), ("已安装或已发布", "有回读或 cmp 记录"))
+
+    def test_revocation_on_a_later_line_voids_the_section(self):
+        cur = ("# 当前状态\n\n## 甲（#80）（2026-11-08）\n- **已安装**：cmp 一致\n- 常浩实机验收通过\n"
+               "- 22:10 常浩反馈没生效，已回滚到旧版\n")
+        r = make_repo(self.root, "rev", {"CURRENT.md": cur})
+        self.gh(prs=[{"number": 81, "title": "做（#80）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}])
+        p = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]
+        self.assertEqual((p["delivery"], p["acceptance"]), ("未知", "未知"))
 
     def test_header_only_commit_does_not_refresh_stale_current(self):
         r = make_repo(self.root, "hd", {"CURRENT.md": "# 当前状态\n\n## 旧节（2026-11-05）\n- 下一步：旧的\n"},
@@ -432,6 +535,29 @@ class GitHubTests(Base):
         for rec in out["projects"]:
             self.assertEqual(len([e for e in rec["errors"] if "60 秒" in e]), 4)
             self.assertIsNone(rec["yesterday_delta"]["merged_prs"])
+
+    def test_gh_that_cannot_start_is_an_error_once(self):
+        real, calls = subprocess.run, []
+
+        def fake(argv, *a, **k):
+            if argv[0].endswith("gh"):
+                calls.append(argv)
+                raise PermissionError("gh")
+            return real(argv, *a, **k)
+        r = make_repo(self.root, "os", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        self.gh()
+        with mock.patch.object(pd.subprocess, "run", side_effect=fake):
+            rec = self.run_one(r)["projects"][0]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all("gh 启动失败" in e for e in rec["errors"] if e.startswith("GitHub")))
+        self.assertIsNone(rec["milestones"])
+
+    def test_bad_github_field_is_an_error_not_a_crash(self):
+        r = make_repo(self.root, "bg", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        self.gh()
+        rec = self.run_one(r, github="fx")["projects"][0]
+        self.assertTrue(any("所有者/仓库" in e for e in rec["errors"]))
+        self.assertIsNone(rec["yesterday_delta"]["merged_prs"])
 
     def test_non_json_output_is_a_fetch_error(self):
         r = make_repo(self.root, "nj", {"CURRENT.md": "# 当前状态\n\n## 节\n"})

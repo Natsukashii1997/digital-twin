@@ -26,16 +26,26 @@ DAY_START = dt.time(4, 0)          # 统计日从 04:00 开始：常浩常干到
 STALE = dt.timedelta(days=1)       # CURRENT 比最近一次合并早这么多就算过期
 GOAL = re.compile(r"^当前阶段目标：(.+)$")
 GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
-# 安装、验收只认「已经发生」的完成写法（V2 第 6 节：文档写了不等于做了，宁可「未知」）：
-# 一行里有转折、撤回（「已安装；后发现没生效，已卸载」），这一行都不算；
-# 行内按。；，切成短句，短句里有否定、条件、将来时，这个短句不算
-INSTALLED = re.compile(r"已安装|已发布|已装机|已装好|装机完成|已上线")
-ACCEPTED = re.compile(r"(常浩|用户|本人)[^。；\n]{0,24}验收[^。；\n]{0,8}通过|实机验收[^。；\n]{0,12}通过")
-CLAUSE = re.compile(r"[。；;，,]")
-REVERSED = re.compile(r"但|却|回滚|卸载|撤|不一致|没生效|未生效|失败")
-NEGATED = re.compile(r"未|没|不|待|尚|将|准备|等|需|要|若|如果|是否|请|才|即可|下一步|"
-                     r"(通过|安装|装机|合并)\s*之?后")   # 「等常浩验收通过」「通过后装机」「如果已安装就重启」都不算
-VERIFIED = re.compile(r"回读|cmp|校验值|sha", re.I)   # 和安装写在同一句才算有回读，否则只是自述
+# 安装、验收只认固定格式的完成记录（白名单，V2 第 6 节：文档写了不等于做了）。格式之外的写法一律「未知」，
+# 宁可漏报，不误报。格式取自名册各项目 CURRENT 的真实写法（2026-11-09 核过）：
+#   节标题里单独一段：「，已安装，」「已安装到本机、」「已发布 `b18150e21b61` 回读通过」「已发布 nm-…」「已发布 653」
+#   条目行开头（冒号必须有，冒号后不能是「否、无、未……」）：「- **已安装**：」「- 已安装：」「- **已安装（11-08 22:56，常浩说「…」）**：」「- **已合并、已安装（…）**」「- **已安装、已重启（…）**」
+#   发布与回读行：「- 发布与回读：… 产物 `70ad4a4648bb` / 已装 `70ad4a4648bb` …」（两个哈希一致才算）
+#   验收：一段话以「常浩 / 用户 / 本人 / 所有者」开头、以「验收通过」结尾，例如「常浩实机验收通过」「交接补记：常浩实机验收乙通过」
+# 同一节里任何一行写了撤回（已回滚、已卸载、没生效、cmp / 回读不一致……），这一节的安装、验收都不算。
+SPLIT = re.compile(r"[（）()，,；;、。：:]")
+INSTALL_CLAUSE = re.compile(r"^(?:已安装|已上线)(?:到本机)?$|"
+                            r"^已发布\s*`?(?:[0-9a-f]{7,40}|nm-[\w-]+|wb-[\w-]+|\d+)`?(?P<rb>\s*回读[^，]{0,6}通过)?$")
+INSTALL_LINE = re.compile(r"^\s*[-*]\s*(?:\*\*)?(?:已合并、)?已安装(?:、[^*（：:]{1,8})?(?:（(?P<note>[^）]*)）)?(?:\*\*)?\s*[：:]"
+                          r"(?!\s*(?:否|❌|✗|✘|无|未|没|不|待))")
+READBACK_LINE = re.compile(r"^\s*[-*]\s*(?:\*\*)?发布与回读(?:\*\*)?\s*[：:].*?产物\s*`?([0-9a-f]{7,40})`?\s*/\s*已装\s*`?([0-9a-f]{7,40})`?")
+ACCEPT_CLAUSE = re.compile(r"^(?:常浩|用户|本人|所有者)(?:已经?)?(?:实机|真机|真屏)?验收(?P<mid>[^，]{0,8}?)通过了?$")
+SHAKY = re.compile(r"未|没|不|无|非|别|待|失败|部分|一半|只|/|？|\?|吗|应|可能|预计|估计|算|Claude|Codex|自测|自验", re.I)
+# 撤回只认明确写法；「与授权不一致之处」是 CURRENT 模板小标题，「回滚：命令」是回滚办法，都不算撤回
+REVOKED = re.compile(r"已回滚|回滚了|已撤回|已卸载|卸载了|没生效|未生效|装回旧版|"
+                     r"(?:cmp|回读|哈希|校验值?|产物|已装)[^，。；\n]{0,8}不一致", re.I)
+VERIFIED = re.compile(r"回读|cmp|校验值|sha256|sha1|\bsha\b", re.I)   # 和安装记录写在同一条才算有回读，否则只是自述
+REF_CLAUSE = re.compile(r"^(?:PR\s*)?#\d+(?:\s*PR\s*#\d+)?(?:\s*(?:squash\s*)?(?:合并为\s*)?`[0-9a-f]{7,40}`)?$")
 HANDOVER = "交接记录（非本人回执）"                        # CURRENT、PR 标题都是 Claude 写的，不是常浩本人的回执
 GH_LIMIT = {"merged_prs": 200, "closed_issues": 200, "open_prs": 100, "milestones": 100}
 REF = re.compile(r"#(\d+)")
@@ -51,16 +61,65 @@ class Fail(Exception):
     pass
 
 
-def affirmed(pattern, text):
-    """有一个短句明写了 pattern：所在那一行没有转折、撤回，所在短句没有否定、条件、将来时。一句都没有就不算。"""
-    return any(not REVERSED.search(line) and any(pattern.search(c) and not NEGATED.search(c) for c in CLAUSE.split(line))
-               for line in text.splitlines())
+def clean(line):
+    """去掉删除线和加粗记号；未勾选、已勾选的清单行，带问号的行，都不当完成记录（返回 None）。"""
+    line = re.sub(r"~~.*?~~", "", line)
+    if re.match(r"^\s*[-*]\s*\[[ xX]\]", line) or re.search(r"[?？]|吗", line):
+        return None
+    return line
 
 
-def install_basis(text):
-    """安装有没有回读证据：同一行里既确认已安装、又写了回读 / cmp / 校验值。"""
-    return "有回读或 cmp 记录" if any(affirmed(INSTALLED, x) and affirmed(VERIFIED, x) for x in text.splitlines()) \
-        else "仅自述"
+def clauses(line):
+    return [c.strip().replace("**", "") for c in SPLIT.split(re.sub(r"^\s*[-*]\s*", "", line))]
+
+
+def accepted_in(line):
+    """一行里有没有「常浩……验收通过」这样单独成段的记录。"""
+    line = clean(line)
+    return line is not None and any((m := ACCEPT_CLAUSE.match(c)) and not SHAKY.search(m.group("mid")) and not SHAKY.search(c)
+                                    for c in clauses(line))
+
+
+def section_status(title, body):
+    """一节 CURRENT 的安装、验收记录：(安装证据等级或 None, 有没有验收)。只认白名单格式，有撤回整节不算。"""
+    lines = [title, *body.splitlines()]
+    if any(REVOKED.search(re.sub(r"~~.*?~~", "", x)) for x in lines):
+        return None, False
+    installs = []   # 每条安装记录有没有回读
+    t = clean(title)
+    for c in clauses(t) if t is not None else []:
+        m = INSTALL_CLAUSE.match(c)
+        if m:
+            installs.append(bool(m.groupdict().get("rb")))
+    body_lines = body.splitlines()
+    for i, raw in enumerate(body_lines):
+        line = clean(raw)
+        if line is None:
+            continue
+        m = INSTALL_LINE.match(line)
+        if m and not SHAKY.search(re.sub(r"常浩说「[^」]*」", "", m.group("note") or "")):
+            indent = len(raw) - len(raw.lstrip())
+            block = [line]   # 条目行加下面缩进更深的子条目，算同一条记录
+            for nxt in body_lines[i + 1:]:
+                if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
+                    break
+                block.append(nxt)
+            installs.append(bool(VERIFIED.search("\n".join(block))))
+        r = READBACK_LINE.match(line)
+        if r and r.group(1) == r.group(2):
+            installs.append(True)   # 产物哈希和已装哈希一致，本身就是回读
+    basis = None if not installs else "有回读或 cmp 记录" if any(installs) else "仅自述"
+    return basis, any(accepted_in(x) for x in lines)
+
+
+def title_refs(title):
+    """节标题里专门写交付编号的段：「（#247）」「（#67，PR #68 `fa81bc8`）」「#43 导航…」开头的号。
+    「常浩实点 #196 后说……」这种从句里顺带提到的号不算。"""
+    nums = {int(m.group(1))} if (m := re.match(r"#(\d+)\s", title)) else set()
+    for c in SPLIT.split(title.replace("、", "，")):
+        if REF_CLAUSE.match(c.strip()):
+            nums |= {int(n) for n in REF.findall(c)}
+    return nums
 
 
 # ---------- 时间 ----------
@@ -97,12 +156,14 @@ def git(root, *args):
 
 
 def commits(root, w, main):
-    """统计日内的提交数，按分支归；一个提交只算在第一个含它的分支下，主分支优先。按提交时间算，不按作者时间。"""
-    branches = git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
-    branches.sort(key=lambda b: b != main)
+    """统计日内的提交数，按分支归；一个提交只算在第一个含它的分支下，主分支优先。按提交时间算，不按作者时间。
+    列分支时就记下各分支指向的提交，后面按提交号查：别的会话中途删掉分支也不出错。"""
+    heads = [line.split(" ", 1)[::-1] for line in
+             git(root, "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads").splitlines() if line]
+    heads.sort(key=lambda bh: bh[0] != main)
     seen, out = set(), {}
-    for b in branches:
-        rows = git(root, "log", f"refs/heads/{b}", f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}",
+    for b, sha in heads:
+        rows = git(root, "log", sha, f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}",
                    "--format=%H %cI", "--").split("\n")
         mine = [h for h, _, t in (r.partition(" ") for r in rows if r) if inside(t, w) and h not in seen]
         seen.update(mine)
@@ -130,11 +191,15 @@ def as_of(root, ref, w):
 
 
 def show(root, ref, name):
-    """某分支上的文件内容；没有这个文件返回 None。"""
+    """某分支上的文件内容；没有这个文件返回 None，git 别的失败抛 Fail（不当成「没有文件」）。"""
     if not ref:
         return None
     r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True, text=True)
-    return r.stdout if r.returncode == 0 else None
+    if r.returncode == 0:
+        return r.stdout
+    if "does not exist" in r.stderr or "exists on disk, but not in" in r.stderr:
+        return None
+    raise Fail((r.stderr or r.stdout).strip()[:200] or f"git show 退出码 {r.returncode}")
 
 
 def goal(root, ref):
@@ -153,15 +218,22 @@ def goal(root, ref):
 
 
 def sections(text):
-    """CURRENT 按二级标题切节：[(标题, 标题里的日期或 None, 正文)]，保持原顺序（最新在上）。"""
+    """CURRENT 按二级标题切节：[(标题, 标题里的日期或 None, 正文)]，保持原顺序（最新在上）。
+    日期写错（如 2026-11-31）当没有日期，不让整份日报崩掉。"""
     parts = re.split(r"^(?=## )", text, flags=re.M)
     out = []
     for p in parts:
         if not p.startswith("## "):
             continue
         title, _, body = p.partition("\n")
-        m = SECTION_DATE.search(title)
-        out.append((title[3:].strip(), m.group(1) if m else None, body))
+        date = None
+        for d in SECTION_DATE.findall(title):
+            try:
+                date = dt.date.fromisoformat(d).isoformat()
+                break
+            except ValueError:
+                continue
+        out.append((title[3:].strip(), date, body))
     return out
 
 
@@ -211,6 +283,9 @@ class GitHub:
             r = subprocess.run([self.exe, *args], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
             self.down = "gh 60 秒没有回应"
+            raise Fail(self.down)
+        except OSError as e:
+            self.down = f"gh 启动失败：{e}"
             raise Fail(self.down)
         if r.returncode:
             msg = (r.stderr or r.stdout).strip()
@@ -277,27 +352,38 @@ def refs_of(pr):
 
 
 def deliverables(prs, dated_sections):
-    """每个合并的 PR 一条，三个维度分开记（V2 5.2）。交付、验收只认当天日期、标题里带这个编号的 CURRENT 节，
-    或 PR 标题里明写的，否则「未知」；否定、将来时写法不算。证据等级另记（V2 第 6 节）：
-    delivery_basis 有回读或 cmp 记录 / 仅自述；acceptance_basis 目前都是交接记录，本人回执要等行动记录（1b）。"""
+    """每个合并的 PR 一条，三个维度分开记（V2 5.2）。交付、验收只认当天日期、标题里专门写了这个编号的 CURRENT 节
+    （白名单格式，见文件头），或 PR 标题里单独成段的「常浩……验收通过」，否则「未知」。证据等级另记（V2 第 6 节）：
+    delivery_basis 有回读或 cmp 记录 / 仅自述；acceptance_basis 目前都是交接记录，本人回执要等行动记录（1b）。
+    同一个编号当天有几个 PR 关联（如 #110 的 1a、1b），这个编号上的记录不分给它们：分不清是哪一个装的。"""
     installed, accepted = {}, {}
     for title, body in dated_sections:
-        text = f"{title}\n{body}"
-        nums = {int(n) for n in REF.findall(title)}  # 只认节标题里的编号：正文顺带提到的别的 PR 不算这一节交付的
-        where = f"CURRENT「{title[:40]}」（节级证据）"   # 节标题有几个编号，这一节的证据就算给每一个
-        if affirmed(INSTALLED, text):
-            for n in nums:
-                installed.setdefault(n, (where, install_basis(text)))
-        if affirmed(ACCEPTED, text):
-            for n in nums:
+        basis, acc = section_status(title, body)
+        where = f"CURRENT「{title[:40]}」（节级证据）"   # 节标题写了几个交付编号，这一节的证据就算给每一个
+        for n in title_refs(title):
+            if basis:
+                installed.setdefault(n, (where, basis))
+            if acc:
                 accepted.setdefault(n, where)
     for pr in prs:  # 「交接补记：常浩实机验收……通过（#242）」这类文档 PR 本身就是验收记录
-        if affirmed(ACCEPTED, pr.get("title", "")):
-            for n in refs_of(pr):
+        if accepted_in(pr.get("title", "")):
+            for n in {pr["number"], *title_refs(pr.get("title", ""))}:
                 accepted.setdefault(n, f"PR #{pr['number']} 标题")
+    shared = {}
+    for pr in prs:
+        if accepted_in(pr.get("title", "")):   # 验收记录 PR 本身不是交付，不算「同号多 PR」
+            continue
+        for n in refs_of(pr)[1:]:
+            shared[n] = shared.get(n, 0) + 1
     out = []
     for pr in prs:
-        refs = refs_of(pr)
+        refs, notes = [], []
+        for n in refs_of(pr):
+            if n != pr["number"] and shared.get(n, 0) > 1:
+                if n in installed or n in accepted:
+                    notes.append(f"#{n} 当天关联 {shared[n]} 个 PR，它的安装 / 验收记录不分给本 PR")
+                continue
+            refs.append(n)
         inst = next((installed[n] for n in refs if n in installed), None)
         acc = next((accepted[n] for n in refs if n in accepted), None)
         out.append({
@@ -307,7 +393,8 @@ def deliverables(prs, dated_sections):
             "delivery_basis": inst[1] if inst else None,
             "acceptance": "已通过" if acc else "未知",
             "acceptance_basis": HANDOVER if acc else None,
-            "evidence": [e for e in (f"PR #{pr['number']} merged", inst and inst[0], acc) if e],
+            "evidence": [f"PR #{pr['number']} merged", *(["安装：" + inst[0]] if inst else []),
+                         *(["验收：" + acc] if acc else []), *notes],
         })
     return out
 
@@ -345,7 +432,12 @@ def project(p, w, hub):
                 rec["errors"].append(f"本机 git：{ref} 在统计日结束前还没有提交")
         except Fail as e:
             rec["errors"].append(f"本机 git：读 {ref} 在统计日结束时的提交失败：{e}")
-    rec["objective"] = goal(root, snap) if snap else {"kind": "未知", "text": None, "source": None}
+    rec["objective"] = {"kind": "未知", "text": None, "source": None}
+    if snap:
+        try:
+            rec["objective"] = goal(root, snap)
+        except Fail as e:
+            rec["errors"].append(f"本机 git：读阶段目标失败：{e}")
     if is_repo:
         try:
             delta["commits"] = commits(root, w, main)
@@ -373,7 +465,9 @@ def project(p, w, hub):
         rec["notes"].append(f"{ref} 上没有 CURRENT.md：没有可信的下一步")
         state["next_reliable"] = False
     repo = p.get("github")
-    if repo:
+    if repo and "/" not in repo:   # GitHub 那几项留 null：名册写错不等于没有 GitHub
+        rec["errors"].append(f"名册 github 字段不是「所有者/仓库」：{repo}")
+    elif repo:
         for key, fn in (("merged_prs", hub.merged_prs), ("closed_issues", hub.closed_issues)):
             try:
                 delta[key] = fn(repo)
@@ -399,6 +493,8 @@ def project(p, w, hub):
     # 新鲜度：CURRENT 最近一节比主分支上最近一次别的改动早一天以上，就不把它的“下一步”当可信依据（V2 第 6 节）。
     # 最近一节的时间取「节标题日期那个统计日结束」和「CURRENT 最后一次提交」里早的那个：只改文件头的提交洗不掉旧节。
     # 只看本机主分支，不依赖 gh；读不到就是 None（未知），不当成没过期
+    if cur and merge_ok and not cur["top_date"]:
+        rec["notes"].append("CURRENT 最上面一节标题没有日期：新鲜度只能按 CURRENT 提交时间算，只改文件头也会显得新")
     if cur and merge_ok:
         stamps = [t for t in (parse_ts(cur["last_commit"]), cur["top_date"] and window(dt.date.fromisoformat(cur["top_date"]))[1]) if t]
         cur_ts, last_merge = (min(stamps) if stamps else None), parse_ts(fresh["last_merge"])
