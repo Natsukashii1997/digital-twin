@@ -15,7 +15,7 @@
 先检查再发（github-center docs/handoff/weekly-hermes.md）：
 - 最新一份周报的统计日应是设定那天的前一天（北京时间）。还没有就先等，到设定时刻后 3 小时仍然没有、
   统计日更早、卡片文件为空或读不出来：只发一句说明，不发旧榜单。
-- 卡片原样发出，只在最前面插一张固定横幅（同目录 assets/tidings-banner.png）。横幅按内容哈希缓存 image_key，换图才重传；
+- 卡片原样发出，只在最前面插一张固定横幅（同目录 assets/tidings-banner.png，横幅本身就是标题，按原比例完整显示）。横幅按内容哈希缓存 image_key，换图才重传；
   上传失败照发不带图，并打印一句提醒。
 - 同一统计日只发一次：本机状态文件记已发的统计日，发送时还带飞书幂等键。
 
@@ -199,7 +199,7 @@ def banner_key(state, warnings):
 
 def with_banner(card, key):
     img = {"tag": "img", "img_key": key, "alt": {"tag": "plain_text", "content": "本周 GitHub 涨星榜"},
-           "scale_type": "crop_center", "preview": False, "corner_radius": "8px"}
+           "scale_type": "fit_horizontal", "preview": False, "corner_radius": "8px"}
     return {**card, "body": {**card["body"], "elements": [img, *card["body"]["elements"]]}}
 
 
