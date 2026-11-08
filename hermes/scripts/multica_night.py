@@ -868,7 +868,10 @@ def remote_diff(a, b):
 
 
 def take_remote_snapshot(night):
-    """停机（STOPPED / FINISHED / 冻结）后给远端拍快照，之后的检查和晨报都拿它比。"""
+    """停机（STOPPED / FINISHED / 冻结）后给远端拍快照，之后的检查和晨报都拿它比。
+    已经拍过就不再覆盖（停机后又被撤销结果、冻结时，基准仍是第一次停机时的远端）。"""
+    if night.state.get("remote_at_stop"):
+        return night.state["remote_at_stop"]
     snap = remote_snapshot(night)
     night.state["remote_at_stop"] = snap
     night.save()
@@ -965,7 +968,9 @@ def cmd_start(night, by, hours, max_runs):
 def watch_after(night):
     """夜跑结束后（STOPPED / FINISHED / 冻结）、release 之前继续看着，绝不推进：
     家族内外新出现的非终态 run 一律取消并告警（早上要接着干活，先 release 再触发）；
-    冻结了却没确认执行器停住的，每次都再试一次硬停并告警（重试硬停不等于重新执行任务）。"""
+    冻结了却没确认执行器停住的，每次都再试一次硬停并告警（重试硬停不等于重新执行任务）；
+    执行器里又冒出 agent 进程：结束并独立回读；没授权、结束不掉或看不清，撤销 STOPPED / FINISHED，冻结（M5 #25、#27）；
+    远端和停机时的快照不一致就告警（只告警：release 前常浩本人也可能动远端）。"""
     st, out, code = night.state, [], 0
     if st.get("frozen") and not st.get("freeze_verified"):
         results, verified, seen = hard_freeze(night.plan)
@@ -991,20 +996,33 @@ def watch_after(night):
                    "。要接着干活，先在终端 release 再触发。" + ("请核对容器是不是被重启了。" if st.get("frozen") else ""))
         code = 1
     if not (st.get("frozen") and st.get("freeze_verified")):   # 执行器还在跑：每次都再查一遍进程（M5 #25、#27）
+        problem = None
         try:
             procs = executor_procs(night.plan)
             if procs:
                 killed = bool(night.plan["executor"].get("kill"))
-                after = (executor_procs(night.plan, "kill") or executor_procs(night.plan)) if killed else procs
+                after = executor_procs(night.plan, "kill") if killed else procs
+                if killed and not after:
+                    after = executor_procs(night.plan)        # 结束之后另起一次独立回读
                 night.log("after_end_procs", procs=procs, killed=killed, after=after)
-                out.append(f"⚠️ 夜跑已结束（{st['outcome']}），执行器里又出现 {len(procs)} 个 agent 进程：" + "；".join(procs[:3]) +
-                           ("。已结束" + ("，但仍有残留，请手动停容器。" if after else "。") if killed else "。计划没授权结束它们，请手动停容器。"))
                 code = 1
+                if after:
+                    problem = (f"执行器里又出现 {len(procs)} 个 agent 进程，" +
+                               (f"结束后仍剩 {len(after)} 个" if killed else "计划没授权结束它们") + "：" + "；".join(after[:3]))
+                else:
+                    out.append(f"⚠️ 夜跑已结束（{st['outcome']}），执行器里又出现 {len(procs)} 个 agent 进程，已结束并独立回读确认：" +
+                               "；".join(procs[:3]))
         except Unclear as e:
-            msg = alarm_once(night, "procs", f"⚠️ 夜跑已结束（{st['outcome']}），核对执行器进程失败：{e}")
-            if msg:
-                out.append(msg)
-                code = 1
+            problem = f"核对执行器进程失败：{e}"
+        if problem:
+            code = 1
+            if st.get("frozen"):     # 已冻结但没确认停住：上面已重试硬停，这里只告警
+                msg = alarm_once(night, "procs", f"⚠️ 夜跑已冻结、执行器没确认停住，{problem}")
+                if msg:
+                    out.append(msg)
+            else:                    # STOPPED / FINISHED 之后执行器又不干净或看不清：撤销原结果，冻结（停容器），Hermes 第 4 轮裁决
+                night.log("outcome_revoked", previous=st["outcome"], why=problem)
+                out.append(freeze(night, [f"夜跑已 {st['outcome']}，之后{problem}，撤销原结果"], [problem]))
     base = st.get("remote_at_stop")
     if base and not base.get("error"):   # 停机后远端还在变，说明还有东西能写（M5 #25）
         diff = remote_diff(base, remote_snapshot(night))

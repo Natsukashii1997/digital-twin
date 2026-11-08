@@ -981,9 +981,46 @@ class MulticaNight(unittest.TestCase):
         self.set_procs(procs=self.RESIDUE)
         code, out = self.run_cli("tick", now=at(20))
         self.assertEqual(code, 1)
-        self.assertIn("执行器里又出现 2 个 agent 进程", out)
-        self.assertIn("已结束。", out)
+        self.assertIn("执行器里又出现 2 个 agent 进程，已结束并独立回读确认", out)
+        self.assertEqual(self.docker_calls()[-2:], ["kill", "list"], "结束之后另起一次独立回读")
+        self.assertEqual(self.state()["outcome"], "STOPPED", "结束干净、回读为空：保持 STOPPED")
         self.assertEqual(self.run_cli("tick", now=at(25)), (0, ""))
+
+    def test_m5_25_unkillable_procs_after_stop_revoke_stopped_and_freeze(self):
+        """Hermes 第 4 轮：STOPPED 之后冒出的进程结束不掉，不能只提示「请手动停容器」——撤销 STOPPED，冻结（停容器）。"""
+        code, out = self.stop_now()
+        self.assertEqual(code, 0, out)
+        self.set_procs(procs=self.RESIDUE, stubborn=True)
+        res = self.run_cli("tick", now=at(20))
+        self.assert_frozen(res, "结束后仍剩 2 个")
+        self.assertIn("撤销原结果", res[1])
+        self.assertIn("outcome_revoked", [r["event"] for r in self.log()])
+        self.assertEqual(self.run_cli("release", "--by", "Hermes", "--confirm", "night-test:STOPPED", now=at(21))[0], 1,
+                         "原结果已撤销，不能再按 STOPPED release")
+
+    def test_m5_25_unreadable_executor_after_stop_revokes_and_freezes(self):
+        """Hermes 第 4 轮：STOPPED 之后核对执行器读不清（docker 不通），看不清不等于干净——撤销 STOPPED，冻结。"""
+        code, out = self.stop_now()
+        self.assertEqual(code, 0, out)
+        self.set_procs(fail=True)
+        self.assert_frozen(self.run_cli("tick", now=at(20)), "核对执行器进程失败")
+
+    def test_m5_25_unauthorized_procs_after_stop_revoke_and_freeze(self):
+        self.plan_obj["executor"]["kill"] = False
+        self.write_plan()
+        code, out = self.stop_now()
+        self.assertEqual(code, 0, out)
+        self.set_procs(procs=self.RESIDUE)
+        self.assert_frozen(self.run_cli("tick", now=at(20)), "计划没授权结束它们")
+        self.assertNotIn("kill", self.docker_calls())
+
+    def test_m5_25_verified_freeze_skips_executor_check(self):
+        """已冻结且确认容器停住：不再 docker exec 进去查（容器停着，exec 必然失败），也不重复告警。"""
+        self.frozen()
+        self.edit(lambda w: (w.update(stuck=[]), [r.update(status="cancelled") for r in w["runs"]]))
+        n = len(self.docker_calls())
+        self.assertEqual(self.run_cli("tick", now=at(250)), (0, ""))
+        self.assertEqual(len(self.docker_calls()), n)
 
     def test_m5_25_remote_snapshot_after_stop_and_change_alarms_once(self):
         """停机后给远端拍快照；之后远端还在变（后台进程推了提交）就告警一次，晨报里也写出来。"""
