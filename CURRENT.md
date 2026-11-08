@@ -29,7 +29,13 @@
   - M5 夜跑 22:19 因 SBX-24 被标 blocked 停机（STOPPED），主控定时任务 6fafbfe09d8d 仍 active；Hermes 20:04 以「Claude 转述、核验不了」回复受阻。release 和暂停主控需要常浩在飞书私聊亲口交代，或自己处理；授权 72 在 11-09 06:00 失效。
   - progress_data 在牛马之家、GitHub 快速中心抽「下一步」抽错，放进 #110 一起修。
 - **已合并**：常浩说「合并」后，分支并入最新 main（未强推），重跑测试 hermes 490 项、orca 48 项 OK，CI 通过，带 `--match-head-commit` squash 合并为 `5190c48`，#109 关闭；主目录已拉齐，worktree 已删。
-- **唯一下一步**：常浩定是否安装新的 HERMES.md 并重启网关（D 档）；之后做 #114（起草 16 个项目的阶段目标），再开工 #110。
+- **已安装（11-08 22:56，常浩说「安装并重启」）**：
+  - 旧版备份、sha256 和网关日志在 `evidence/2026-11-08-HERMES常设授权-安装/`；装前核对旧安装副本等于合并前的 main。
+  - 注入扫描用 Hermes 的 `tools/threat_patterns.py`，context、strict 两种模式都是 0 命中。
+  - `~/.hermes/workspace/HERMES.md`（600，`cb771945…`）和 main `cmp` 一致。
+  - 网关 `launchctl kickstart -k`：新实例 22:56:30 起来时，旧进程 39740 还没退干净，报「A gateway already owns this host」后以退出码 1 退出；launchd 22:57:01 自动拉起，22:57:04 `feishu connected`，新 PID 86812。猛鬼兽断线约 36 秒。
+  - 飞书里已有的会话要 `/new` 后才加载新规程。
+- **唯一下一步**：做 #114（起草 16 个项目的阶段目标，给常浩确认），再开工 #110。
 
 ## 2026-11-08 · Tidings 周报横幅换新图（#106，PR #107 `659fafd`，配合 github-center #86）
 
