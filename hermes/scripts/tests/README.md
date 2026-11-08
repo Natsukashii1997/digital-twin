@@ -71,7 +71,7 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 
 ## Tidings 周报推送（test_tidings_weekly.py）
 
-测的是 `hermes/scripts/tidings_weekly.py`，跑真实入口。假 `lark-cli`（`DT_LARK_CLI`）按预设回话应答并记下每次调用的参数、工作目录和环境；周报目录、状态文件、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时横幅插在最前面、bot 身份、去掉 `HERMES_*` 再调、成功不输出；同一期只发一次、横幅按内容缓存、换图才重传、`--force` 换幂等键再发；没有周报或数据过期只发一句说明且同天不重复；卡片为空、不是卡片、缺失都发说明；横幅上传失败照发不带图并提醒；发送失败退出码 1、下次再发、已上传的横幅缓存留着；发出后状态写不进不报失败只提醒；没有私聊 chat_id 报错不发；`--dry-run` 只打印。不联网、不碰真实周报、状态文件和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_tidings_weekly.py -v`。
+测的是 `hermes/scripts/tidings_weekly.py`，跑真实入口。假 `lark-cli`（`DT_LARK_CLI`）按预设回话应答并记下每次调用的参数、工作目录和环境；周报目录、状态文件、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时横幅插在最前面、bot 身份、去掉 `HERMES_*` 再调、成功不输出；同一期只发一次、横幅按内容缓存、换图才重传、`--force` 换幂等键再发；没有周报或数据过期只发一句说明且同天不重复；卡片为空、不是卡片、缺失都发说明；横幅上传失败照发不带图并提醒；发送失败退出码 1、下次再发、已上传的横幅缓存留着；发出后状态写不进不报失败只提醒；没有私聊 chat_id 报错不发；周报时间不早于每日更新、旧的 11:30 按和 github-center `readSettings` 同一条规则迁到每日更新后 1.5 小时（github-center #83）；`--dry-run` 只打印。不联网、不碰真实周报、状态文件和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_tidings_weekly.py -v`。
 
 ## 仓库自检（test_check_repos.py）
 
