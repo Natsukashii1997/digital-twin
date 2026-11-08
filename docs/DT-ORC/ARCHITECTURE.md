@@ -343,8 +343,10 @@ agent instructions 里的停机条件（7.3）只在 agent 还活着时有效；
    - 对处于**全部 5 种非终态**的 run 逐个发 `multica issue cancel-task <run-id>`：`deferred`（到点会进队列）、`queued`、`dispatched`、`waiting_local_directory`（目录锁释放后会继续跑）、`running`。前两种之外的状态能否被取消〔待实测〕；
    - 把还在 `backlog / todo` 的子 issue 留在原处不再推进，当前子 issue 改 `blocked` 并评论原因；
    - 回读确认。
-3. **停机成功的判定**：相关 run 全部处于终态 `completed / failed / cancelled`，**且**后续触发源（自建 Wakeup、系统 Child-Done 规则或其 `cancelled` 回退、Autopilot）都已停用并回读确认。缺任何一项都不算停机成功，不得在晨报或 run-log 里写“已安全停机”。
-4. **未达成停机成功**（命令超时、回读仍有任一非终态 run、触发源状态读不到、run 记录不完整）：进入冻结——停 daemon（`multica daemon stop`），记录 `UNRECONCILED`，飞书私聊常浩，**不自动继续、不自动重试**；冻结期间 daemon 不得重启（包括 `daemon autostart` 的开机自启，冻结时一并 `disable`），由常浩核对后才恢复，避免重启后把残留的 `queued / deferred` run 接着跑掉。
+3. **停机成功的判定**：相关 run 全部处于终态 `completed / failed / cancelled`，**且**后续触发源（自建 Wakeup、系统 Child-Done 规则或其 `cancelled` 回退、Autopilot）都已停用并回读确认，**且**执行器里已没有 agent 派生的进程（到执行器里独立回读，不以 Multica 的 run 状态代替）。缺任何一项都不算停机成功，不得在晨报或 run-log 里写“已安全停机”。
+   - 为什么要第三条（M5 首夜演练实测，digital-twin #97）：取消 run 只结束 agent 主进程所在的进程组，agent 放到后台、另开会话的进程会被执行器的 init 收养、继续运行，并仍持有 agent 的凭据。Multica 显示 `cancelled` 不等于执行器已停。
+   - 授权过的停机脚本可以先结束这些残留进程（先 TERM 后 KILL），再独立回读；结束动作要写进运行计划，并经 Hermes 或常浩批准。停机后给远端（分支、PR）拍快照，release 前持续比对，远端还在变就告警。
+4. **未达成停机成功**（命令超时、回读仍有任一非终态 run、触发源状态读不到、run 记录不完整、执行器里仍有 agent 进程或读不清）：进入冻结——停执行器并独立回读确认它已停、不会自动重启（执行器在容器里时：去掉容器的自动重启并停容器，再用 `docker inspect` 回读；daemon 直接跑在本机时：`multica daemon stop`，并 `disable` 开机自启），记录 `UNRECONCILED`，飞书私聊常浩，**不自动继续、不自动重试**；冻结期间执行器不得重启，由常浩核对后才恢复，避免重启后把残留的 `queued / deferred` run 接着跑掉。
 5. 每次触发都写进 run-log（触发原因、执行的命令、每个 run 的回读状态、判定结果）。
 
 SUPERVISED 下的多 stage 运行也应开着这个检查；它在 M2 期间先以“只告警”方式试跑。
@@ -564,7 +566,7 @@ multica issue run-messages <run-id> --output json   # 每个 run 一次，可用
 | 驿窗送审结果不明 | 看接力记录的阶段（`delivered / working`），等回信或超时停下 | 换会话重发同一份包 |
 | 审核包或远端 HEAD 改变 | 原结论作废、重新送审 | 用旧结论合并新代码 |
 | 合并时 GitHub 报 HEAD 不匹配 | 停止，重新核对 PR 与审核 | 自动重试、去掉 `--match-head-commit` 再合 |
-| 停机后回读仍有非终态 run（含 `deferred`、`waiting_local_directory`），或取消/禁用结果不明，或 run 记录不完整 | 冻结：停 daemon 且不重启、记 `UNRECONCILED`、私聊常浩（5.3a 第 3–4 条） | 宣布“已停机”、自动继续下一 stage、重启 daemon |
+| 停机后回读仍有非终态 run（含 `deferred`、`waiting_local_directory`），或取消/禁用结果不明，或 run 记录不完整，或执行器里仍有 agent 进程 | 冻结：停执行器（容器或 daemon）且不重启、独立回读、记 `UNRECONCILED`、私聊常浩（5.3a 第 3–4 条） | 宣布“已停机”、自动继续下一 stage、重启执行器 |
 | 跨系统账本冲突 | `UNRECONCILED`、停受影响动作 | 模型自信选一个 |
 | 普通任务失败 | 停本 issue 及依赖，其他继续 | 局部失败升级为全局停 |
 | 身份/权限/证据完整性破坏 | 冻结相关安全域，停 daemon | 以效率为由忽略 |
@@ -780,7 +782,7 @@ digital-twin/
 | R7 | **驿窗依赖 Chrome 开着、电脑不睡** | 驿窗经常浩 Chrome 里登录的 chatgpt.com 送审；插件或页面掉线时通道不可用；页面改版时插件报 `no-composer` 等原因，驿窗退回半自动 | 无人值守长跑只做到“开 PR 待审”，送审在常浩在场或机器条件满足时进行；ChatGPT 30 分钟不回、Claude 2 小时不交回，驿窗停下交还常浩；未回信、接连 fail/stop 等问题以驿窗侧排查结论为准 |
 | R8 | **调用方身份、回信回流、High 强度、审核证据未打通** | 见 3.3：三项〔待实测〕；驿窗发送前不核对模型与思考强度；接力记录只留最新 200 条、不存完整送审包指纹 | 实测前送审由桌面 Claude 会话发起；回执按 5.5 第 8 条标审核模式；合并官以驿窗记录（非 PR 评论）为证据，驿窗补齐前只影子运行、不自动合并；需驿窗改动的另开 postpane issue |
 | R11 | **合并竞态** | 读 PR 与执行合并之间，agent 仍可能推新 HEAD | 合并带 `--match-head-commit <审过的 head_sha>`，不匹配即停、不重试（5.5 第 7 条） |
-| R12 | **长跑停不下来** | agent 崩溃时执行不了 instructions 里的停机；`blocked` 不关 Wakeup | 5.3a 独立停机检查：禁用 Wakeup、暂停 Autopilot、取消全部 5 种非终态 run、回读；run 全部终态且触发源全停才算停机成功，否则冻结且不重启 daemon |
+| R12 | **长跑停不下来** | agent 崩溃时执行不了 instructions 里的停机；`blocked` 不关 Wakeup | 5.3a 独立停机检查：禁用 Wakeup、暂停 Autopilot、取消全部 5 种非终态 run、回读；run 全部终态、触发源全停、执行器里没有 agent 进程才算停机成功，否则冻结且不重启执行器 |
 | R9 | **数据与模型出境** | 本地部署不等于模型离线；任务、上下文和工具结果会送往 Anthropic / OpenAI | 工作区只放个人工程任务；不接企业数据、Vault 正文、凭据 |
 | R10 | **Multica 飞书渠道被误开** | 自托管下设 `MULTICA_LARK_SECRET_KEY` 即开启 | 部署配置不设该变量；部署回读时检查 |
 
