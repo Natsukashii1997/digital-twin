@@ -6,15 +6,17 @@
 
 ---
 
-## 2026-11-08 · M5 演练问题修补：第 1 批等常浩本人授权，第 2 批已开 PR（#97、#99）
+## 2026-11-08 · M5 演练问题修补：第 1 批已合并安装，复验演练 3 门槛设计有误、等常浩修正授权（#97、#99）
 
 - **来由**：M5 首夜两次演练后 Hermes 两次不放行（Multica 显示 STOPPED 不等于执行器已停；取消 run 杀不掉 agent 放到后台的进程）。常浩要求「基于这次演练暴露出的问题，请列一个问题清单，然后逐个解决」。清单 29 条、分批计划见证据目录 `2026-11-08-M5首夜/` 00、24 号。
-- **第 1 批（PR #100，#97，L3）**：停机在 Multica 回读之外，再到执行器容器里独立核对进程，为空才写 STOPPED；`executor.kill: true` 时结束残留进程，夜跑途中每次 tick 清孤儿；停机后给远端拍快照、持续比对；消息文件尾部截断记缺口；执行单同步，测试数不写死。原计划 27②（改执行器 runtime 配置）不做，改由主控三处清理，理由见 `claude-31-第3批决策清单.md` 末节。
-- **测试**：15 项新用例在改前主控上 `FAILED (failures=13, errors=2)`；改后全量 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests` `Ran 485 tests` `OK`，`orca/tests` `Ran 48 tests` `OK`。一次性测试容器正向验证 list / orphans / kill-orphans / kill 都对（`claude-26-…log`）。
-- **Hermes 裁决（`hermes-30-修补合并与复验裁决.md`）**：合并、`executor.kill`、安装、08 号授权延续、两场复验 **5 项全部不批**，要常浩本人明确授权。按约定只记录、不绕过。授权草稿：`claude-33-常设授权草稿-修补与复验.md`。
-- **第 2 批（本 PR，#99）**：名册里 digital-twin 的测试命令钉死 `/usr/bin/python3`；AGENTS 写明测试版本和证据文件写入方前缀；tests/README 不写死总数；新增 `test_roster.py`（path、GitHub 仓库、项目 id 唯一）。#14 架构 5.3a 修订单独开 PR，按架构 12.4 等常浩定。
-- **未做**：PR #100 合并、安装、复验演练两场（都等授权）；第 3 批规则与架构改动（决策清单 `claude-31-…md` 等常浩批）；Multica 上游 issue（草稿 `claude-29-…md`，未发）；驿窗那组 1、2、3、18 号（建议另开驿窗会话）。
-- **唯一下一步**：常浩核对 `claude-33-…md` 后在飞书私聊发给 Hermes；Hermes 核对 PR #100 后批合并，Claude 安装并跑两场复验。
+- **第 1 批（PR #100，#97，L3，已合并 a3e497d）**：停机在 Multica 回读之外，再到执行器容器里独立核对进程，为空才写 STOPPED；`executor.kill: true` 时结束残留，夜跑途中每次 tick 清孤儿；停机后到 release 前，残留结束不掉或读不清就撤销 STOPPED、冻结；停机后给远端拍快照、持续比对；消息文件尾部截断记为缺口。原计划 27②（改执行器 runtime 配置）不做，改由主控三处清理。
+- **审批**：常浩飞书授权（`hermes-34`，到 11-10 00:00）。Hermes 第 1 次（`hermes-35`）指出停机后只告警不冻结、复验脚本门槛不硬，不批；返修后第 2 次（`hermes-40`）批准合并，条件是 CI 成功；复验脚本又修三处后，第 3 次（`hermes-43`）批准复验。
+- **测试**：19 项新用例先红后绿；全量 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests` `Ran 489 tests` `OK`；`orca/tests` `Ran 48 tests`：首跑 1 项计时用例失败，补跑 `OK`（main 上同样不稳，本 PR 没改 orca）；CI `test: SUCCESS`。
+- **安装**：`~/.hermes/scripts/multica_night.py` 与 main 的 cmp 一致（sha1 2c948decda37），旧版备份在 `claude-42-安装备份/`；定时任务 6fafbfe09d8d 仍暂停。
+- **复验演练 3（`claude-44`、`claude-45`）**：主控全部正常（STOPPED，没有残留，10 次探针都干净，停机后远端没变）。但没通过，原因是我设计的门槛有误：G6 拿演练前的快照比，agent 在 stop 前正常推的 PR #8 被判失败；场景 1 的 run 在 stop 前已经结束。按边界不 release，演练 4 没跑。脚本 v3（`claude-46`，自测 `claude-47`）和修正授权草稿（`claude-48`）已备好。
+- **第 2 批（本 PR，#99）**：名册里 digital-twin 的测试命令钉死 `/usr/bin/python3`；AGENTS 写明测试版本和证据文件写入方前缀；tests/README 不写死总数；新增 `test_roster.py`。#14 架构 5.3a 修订见 PR #101（等常浩定）。
+- **未做**：复验演练 4、5；第 3 批（决策清单 `claude-31`，等常浩批）；Multica 上游 issue（草稿 `claude-29`，未发）；驿窗那组 1、2、3、18 号。
+- **唯一下一步**：常浩核对 `claude-48-修正授权草稿.md`，在飞书发给 Hermes；Hermes 审过脚本 v3 后，Claude release drill-3，再跑演练 5、演练 4。
 
 ## 2026-11-08 · M5 首夜：Hermes 主控的 Multica 夜跑与独立停机检查（#92）
 
