@@ -26,14 +26,20 @@ DAY_START = dt.time(4, 0)          # 统计日从 04:00 开始：常浩常干到
 STALE = dt.timedelta(days=1)       # CURRENT 比最近一次合并早这么多就算过期
 GOAL = re.compile(r"^当前阶段目标：(.+)$")
 GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
-INSTALLED = re.compile(r"已安装|已发布|装机|已上线|正式 ?\d{4} ?已发布")
+# 安装、验收只认「已经发生」的完成写法（V2 第 6 节：文档写了不等于做了，宁可「未知」）：
+# 一行里有转折、撤回（「已安装；后发现没生效，已卸载」），这一行都不算；
+# 行内按。；，切成短句，短句里有否定、条件、将来时，这个短句不算
+INSTALLED = re.compile(r"已安装|已发布|已装机|已装好|装机完成|已上线")
 ACCEPTED = re.compile(r"(常浩|用户|本人)[^。；\n]{0,24}验收[^。；\n]{0,8}通过|实机验收[^。；\n]{0,12}通过")
-CLAUSE = re.compile(r"[。；;，,\n]")
-NEGATED = re.compile(r"未|没|不|待|尚|后再|将|准备|失败")   # 「验收未通过」「待装机」「通过后再装」「已安装失败」都不算
-VERIFIED = re.compile(r"回读|cmp|一致|校验|核对")          # 安装记录里带这些字样才算有回读，否则只是自述
+CLAUSE = re.compile(r"[。；;，,]")
+REVERSED = re.compile(r"但|却|回滚|卸载|撤|不一致|没生效|未生效|失败")
+NEGATED = re.compile(r"未|没|不|待|尚|将|准备|等|需|要|若|如果|是否|请|才|即可|下一步|"
+                     r"(通过|安装|装机|合并)\s*之?后")   # 「等常浩验收通过」「通过后装机」「如果已安装就重启」都不算
+VERIFIED = re.compile(r"回读|cmp|校验值|sha", re.I)   # 和安装写在同一句才算有回读，否则只是自述
 HANDOVER = "交接记录（非本人回执）"                        # CURRENT、PR 标题都是 Claude 写的，不是常浩本人的回执
 GH_LIMIT = {"merged_prs": 200, "closed_issues": 200, "open_prs": 100, "milestones": 100}
 REF = re.compile(r"#(\d+)")
+CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)", re.I)
 SECTION_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 CHECK_REF = re.compile(r"^\s*- \[([ xX])\]\s*#(\d+)", re.M)   # 以 issue 号开头的清单项：「- [ ] #109 批 0」
 MIN_CHILDREN = 2                   # 至少两条这样的清单项才算父 issue；一条顺带提到 issue 号的多半是验收条件
@@ -46,8 +52,15 @@ class Fail(Exception):
 
 
 def affirmed(pattern, text):
-    """有一个短句明写了 pattern，且同一短句里没有否定、将来时写法；一句都没有就不算。"""
-    return any(pattern.search(c) and not NEGATED.search(c) for c in CLAUSE.split(text))
+    """有一个短句明写了 pattern：所在那一行没有转折、撤回，所在短句没有否定、条件、将来时。一句都没有就不算。"""
+    return any(not REVERSED.search(line) and any(pattern.search(c) and not NEGATED.search(c) for c in CLAUSE.split(line))
+               for line in text.splitlines())
+
+
+def install_basis(text):
+    """安装有没有回读证据：同一行里既确认已安装、又写了回读 / cmp / 校验值。"""
+    return "有回读或 cmp 记录" if any(affirmed(INSTALLED, x) and affirmed(VERIFIED, x) for x in text.splitlines()) \
+        else "仅自述"
 
 
 # ---------- 时间 ----------
@@ -89,7 +102,8 @@ def commits(root, w, main):
     branches.sort(key=lambda b: b != main)
     seen, out = set(), {}
     for b in branches:
-        rows = git(root, "log", b, f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}", "--format=%H %cI").split("\n")
+        rows = git(root, "log", f"refs/heads/{b}", f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}",
+                   "--format=%H %cI", "--").split("\n")
         mine = [h for h, _, t in (r.partition(" ") for r in rows if r) if inside(t, w) and h not in seen]
         seen.update(mine)
         if mine:
@@ -106,6 +120,13 @@ def main_ref(root, main):
         if r.returncode == 0 and r.stdout.strip():
             refs.append((int(r.stdout.strip()), ref))
     return max(refs)[1] if refs else None
+
+
+def as_of(root, ref, w):
+    """主分支在统计日结束时的那个提交：阶段目标、CURRENT、新鲜度都按它读，回放历史统计日和当天跑结果一致，
+    04:00 以后的提交不混进前一天。统计日结束前主分支还没有提交，返回 None。"""
+    end = (w[1] - dt.timedelta(seconds=1)).isoformat()
+    return git(root, "rev-list", "-1", "--first-parent", f"--before={end}", ref).strip() or None
 
 
 def show(root, ref, name):
@@ -146,7 +167,7 @@ def sections(text):
 
 def current_state(root, ref, w):
     """CURRENT 最上面一节、下一步、最后一次提交 CURRENT 的时间、统计日内改过没有，以及当天日期的各节（找安装、验收证据用）。
-    主分支上没有 CURRENT 返回 None；git 读不了抛 Fail。"""
+    ref 是主分支在统计日结束时的提交。没有 CURRENT 返回 None；git 读不了抛 Fail。"""
     text = show(root, ref, "CURRENT.md")
     if text is None:
         return None
@@ -157,17 +178,19 @@ def current_state(root, ref, w):
                "--", "CURRENT.md").split()
     return {
         "top_section": secs[0][0] if secs else None,
+        "top_date": secs[0][1] if secs else None,
         "next_step": progress_data.next_step(text.splitlines()),
         "last_commit": stamp or None,
         "changed": any(inside(t, w) for t in rows),
-        "dated_today": [(t, b) for t, d, b in secs if d == w[0].date().isoformat()],
+        # 快照截在 D+1 04:00，标着 D+1 的节一定是凌晨写的，也算统计日 D 的
+        "dated_today": [(t, b) for t, d, b in secs if d in (w[0].date().isoformat(), w[1].date().isoformat())],
     }
 
 
 def last_change(root, ref):
     """主分支上最近一次不只改 CURRENT 的提交时间，当作「最近一次合并」：不依赖 gh，也不限于统计日。
     直接推到主分支的文档提交也算在内，宁可多报过期。从来没有这样的提交返回 None。"""
-    return git(root, "log", "-1", "--format=%cI", ref, "--", ".", ":(exclude)CURRENT.md").strip() or None
+    return git(root, "log", "-1", "--first-parent", "--format=%cI", ref, "--", ".", ":(exclude)CURRENT.md").strip() or None
 
 
 # ---------- GitHub ----------
@@ -247,8 +270,10 @@ def milestone(issue):
 # ---------- 汇总一个项目 ----------
 
 def refs_of(pr):
-    """一个 PR 关联的编号：自己的号，加标题和正文里引用的 issue 号。"""
-    return {pr["number"], *(int(n) for n in REF.findall(f"{pr.get('title', '')} {pr.get('body') or ''}"))}
+    """一个 PR 关联的编号，按固定顺序：自己的号在前，再按数字排标题里的号和正文里 Closes / Fixes 的号。
+    正文里顺带提到的别的号不算：否则会把别的节的安装、验收挂到这个 PR 上。"""
+    linked = {int(n) for n in REF.findall(pr.get("title", ""))} | {int(n) for n in CLOSES.findall(pr.get("body") or "")}
+    return [pr["number"], *sorted(linked - {pr["number"]})]
 
 
 def deliverables(prs, dated_sections):
@@ -259,13 +284,13 @@ def deliverables(prs, dated_sections):
     for title, body in dated_sections:
         text = f"{title}\n{body}"
         nums = {int(n) for n in REF.findall(title)}  # 只认节标题里的编号：正文顺带提到的别的 PR 不算这一节交付的
+        where = f"CURRENT「{title[:40]}」（节级证据）"   # 节标题有几个编号，这一节的证据就算给每一个
         if affirmed(INSTALLED, text):
-            basis = "有回读或 cmp 记录" if affirmed(VERIFIED, text) else "仅自述"   # 「没核对」不算
             for n in nums:
-                installed.setdefault(n, (f"CURRENT「{title[:40]}」", basis))
+                installed.setdefault(n, (where, install_basis(text)))
         if affirmed(ACCEPTED, text):
             for n in nums:
-                accepted.setdefault(n, f"CURRENT「{title[:40]}」")
+                accepted.setdefault(n, where)
     for pr in prs:  # 「交接补记：常浩实机验收……通过（#242）」这类文档 PR 本身就是验收记录
         if affirmed(ACCEPTED, pr.get("title", "")):
             for n in refs_of(pr):
@@ -295,40 +320,56 @@ def project(p, w, hub):
            "yesterday_delta": {"merged_prs": None, "closed_issues": None, "commits": None, "current_changed": None},
            "current_state": {"top_section": None, "next_step": None, "next_reliable": None, "open_prs": None,
                              "checkout_branch": None, "dirty_files": None},
-           "freshness": {"current_last_commit": None, "last_merge": None, "stale": None},
+           "freshness": {"current_last_commit": None, "top_section_date": None, "current_as_of": None,
+                         "last_merge": None, "stale": None},
            "notes": [], "errors": []}
     delta, state, fresh = rec["yesterday_delta"], rec["current_state"], rec["freshness"]
     if not root.exists():
         rec["errors"].append(f"本机没有仓库目录 {root}")
         return rec
     main = p.get("main", "main")
-    ref = main_ref(root, main)
-    if ref:
-        rec["objective"] = goal(root, ref)
-    else:  # 不是「未设目标」「没有 CURRENT」：是根本读不到
-        rec["objective"] = {"kind": "未知", "text": None, "source": None}
-        rec["errors"].append(f"本机 git：找不到主分支 origin/{main} 和 {main}，阶段目标、CURRENT、新鲜度都读不了")
     try:
-        delta["commits"] = commits(root, w, main)
-        state["checkout_branch"] = git(root, "branch", "--show-current").strip() or "（游离 HEAD）"
-        state["dirty_files"] = len(git(root, "status", "--porcelain").splitlines())
+        git(root, "rev-parse", "--git-dir")
+        is_repo = True
     except (Fail, OSError) as e:
-        rec["errors"].append(f"本机 git：{e}")
-    cur, dated, merge_ok = None, [], False
-    if ref:
+        is_repo = False
+        rec["errors"].append(f"本机 git：读不了仓库（不是 git 仓库或没有 git）：{e}")
+    ref = main_ref(root, main) if is_repo else None   # 主分支名，写进说明用
+    snap = None                                         # 主分支在统计日结束时的提交：目标、CURRENT、新鲜度都按它读
+    if is_repo and not ref:   # 不是「未设目标」「没有 CURRENT」：是根本读不到
+        rec["errors"].append(f"本机 git：找不到主分支 origin/{main} 和 {main}，阶段目标、CURRENT、新鲜度都读不了")
+    elif ref:
         try:
-            cur = current_state(root, ref, w)
-            fresh["last_merge"] = last_change(root, ref)
+            snap = as_of(root, ref, w)
+            if not snap:
+                rec["errors"].append(f"本机 git：{ref} 在统计日结束前还没有提交")
+        except Fail as e:
+            rec["errors"].append(f"本机 git：读 {ref} 在统计日结束时的提交失败：{e}")
+    rec["objective"] = goal(root, snap) if snap else {"kind": "未知", "text": None, "source": None}
+    if is_repo:
+        try:
+            delta["commits"] = commits(root, w, main)
+            state["checkout_branch"] = git(root, "branch", "--show-current").strip() or "（游离 HEAD）"
+            state["dirty_files"] = len(git(root, "status", "--porcelain").splitlines())
+        except (Fail, OSError) as e:
+            rec["errors"].append(f"本机 git：{e}")
+    cur, dated, merge_ok = None, [], False
+    if snap:
+        try:
+            cur = current_state(root, snap, w)
+            fresh["last_merge"] = last_change(root, snap)
             merge_ok = True
         except Fail as e:
             rec["errors"].append(f"本机 git：读 {ref} 失败：{e}")
             cur = cur or False   # False = 读失败，None = 主分支上确实没有 CURRENT
     if cur:
         state["top_section"], state["next_step"] = cur["top_section"], cur["next_step"]
-        fresh["current_last_commit"] = cur["last_commit"]
+        fresh["current_last_commit"], fresh["top_section_date"] = cur["last_commit"], cur["top_date"]
         delta["current_changed"] = cur["changed"]
         dated = cur["dated_today"]
-    elif cur is None and ref:
+        if cur["changed"] and cur["top_date"] and cur["top_date"] < day.isoformat():
+            rec["notes"].append(f"CURRENT 当天有提交，但最上面一节是 {cur['top_date']} 的：可能只改了文件头或旧节")
+    elif cur is None and snap:
         rec["notes"].append(f"{ref} 上没有 CURRENT.md：没有可信的下一步")
         state["next_reliable"] = False
     repo = p.get("github")
@@ -355,10 +396,13 @@ def project(p, w, hub):
         delta["merged_prs"] = deliverables(delta["merged_prs"], dated)
     if delta["closed_issues"] is not None:
         delta["closed_issues"] = [{"number": i["number"], "title": i["title"]} for i in delta["closed_issues"]]
-    # 新鲜度：CURRENT 比主分支上最近一次别的改动早一天以上，就不把它的“下一步”当可信依据（V2 第 6 节）。
+    # 新鲜度：CURRENT 最近一节比主分支上最近一次别的改动早一天以上，就不把它的“下一步”当可信依据（V2 第 6 节）。
+    # 最近一节的时间取「节标题日期那个统计日结束」和「CURRENT 最后一次提交」里早的那个：只改文件头的提交洗不掉旧节。
     # 只看本机主分支，不依赖 gh；读不到就是 None（未知），不当成没过期
     if cur and merge_ok:
-        cur_ts, last_merge = parse_ts(fresh["current_last_commit"]), parse_ts(fresh["last_merge"])
+        stamps = [t for t in (parse_ts(cur["last_commit"]), cur["top_date"] and window(dt.date.fromisoformat(cur["top_date"]))[1]) if t]
+        cur_ts, last_merge = (min(stamps) if stamps else None), parse_ts(fresh["last_merge"])
+        fresh["current_as_of"] = cur_ts.isoformat() if cur_ts else None
         fresh["stale"] = bool(last_merge) and (cur_ts is None or last_merge - cur_ts > STALE)
         state["next_reliable"] = bool(state["next_step"]) and not fresh["stale"]
     return rec

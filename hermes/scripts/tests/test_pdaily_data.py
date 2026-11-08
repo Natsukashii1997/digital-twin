@@ -199,6 +199,40 @@ class RepoTests(Base):
         self.assertEqual(rec["objective"]["kind"], "目标")
         self.assertEqual(rec["errors"], [])
 
+    def test_reads_main_as_of_stat_day_end(self):
+        r = make_repo(self.root, "asof", {"README.md": "x", "CURRENT.md": f"# 当前状态\n\n{GOAL_LINE}\n\n## 当天（2026-11-08）\n- 下一步：A\n"},
+                      at="2026-11-08 10:00:00 +0800")
+        commit(r, "凌晨补一节", "2026-11-09 00:30:00 +0800", "CURRENT.md",
+               f"# 当前状态\n\n{GOAL_LINE}\n\n## 凌晨（#70）（2026-11-09）\n- 已安装：cmp 一致\n- 下一步：B\n\n## 当天（2026-11-08）\n- 下一步：A\n")
+        commit(r, "第二天白天", "2026-11-09 10:00:00 +0800", "CURRENT.md", "# 当前状态\n\n## 次日（2026-11-09）\n- 下一步：C\n")
+        commit(r, "第二天合并", "2026-11-09 12:00:00 +0800", "a.py", "x")
+        self.gh(prs=[{"number": 70, "title": "做（#70）", "url": "", "body": "", "mergedAt": "2026-11-08T16:00:00Z"}])
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["current_state"]["next_step"], "B")              # 不是 04:00 以后的 C
+        self.assertEqual(rec["objective"]["kind"], "目标")
+        self.assertEqual(rec["freshness"]["current_last_commit"], "2026-11-09T00:30:00+08:00")
+        self.assertEqual(rec["freshness"]["last_merge"], "2026-11-08T10:00:00+08:00")   # 11-09 12:00 的合并不算
+        self.assertEqual(rec["yesterday_delta"]["merged_prs"][0]["delivery"], "已安装或已发布")   # D+1 凌晨的节算 D
+        self.assertFalse(any("文件头" in n for n in rec["notes"]))
+
+    def test_main_without_commits_before_day_end(self):
+        r = make_repo(self.root, "late", {"CURRENT.md": f"# 当前状态\n\n{GOAL_LINE}\n"}, at="2026-11-10 10:00:00 +0800")
+        self.gh()
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["objective"]["kind"], "未知")
+        self.assertTrue(any("统计日结束前还没有提交" in e for e in rec["errors"]))
+        self.assertIsNone(rec["freshness"]["stale"])
+
+    def test_branch_named_like_a_directory(self):
+        r = make_repo(self.root, "amb", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        (r / "docs").mkdir()
+        commit(r, "加 docs", "2026-11-08 10:00:00 +0800", "docs/a.md", "x")
+        sh(r, "branch", "docs")
+        self.gh()
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["yesterday_delta"]["commits"], {"main": 1})
+        self.assertEqual(rec["errors"], [])
+
     def test_local_git_failure_is_unknown(self):
         r = self.root / "notgit"
         r.mkdir()
@@ -210,8 +244,12 @@ class RepoTests(Base):
         self.assertEqual(rec["objective"]["kind"], "未知")
         self.assertIsNone(rec["yesterday_delta"]["commits"])
         self.assertIsNone(rec["freshness"]["stale"])
-        self.assertTrue(rec["errors"])
+        self.assertEqual(len(rec["errors"]), 1)
+        self.assertIn("读不了仓库", rec["errors"][0])
         self.assertEqual(out["coverage"]["read_ok"], 0)
+        with mock.patch.object(pd.subprocess, "run", side_effect=FileNotFoundError("git")):   # 机器上没有 git：不崩
+            rec = pd.project({"id": "x", "name": "x", "path": str(r), "github": None}, pd.window(D), pd.GitHub(pd.window(D)))
+        self.assertIn("读不了仓库", rec["errors"][0])
 
     def test_last_change_failure_leaves_freshness_unknown(self):
         r = make_repo(self.root, "lf", {"CURRENT.md": "# 当前状态\n\n## 节\n- 下一步：x\n"})
@@ -313,24 +351,69 @@ class GitHubTests(Base):
         self.assertIs(rec["current_state"]["next_reliable"], True)
 
     def test_negated_and_future_forms_do_not_count(self):
-        bad = ["常浩验收未通过", "常浩验收还没通过", "等常浩验收通过后再装", "未装机", "待装机", "已安装失败，回滚了"]
-        secs = "".join(f"## 事{i}（#{20 + i}）（2026-11-08）\n- {t}\n\n" for i, t in enumerate(bad))
-        secs += ("## 自述（#30）（2026-11-08）\n- 已安装，没核对\n\n"
+        bad = ["常浩验收未通过", "常浩验收还没通过", "等常浩验收通过后再装", "未装机", "待装机", "已安装失败，回滚了",
+               # 第二轮审查：条件、前提、将来时、转折、撤回
+               "下一步：常浩装机", "等合并后装机", "需要重新装机", "装机命令见下", "是否已安装要再确认",
+               "如果已安装就重启网关", "撤掉已安装的旧版", "等常浩验收通过", "需要常浩实机验收通过才能装",
+               "常浩验收通过后合并", "若常浩验收通过即可装", "交接：常浩实机验收通过后装机。",
+               "已安装，但回读不一致", "已安装，随后回滚", "已安装；后发现没生效，已卸载"]
+        secs = "".join(f"## 事{i}（#{100 + i}）（2026-11-08）\n- {t}\n\n" for i, t in enumerate(bad))
+        secs += ("## 自述（#30）（2026-11-08）\n- 已安装，没回读\n- 另一行：cmp 过别的文件\n\n"
                  "## 回读（#31）（2026-11-08）\n- 已安装：从 main 复制，cmp 一致\n- 常浩实机验收通过\n")
         r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n{secs}"})
         pr = lambda n, title=None: {"number": n, "title": title or f"做（#{n}）", "url": "", "body": "",
                                     "mergedAt": "2026-11-08T03:00:00Z"}
-        self.gh(prs=[pr(20 + i) for i in range(len(bad))] + [pr(30), pr(31), pr(40, "交接补记：常浩实机验收未通过（#41）"), pr(41)])
+        self.gh(prs=[pr(100 + i) for i in range(len(bad))] + [pr(30), pr(31), pr(40, "交接补记：常浩实机验收未通过（#41）"), pr(41)])
         prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
         for i, text in enumerate(bad):
             with self.subTest(text):
-                self.assertEqual((prs[20 + i]["delivery"], prs[20 + i]["acceptance"]), ("未知", "未知"))
-                self.assertIsNone(prs[20 + i]["delivery_basis"])
+                self.assertEqual((prs[100 + i]["delivery"], prs[100 + i]["acceptance"]), ("未知", "未知"))
+                self.assertIsNone(prs[100 + i]["delivery_basis"])
         self.assertEqual(prs[41]["acceptance"], "未知")                       # PR 标题写的是未通过
         self.assertEqual((prs[30]["delivery"], prs[30]["delivery_basis"]), ("已安装或已发布", "仅自述"))
         self.assertEqual((prs[31]["delivery_basis"], prs[31]["acceptance"]), ("有回读或 cmp 记录", "已通过"))
         self.assertEqual(prs[31]["acceptance_basis"], "交接记录（非本人回执）")
         self.assertIsNone(prs[30]["acceptance_basis"])
+
+    def test_only_own_title_and_closing_refs_link_evidence(self):
+        cur = ("# 当前状态\n\n## 别的（#60）（2026-11-08）\n- 已安装：cmp 一致\n\n"
+               "## 甲（#49）（2026-11-08）\n- 已安装：cmp 一致\n\n"
+               "## 自己（#52）（2026-11-08）\n- 已安装，cmp 一致\n\n## 关联（#51）（2026-11-08）\n- 已安装\n")
+        r = make_repo(self.root, "refs", {"CURRENT.md": cur})
+        pr = lambda n, title, body: {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(50, "做乙", "参考 #60 的做法"), pr(53, "做甲", "Closes #49"), pr(52, "做丙（#51）", "")])
+        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
+        self.assertEqual(prs[50]["delivery"], "未知")                       # 正文顺带提到 #60 不继承
+        self.assertEqual(prs[53]["delivery"], "已安装或已发布")               # Closes #49 算
+        self.assertEqual(prs[52]["delivery_basis"], "有回读或 cmp 记录")      # 自己的号优先，不随 set 顺序变
+        self.assertIn("自己（#52）", prs[52]["evidence"][1])
+        self.assertIn("节级证据", prs[52]["evidence"][1])
+
+    def test_header_only_commit_does_not_refresh_stale_current(self):
+        r = make_repo(self.root, "hd", {"CURRENT.md": "# 当前状态\n\n## 旧节（2026-11-05）\n- 下一步：旧的\n"},
+                      at="2026-11-05 10:00:00 +0800")
+        commit(r, "合并", "2026-11-07 20:00:00 +0800", "a.py", "x")
+        commit(r, "只加目标行", "2026-11-08 09:00:00 +0800", "CURRENT.md",
+               f"# 当前状态\n\n{GOAL_LINE}\n\n## 旧节（2026-11-05）\n- 下一步：旧的\n")
+        self.gh()
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["freshness"]["current_as_of"], "2026-11-06T04:00:00+08:00")
+        self.assertIs(rec["freshness"]["stale"], True)
+        self.assertIs(rec["current_state"]["next_reliable"], False)
+        self.assertIs(rec["yesterday_delta"]["current_changed"], True)
+        self.assertTrue(any("可能只改了文件头" in n for n in rec["notes"]))
+
+    def test_last_merge_follows_first_parent(self):
+        r = make_repo(self.root, "fp", {"CURRENT.md": "# 当前状态\n\n## 节（2026-11-05）\n- 下一步：x\n"},
+                      at="2026-11-05 10:00:00 +0800")
+        sh(r, "checkout", "-q", "-b", "old")
+        commit(r, "很早写好的分支", "2026-11-01 10:00:00 +0800", "a.py", "x")
+        sh(r, "checkout", "-q", "main")
+        sh(r, "merge", "-q", "--no-ff", "-m", "普通合并", "old", at="2026-11-08 10:00:00 +0800")
+        self.gh()
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["freshness"]["last_merge"], "2026-11-08T10:00:00+08:00")
+        self.assertIs(rec["freshness"]["stale"], True)
 
     def test_gh_timeout_skips_remaining_repos(self):
         real, calls = subprocess.run, []
