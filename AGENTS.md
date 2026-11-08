@@ -20,7 +20,7 @@ hermes/
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
-    tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 11:30）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
+    tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 19:30，不早于每日更新时间，github-center #83）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
     multica_night.py   Multica 夜跑主控（#92，DT-ORC M5 / 5.3a）：Hermes 无模型定时任务每 5 分钟经 multica_night_tick.py 调 tick（approve 记下的开跑时刻到了就先 start）；按计划文件在 DT 沙盒建父单和分 stage 子单，子单交付（in_review）后推进下一 stage，边跑边导 run-log 和消息到 DigitalTwin/runs/<夜跑>/，到上限按 5.3a 停机（禁用 Wakeup、暂停 Autopilot、取消非终态 run、回读），回读不过就冻结执行器容器；开跑前核对名册 sandbox: true；不合并、不送审；计划样例 hermes/samples/multica-night-2026-11-08.json，执行单 docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
     merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列

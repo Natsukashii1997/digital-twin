@@ -6,7 +6,9 @@
 --force 不看设置和时间、本期已发过也再发一次（手动补发用）。
 
 什么时候发（#58，github-center #61）：读 github-center 设置页存的 data/settings.json 里的 weekly（开关、星期、时间）。
-- 没存过、读不出来或某项不合规，按默认值：开、周一、11:30（同 github-center src/settings/index.js 的 DEFAULTS.weekly）。
+- 没存过、读不出来或某项不合规，按默认值：开、周一、19:30（同 github-center src/settings/index.js 的 DEFAULTS.weekly）。
+- 周报时间不能早于每日更新时间（github-center #83：统计日改按美国太平洋时间，出榜推后 8 小时）。设置文件是原样从服务器拉回来的，
+  旧设置可能还是 11:30：和 github-center 的 readSettings 一样，每日更新早于 17:00 的按 18:00，周报早于每日更新的按每日更新后 1.5 小时（最晚 23:45）。
 - 关着不发；过了最近一次设定时刻，这一期还没发过才发。能发到设定那天结束（数据要等时可延到设定时刻后 3 小时 15 分），
   过了就不补（整天错过不隔天补发）。
 
@@ -38,7 +40,10 @@ STATE = Path(os.environ.get("DT_TIDINGS_STATE", "~/Library/Application Support/D
 BANNER = Path(os.environ.get("DT_TIDINGS_BANNER") or Path(__file__).with_name("assets") / "tidings-banner.png")
 BJ = dt.timezone(dt.timedelta(hours=8))
 TIMEOUT = 60
-DEFAULT_WEEKLY = {"on": True, "day": 1, "at": "11:30"}   # 同 github-center DEFAULTS.weekly；day 0 = 周日
+DEFAULT_WEEKLY = {"on": True, "day": 1, "at": "19:30"}   # 同 github-center DEFAULTS.weekly；day 0 = 周日（#83 前 11:30）
+DEFAULT_DAILY_AT = "18:00"                                # 同 github-center DEFAULTS.daily.at
+EARLIEST_DAILY = "17:00"                                  # 同 github-center EARLIEST
+WEEKLY_AFTER = 90                                         # 周报早于每日更新时，迁到每日更新后这么多分钟
 DAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
 WAIT = dt.timedelta(hours=3)                              # 到点后数据还没生成，最多等这么久再发说明
 TICK = dt.timedelta(minutes=15)                           # 定时任务的间隔：等满 3 小时后至少还有一次机会发说明
@@ -108,18 +113,29 @@ def load_card(day):
     return card if ok else None
 
 
+def is_time(t):
+    return isinstance(t, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t) is not None
+
+
 def read_weekly():
-    """设置页的周报推送设置；文件没有、读不出来或某项不合规，那一项用默认值（同 github-center 的 readSettings）。"""
+    """设置页的周报推送设置；文件没有、读不出来或某项不合规，那一项用默认值；周报早于每日更新时按迁移规则（同 github-center 的 readSettings）。"""
     try:
-        w = json.loads((REPO / "data/settings.json").read_text(encoding="utf-8")).get("weekly")
-    except (OSError, ValueError, AttributeError):
-        w = None
-    w = w if isinstance(w, dict) else {}
+        s = json.loads((REPO / "data/settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        s = None
+    s = s if isinstance(s, dict) else {}
+    w = s.get("weekly") if isinstance(s.get("weekly"), dict) else {}
+    d = s.get("daily") if isinstance(s.get("daily"), dict) else {}
+    daily = d.get("at") if is_time(d.get("at")) and d["at"] >= EARLIEST_DAILY and int(d["at"][3:]) % 15 == 0 else DEFAULT_DAILY_AT
     on, day, at = w.get("on"), w.get("day"), w.get("at")
+    at = at if is_time(at) else DEFAULT_WEEKLY["at"]
+    if at < daily:
+        m = min(int(daily[:2]) * 60 + int(daily[3:]) + WEEKLY_AFTER, 23 * 60 + 45)
+        at = f"{m // 60:02d}:{m % 60:02d}"
     return {
         "on": on if isinstance(on, bool) else DEFAULT_WEEKLY["on"],
         "day": day if type(day) is int and 0 <= day <= 6 else DEFAULT_WEEKLY["day"],
-        "at": at if isinstance(at, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at) else DEFAULT_WEEKLY["at"],
+        "at": at,
     }
 
 
