@@ -56,7 +56,8 @@ UTC = dt.timezone.utc
 TIMEOUT = 60
 ACTIVE = ("deferred", "queued", "dispatched", "waiting_local_directory", "running")   # 5 种非终态（5.3a）
 TERMINAL = ("completed", "failed", "cancelled")
-DELIVERED = ("in_review", "done", "cancelled")
+DELIVERED = ("in_review", "done", "cancelled")   # 停机时这些子单不改 blocked
+STAGE_DONE = ("in_review", "done")                # 推进下一 stage 只认这两种；子单被取消算违规（不自动放行）
 WAKEUP_OFF = ("disabled", "expired", "cancelled", "completed", "deleted", "paused")
 DEFAULT_LIMITS = {"hours": 4, "max_runs": 20, "max_consecutive_failures": 2, "stall_minutes": 30}
 TICK_GAP = dt.timedelta(minutes=15)       # 两次 tick 相隔超过这个就记一笔（多半是睡眠，G-20）
@@ -337,13 +338,29 @@ def collect(night):
     return snap
 
 
+def file_max_seq(p):
+    """导出文件里已有的最大序号：追加后、存状态前进程被杀，重启时据此去重，不重复写。"""
+    best = 0
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                seq = json.loads(line).get("seq")
+            except ValueError:
+                continue
+            if isinstance(seq, int) and seq > best:
+                best = seq
+    return best
+
+
 def export_messages(night, rid, rec):
-    msgs = night.mc("issue", "run-messages", rid, "--since", str(rec["last_seq"]))
-    msgs = items(msgs, "messages")
     p = night.d / "messages" / f"{rid}.jsonl"
-    for m in sorted(msgs, key=lambda m: m.get("seq", 0)):
-        seq = m.get("seq")
-        if not isinstance(seq, int) or seq <= rec["last_seq"]:
+    rec["last_seq"] = max(rec["last_seq"], file_max_seq(p))
+    msgs = items(night.mc("issue", "run-messages", rid, "--since", str(rec["last_seq"])), "messages")
+    if any(not isinstance(m.get("seq"), int) or isinstance(m.get("seq"), bool) for m in msgs):
+        rec["gap"] = True          # 序号读不懂：记为证据异常，不是跳过了事
+    for m in sorted((m for m in msgs if isinstance(m.get("seq"), int)), key=lambda m: m["seq"]):
+        seq = m["seq"]
+        if seq <= rec["last_seq"]:
             continue
         if seq != rec["last_seq"] + 1:
             rec["gap"] = True
@@ -404,6 +421,34 @@ def st_start(night):
     return parse(night.state["auth"]["started_at"])
 
 
+def identity_drift_one(night, key, i):
+    """单张子单的核心身份字段和计划一致：负责人是计划里的 agent、父单、stage、项目。"""
+    c = next(c for c in night.children() if c["key"] == key)
+    ident, out = night.ident(key), []
+    if not isinstance(i, dict):
+        return [f"{ident} 读不清"]
+    if i.get("assignee_type") != "agent" or i.get("assignee_id") != night.plan["agents"][c["agent"]]:
+        out.append(f"{ident} 负责人不是计划里的 {c['agent']}")
+    if i.get("parent_issue_id") != night.state["issues"]["PARENT"]["id"]:
+        out.append(f"{ident} 父单不对")
+    if i.get("stage") != c["stage"]:
+        out.append(f"{ident} stage 不对")
+    if night.plan.get("project_id") and i.get("project_id") != night.plan["project_id"]:
+        out.append(f"{ident} 项目不对")
+    return out
+
+
+def identity_drift(night, issues):
+    """父单负责人是计划里的常浩（Child-Done 不唤醒 agent），每张子单的身份字段和计划一致。issues：key → issue。"""
+    out = []
+    parent = issues.get("PARENT")
+    if not (isinstance(parent, dict) and owner_parent(night, parent)):
+        out.append(f"{night.ident('PARENT')} 负责人不是计划里的常浩（Child-Done 可能唤醒 agent）")
+    for c in night.children():
+        out += identity_drift_one(night, c["key"], issues.get(c["key"]))
+    return out
+
+
 def violations(night, snap, t):
     lim, st, why = night.limits, night.state, []
     if t >= parse(st["auth"]["deadline"]):
@@ -417,13 +462,16 @@ def violations(night, snap, t):
             why.append(f"{night.ident(k)} 连续失败 {n} 次")
         if snap["issues"][k].get("status") == "blocked":
             why.append(f"{night.ident(k)} 被 agent 标为 blocked")
+        if snap["issues"][k].get("status") == "cancelled":
+            why.append(f"{night.ident(k)} 被取消，后面 stage 依赖的产物不明，不自动放行")
+        if c["stage"] < st.get("stage", 0) and active_runs(snap, [k]):
+            why.append(f"{night.ident(k)}（stage {c['stage']}，已交付）又开了 run：异常重入")
+    why += identity_drift(night, snap["issues"])
     for k, ws in snap["wakeups"].items():
         if any(wakeup_on(w) for w in ws):
             why.append(f"{night.ident(k)} 上出现了未授权的 Wakeup")
     if any(str(a.get("status")).lower() == "active" for a in snap["autopilots"]):
         why.append("工作区里有启用中的 Autopilot")
-    if not owner_parent(night, snap["issues"]["PARENT"]):
-        why.append("父单不再指派给常浩（Child-Done 会唤醒 agent）")
     strays = stray_runs(night)
     if strays:
         why.append("计划里的 agent 在家族外开了 run：" + "、".join(f"{n} {str(r.get('id'))[:8]}" for n, r in strays[:3]))
@@ -458,8 +506,13 @@ def advance(night, n, t):
     night.save()
     moved = []
     for k in night.stage_keys(n):
-        cur = night.mc("issue", "get", night.ident(k)).get("status")
-        if cur != "backlog":
+        if emergency_file(night.id).exists():
+            raise Unclear("应急冻结已触发，不再推进")
+        iss = night.mc("issue", "get", night.ident(k))
+        drift = identity_drift_one(night, k, iss)
+        if drift:
+            raise Unclear("推进前核对身份不符：" + "；".join(drift))
+        if iss.get("status") != "backlog":
             continue
         night.mc("issue", "status", night.ident(k), "todo")
         moved.append(night.ident(k))
@@ -487,10 +540,23 @@ def owner_parent(night, parent):
     return parent.get("assignee_type") == "member" and parent.get("assignee_id") == night.plan["owner_member_id"]
 
 
-def stop(night, reasons, finished=False):
-    """5.3a 停机。返回要打印的文字；没停干净就冻结。任何一步出错都只记下来、接着做后面的步骤，最后由回读判定。"""
+def final_export(night):
+    """停机后最后一次导出：把刚被取消的 run 也写进 run-log、收齐消息。导不全就标证据不完整，晨报照实说。"""
+    try:
+        collect(night)
+        return None
+    except Exception as e:      # noqa: BLE001
+        night.state["evidence_incomplete"] = f"{type(e).__name__}: {e}"
+        night.save()
+        night.log("evidence_incomplete", error=night.state["evidence_incomplete"])
+        return night.state["evidence_incomplete"]
+
+
+def stop(night, reasons, finished=False, unclear=False):
+    """5.3a 停机。返回要打印的文字；没停干净就冻结。任何一步出错都只记下来、接着做后面的步骤，最后由回读判定。
+    unclear：触发原因本身就是 run 记录核不清。这时“现在看得见的 run 都结束了”证明不了“全部 run 都结束了”，回读通过也冻结。"""
     st, errs = night.state, []
-    st["stopping"] = {"at": iso(now()), "reasons": reasons, "finished": finished}
+    st["stopping"] = {"at": iso(now()), "reasons": reasons, "finished": finished, "unclear": unclear}
     night.save()
     night.log("stop_begin", reasons=reasons, finished=finished)
     fam = night.family()
@@ -529,7 +595,10 @@ def stop(night, reasons, finished=False):
         step("在父单写停机原因", lambda: night.mc("issue", "comment", "add", night.ident("PARENT"), "--content-stdin",
                                           stdin="夜跑主控停机：" + "；".join(reasons) + "。后面的 stage 留在 backlog，不再推进。"))
     ok, left = readback(night, errs)   # ⑥ 回读
+    if ok and unclear:
+        ok, left = False, ["触发原因是 run 记录核不清，回读看得见的 run 都已终态也证明不了全部已终止"]
     night.log("stop_readback", ok=ok, left=left, errors=errs)
+    gap = final_export(night)          # ⑦ 最后一次导出（成功、冻结都做）
     if ok:
         st["outcome"] = "FINISHED" if finished else "STOPPED"
         st["ended_at"] = iso(now())
@@ -537,7 +606,8 @@ def stop(night, reasons, finished=False):
         night.save()
         night.log("stopped", outcome=st["outcome"], reasons=reasons)
         head = "夜跑全部 stage 已交付，触发源都已关停（回读确认）" if finished else "夜跑已停机（回读确认：run 全部终态，Wakeup、Autopilot 都已停）"
-        return f"{head}。原因：{'；'.join(reasons)}。"
+        tail = f"\n注意：运行记录没导全（{gap}），晨报会标出。" if gap else ""
+        return f"{head}。原因：{'；'.join(reasons)}。release 之前新出现的 run 都会被取消。{tail}"
     return freeze(night, reasons, left + errs)
 
 
@@ -548,10 +618,16 @@ def readback(night, errs):
     for i in range(max(tries, 1)):
         left = []
         try:
+            present = set()
             for k in night.family():
                 for r in items(night.mc("issue", "runs", night.ident(k)), "runs"):
+                    present.add(r.get("id"))
                     if r.get("status") not in TERMINAL:
                         left.append(f"{night.ident(k)} 的 run {str(r.get('id'))[:8]} 仍是 {r.get('status')}")
+            lost = [rid for rid in night.state.get("runs", {}) if rid not in present]
+            if lost:      # 以前见过的 run 这次没列出来：看不见不等于结束了
+                left.append(f"以前见过的 {len(lost)} 个 run 回读时不见了（{', '.join(x[:8] for x in lost[:3])}）")
+            for k in night.family():
                 if any(wakeup_on(w) for w in items(night.mc("issue", "wakeup", "list", night.ident(k)), "wakeups")):
                     left.append(f"{night.ident(k)} 上仍有启用中的 Wakeup")
             for name, r in stray_runs(night):
@@ -571,25 +647,51 @@ def readback(night, errs):
     return False, left
 
 
-def freeze(night, reasons, problems):
-    st, results = night.state, []
-    for cmd in night.plan.get("freeze_cmds", []):
+def hard_freeze(plan):
+    """停执行器（freeze_cmds），再用 freeze_check 独立回读：容器真的停了、也不会自动重启才算 verified。
+    只依赖计划和本机命令，不碰夜跑状态，应急路径也用它。返回 (各命令结果, verified, 回读输出)。"""
+    results = []
+    for cmd in plan.get("freeze_cmds", []):
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
             results.append({"cmd": cmd, "code": r.returncode, "out": (r.stderr or r.stdout).strip()[:200]})
         except (OSError, subprocess.SubprocessError) as e:
             results.append({"cmd": cmd, "code": None, "out": type(e).__name__})
-    froze_ok = bool(results) and all(r["code"] == 0 for r in results)
-    st.update(frozen=True, outcome="UNRECONCILED", ended_at=iso(now()))
+    chk, seen = plan.get("freeze_check") or {}, ""
+    if chk.get("cmd"):
+        try:
+            r = subprocess.run(chk["cmd"], capture_output=True, text=True, timeout=TIMEOUT)
+            seen = (r.stdout or r.stderr).strip()
+            verified = r.returncode == 0 and seen == chk.get("expect")
+        except (OSError, subprocess.SubprocessError) as e:
+            seen, verified = type(e).__name__, False
+    else:
+        verified = False         # 没有独立回读手段，就不能说已经冻住
+    return results, verified, seen
+
+
+def freeze_lines(night, results, verified, seen):
+    if verified:
+        return [f"已停隔离执行器容器并去掉自动重启（回读：{seen}）。"]
+    bad = [" ".join(r["cmd"]) for r in results if r["code"] != 0]
+    out = ["⚠️ 执行器没确认停住" + (f"，失败的命令：{'；'.join(bad)}" if bad else "") + f"（回读：{seen or '无'}）。"
+           "每次检查都会再试一次；请尽快手动停容器。"]
+    if not night.plan.get("freeze_cmds"):
+        out.append("⚠️ 计划里没有 freeze_cmds。")
+    return out
+
+
+def freeze(night, reasons, problems):
+    st = night.state
+    results, verified, seen = hard_freeze(night.plan)
+    st.update(frozen=True, freeze_verified=verified, outcome="UNRECONCILED", ended_at=iso(now()))
     st.pop("stopping", None)
     night.save()
-    night.log("freeze", reasons=reasons, problems=problems, commands=results)
-    lines = ["⚠️ 夜跑停机没有回读通过，已冻结（UNRECONCILED），不会再推进或重试。",
+    night.log("freeze", reasons=reasons, problems=problems, commands=results, verified=verified, check=seen)
+    lines = ["⚠️ 夜跑停机没有回读通过，已冻结（UNRECONCILED），不会再推进或重试任务。",
              f"停机原因：{'；'.join(reasons)}", "没停干净的：" + "；".join(problems[:6])]
-    lines.append("已停隔离执行器容器并去掉自动重启。" if froze_ok else
-                 "⚠️ 冻结命令没全部成功，请尽快手动停容器：" + "；".join(" ".join(r["cmd"]) for r in results if r["code"] != 0)
-                 if results else "⚠️ 计划里没有 freeze_cmds，容器没停，请尽快手动停。")
-    lines.append(f"核对后：手动恢复容器，再跑 multica_night.py release --by 常浩。记录在 {night.d}")
+    lines += freeze_lines(night, results, verified, seen)
+    lines.append(f"恢复只由常浩在终端里核对后做（见执行单第六节）。记录在 {night.d}")
     return "\n".join(lines)
 
 
@@ -613,16 +715,18 @@ def roster_gate(plan):
 def preflight(night):
     gate = roster_gate(night.plan)
     why = [gate] if gate else []
-    snap = {"runs": {}, "wakeups": {}}
+    snap = {"runs": {}, "wakeups": {}, "issues": {}}
     for k in night.family():
         iss = night.mc("issue", "get", night.ident(k))
-        if k == "PARENT" and iss.get("assignee_type") != "member":
-            why.append("父单要指派给成员（常浩）")
+        snap["issues"][k] = iss
         if k != "PARENT" and iss.get("status") != "backlog":
             why.append(f"{night.ident(k)} 不在 backlog（{iss.get('status')}）")
         snap["runs"][k] = items(night.mc("issue", "runs", night.ident(k)), "runs")
         if any(wakeup_on(w) for w in items(night.mc("issue", "wakeup", "list", night.ident(k)), "wakeups")):
             why.append(f"{night.ident(k)} 上有启用中的 Wakeup")
+    why += identity_drift(night, snap["issues"])
+    if emergency_file(night.id).exists():
+        why.append("这次夜跑触发过应急冻结")
     if active_runs(snap):
         why.append("家族里已有在跑的 run")
     if any(str(a.get("status")).lower() == "active" for a in items(night.mc("autopilot", "list"), "autopilots")):
@@ -662,35 +766,34 @@ def cmd_start(night, by, hours, max_runs):
 
 
 def watch_after(night):
-    """夜跑结束后、常浩 release 之前继续看着：
-    冻结时发现有 run 在跑（比如容器被重启了）就再取消一次并告警；正常停机或全部交付后只告警（每个 run 说一次），
-    不取消——早上常浩自己在单上评论、送审触发的 run 是正常的。绝不推进。"""
-    st = night.state
+    """夜跑结束后（STOPPED / FINISHED / 冻结）、release 之前继续看着，绝不推进：
+    家族内外新出现的非终态 run 一律取消并告警（早上要接着干活，先 release 再触发）；
+    冻结了却没确认执行器停住的，每次都再试一次硬停并告警（重试硬停不等于重新执行任务）。"""
+    st, out, code = night.state, [], 0
+    if st.get("frozen") and not st.get("freeze_verified"):
+        results, verified, seen = hard_freeze(night.plan)
+        st["freeze_verified"] = verified
+        night.save()
+        night.log("freeze_retry", commands=results, verified=verified, check=seen)
+        out += freeze_lines(night, results, verified, seen)
+        code = 1
     found = [(night.ident(k), r) for k in night.family() for r in items(night.mc("issue", "runs", night.ident(k)), "runs")]
     found += [(f"{n}（家族外）", r) for n, r in stray_runs(night)]
-    found = [(who, r) for who, r in found if r.get("status") in ACTIVE]
-    if st.get("frozen"):
-        left = []
-        for who, r in found:
-            try:
-                night.mc("issue", "cancel-task", r["id"])
-                left.append(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}，已再次取消）")
-            except Unclear as e:
-                left.append(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}，取消失败：{e}）")
-        if not left:
-            return 0, ""
-        night.log("frozen_guard", runs=left)
-        return 1, "⚠️ 夜跑处于冻结状态，却发现有 run 在跑：" + "；".join(left) + "。请核对容器是不是被重启了。"
-    told = st.setdefault("alerted", [])
-    new = [(who, r) for who, r in found if r["id"] not in told]
-    if not new:
-        return 0, ""
-    told += [r["id"] for _, r in new]
-    night.save()
-    night.log("after_end_runs", runs=[f"{who}:{r['id']}" for who, r in new])
-    return 0, (f"注意：夜跑已结束（{st['outcome']}），又有 run 开跑：" +
-               "；".join(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}）" for who, r in new) +
-               "。是你早上触发的就不用管；不是的话 stop 不了已结束的夜跑，请直接在 Multica 里取消。")
+    left = []
+    for who, r in found:
+        if r.get("status") not in ACTIVE:
+            continue
+        try:
+            night.mc("issue", "cancel-task", r["id"])
+            left.append(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}，已取消）")
+        except Unclear as e:
+            left.append(f"{who} 的 run {str(r['id'])[:8]}（{r.get('status')}，取消失败：{e}）")
+    if left:
+        night.log("after_end_guard", runs=left)
+        out.append(f"⚠️ 夜跑已结束（{st['outcome']}），还没 release 却有 run 开跑：" + "；".join(left) +
+                   "。要接着干活，先在终端 release 再触发。" + ("请核对容器是不是被重启了。" if st.get("frozen") else ""))
+        code = 1
+    return code, "\n".join(out)
 
 
 START_WINDOW = dt.timedelta(minutes=30)   # 定时开跑：过了批准的时刻这么久还没开（比如电脑睡了），就不开
@@ -739,6 +842,13 @@ def cmd_tick(night):
     st, t = night.state, now()
     if not st.get("auth"):
         return scheduled_start(night, t)
+    if emergency_file(night.id).exists() and not st.get("frozen"):   # 卡住期间触发过应急冻结：接管为冻结状态
+        em = load(emergency_file(night.id), {})
+        st.update(frozen=True, freeze_verified=bool(em.get("verified")), outcome="UNRECONCILED", ended_at=em.get("at") or iso(t))
+        st.pop("stopping", None)
+        night.save()
+        night.log("emergency_adopted", emergency=em)
+        return 1, "⚠️ 上一次检查卡住时已触发应急冻结，现记为 UNRECONCILED，不再推进；恢复由常浩在终端核对后做。"
     if st.get("outcome"):
         try:
             return watch_after(night)
@@ -754,13 +864,18 @@ def cmd_tick(night):
     st["ticks"] = st.get("ticks", 0) + 1
     night.save()
     if st.get("stopping"):   # 上次停机做到一半（进程被杀）：接着停，不推进
-        out.append(stop(night, st["stopping"]["reasons"] + ["上次停机没做完，接着做"], st["stopping"].get("finished", False)))
-        return 0, "\n".join(out)
+        s = st["stopping"]
+        out.append(stop(night, s["reasons"] + ["上次停机没做完，接着做"], s.get("finished", False), s.get("unclear", False)))
+        return (1 if night.state.get("frozen") else 0), "\n".join(out)
     try:
         snap = collect(night)
+    except Unclear as e:      # run 记录核不清：停机，且回读通过也冻结（P0：看不见不等于结束了）
+        out.append(stop(night, [f"UNRECONCILED：{e}"], unclear=True))
+        return (1 if night.state.get("frozen") else 0), "\n".join(out)
+    try:
         why = violations(night, snap, t)
     except Unclear as e:
-        why = [f"UNRECONCILED：{e}"]
+        why = [f"核对上限时读不清：{e}"]
     if why:
         out.append(stop(night, why))
         return (1 if night.state.get("frozen") else 0), "\n".join(out)
@@ -775,7 +890,8 @@ def cmd_tick(night):
             return (1 if night.state.get("frozen") else 0), "\n".join(out)
         out.append(f"夜跑 stage {n} 上次推进没做完，已补上：{'、'.join(moved)}。")
         return 0, "\n".join(out)
-    if all(snap["issues"][k].get("status") in DELIVERED for k in keys) and not active_runs(snap, keys):
+    # 交付 = 当前 stage 都到 in_review / done，且整个家族没有非终态 run（P1-05：旧 stage 重入时不推进）
+    if all(snap["issues"][k].get("status") in STAGE_DONE for k in keys) and not active_runs(snap):
         if n < night.last_stage():
             try:
                 moved = advance(night, n + 1, t)
@@ -858,11 +974,23 @@ def cmd_report(night):
     return 0
 
 
-def cmd_release(night, by):
-    if not night.state.get("outcome"):
+def cmd_release(night, by, confirm):
+    """--by 只是审计字段，不是身份凭证。一台单用户的 Mac 上，命令行认不出“是不是常浩本人”，这里能做的是两道关：
+    --confirm 必须写出「夜跑 id:当前结果」（绑定这次夜跑和它现在的状态，防误放）；
+    冻结（UNRECONCILED）的只能在交互式终端里 release——agent 的非交互调用一律拒绝（Hermes 批复：冻结恢复不下放）。"""
+    st = night.state
+    if not st.get("outcome"):
         print("夜跑还在进行，先 stop 再 release。")
         return 1
-    night.state["released"] = {"by": by, "at": iso(now())}
+    want = f"{night.id}:{st['outcome']}"
+    if confirm != want:
+        print(f"没有 release：--confirm 要写成 {want}（绑定这次夜跑和它现在的状态）。")
+        return 1
+    if st.get("frozen") and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("没有 release：这次夜跑已冻结（UNRECONCILED），只能由常浩在交互式终端里核对现场后 release。")
+        night.log("release_refused", by=by, reason="frozen-non-interactive")
+        return 1
+    st["released"] = {"by": by, "at": iso(now()), "interactive": sys.stdin.isatty()}
     night.save()
     night.log("release", by=by)
     cur = ROOT / "night-current"
@@ -878,7 +1006,7 @@ _LOCKS = []                              # 持有到进程结束
 
 
 def grab_lock(path, wait):
-    """拿到锁返回 None；拿不到返回要打印的文字（tick 拿不到且对方没卡住时返回空串，静默跳过）。"""
+    """拿到锁返回 None；拿不到返回持锁的时长（timedelta，读不到持锁时刻就当已卡死）。"""
     f = open(path, "a+")
     deadline = time.monotonic() + wait
     while True:
@@ -895,13 +1023,43 @@ def grab_lock(path, wait):
                 break
             time.sleep(2)
     f.seek(0)
-    since = parse(f.read().strip() or None)
-    held = int((now() - since).total_seconds() // 60) if since else None
-    if wait:
-        return f"主控正忙（已持锁 {held if held is not None else '?'} 分钟），稍后再试；急停可直接停执行器容器。"
-    if since and now() - since > LOCK_STALE:
-        return f"⚠️ 夜跑主控上一次检查已卡住 {held} 分钟（多半是 multica 不响应），这期间没有对账和停机检查。"
-    return ""
+    try:
+        since = parse(f.read().strip() or None)
+    except ValueError:
+        since = None
+    return now() - since if since else LOCK_STALE * 2
+
+
+def emergency_file(nid):
+    return ROOT / nid / "emergency.json"
+
+
+def emergency_freeze(nid, why):
+    """应急停机（P1-02）：持锁的主控卡住时，不等它，直接硬停执行器并告警。
+    不碰 state.json（那是持锁进程的），只写 emergency.json；持锁进程推进前会看到它，下一次拿到锁的 tick 接管为冻结状态。
+    已正常 STOPPED / FINISHED、或已 release 的夜跑不需要。"""
+    st = load(ROOT / nid / "state.json", {})
+    if not st.get("auth") or st.get("released") or st.get("outcome") in ("STOPPED", "FINISHED"):
+        return ""
+    plan = load(ROOT / nid / "plan.json")
+    results, verified, seen = hard_freeze(plan)
+    dump(emergency_file(nid), {"at": iso(now()), "why": why, "commands": results, "verified": verified, "check": seen})
+    append(ROOT / nid / "run-log.jsonl", {"ts": iso(now()), "event": "emergency_freeze", "why": why,
+                                          "commands": results, "verified": verified, "check": seen})
+    head = f"⚠️ 夜跑应急冻结：{why}。没有等卡住的主控，直接停了执行器。"
+    tail = "执行器已确认停住、不会自动重启。" if verified else "⚠️ 执行器没确认停住，请立刻手动停容器。"
+    return f"{head}{tail}恢复由常浩在终端核对后做。"
+
+
+def guarded_stop(nid, why, unclear=False):
+    """停机，外加兜底：停机本身崩了就直接冻结（只依赖计划和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。"""
+    try:
+        return stop(Night(nid), why, unclear=unclear)
+    except Exception as e2:      # noqa: BLE001
+        try:
+            return freeze(Night(nid), why, [f"停机过程异常：{type(e2).__name__}: {e2}"])
+        except Exception as e3:  # noqa: BLE001
+            return f"⚠️ 夜跑停机和冻结都失败了，请立刻手动停执行器容器：{type(e3).__name__}: {e3}"
 
 
 def main(argv=None):
@@ -924,7 +1082,8 @@ def main(argv=None):
     sub.add_parser("status")
     sub.add_parser("report")
     r = sub.add_parser("release")
-    r.add_argument("--by", required=True)
+    r.add_argument("--by", required=True, help="只作审计记录，不是身份凭证")
+    r.add_argument("--confirm", required=True, help="写成「夜跑 id:当前结果」，例如 2026-11-08-todo-lite-v0.2:STOPPED")
     for q in (s, ap, x, r, sub.choices["tick"], sub.choices["status"], sub.choices["report"]):
         q.add_argument("--night", help="夜跑 id；默认当前夜跑")
     a = a.parse_args(argv)
@@ -938,10 +1097,17 @@ def main(argv=None):
         return 1
     ROOT.mkdir(parents=True, exist_ok=True)
     held = grab_lock(ROOT / nid / "tick.lock", wait=0 if a.cmd == "tick" else LOCK_WAIT)
-    if isinstance(held, str):
-        if held:
-            print(held)
-        return 1 if (held or a.cmd != "tick") else 0
+    if held is not None:
+        mins = int(held.total_seconds() // 60)
+        if a.cmd == "tick" and held <= LOCK_STALE:
+            return 0          # 上一次 tick 还在跑（比如在停机回读），这次跳过
+        if a.cmd in ("tick", "stop"):
+            text = emergency_freeze(nid, f"主控已持锁 {mins} 分钟没放（多半卡在 multica 不响应上）" if a.cmd == "tick"
+                                    else f"人工停机时主控已持锁 {mins} 分钟")
+            print(text or f"⚠️ 夜跑主控已持锁 {mins} 分钟没放。")
+            return 1
+        print(f"主控正忙（已持锁 {mins} 分钟），稍后再试；要急停就用 stop。")
+        return 1
     night = Night(nid)
     if a.cmd == "tick":
         try:
@@ -950,16 +1116,10 @@ def main(argv=None):
             night = Night(nid)
             night.log("crash", error=traceback.format_exc()[-1500:])
             why = [f"主控脚本异常：{type(e).__name__}: {e}"]
-            try:
-                if night.state.get("auth") and not night.state.get("outcome"):
-                    text = stop(night, why)
-                else:
-                    text = f"⚠️ 夜跑主控异常：{type(e).__name__}: {e}"
-            except Exception as e2:      # noqa: BLE001 —— 停机本身也崩了：直接冻结（只依赖计划和本机命令）
-                try:
-                    text = freeze(Night(nid), why, [f"停机过程异常：{type(e2).__name__}: {e2}"])
-                except Exception as e3:  # noqa: BLE001
-                    text = f"⚠️ 夜跑主控异常，停机和冻结都失败了，请立刻手动停容器：{type(e3).__name__}: {e3}"
+            if night.state.get("auth") and not night.state.get("outcome"):
+                text = guarded_stop(nid, why)
+            else:
+                text = f"⚠️ 夜跑主控异常：{type(e).__name__}: {e}"
             code = 1
         if text:
             print(text)
@@ -979,14 +1139,13 @@ def main(argv=None):
         if not night.state.get("auth") or night.state.get("outcome"):
             print("夜跑没在进行，不用停。")
             return 1
-        text = stop(night, [f"人工停机：{a.reason}"])
-        print(text)
-        return 1 if night.state.get("frozen") else 0
+        print(guarded_stop(nid, [f"人工停机：{a.reason}"]))
+        return 1 if Night(nid).state.get("frozen") else 0
     if a.cmd == "status":
         return cmd_status(night)
     if a.cmd == "report":
         return cmd_report(night)
-    return cmd_release(night, a.by)
+    return cmd_release(night, a.by, a.confirm)
 
 
 if __name__ == "__main__":

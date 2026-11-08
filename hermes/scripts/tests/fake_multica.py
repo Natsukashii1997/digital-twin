@@ -114,7 +114,7 @@ if p[:2] == ["autopilot", "update"]:
     emit({"ok": True})
 if p[:2] == ["issue", "run-messages"]:
     since = int(opt("--since", "0"))
-    emit([m for m in w.get("messages", {}).get(p[2], []) if m["seq"] > since])
+    emit([m for m in w.get("messages", {}).get(p[2], []) if not isinstance(m.get("seq"), int) or m["seq"] > since])
 if p[:2] == ["issue", "status"]:
     i = issues[p[2]]
     i["status"] = p[3]

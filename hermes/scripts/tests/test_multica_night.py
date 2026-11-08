@@ -48,6 +48,9 @@ class MulticaNight(unittest.TestCase):
         self.freeze_log = self.tmp / "freeze.log"
         plan = json.loads(json.dumps(PLAN))
         plan["freeze_cmds"] = [["sh", "-c", f"echo stop >> '{self.freeze_log}'"]]
+        self.check_file = self.tmp / "container.txt"          # 假 docker inspect 的输出
+        self.check_file.write_text("false no", encoding="utf-8")
+        plan["freeze_check"] = {"cmd": ["cat", str(self.check_file)], "expect": "false no"}
         self.plan_file = self.tmp / "plan.json"
         self.plan_file.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
         wrapper = self.tmp / "multica"
@@ -83,10 +86,10 @@ class MulticaNight(unittest.TestCase):
         fn(w)
         self.put(w)
 
-    def run_cli(self, *args, now=T0):
+    def run_cli(self, *args, now=T0, env=None):
         self.edit(lambda w: w.update(now=now))
         r = subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True,
-                           env={**self.env, "DT_NOW": now})
+                           env={**self.env, "DT_NOW": now, **(env or {})})
         return r.returncode, r.stdout + r.stderr
 
     def ident(self, key):
@@ -237,6 +240,15 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(self.issue("V")["status"], "backlog")
 
     # ---- 停机 ----
+    def assert_frozen(self, res, reason):
+        code, out = res
+        self.assertEqual(code, 1, out)
+        self.assertIn("已冻结", out)
+        self.assertIn(reason, out)
+        st = self.state()
+        self.assertEqual((st["outcome"], st["frozen"], st["freeze_verified"]), ("UNRECONCILED", True, True))
+        self.assertTrue(self.freeze_log.exists(), "冻结命令确实执行了")
+
     def assert_stopped(self, out, reason):
         self.assertIn("已停机", out)
         self.assertIn(reason, out)
@@ -302,13 +314,13 @@ class MulticaNight(unittest.TestCase):
         self.started()
         self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
         self.edit(lambda w: w["runs"].pop(0))
-        self.assert_stopped(self.run_cli("tick", now=at(10))[1], "UNRECONCILED")
+        self.assert_frozen(self.run_cli("tick", now=at(10)), "不见了")
 
     def test_message_gap_is_unreconciled(self):
         self.started()
         self.finish("A")
         self.edit(lambda w: w["messages"].update({w["runs"][0]["id"]: [{"seq": 1}, {"seq": 3}]}))
-        self.assert_stopped(self.run_cli("tick", now=at(12))[1], "序号有缺口")
+        self.assert_frozen(self.run_cli("tick", now=at(12)), "序号有缺口")
 
     def test_out_of_family_change_stops(self):
         self.started()
@@ -372,7 +384,8 @@ class MulticaNight(unittest.TestCase):
         self.add_run("A", "queued", minutes=255)
         code, out = self.run_cli("tick", now=at(260))
         self.assertEqual(code, 1)
-        self.assertIn("冻结状态，却发现有 run 在跑", out)
+        self.assertIn("还没 release 却有 run 开跑", out)
+        self.assertIn("容器是不是被重启了", out)
         self.assertEqual(self.issue("V")["status"], "backlog")
         self.assertTrue(all(r["status"] != "queued" for r in self.get()["runs"]))
         self.assertIn(stuck, [r["id"] for r in self.get()["runs"]])
@@ -396,12 +409,24 @@ class MulticaNight(unittest.TestCase):
         self.assertTrue(all(r["status"] == "cancelled" for r in self.get()["runs"]), "读不懂也照样把 run 取消掉")
         self.assertIn("crash", [r["event"] for r in self.log()])
 
-    def test_release_clears_current_night(self):
+    def test_frozen_night_cannot_be_released_non_interactively(self):
+        """P1-07：冻结的夜跑只能由常浩在交互式终端里 release；agent 的非交互调用拒绝。"""
         self.frozen()
-        code, out = self.run_cli("release", "--by", "常浩", now=at(300))
-        self.assertEqual(code, 0, out)
+        code, out = self.run_cli("release", "--by", "常浩", "--confirm", "night-test:UNRECONCILED", now=at(300))
+        self.assertEqual(code, 1)
+        self.assertIn("交互式终端", out)
+        self.assertTrue((self.root / "night-current").exists())
+        self.assertNotIn("released", self.state())
+
+    def test_release_needs_binding_confirm(self):
+        self.started()
+        self.run_cli("stop", "--reason", "演练", now=at(5))
+        code, out = self.run_cli("release", "--by", "常浩", "--confirm", "night-test:FINISHED", now=at(6))
+        self.assertEqual(code, 1)
+        self.assertIn("night-test:STOPPED", out)
+        self.assertEqual(self.run_cli("release", "--by", "常浩", "--confirm", "night-test:STOPPED", now=at(7))[0], 0)
         self.assertFalse((self.root / "night-current").exists())
-        self.assertEqual(self.run_cli("tick", now=at(305)), (0, ""))
+        self.assertEqual(self.run_cli("tick", now=at(10)), (0, ""))
 
     # ---- 定时开跑 ----
     def approved(self, start_at="2026-11-08T22:00:00+08:00"):
@@ -493,7 +518,7 @@ class MulticaNight(unittest.TestCase):
         self.assertIn("没人看守", out)
         self.assertEqual((self.root / "night-current").read_text(), "night-test")
         self.run_cli("stop", "--reason", "演练结束", now=at(4))
-        self.run_cli("release", "--by", "常浩", now=at(5))
+        self.assertEqual(self.run_cli("release", "--by", "常浩", "--confirm", "night-test:STOPPED", now=at(5))[0], 0)
         self.assertEqual(self.run_cli("plan", str(f), now=at(6))[0], 0)
 
     def test_later_stage_started_early_stops(self):
@@ -527,10 +552,10 @@ class MulticaNight(unittest.TestCase):
     def test_parent_reassigned_is_restored_on_stop(self):
         self.started()
         self.edit(lambda w: w["issues"][self.ident("PARENT")].update(assignee_type="agent", assignee_id="agent-claude"))
-        self.assert_stopped(self.run_cli("tick", now=at(5))[1], "父单不再指派给常浩")
+        self.assert_stopped(self.run_cli("tick", now=at(5))[1], "负责人不是计划里的常浩")
         self.assertEqual(self.issue("PARENT")["assignee_id"], OWNER)
 
-    def test_runs_after_finish_are_reported_once_not_cancelled(self):
+    def test_runs_after_finish_are_cancelled_until_release(self):
         self.started()
         for k in ("A", "B"):
             self.finish(k)
@@ -539,12 +564,12 @@ class MulticaNight(unittest.TestCase):
         self.assertIn("全部 stage 已交付", self.run_cli("tick", now=at(25))[1])
         self.add_run("A", "running", minutes=30)
         code, out = self.run_cli("tick", now=at(35))
-        self.assertEqual(code, 0)
-        self.assertIn("又有 run 开跑", out)
-        self.assertEqual(self.get()["runs"][-1]["status"], "running", "结束后不替常浩取消")
-        self.assertEqual(self.run_cli("tick", now=at(40)), (0, ""), "同一个 run 只说一次")
+        self.assertEqual(code, 1)
+        self.assertIn("还没 release 却有 run 开跑", out)
+        self.assertEqual(self.get()["runs"][-1]["status"], "cancelled", "P1-04：release 前结束的夜跑不让新 run 跑")
+        self.assertEqual(self.run_cli("tick", now=at(40)), (0, ""))
 
-    def test_stuck_tick_is_reported(self):
+    def test_stuck_tick_triggers_emergency_freeze(self):
         self.started()
         import fcntl
         lock = open(self.root / "night-test" / "tick.lock", "w")
@@ -555,9 +580,123 @@ class MulticaNight(unittest.TestCase):
             self.assertEqual(self.run_cli("tick", now=at(10)), (0, ""), "持锁不到 15 分钟：静默跳过")
             code, out = self.run_cli("tick", now=at(20))
             self.assertEqual(code, 1)
-            self.assertIn("已卡住 19 分钟", out)
+            self.assertIn("应急冻结", out)
+            self.assertIn("持锁 19 分钟", out)
+            self.assertEqual(self.freeze_log.read_text().split(), ["stop"], "不等卡住的主控，直接硬停")
+            self.assertTrue((self.root / "night-test" / "emergency.json").exists())
+            self.assertNotIn("frozen", self.state(), "不碰持锁进程的 state.json")
         finally:
             lock.close()
+        code, out = self.run_cli("tick", now=at(25))
+        self.assertEqual(code, 1)
+        self.assertIn("已触发应急冻结", out)
+        self.assertEqual((self.state()["outcome"], self.state()["frozen"]), ("UNRECONCILED", True))
+        self.finish("A")
+        self.finish("B")
+        self.run_cli("tick", now=at(30))
+        self.assertEqual(self.issue("V")["status"], "backlog", "应急冻结后绝不推进")
+
+    # ---- ChatGPT High 第 1 轮（#93）----
+    def test_p0_vanished_run_with_others_completed_still_freezes(self):
+        """P0-01：历史 run A 消失，API 只返回已结束的 B：不能判 STOPPED，必须冻结。"""
+        self.started()
+        self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
+        a = self.ident("A")
+        self.edit(lambda w: (w.update(runs=[r for r in w["runs"] if r["issue"] != a]),
+                             [r.update(status="completed", completed_at=at(6)) for r in w["runs"]]))
+        self.assert_frozen(self.run_cli("tick", now=at(10)), "不见了")
+
+    def test_p1_01_start_refuses_identity_drift(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        self.edit(lambda w: w["issues"][self.ident("V")].update(assignee_id="agent-other"))
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 1)
+        self.assertIn("负责人不是计划里的 codex", out)
+        self.assertEqual(self.issue("A")["status"], "backlog")
+
+    def test_p1_01_parent_owned_by_other_member_refused(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        self.edit(lambda w: w["issues"][self.ident("PARENT")].update(assignee_id="member-someone"))
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 1)
+        self.assertIn("负责人不是计划里的常浩", out)
+
+    def test_p1_01_reassigned_backlog_child_stops_night(self):
+        self.started()
+        self.edit(lambda w: w["issues"][self.ident("V")].update(assignee_id="agent-other"))
+        self.assert_stopped(self.run_cli("tick", now=at(5))[1], "负责人不是计划里的 codex")
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_p1_03_unverified_freeze_is_retried(self):
+        self.check_file.write_text("true unless-stopped", encoding="utf-8")
+        self.started()
+        self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
+        self.edit(lambda w: w["runs"].pop(0))
+        code, out = self.run_cli("tick", now=at(10))
+        self.assertEqual(code, 1)
+        self.assertIn("执行器没确认停住", out)
+        self.assertIs(self.state()["freeze_verified"], False)
+        code, out = self.run_cli("tick", now=at(15))
+        self.assertEqual(code, 1)
+        self.assertIn("执行器没确认停住", out)
+        self.assertEqual(len(self.freeze_log.read_text().split()), 2, "每次检查都再试一次硬停")
+        self.check_file.write_text("false no", encoding="utf-8")
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertIn("已停隔离执行器容器", out)
+        self.assertIs(self.state()["freeze_verified"], True)
+        self.assertEqual(self.run_cli("tick", now=at(25)), (0, ""))
+
+    def test_p1_05_earlier_stage_reentry_blocks_advance(self):
+        self.started()
+        self.finish("A")
+        self.finish("B")
+        self.assertIn("进入 stage 2", self.run_cli("tick", now=at(15))[1])
+        self.finish("V", minutes=20)
+        self.add_run("A", "running", minutes=21)
+        code, out = self.run_cli("tick", now=at(25))
+        self.assertIn("异常重入", out)
+        self.assertNotIn("全部 stage 已交付", out)
+        self.assertEqual(self.state()["outcome"], "STOPPED")
+        self.assertTrue(all(r["status"] in ("completed", "cancelled") for r in self.get()["runs"]))
+
+    def test_p1_06_cancelled_runs_get_final_run_log_lines(self):
+        self.started()
+        self.edit(lambda w: [r.update(status="running") for r in w["runs"]])
+        self.run_cli("tick", now=at(241))
+        lines = [r for r in self.log() if r["event"] == "run"]
+        self.assertEqual(sorted(r["status"] for r in lines), ["cancelled", "cancelled"])
+        self.assertEqual({r["run_id"] for r in lines}, {r["id"] for r in self.get()["runs"]})
+
+    def test_p2_01_manual_stop_crash_falls_back_to_freeze(self):
+        self.started()
+        code, out = self.run_cli("stop", "--reason", "演练", now=at(5), env={"DT_NIGHT_READBACK": "坏"})
+        self.assertEqual(code, 1, out)
+        self.assertIn("已冻结", out)
+        self.assertIn("停机过程异常", out)
+        self.assertTrue(self.freeze_log.exists())
+
+    def test_p2_02_cancelled_child_does_not_release_next_stage(self):
+        self.started()
+        self.finish("A", run_status="cancelled", issue_status="cancelled")
+        self.finish("B")
+        self.assert_stopped(self.run_cli("tick", now=at(15))[1], "被取消")
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_p2_03_invalid_seq_is_evidence_gap(self):
+        self.started()
+        self.finish("A")
+        self.edit(lambda w: w["messages"].update({w["runs"][0]["id"]: [{"seq": 1}, {"seq": "2"}]}))
+        self.assert_frozen(self.run_cli("tick", now=at(12)), "序号有缺口")
+
+    def test_p2_03_no_duplicate_messages_after_crash(self):
+        """追加消息后、存状态前进程被杀：重启后按文件里的序号去重。"""
+        self.started()
+        self.finish("A")
+        rid = self.get()["runs"][0]["id"]
+        d = self.root / "night-test" / "messages"
+        (d / f"{rid}.jsonl").write_text('{"seq": 1}\n{"seq": 2}\n', encoding="utf-8")
+        self.assertEqual(self.run_cli("tick", now=at(12)), (0, ""))
+        self.assertEqual(len((d / f"{rid}.jsonl").read_text().splitlines()), 2)
 
     # ---- 其他 ----
     def test_tick_gap_is_noted(self):

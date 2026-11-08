@@ -13,6 +13,10 @@
     ["/opt/homebrew/bin/docker", "--context", "colima-multica", "update", "--restart=no", "multica-isolated-agent-1"],
     ["/opt/homebrew/bin/docker", "--context", "colima-multica", "stop", "multica-isolated-agent-1"]
   ],
+  "freeze_check": {
+    "cmd": ["/opt/homebrew/bin/docker", "--context", "colima-multica", "inspect", "-f", "{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}", "multica-isolated-agent-1"],
+    "expect": "false no"
+  },
   "parent": {
     "title": "M5 首夜：todo-lite v0.2 无人值守夜跑（Hermes 主控）",
     "description": "DT-ORC M5 首夜（digital-twin #92）。UNATTENDED，只在 DT 沙盒 / dt-sandbox。\n\n本单指派给常浩（成员），不会唤醒任何 agent；下一 stage 由 Hermes 的 multica_night.py 推进，到上限按 ARCHITECTURE 5.3a 停机。\n今晚不合并、不送审：每张子单做到开 PR、把单改为 in_review 为止，早上由常浩看 PR、送审、决定合并。\n\nstage 1：导出、搜索两个新命令（Claude 开发）\nstage 2：反向验证 stage 1 的两个 PR（Codex 验证）\nstage 3：按验证结论返修，没有要修的就做统计命令（Claude 开发）\nstage 4：回归与夜跑总结（Codex 验证）"
