@@ -19,7 +19,7 @@ from pathlib import Path
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
 DISPATCH = Path(os.environ.get("DT_DISPATCH", "~/.hermes/dispatch")).expanduser()
 CLIP = 200  # “下一步”最多保留多少字
-NEXT = re.compile(r"下一步\s*[：:|]|^#+.*下一步")  # “下一步：…”、表格“| 唯一下一步 |”、标题“## 唯一下一步”
+NEXT = re.compile(r"下一步\**\s*[：:|]|^#+.*下一步")  # “下一步：…”“**下一步**：…”、表格“| 唯一下一步 |”、标题“## 唯一下一步”
 
 
 def git(cwd, *args):
@@ -96,22 +96,40 @@ def plain(s, clip=CLIP):
     return s if len(s) <= clip else s[:clip] + "…"
 
 
+def next_step(lines):
+    """CURRENT 的“下一步”：先在最上面一节里找，再看文件头（第一个二级标题之前），最后才认单独成节的“## 唯一下一步”。
+    不再从全文第一处匹配：旧的节、文件头里过期的“唯一下一步”会把当天写的下一步盖掉（#110）。"""
+    starts = [i for i, x in enumerate(lines) if x.startswith("## ")]
+    top = (starts[0], starts[1] if len(starts) > 1 else len(lines)) if starts else (0, len(lines))
+    head = (0, starts[0] if starts else len(lines))
+    rest = [(s, s + 1) for s in starts if re.match(r"^#+.*下一步", lines[s])]
+    for lo, hi in (top, head, *rest):
+        for i in range(lo, hi):
+            x = lines[i]
+            if NEXT.search(x):
+                if x.startswith("#"):  # “## 唯一下一步”这种标题，取下面第一行正文
+                    x = next((y for y in lines[i + 1:] if y.strip()), x)
+                s = re.sub(r"^.*?下一步\s*[：:]\s*", "", plain(x, clip=10**9))  # 先去掉“遗留 / 下一步：”“更新：……唯一下一步：”这类前缀，再截断
+                return (s if len(s) <= CLIP else s[:CLIP] + "…") or None
+    return None
+
+
+def touched_on(path, f, day):
+    """CURRENT 那天改过没有：有提交就按最后一次提交的日期（git pull 会刷新文件时间，靠不住），从没提交过才看文件时间。"""
+    r = subprocess.run(["git", "-C", str(path), "log", "-1", "--format=%cd", "--date=short", "--", f.name],
+                       capture_output=True, text=True)
+    stamp = r.stdout.strip() if r.returncode == 0 else ""
+    return (stamp == day.isoformat()) if stamp else dt.date.fromtimestamp(f.stat().st_mtime) == day
+
+
 def current(path, day):
-    """CURRENT 最上面一节的标题、第一处“下一步”、今天有没有改过。"""
+    """CURRENT 最上面一节的标题、“下一步”、这天有没有改过。"""
     f = Path(path) / "CURRENT.md"
     if not f.exists():
         return None
     lines = f.read_text(encoding="utf-8").splitlines()
     head = next((plain(x, 80) for x in lines if x.startswith("## ")), "（没有二级标题）")
-    nxt = "（没写下一步）"
-    for i, x in enumerate(lines):
-        if NEXT.search(x):
-            if x.startswith("#"):  # “## 唯一下一步”这种标题，取下面第一行正文
-                x = next((y for y in lines[i + 1:] if y.strip()), x)
-            nxt = re.sub(r"^.{0,12}?下一步[：:]\s*", "", plain(x)) or nxt  # 去掉行首的“遗留 / 下一步：”这类标签
-            break
-    touched = dt.date.fromtimestamp(f.stat().st_mtime) == day
-    return head, nxt, touched
+    return head, next_step(lines) or "（没写下一步）", touched_on(path, f, day)
 
 
 def orders(day):
