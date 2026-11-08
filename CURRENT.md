@@ -7,6 +7,13 @@
 ---
 
 
+## 2026-11-08 · Tidings 周报横幅换新图（#106，PR #107 `659fafd`，配合 github-center #86）
+
+- 改了什么：`hermes/scripts/assets/tidings-banner.png` 换成常浩用 GPT 生成的深色横条（1901×487，从 2000×667 原图抠出圆角线框内部分；副标题改成「近 7 天新增 Star · TOP10」）；插图从 `crop_center` 改为 `fit_horizontal`，按原比例完整显示。github-center 的卡片同时去掉橙色标题栏，横幅就是标题。
+- 验证：全量 490 项通过；新卡片多次经猛鬼兽身份实发到私聊（临时状态文件，不动正式已发记录），飞书电脑端截图核对，整张卡约为改前的 70%。手机端未实测。
+- **已安装（11-08 22:12，常浩说「合并并安装」）**：`~/.hermes/scripts/tidings_weekly.py` 和 `assets/tidings-banner.png` 换成 main 版，`cmp` 一致，`--dry-run` 输出「不发：还没到周一 19:30。」；旧版和校验值在 `~/Library/Application Support/DigitalTwin/evidence/2026-11-08-tidings-banner-安装/`。新横幅第一次正式发送时会按内容哈希自动重传。
+- **下一步**：11-09（周一）19:30 后看私聊收到的周报卡片是新版（横幅、标签、按钮），核对后本条结束。
+
 ## 2026-11-08 · Tidings 周报默认周一 19:30、不早于每日更新（#104，PR #105 `424dc18`，配合 github-center #83）
 
 - 改了什么：`tidings_weekly.py` 默认周报时间 11:30 → 19:30；按 github-center `readSettings` 同一规则算周报时间（每日更新早于 17:00 或不合规按 18:00，周报早于每日更新按每日更新后 1.5 小时，最晚 23:45），因为本机 `data/settings.json` 是从服务器原样拉回的，可能还是旧的 11:30。
