@@ -115,7 +115,11 @@ def next_step(lines):
 
 
 def touched_on(path, f, day):
-    """CURRENT 那天改过没有：有提交就按最后一次提交的日期（git pull 会刷新文件时间，靠不住），从没提交过才看文件时间。"""
+    """CURRENT 那天改过没有：有提交就按最后一次提交的日期（git pull 会刷新文件时间，靠不住）；
+    从没提交过、或者有还没提交的改动，看文件时间。"""
+    dirty = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "--", f.name], capture_output=True, text=True)
+    if dirty.returncode == 0 and dirty.stdout.strip():
+        return dt.date.fromtimestamp(f.stat().st_mtime) == day
     r = subprocess.run(["git", "-C", str(path), "log", "-1", "--format=%cd", "--date=short", "--", f.name],
                        capture_output=True, text=True)
     stamp = r.stdout.strip() if r.returncode == 0 else ""

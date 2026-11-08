@@ -28,6 +28,11 @@ GOAL = re.compile(r"^当前阶段目标：(.+)$")
 GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
 INSTALLED = re.compile(r"已安装|已发布|装机|已上线|正式 ?\d{4} ?已发布")
 ACCEPTED = re.compile(r"(常浩|用户|本人)[^。；\n]{0,24}验收[^。；\n]{0,8}通过|实机验收[^。；\n]{0,12}通过")
+CLAUSE = re.compile(r"[。；;，,\n]")
+NEGATED = re.compile(r"未|没|不|待|尚|后再|将|准备|失败")   # 「验收未通过」「待装机」「通过后再装」「已安装失败」都不算
+VERIFIED = re.compile(r"回读|cmp|一致|校验|核对")          # 安装记录里带这些字样才算有回读，否则只是自述
+HANDOVER = "交接记录（非本人回执）"                        # CURRENT、PR 标题都是 Claude 写的，不是常浩本人的回执
+GH_LIMIT = {"merged_prs": 200, "closed_issues": 200, "open_prs": 100, "milestones": 100}
 REF = re.compile(r"#(\d+)")
 SECTION_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 CHECK_REF = re.compile(r"^\s*- \[([ xX])\]\s*#(\d+)", re.M)   # 以 issue 号开头的清单项：「- [ ] #109 批 0」
@@ -38,6 +43,11 @@ number title body subIssues(first:100){nodes{number state}}}}}}"""
 
 class Fail(Exception):
     pass
+
+
+def affirmed(pattern, text):
+    """有一个短句明写了 pattern，且同一短句里没有否定、将来时写法；一句都没有就不算。"""
+    return any(pattern.search(c) and not NEGATED.search(c) for c in CLAUSE.split(text))
 
 
 # ---------- 时间 ----------
@@ -73,10 +83,10 @@ def git(root, *args):
     return r.stdout
 
 
-def commits(root, w):
+def commits(root, w, main):
     """统计日内的提交数，按分支归；一个提交只算在第一个含它的分支下，主分支优先。按提交时间算，不按作者时间。"""
     branches = git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
-    branches.sort(key=lambda b: b != "main")
+    branches.sort(key=lambda b: b != main)
     seen, out = set(), {}
     for b in branches:
         rows = git(root, "log", b, f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}", "--format=%H %cI").split("\n")
@@ -134,20 +144,30 @@ def sections(text):
     return out
 
 
-def current_state(root, ref, day):
-    """CURRENT 最上面一节、下一步、最后一次提交 CURRENT 的时间，以及当天日期的各节（找安装、验收证据用）。"""
+def current_state(root, ref, w):
+    """CURRENT 最上面一节、下一步、最后一次提交 CURRENT 的时间、统计日内改过没有，以及当天日期的各节（找安装、验收证据用）。
+    主分支上没有 CURRENT 返回 None；git 读不了抛 Fail。"""
     text = show(root, ref, "CURRENT.md")
     if text is None:
         return None
     secs = sections(text)
-    stamp = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%cI", ref, "--", "CURRENT.md"],
-                           capture_output=True, text=True).stdout.strip()
+    stamp = git(root, "log", "-1", "--format=%cI", ref, "--", "CURRENT.md").strip()
+    # 改过没有看统计日窗口里的提交，不看最后一次：04:00 以后又提交一次、回放历史日期时，最后一次都会落在窗口外
+    rows = git(root, "log", ref, f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}", "--format=%cI",
+               "--", "CURRENT.md").split()
     return {
         "top_section": secs[0][0] if secs else None,
         "next_step": progress_data.next_step(text.splitlines()),
         "last_commit": stamp or None,
-        "dated_today": [(t, b) for t, d, b in secs if d == day.isoformat()],
+        "changed": any(inside(t, w) for t in rows),
+        "dated_today": [(t, b) for t, d, b in secs if d == w[0].date().isoformat()],
     }
+
+
+def last_change(root, ref):
+    """主分支上最近一次不只改 CURRENT 的提交时间，当作「最近一次合并」：不依赖 gh，也不限于统计日。
+    直接推到主分支的文档提交也算在内，宁可多报过期。从来没有这样的提交返回 None。"""
+    return git(root, "log", "-1", "--format=%cI", ref, "--", ".", ":(exclude)CURRENT.md").strip() or None
 
 
 # ---------- GitHub ----------
@@ -157,6 +177,7 @@ class GitHub:
 
     def __init__(self, w):
         self.w = w
+        self.capped = set()   # (仓库, 哪一项)：返回条数到了上限，可能截断
         self.exe = shutil.which("gh", path=os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin"]))
         self.down = None if self.exe else "找不到 gh 命令"
 
@@ -174,32 +195,40 @@ class GitHub:
             if "connect" in msg or "timeout" in msg.lower():
                 self.down = msg
             raise Fail(msg)
-        return json.loads(r.stdout or "null")
+        try:
+            return json.loads(r.stdout or "null")
+        except ValueError:
+            raise Fail(f"gh 输出不是 JSON：{r.stdout.strip()[:80]}")
+
+    def _cap(self, repo, key, rows):
+        if len(rows or []) >= GH_LIMIT[key]:
+            self.capped.add((repo, key))
+        return rows or []
 
     def _range(self, kind):
         return f"{kind}:{self.w[0].isoformat()}..{self.w[1].isoformat()}"
 
     def merged_prs(self, repo):
-        rows = self._run("pr", "list", "-R", repo, "--state", "merged", "--search", self._range("merged"), "--limit", "200",
-                         "--json", "number,title,url,body,mergedAt")
-        return [r for r in rows or [] if inside(r.get("mergedAt"), self.w)]
+        rows = self._run("pr", "list", "-R", repo, "--state", "merged", "--search", self._range("merged"),
+                         "--limit", str(GH_LIMIT["merged_prs"]), "--json", "number,title,url,body,mergedAt")
+        return [r for r in self._cap(repo, "merged_prs", rows) if inside(r.get("mergedAt"), self.w)]
 
     def closed_issues(self, repo):
-        rows = self._run("issue", "list", "-R", repo, "--state", "closed", "--search", self._range("closed"), "--limit", "200",
-                         "--json", "number,title,closedAt")
-        return [r for r in rows or [] if inside(r.get("closedAt"), self.w)]
+        rows = self._run("issue", "list", "-R", repo, "--state", "closed", "--search", self._range("closed"),
+                         "--limit", str(GH_LIMIT["closed_issues"]), "--json", "number,title,closedAt")
+        return [r for r in self._cap(repo, "closed_issues", rows) if inside(r.get("closedAt"), self.w)]
 
     def open_prs(self, repo):
-        rows = self._run("pr", "list", "-R", repo, "--state", "open", "--limit", "100",
+        rows = self._run("pr", "list", "-R", repo, "--state", "open", "--limit", str(GH_LIMIT["open_prs"]),
                          "--json", "number,title,createdAt,isDraft,mergedAt,closedAt")
         return [{"number": r["number"], "title": r["title"], "created": r.get("createdAt")}
-                for r in rows or [] if not r.get("mergedAt") and not r.get("closedAt")]
+                for r in self._cap(repo, "open_prs", rows) if not r.get("mergedAt") and not r.get("closedAt")]
 
     def milestones(self, repo):
         owner, name = repo.split("/", 1)
-        data = self._run("api", "graphql", "-f", f"query={MILESTONE_QUERY}", "-F", f"o={owner}", "-F", f"n={name}")
+        data = self._run("api", "graphql", "-f", f"query={MILESTONE_QUERY}", "-f", f"o={owner}", "-f", f"n={name}")
         nodes = (((data or {}).get("data") or {}).get("repository") or {}).get("issues", {}).get("nodes") or []
-        return [m for m in (milestone(n) for n in nodes) if m]
+        return [m for m in (milestone(n) for n in self._cap(repo, "milestones", nodes)) if m]
 
 
 def milestone(issue):
@@ -224,19 +253,21 @@ def refs_of(pr):
 
 def deliverables(prs, dated_sections):
     """每个合并的 PR 一条，三个维度分开记（V2 5.2）。交付、验收只认当天日期、标题里带这个编号的 CURRENT 节，
-    或 PR 标题里明写的，否则「未知」。"""
+    或 PR 标题里明写的，否则「未知」；否定、将来时写法不算。证据等级另记（V2 第 6 节）：
+    delivery_basis 有回读或 cmp 记录 / 仅自述；acceptance_basis 目前都是交接记录，本人回执要等行动记录（1b）。"""
     installed, accepted = {}, {}
     for title, body in dated_sections:
         text = f"{title}\n{body}"
         nums = {int(n) for n in REF.findall(title)}  # 只认节标题里的编号：正文顺带提到的别的 PR 不算这一节交付的
-        if INSTALLED.search(text):
+        if affirmed(INSTALLED, text):
+            basis = "有回读或 cmp 记录" if affirmed(VERIFIED, text) else "仅自述"   # 「没核对」不算
             for n in nums:
-                installed.setdefault(n, f"CURRENT「{title[:40]}」")
-        if ACCEPTED.search(text):
+                installed.setdefault(n, (f"CURRENT「{title[:40]}」", basis))
+        if affirmed(ACCEPTED, text):
             for n in nums:
                 accepted.setdefault(n, f"CURRENT「{title[:40]}」")
     for pr in prs:  # 「交接补记：常浩实机验收……通过（#242）」这类文档 PR 本身就是验收记录
-        if ACCEPTED.search(pr.get("title", "")):
+        if affirmed(ACCEPTED, pr.get("title", "")):
             for n in refs_of(pr):
                 accepted.setdefault(n, f"PR #{pr['number']} 标题")
     out = []
@@ -248,8 +279,10 @@ def deliverables(prs, dated_sections):
             "number": pr["number"], "title": pr["title"], "url": pr.get("url"), "merged_at": pr.get("mergedAt"),
             "engineering": "已合并",
             "delivery": "已安装或已发布" if inst else "未知",
+            "delivery_basis": inst[1] if inst else None,
             "acceptance": "已通过" if acc else "未知",
-            "evidence": [e for e in (f"PR #{pr['number']} merged", inst, acc) if e],
+            "acceptance_basis": HANDOVER if acc else None,
+            "evidence": [e for e in (f"PR #{pr['number']} merged", inst and inst[0], acc) if e],
         })
     return out
 
@@ -268,23 +301,36 @@ def project(p, w, hub):
     if not root.exists():
         rec["errors"].append(f"本机没有仓库目录 {root}")
         return rec
-    ref = main_ref(root, p.get("main", "main"))
-    rec["objective"] = goal(root, ref)
+    main = p.get("main", "main")
+    ref = main_ref(root, main)
+    if ref:
+        rec["objective"] = goal(root, ref)
+    else:  # 不是「未设目标」「没有 CURRENT」：是根本读不到
+        rec["objective"] = {"kind": "未知", "text": None, "source": None}
+        rec["errors"].append(f"本机 git：找不到主分支 origin/{main} 和 {main}，阶段目标、CURRENT、新鲜度都读不了")
     try:
-        delta["commits"] = commits(root, w)
+        delta["commits"] = commits(root, w, main)
         state["checkout_branch"] = git(root, "branch", "--show-current").strip() or "（游离 HEAD）"
         state["dirty_files"] = len(git(root, "status", "--porcelain").splitlines())
     except (Fail, OSError) as e:
         rec["errors"].append(f"本机 git：{e}")
-    cur = current_state(root, ref, day)
-    dated = []
+    cur, dated, merge_ok = None, [], False
+    if ref:
+        try:
+            cur = current_state(root, ref, w)
+            fresh["last_merge"] = last_change(root, ref)
+            merge_ok = True
+        except Fail as e:
+            rec["errors"].append(f"本机 git：读 {ref} 失败：{e}")
+            cur = cur or False   # False = 读失败，None = 主分支上确实没有 CURRENT
     if cur:
         state["top_section"], state["next_step"] = cur["top_section"], cur["next_step"]
         fresh["current_last_commit"] = cur["last_commit"]
-        delta["current_changed"] = inside(cur["last_commit"], w)
+        delta["current_changed"] = cur["changed"]
         dated = cur["dated_today"]
-    else:
-        rec["notes"].append(f"{ref or '主分支'} 上没有 CURRENT.md：没有可信的下一步")
+    elif cur is None and ref:
+        rec["notes"].append(f"{ref} 上没有 CURRENT.md：没有可信的下一步")
+        state["next_reliable"] = False
     repo = p.get("github")
     if repo:
         for key, fn in (("merged_prs", hub.merged_prs), ("closed_issues", hub.closed_issues)):
@@ -300,22 +346,21 @@ def project(p, w, hub):
             rec["milestones"] = hub.milestones(repo)
         except Fail as e:
             rec["errors"].append(f"GitHub milestones：{e}")
+        for key in sorted(k for r, k in hub.capped if r == repo):
+            rec["notes"].append(f"GitHub {key} 到了 {GH_LIMIT[key]} 条上限，可能截断")
     else:
         delta["merged_prs"], delta["closed_issues"], state["open_prs"], rec["milestones"] = [], [], [], []
+        rec["notes"].append("名册里没有 GitHub 仓库：PR、issue、里程碑按空记")
     if delta["merged_prs"] is not None:
         delta["merged_prs"] = deliverables(delta["merged_prs"], dated)
     if delta["closed_issues"] is not None:
         delta["closed_issues"] = [{"number": i["number"], "title": i["title"]} for i in delta["closed_issues"]]
-    # 新鲜度：CURRENT 比最近一次合并早一天以上，就不把它的“下一步”当可信依据（V2 第 6 节）
-    merges = [parse_ts(x["merged_at"]) for x in delta["merged_prs"] or [] if x.get("merged_at")]
-    last_merge = max(merges) if merges else None
-    fresh["last_merge"] = last_merge.isoformat() if last_merge else None
-    cur_ts = parse_ts(fresh["current_last_commit"])
-    if cur and last_merge:
-        fresh["stale"] = cur_ts is None or last_merge - cur_ts > STALE
-    elif cur:
-        fresh["stale"] = False
-    state["next_reliable"] = bool(state["next_step"]) and fresh["stale"] is False
+    # 新鲜度：CURRENT 比主分支上最近一次别的改动早一天以上，就不把它的“下一步”当可信依据（V2 第 6 节）。
+    # 只看本机主分支，不依赖 gh；读不到就是 None（未知），不当成没过期
+    if cur and merge_ok:
+        cur_ts, last_merge = parse_ts(fresh["current_last_commit"]), parse_ts(fresh["last_merge"])
+        fresh["stale"] = bool(last_merge) and (cur_ts is None or last_merge - cur_ts > STALE)
+        state["next_reliable"] = bool(state["next_step"]) and not fresh["stale"]
     return rec
 
 

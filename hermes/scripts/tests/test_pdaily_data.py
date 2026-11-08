@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
@@ -73,8 +74,8 @@ class Base(unittest.TestCase):
         (self.state / "issue_list.json").write_text(json.dumps(list(issues)))
         (self.state / "api.json").write_text(json.dumps(self.NO_MILESTONES if api is None else api))
 
-    def run_one(self, r, github="o/fx"):
-        p = {"id": r.name, "name": r.name, "path": str(r), "main": "main", "github": github}
+    def run_one(self, r, github="o/fx", main="main"):
+        p = {"id": r.name, "name": r.name, "path": str(r), "main": main, "github": github}
         return pd.collect(D, [p])
 
 
@@ -144,6 +145,84 @@ class RepoTests(Base):
         self.assertTrue(rec["current_state"]["next_reliable"])
         self.assertEqual(rec["errors"], [])
 
+    def test_current_changed_uses_window_not_last_commit(self):
+        r = make_repo(self.root, "cc", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        commit(r, "当天记", "2026-11-08 15:00:00 +0800", "CURRENT.md", "# 当前状态\n\n## 当天\n")
+        commit(r, "第二天 06:00 又记", "2026-11-09 06:00:00 +0800", "CURRENT.md", "# 当前状态\n\n## 次日\n")
+        self.gh()
+        self.assertIs(self.run_one(r)["projects"][0]["yesterday_delta"]["current_changed"], True)
+        r = make_repo(self.root, "cn", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        commit(r, "只改了代码", "2026-11-08 15:00:00 +0800", "a.py", "x")
+        commit(r, "窗口外记", "2026-11-09 06:00:00 +0800", "CURRENT.md", "# 当前状态\n\n## 次日\n")
+        self.assertIs(self.run_one(r)["projects"][0]["yesterday_delta"]["current_changed"], False)
+
+    def test_origin_main_newer_than_local_main_wins(self):
+        up = make_repo(self.root, "up", {"CURRENT.md": "# 当前状态\n\n## 旧\n- 下一步：旧的\n"})
+        sh(self.root, "clone", "-q", str(up), "down")
+        down = self.root / "down"
+        commit(up, "上游更新", "2026-11-08 12:00:00 +0800", "CURRENT.md", "# 当前状态\n\n## 新\n- 下一步：新的\n")
+        sh(down, "fetch", "-q")
+        self.gh()
+        rec = self.run_one(down)["projects"][0]
+        self.assertEqual(rec["current_state"]["next_step"], "新的")
+        self.assertEqual(rec["current_state"]["checkout_branch"], "main")
+
+    def test_missing_main_branch_is_error_not_unset(self):
+        r = self.root / "mm"
+        r.mkdir()
+        sh(r, "init", "-q", "-b", "master")
+        (r / "CURRENT.md").write_text(f"# 当前状态\n\n{GOAL_LINE}\n\n## 节\n- 下一步：x\n", encoding="utf-8")
+        sh(r, "add", "-A")
+        sh(r, "commit", "-q", "-m", "起步")
+        self.gh()
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["objective"]["kind"], "未知")
+        self.assertTrue(any("找不到主分支" in e for e in rec["errors"]))
+        self.assertFalse(any("没有 CURRENT" in n for n in rec["notes"]))
+        self.assertIsNone(rec["freshness"]["stale"])
+        self.assertIsNone(rec["current_state"]["next_reliable"])
+        self.assertIsNone(rec["yesterday_delta"]["current_changed"])
+
+    def test_non_main_trunk_and_cross_branch_dedupe(self):
+        r = self.root / "tr"
+        r.mkdir()
+        sh(r, "init", "-q", "-b", "trunk")
+        (r / "CURRENT.md").write_text(f"# 当前状态\n\n{GOAL_LINE}\n\n## 节\n", encoding="utf-8")
+        sh(r, "add", "-A")
+        sh(r, "commit", "-q", "-m", "起步", at="2026-11-06 10:00:00 +0800")
+        commit(r, "主干上", "2026-11-08 10:00:00 +0800")
+        sh(r, "checkout", "-q", "-b", "feat")
+        commit(r, "分支上", "2026-11-08 11:00:00 +0800")
+        self.gh()
+        rec = self.run_one(r, main="trunk")["projects"][0]
+        self.assertEqual(rec["yesterday_delta"]["commits"], {"trunk": 1, "feat": 1})   # 主干上那条不重复算给 feat
+        self.assertEqual(rec["objective"]["kind"], "目标")
+        self.assertEqual(rec["errors"], [])
+
+    def test_local_git_failure_is_unknown(self):
+        r = self.root / "notgit"
+        r.mkdir()
+        (r / "CURRENT.md").write_text("# 当前状态\n", encoding="utf-8")
+        self.gh()
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.root)}):
+            out = self.run_one(r)
+        rec = out["projects"][0]
+        self.assertEqual(rec["objective"]["kind"], "未知")
+        self.assertIsNone(rec["yesterday_delta"]["commits"])
+        self.assertIsNone(rec["freshness"]["stale"])
+        self.assertTrue(rec["errors"])
+        self.assertEqual(out["coverage"]["read_ok"], 0)
+
+    def test_last_change_failure_leaves_freshness_unknown(self):
+        r = make_repo(self.root, "lf", {"CURRENT.md": "# 当前状态\n\n## 节\n- 下一步：x\n"})
+        self.gh()
+        with mock.patch.object(pd, "last_change", side_effect=pd.Fail("坏了")):
+            rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["current_state"]["next_step"], "x")
+        self.assertIsNone(rec["freshness"]["stale"])
+        self.assertIsNone(rec["current_state"]["next_reliable"])
+        self.assertTrue(any("坏了" in e for e in rec["errors"]))
+
     def test_no_current_is_a_note_not_an_error(self):
         r = make_repo(self.root, "k", {"README.md": "# k\n\n当前阶段目标：常态维护。（2026-11-08 常浩确认，digital-twin#114）\n"})
         self.gh()
@@ -198,11 +277,93 @@ class GitHubTests(Base):
     def test_stale_current_makes_next_step_unreliable(self):
         r = make_repo(self.root, "s", {"CURRENT.md": "# 当前状态\n\n## 老的一节（2026-11-06）\n- 下一步：老的\n"},
                       at="2026-11-06 10:00:00 +0800")
+        commit(r, "合并 #5", "2026-11-08 18:00:00 +0800", "a.py", "x")
         self.gh(prs=[{**self.PR, "mergedAt": "2026-11-08T10:00:00Z"}])
         rec = self.run_one(r)["projects"][0]
         self.assertTrue(rec["freshness"]["stale"])
+        self.assertEqual(rec["freshness"]["last_merge"], "2026-11-08T18:00:00+08:00")
         self.assertEqual(rec["current_state"]["next_step"], "老的")
         self.assertFalse(rec["current_state"]["next_reliable"])
+
+    def test_stale_does_not_depend_on_gh_or_window(self):
+        cur = {"CURRENT.md": "# 当前状态\n\n## 老的一节（2026-11-05）\n- 下一步：老的\n"}
+        # gh 连不上：新鲜度照样从本机主分支算出来，不是 False 也不是 None
+        r = make_repo(self.root, "sg", cur, at="2026-11-05 10:00:00 +0800")
+        commit(r, "合并", "2026-11-08 12:00:00 +0800", "a.py", "x")
+        self.gh()
+        (self.state / "fail").write_text("error connecting to api.github.com\n")
+        rec = self.run_one(r)["projects"][0]
+        self.assertTrue(any("GitHub" in e for e in rec["errors"]))
+        self.assertIs(rec["freshness"]["stale"], True)
+        self.assertIs(rec["current_state"]["next_reliable"], False)
+        (self.state / "fail").unlink()
+        # 合并在统计日之前（11-07），当天没有合并：照样算过期
+        r = make_repo(self.root, "sw", cur, at="2026-11-05 10:00:00 +0800")
+        commit(r, "合并", "2026-11-07 20:00:00 +0800", "a.py", "x")
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["yesterday_delta"]["merged_prs"], [])
+        self.assertIs(rec["freshness"]["stale"], True)
+        # 只改 CURRENT 的提交不算合并；CURRENT 在最近一次合并之后更新过：不过期
+        r = make_repo(self.root, "sf", cur, at="2026-11-05 10:00:00 +0800")
+        commit(r, "合并", "2026-11-07 20:00:00 +0800", "a.py", "x")
+        commit(r, "记 CURRENT", "2026-11-08 09:00:00 +0800", "CURRENT.md", "# 当前状态\n\n## 新（2026-11-08）\n- 下一步：新的\n")
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(rec["freshness"]["last_merge"], "2026-11-07T20:00:00+08:00")
+        self.assertIs(rec["freshness"]["stale"], False)
+        self.assertIs(rec["current_state"]["next_reliable"], True)
+
+    def test_negated_and_future_forms_do_not_count(self):
+        bad = ["常浩验收未通过", "常浩验收还没通过", "等常浩验收通过后再装", "未装机", "待装机", "已安装失败，回滚了"]
+        secs = "".join(f"## 事{i}（#{20 + i}）（2026-11-08）\n- {t}\n\n" for i, t in enumerate(bad))
+        secs += ("## 自述（#30）（2026-11-08）\n- 已安装，没核对\n\n"
+                 "## 回读（#31）（2026-11-08）\n- 已安装：从 main 复制，cmp 一致\n- 常浩实机验收通过\n")
+        r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n{secs}"})
+        pr = lambda n, title=None: {"number": n, "title": title or f"做（#{n}）", "url": "", "body": "",
+                                    "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(20 + i) for i in range(len(bad))] + [pr(30), pr(31), pr(40, "交接补记：常浩实机验收未通过（#41）"), pr(41)])
+        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
+        for i, text in enumerate(bad):
+            with self.subTest(text):
+                self.assertEqual((prs[20 + i]["delivery"], prs[20 + i]["acceptance"]), ("未知", "未知"))
+                self.assertIsNone(prs[20 + i]["delivery_basis"])
+        self.assertEqual(prs[41]["acceptance"], "未知")                       # PR 标题写的是未通过
+        self.assertEqual((prs[30]["delivery"], prs[30]["delivery_basis"]), ("已安装或已发布", "仅自述"))
+        self.assertEqual((prs[31]["delivery_basis"], prs[31]["acceptance"]), ("有回读或 cmp 记录", "已通过"))
+        self.assertEqual(prs[31]["acceptance_basis"], "交接记录（非本人回执）")
+        self.assertIsNone(prs[30]["acceptance_basis"])
+
+    def test_gh_timeout_skips_remaining_repos(self):
+        real, calls = subprocess.run, []
+
+        def fake(argv, *a, **k):
+            if argv[0].endswith("gh"):
+                calls.append(argv)
+                raise subprocess.TimeoutExpired(argv, 60)
+            return real(argv, *a, **k)
+        repos = [make_repo(self.root, n, {"CURRENT.md": "# 当前状态\n\n## 节\n"}) for n in ("t1", "t2")]
+        self.gh()
+        with mock.patch.object(pd.subprocess, "run", side_effect=fake):
+            out = pd.collect(D, [{"id": r.name, "name": r.name, "path": str(r), "main": "main", "github": "o/fx"}
+                                 for r in repos])
+        self.assertEqual(len(calls), 1)
+        for rec in out["projects"]:
+            self.assertEqual(len([e for e in rec["errors"] if "60 秒" in e]), 4)
+            self.assertIsNone(rec["yesterday_delta"]["merged_prs"])
+
+    def test_non_json_output_is_a_fetch_error(self):
+        r = make_repo(self.root, "nj", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        self.gh()
+        (self.state / "pr_list.json").write_text("gh: 出错了\n")
+        rec = self.run_one(r)["projects"][0]
+        self.assertIsNone(rec["yesterday_delta"]["merged_prs"])
+        self.assertTrue(any("不是 JSON" in e for e in rec["errors"]))
+
+    def test_capped_list_gets_a_note(self):
+        r = make_repo(self.root, "cap", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        self.gh(prs=[{"number": n, "title": "t", "createdAt": "2026-11-01T00:00:00Z"} for n in range(100)])
+        rec = self.run_one(r)["projects"][0]
+        self.assertEqual(len(rec["current_state"]["open_prs"]), 100)
+        self.assertEqual([n for n in rec["notes"] if "上限" in n], ["GitHub open_prs 到了 100 条上限，可能截断"])
 
     def test_milestones_native_and_checklist_but_not_acceptance_lists(self):
         api = {"graphql": {"data": {"repository": {"issues": {"nodes": [
@@ -222,6 +383,7 @@ class GitHubTests(Base):
         rec = self.run_one(r, github=None)["projects"][0]
         self.assertEqual(rec["yesterday_delta"]["merged_prs"], [])
         self.assertEqual(rec["milestones"], [])
+        self.assertTrue(any("没有 GitHub" in n for n in rec["notes"]))
 
 
 class NextStepTests(unittest.TestCase):
@@ -234,6 +396,18 @@ class NextStepTests(unittest.TestCase):
         lines = ("# 当前状态\n\n更新：2026-11-06。" + "很长的说明" * 60 + "。唯一下一步：头部的\n\n## 最新\n- 没写\n"
                  "\n## 更早\n- 下一步：更早的\n").splitlines()
         self.assertEqual(progress_data.next_step(lines), "头部的")   # 长行先去前缀再截断
+
+    def test_touched_on_uses_file_time_when_current_is_dirty(self):
+        with tempfile.TemporaryDirectory(prefix="digital-twin-pdaily-test-") as tmp:
+            r = make_repo(Path(tmp), "dirty", {"CURRENT.md": "# 当前状态\n"})   # 11-06 提交
+            f = r / "CURRENT.md"
+            f.write_text("# 当前状态\n\n## 还没提交的一节\n", encoding="utf-8")
+            t = dt.datetime(2026, 11, 8, 12, 0).timestamp()
+            os.utime(f, (t, t))
+            self.assertTrue(progress_data.touched_on(r, f, D))
+            sh(r, "checkout", "-q", "--", "CURRENT.md")
+            os.utime(f, (t, t))
+            self.assertFalse(progress_data.touched_on(r, f, D))   # 干净时按提交日期 11-06
 
     def test_older_sections_are_not_used(self):
         lines = "# 当前状态\n\n## 最新\n- 没写\n\n## 更早\n- 下一步：更早的\n".splitlines()
