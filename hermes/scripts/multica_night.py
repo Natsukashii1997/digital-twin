@@ -338,23 +338,28 @@ def collect(night):
     return snap
 
 
-def file_max_seq(p):
-    """导出文件里已有的最大序号：追加后、存状态前进程被杀，重启时据此去重，不重复写。"""
-    best = 0
+def file_seqs(p):
+    """导出文件里已有的序号。读不懂的行记为 None（证据异常）。"""
+    out = []
     if p.exists():
         for line in p.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
             try:
                 seq = json.loads(line).get("seq")
-            except ValueError:
-                continue
-            if isinstance(seq, int) and seq > best:
-                best = seq
-    return best
+            except (ValueError, AttributeError):
+                seq = None
+            out.append(seq if isinstance(seq, int) and not isinstance(seq, bool) else None)
+    return out
 
 
 def export_messages(night, rid, rec):
     p = night.d / "messages" / f"{rid}.jsonl"
-    rec["last_seq"] = max(rec["last_seq"], file_max_seq(p))
+    have = file_seqs(p)
+    # 追加后、存状态前进程被杀：按文件里已有的序号去重；同时核对文件本身从 1 连续，不只看最大值（第 2 轮 P2-01）
+    if have and (None in have or have != list(range(1, len(have) + 1))):
+        rec["gap"] = True
+    rec["last_seq"] = max([rec["last_seq"]] + [s for s in have if s is not None])
     msgs = items(night.mc("issue", "run-messages", rid, "--since", str(rec["last_seq"])), "messages")
     if any(not isinstance(m.get("seq"), int) or isinstance(m.get("seq"), bool) for m in msgs):
         rec["gap"] = True          # 序号读不懂：记为证据异常，不是跳过了事
@@ -541,15 +546,18 @@ def owner_parent(night, parent):
 
 
 def final_export(night):
-    """停机后最后一次导出：把刚被取消的 run 也写进 run-log、收齐消息。导不全就标证据不完整，晨报照实说。"""
+    """停机后最后一次导出：把刚被取消的 run 也写进 run-log、收齐消息，并纳入停机判定（第 2 轮 P0-01）。
+    返回 (问题, 仍在跑的 run id)：导出时发现 run 消失、序号缺口、读不懂，都算核不清，不能写 STOPPED；
+    回读之后又冒出来的非终态 run 交给调用方再取消、再回读。"""
     try:
         collect(night)
-        return None
     except Exception as e:      # noqa: BLE001
-        night.state["evidence_incomplete"] = f"{type(e).__name__}: {e}"
+        msg = f"{type(e).__name__}: {e}"
+        night.state["evidence_incomplete"] = msg
         night.save()
-        night.log("evidence_incomplete", error=night.state["evidence_incomplete"])
-        return night.state["evidence_incomplete"]
+        night.log("evidence_incomplete", error=msg)
+        return msg, []
+    return None, [rid for rid, rec in night.state.get("runs", {}).items() if rec.get("status") in ACTIVE]
 
 
 def stop(night, reasons, finished=False, unclear=False):
@@ -598,7 +606,21 @@ def stop(night, reasons, finished=False, unclear=False):
     if ok and unclear:
         ok, left = False, ["触发原因是 run 记录核不清，回读看得见的 run 都已终态也证明不了全部已终止"]
     night.log("stop_readback", ok=ok, left=left, errors=errs)
-    gap = final_export(night)          # ⑦ 最后一次导出（成功、冻结都做）
+    gap, late = final_export(night)    # ⑦ 最后一次导出（成功、冻结都做），结果纳入判定
+    if ok and late:                    # 回读之后又冒出在跑的 run：再取消、再回读、再导出一次
+        for rid in late:
+            try:
+                night.mc("issue", "cancel-task", rid)
+            except Exception as e:     # noqa: BLE001
+                errs.append(f"取消回读后出现的 run {rid[:8]}：{type(e).__name__}: {e}")
+        ok, left = readback(night, errs)
+        gap2, late = final_export(night)
+        gap = gap or gap2
+        night.log("stop_readback_again", ok=ok, left=left, late=late)
+        if late:
+            ok, left = False, left + [f"回读之后又出现 {len(late)} 个非终态 run，取消后仍没结束"]
+    if ok and gap:
+        ok, left = False, [f"最后一次导出时发现运行记录核不清（{gap}），不能证明全部 run 已终止"]
     if ok:
         st["outcome"] = "FINISHED" if finished else "STOPPED"
         st["ended_at"] = iso(now())
@@ -606,8 +628,7 @@ def stop(night, reasons, finished=False, unclear=False):
         night.save()
         night.log("stopped", outcome=st["outcome"], reasons=reasons)
         head = "夜跑全部 stage 已交付，触发源都已关停（回读确认）" if finished else "夜跑已停机（回读确认：run 全部终态，Wakeup、Autopilot 都已停）"
-        tail = f"\n注意：运行记录没导全（{gap}），晨报会标出。" if gap else ""
-        return f"{head}。原因：{'；'.join(reasons)}。release 之前新出现的 run 都会被取消。{tail}"
+        return f"{head}。原因：{'；'.join(reasons)}。release 之前新出现的 run 都会被取消。"
     return freeze(night, reasons, left + errs)
 
 
@@ -655,7 +676,7 @@ def hard_freeze(plan):
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
             results.append({"cmd": cmd, "code": r.returncode, "out": (r.stderr or r.stdout).strip()[:200]})
-        except (OSError, subprocess.SubprocessError) as e:
+        except Exception as e:   # noqa: BLE001 —— 一条命令出问题，后面的照样执行
             results.append({"cmd": cmd, "code": None, "out": type(e).__name__})
     chk, seen = plan.get("freeze_check") or {}, ""
     if chk.get("cmd"):
@@ -663,7 +684,7 @@ def hard_freeze(plan):
             r = subprocess.run(chk["cmd"], capture_output=True, text=True, timeout=TIMEOUT)
             seen = (r.stdout or r.stderr).strip()
             verified = r.returncode == 0 and seen == chk.get("expect")
-        except (OSError, subprocess.SubprocessError) as e:
+        except Exception as e:   # noqa: BLE001 —— 回读不了就是没确认
             seen, verified = type(e).__name__, False
     else:
         verified = False         # 没有独立回读手段，就不能说已经冻住
@@ -1042,8 +1063,12 @@ def emergency_freeze(nid, why):
     if not st.get("auth") or st.get("released") or st.get("outcome") in ("STOPPED", "FINISHED"):
         return ""
     plan = load(ROOT / nid / "plan.json")
+    at = iso(now())
+    # 先原子写入阻断标记，再停执行器（第 2 轮 P1-01）：卡住的主控只要看到标记就不再推进，不必等硬停做完
+    dump(emergency_file(nid), {"status": "EMERGENCY_REQUESTED", "at": at, "why": why})
     results, verified, seen = hard_freeze(plan)
-    dump(emergency_file(nid), {"at": iso(now()), "why": why, "commands": results, "verified": verified, "check": seen})
+    dump(emergency_file(nid), {"status": "EMERGENCY_FROZEN" if verified else "EMERGENCY_UNVERIFIED", "at": at, "why": why,
+                               "commands": results, "verified": verified, "check": seen})
     append(ROOT / nid / "run-log.jsonl", {"ts": iso(now()), "event": "emergency_freeze", "why": why,
                                           "commands": results, "verified": verified, "check": seen})
     head = f"⚠️ 夜跑应急冻结：{why}。没有等卡住的主控，直接停了执行器。"
@@ -1052,14 +1077,20 @@ def emergency_freeze(nid, why):
 
 
 def guarded_stop(nid, why, unclear=False):
-    """停机，外加兜底：停机本身崩了就直接冻结（只依赖计划和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。"""
+    """停机，外加兜底：停机本身崩了就直接冻结（只依赖计划和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。
+    返回 (ok, 文字)：只有回读确认的 STOPPED / FINISHED 才算 ok；冻结和“停机冻结都失败”都不算，退出码据此非零（第 2 轮 P1-02）。"""
     try:
-        return stop(Night(nid), why, unclear=unclear)
+        text = stop(Night(nid), why, unclear=unclear)
     except Exception as e2:      # noqa: BLE001
         try:
-            return freeze(Night(nid), why, [f"停机过程异常：{type(e2).__name__}: {e2}"])
+            text = freeze(Night(nid), why, [f"停机过程异常：{type(e2).__name__}: {e2}"])
         except Exception as e3:  # noqa: BLE001
-            return f"⚠️ 夜跑停机和冻结都失败了，请立刻手动停执行器容器：{type(e3).__name__}: {e3}"
+            return False, f"⚠️ 夜跑停机和冻结都失败了，请立刻手动停执行器容器：{type(e3).__name__}: {e3}"
+    try:
+        ok = Night(nid).state.get("outcome") in ("STOPPED", "FINISHED")
+    except Exception:            # noqa: BLE001 —— 连状态都读不回来，就不能说停好了
+        ok = False
+    return ok, text
 
 
 def main(argv=None):
@@ -1117,7 +1148,7 @@ def main(argv=None):
             night.log("crash", error=traceback.format_exc()[-1500:])
             why = [f"主控脚本异常：{type(e).__name__}: {e}"]
             if night.state.get("auth") and not night.state.get("outcome"):
-                text = guarded_stop(nid, why)
+                text = guarded_stop(nid, why)[1]
             else:
                 text = f"⚠️ 夜跑主控异常：{type(e).__name__}: {e}"
             code = 1
@@ -1139,8 +1170,9 @@ def main(argv=None):
         if not night.state.get("auth") or night.state.get("outcome"):
             print("夜跑没在进行，不用停。")
             return 1
-        print(guarded_stop(nid, [f"人工停机：{a.reason}"]))
-        return 1 if Night(nid).state.get("frozen") else 0
+        ok, text = guarded_stop(nid, [f"人工停机：{a.reason}"])
+        print(text)
+        return 0 if ok else 1
     if a.cmd == "status":
         return cmd_status(night)
     if a.cmd == "report":

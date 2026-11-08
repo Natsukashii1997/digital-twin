@@ -698,6 +698,98 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(self.run_cli("tick", now=at(12)), (0, ""))
         self.assertEqual(len((d / f"{rid}.jsonl").read_text().splitlines()), 2)
 
+    # ---- ChatGPT High 第 2 轮（#93）----
+    def test_r2_p0_gap_found_only_at_final_export_freezes(self):
+        """回读通过，最后一次导出才发现消息序号缺口：不能写 STOPPED，要冻结。"""
+        self.started()
+        self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
+        self.edit(lambda w: w["messages"].update({w["runs"][0]["id"]: [{"seq": 1}, {"seq": 3}]}))
+        code, out = self.run_cli("stop", "--reason", "演练", now=at(6))
+        self.assertEqual(code, 1, out)
+        self.assertIn("最后一次导出时发现运行记录核不清", out)
+        self.assertEqual((self.state()["outcome"], self.state()["frozen"]), ("UNRECONCILED", True))
+
+    def spawn_after_readback(self, stuck=False):
+        """停机时：第 ⑤ 步读过一次 A，回读之后最后导出再读 A 时，A 上冒出一个 running 的 run。"""
+        self.started()
+        self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
+        a = self.ident("A")
+        run = {"id": "run-late", "issue": a, "status": "running", "created_at": at(6), "agent_id": "agent-claude",
+               "attempt": 1, "result": {}}
+        self.edit(lambda w: (w.update(spawn={"on": f"issue get {a}", "nth": 2, "run": run}),
+                             w.update(stuck=["run-late"] if stuck else [])))
+        return self.run_cli("stop", "--reason", "演练", now=at(6))
+
+    def test_r2_p0_run_appearing_after_readback_is_cancelled_and_rechecked(self):
+        code, out = self.spawn_after_readback()
+        self.assertEqual(code, 0, out)
+        self.assertIn("已停机", out)
+        self.assertEqual(next(r for r in self.get()["runs"] if r["id"] == "run-late")["status"], "cancelled")
+        self.assertIn("stop_readback_again", [r["event"] for r in self.log()])
+        self.assertIn("run-late", {r["run_id"] for r in self.log() if r["event"] == "run"})
+
+    def test_r2_p0_run_appearing_after_readback_that_will_not_stop_freezes(self):
+        code, out = self.spawn_after_readback(stuck=True)
+        self.assertEqual(code, 1, out)
+        self.assertIn("已冻结", out)
+        self.assertEqual(self.state()["outcome"], "UNRECONCILED")
+
+    def test_r2_p1_emergency_marker_is_written_before_hard_stop(self):
+        """应急冻结：阻断标记先落盘，再停执行器（停容器那一刻标记已经在了）。"""
+        marker = self.root / "night-test" / "emergency.json"
+        seen = self.tmp / "marker-seen.log"
+        plan = json.loads(self.plan_file.read_text(encoding="utf-8"))
+        plan["freeze_cmds"].insert(0, ["sh", "-c", f"grep -q EMERGENCY_REQUESTED '{marker}' && echo yes >> '{seen}'"])
+        self.plan_file.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        self.started()
+        import fcntl
+        lock = open(self.root / "night-test" / "tick.lock", "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock.write(at(1))
+        lock.flush()
+        try:
+            code, out = self.run_cli("tick", now=at(20))
+        finally:
+            lock.close()
+        self.assertEqual(code, 1, out)
+        self.assertEqual(seen.read_text().split(), ["yes"], "停容器时标记已经写好")
+        self.assertEqual(json.loads(marker.read_text())["status"], "EMERGENCY_FROZEN")
+
+    def test_r2_p1_requested_marker_alone_blocks_advance(self):
+        """应急进程写完标记就崩了（还没停容器）：主控也不再推进，接管为冻结，并补做硬停。"""
+        self.started()
+        self.finish("A")
+        self.finish("B")
+        (self.root / "night-test" / "emergency.json").write_text(json.dumps({"status": "EMERGENCY_REQUESTED", "at": at(9)}))
+        code, out = self.run_cli("tick", now=at(10))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.issue("V")["status"], "backlog")
+        self.assertIs(self.state()["freeze_verified"], False)
+        code, out = self.run_cli("tick", now=at(15))
+        self.assertIn("已停隔离执行器容器", out)
+        self.assertIs(self.state()["freeze_verified"], True)
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_r2_p1_stop_and_freeze_both_failing_exits_nonzero(self):
+        self.started()
+        d = self.root / "night-test"
+        os.chmod(d, 0o500)            # 状态写不进去：停机和冻结都会失败
+        try:
+            code, out = self.run_cli("stop", "--reason", "演练", now=at(5))
+        finally:
+            os.chmod(d, 0o700)
+        self.assertEqual(code, 1, out)
+        self.assertIn("停机和冻结都失败了", out)
+
+    def test_r2_p2_existing_file_gap_detected_on_restart(self):
+        """导出文件里已有 1、3，state 还没存缺口就被杀：重启后要查出缺口，不能接着从 3 往后导。"""
+        self.started()
+        self.finish("A")
+        rid = self.get()["runs"][0]["id"]
+        self.edit(lambda w: w["messages"].update({rid: [{"seq": 1}, {"seq": 2}, {"seq": 3}]}))
+        (self.root / "night-test" / "messages" / f"{rid}.jsonl").write_text('{"seq": 1}\n{"seq": 3}\n', encoding="utf-8")
+        self.assert_frozen(self.run_cli("tick", now=at(12)), "序号有缺口")
+
     # ---- 其他 ----
     def test_tick_gap_is_noted(self):
         self.started()

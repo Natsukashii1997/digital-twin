@@ -13,6 +13,7 @@ world：
   start_runs 改 todo 时是否给 agent 单开一个 queued run（默认 true）
   fail       [命令前缀]：命中就退出码 1
   stuck      [run id]：cancel-task 对它们不生效（模拟取消不掉）
+  spawn      {"on": 命令行, "nth": n, "run": {...}}：这条命令第 n 次被调用时，先往 runs 里加这个 run（模拟中途冒出新 run）
 参数里的 --workspace-id、--profile、--output 都忽略，但会记下来供断言。
 """
 import json
@@ -69,6 +70,11 @@ for prefix in w.get("fail", []):
         die("fake: 注入失败 " + prefix)
 
 issues = w.setdefault("issues", {})
+sp = w.get("spawn")
+if sp and line == sp["on"]:
+    sp["seen"] = sp.get("seen", 0) + 1
+    if sp["seen"] == sp["nth"]:
+        w.setdefault("runs", []).append(sp["run"])
 
 
 def touch(i):

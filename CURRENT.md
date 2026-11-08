@@ -9,12 +9,12 @@
 ## 2026-11-08 · M5 首夜：Hermes 主控的 Multica 夜跑与独立停机检查（#92）
 
 - **来由**：常浩要今晚做 Hermes 主导的 Multica 无人值守测试，11-08 选「方案甲」（Hermes 外部推进，父单指派给常浩）。约 02:00 常浩说「我要去睡了，剩下所有的需要批准的内容都让 Hermes 去批准。」
-- **改了什么**：新增 `hermes/scripts/multica_night.py`（plan / start / tick / stop / status / report / release）：按计划建单、按 stage 推进、边跑边导 run-log 和消息、到上限按 5.3a 停机、回读不过就冻结执行器容器，计数持久化、重启不清零；`tests/fake_multica.py` + `test_multica_night.py` 55 项；`multica_night_tick.py` 是定时任务入口；`approve` 记下几点开跑，到点由 tick 开跑；名册 v1.6 给 dt-sandbox 标 `sandbox: true` 和 Multica 工作区；今晚计划 `hermes/samples/multica-night-2026-11-08.json`；执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md`（写明和架构 7.3 等处的差异、批准来源、开跑前清单、时间线、验收）。
-- **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` → `Ran 457 tests`（系统 Python 3.9，和 Hermes、CI 同版本） / `OK`；`orca/tests` → `OK`。真实 multica 只读冒烟：issue get / runs / wakeup list / autopilot list / run-messages --since / issue list --updated-since 的拼法和输出格式都对。
+- **改了什么**：新增 `hermes/scripts/multica_night.py`（plan / start / tick / stop / status / report / release）：按计划建单、按 stage 推进、边跑边导 run-log 和消息、到上限按 5.3a 停机、回读不过就冻结执行器容器，计数持久化、重启不清零；`tests/fake_multica.py` + `test_multica_night.py` 62 项；`multica_night_tick.py` 是定时任务入口；`approve` 记下几点开跑，到点由 tick 开跑；名册 v1.6 给 dt-sandbox 标 `sandbox: true` 和 Multica 工作区；今晚计划 `hermes/samples/multica-night-2026-11-08.json`；执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md`（写明和架构 7.3 等处的差异、批准来源、开跑前清单、时间线、验收）。
+- **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` → `Ran 464 tests`（系统 Python 3.9，和 Hermes、CI 同版本） / `OK`；`orca/tests` → `OK`。真实 multica 只读冒烟：issue get / runs / wakeup list / autopilot list / run-messages --since / issue list --updated-since 的拼法和输出格式都对。
 - **Hermes 审批（02:48 左右）**：按常浩委托把 7 项（合并、安装、定时任务、清理 SBX-2/3、令牌偏离、真实演练、22:00 开跑）交 Hermes，**7 项全部不批准**：委托经 Claude 转述、未经常浩本人在已核验私聊或亲手操作确认，不能当作授权，也不得记为 owner_approved。请求与原样回复在 `evidence/2026-11-08-M5首夜/`。
 - **独立审查**：子 agent 只读审查出 10 条，第 1–9 条已修并补测试（见第三个提交），第 10 条的测试缺口已补；「取消 running 的 run 实际要多久」留到真实演练量。
 - **Hermes 飞书批复（08:34，`03-Hermes飞书批复.md`）**：常浩在飞书私聊委托后，Hermes 附条件批准第 2–7 项，第 1 项（合并）要先有绑定 HEAD 的独立技术审核。已执行第 4 项（SBX-2、SBX-3 改 cancelled 并回读，`04-清理探针单.md`），核验了第 5 项的隔离前提（`05-隔离前提核验.md`）。
-- **ChatGPT High 独立审查（驿窗 `h1a1b894e96600`，L3）**：第 1 轮「需修改」（P0 ×1、P1 ×7、P2 ×3），已全部返修并补测试，送第 2 轮。
+- **ChatGPT High 独立审查（驿窗 `h1a1b894e96600`，L3）**：第 1 轮「需修改」（P0 ×1、P1 ×7、P2 ×3），已全部返修并补测试；第 2 轮「需修改」、出口决策升级（剩 P0 ×1、P1 ×2、P2 ×1），常浩选「修完再复审」，已返修并送第 3 轮（只看这 4 处）。P1-07（TTY + 绑定确认只防误操作、不是身份证明）的剩余风险待常浩确认。
 - **未做**：合并、安装、Hermes 定时任务、真实演练、建单、开跑。
 - **范围外发现**：`hermes/scripts/tests/README.md` 里的总数「共 356 项」早已过时（合并前就是 402），没改。
 - **唯一下一步**：常浩确认审批方式（自己批这 7 项，或在飞书私聊里对 Hermes 确认委托范围后由 Hermes 批），然后合并、安装、白天演练，21:30 核对清单，22:00 开跑。
