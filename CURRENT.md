@@ -6,6 +6,14 @@
 
 ---
 
+
+## 2026-11-08 · Tidings 周报默认周一 19:30、不早于每日更新（#104，PR #105 `424dc18`，配合 github-center #83）
+
+- 改了什么：`tidings_weekly.py` 默认周报时间 11:30 → 19:30；按 github-center `readSettings` 同一规则算周报时间（每日更新早于 17:00 或不合规按 18:00，周报早于每日更新按每日更新后 1.5 小时，最晚 23:45），因为本机 `data/settings.json` 是从服务器原样拉回的，可能还是旧的 11:30。
+- 验证：`python3 -B -m unittest discover -s hermes/scripts/tests` 490 项 OK；周报推送 20 项（新增迁移用例）。
+- **已安装（11-08 18:5x，常浩说「装新版并重启」）**：`~/.hermes/scripts/tidings_weekly.py` 从 main 复制，`cmp` 一致；`--dry-run` 输出「不发：还没到周一 19:30。」；旧版备份和校验值在 `evidence/2026-11-08-tidings-1930-安装/`。定时任务 `18a21b2eb87a` 本来就是每 15 分钟一次，不用改。
+- **下一步**：11-09 19:30 后看私聊是否收到统计日 11-08 的周报卡片（github-center 当天 18:00 出榜）。
+
 ## 2026-11-08 · M5 首夜：Hermes 主控的 Multica 夜跑与独立停机检查（#92）
 
 - **来由**：常浩要今晚做 Hermes 主导的 Multica 无人值守测试，11-08 选「方案甲」（Hermes 外部推进，父单指派给常浩）。约 02:00 常浩说「我要去睡了，剩下所有的需要批准的内容都让 Hermes 去批准。」
