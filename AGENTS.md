@@ -39,7 +39,7 @@ docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
 docs/三报体系-V2.1.md   主动运营与三报（早报 / 晚报 / 周报）的产品与实施基线（PRD D20）；评审过程在 docs/reviews/
 docs/常设授权清单.md     Hermes 的常设授权四档（PRD D21）：动作前查，日报按它写依据；只有常浩能改
-docs/个人项目日报-V1-设计.md  个人项目日报规格与样稿（PRD D22，#108）：每天 08:00 私聊，只覆盖个人项目
+docs/个人项目日报-V2-设计.md  个人项目代理管理日报规格与样稿（PRD D22，#108）：每天 08:00 私聊简报 + 本地完整日报，只覆盖个人项目
 orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
