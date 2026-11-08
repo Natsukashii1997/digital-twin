@@ -302,7 +302,7 @@ def cmd_plan(path):
 
 # ---------- 对账 ----------
 
-def collect(night):
+def collect(night, full=False):
     """读家族的 issue、run、Wakeup，工作区的 Autopilot；边读边导出 run-log 和消息。有任何核不清就抛 Unclear。"""
     st = night.state
     seen = st.setdefault("runs", {})
@@ -322,6 +322,8 @@ def collect(night):
                                         "created_at": r.get("created_at"), "gap": False})
             rec["status"] = r.get("status")
             if rec["logged"]:
+                if full:     # 最后一次导出：已记账的 run 也要重新核对消息文件和远端消息（第 3 轮 P0-01）
+                    export_messages(night, rid, rec)
                 continue
             export_messages(night, rid, rec)
             if r.get("status") in TERMINAL:
@@ -344,6 +346,7 @@ def file_seqs(p):
     if p.exists():
         for line in p.read_text(encoding="utf-8").splitlines():
             if not line.strip():
+                out.append(None)     # 空行也算读不懂（第 3 轮 P2-01）
                 continue
             try:
                 seq = json.loads(line).get("seq")
@@ -519,6 +522,8 @@ def advance(night, n, t):
             raise Unclear("推进前核对身份不符：" + "；".join(drift))
         if iss.get("status") != "backlog":
             continue
+        if emergency_file(night.id).exists():   # 改状态（会触发 agent）前再查一次（第 3 轮 P1-01A）
+            raise Unclear("应急冻结已触发，不再推进")
         night.mc("issue", "status", night.ident(k), "todo")
         moved.append(night.ident(k))
     night.log("advance", stage=n, issues=moved)
@@ -550,7 +555,7 @@ def final_export(night):
     返回 (问题, 仍在跑的 run id)：导出时发现 run 消失、序号缺口、读不懂，都算核不清，不能写 STOPPED；
     回读之后又冒出来的非终态 run 交给调用方再取消、再回读。"""
     try:
-        collect(night)
+        collect(night, full=True)
     except Exception as e:      # noqa: BLE001
         msg = f"{type(e).__name__}: {e}"
         night.state["evidence_incomplete"] = msg
@@ -621,6 +626,8 @@ def stop(night, reasons, finished=False, unclear=False):
             ok, left = False, left + [f"回读之后又出现 {len(late)} 个非终态 run，取消后仍没结束"]
     if ok and gap:
         ok, left = False, [f"最后一次导出时发现运行记录核不清（{gap}），不能证明全部 run 已终止"]
+    if ok and emergency_file(night.id).exists():   # 停机途中出现了应急冻结：以冻结为准（第 3 轮 P1-01B）
+        ok, left = False, ["停机途中出现了应急冻结标记，以应急冻结为准"]
     if ok:
         st["outcome"] = "FINISHED" if finished else "STOPPED"
         st["ended_at"] = iso(now())
@@ -1007,7 +1014,7 @@ def cmd_release(night, by, confirm):
     if confirm != want:
         print(f"没有 release：--confirm 要写成 {want}（绑定这次夜跑和它现在的状态）。")
         return 1
-    if st.get("frozen") and not (sys.stdin.isatty() and sys.stdout.isatty()):
+    if (st.get("frozen") or emergency_file(night.id).exists()) and not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("没有 release：这次夜跑已冻结（UNRECONCILED），只能由常浩在交互式终端里核对现场后 release。")
         night.log("release_refused", by=by, reason="frozen-non-interactive")
         return 1
