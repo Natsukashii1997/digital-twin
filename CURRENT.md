@@ -38,7 +38,8 @@
   - 网关 `launchctl kickstart -k`：新实例 22:56:30 起来时，旧进程 39740 还没退干净，报「A gateway already owns this host」后以退出码 1 退出；launchd 22:57:01 自动拉起，22:57:04 `feishu connected`，新 PID 86812。猛鬼兽断线约 36 秒。
   - 飞书里已有的会话要 `/new` 后才加载新规程。
 - **#114 已完成（11-08 23:14，常浩「全部按推荐」）**：16 个项目都写上了「当前阶段目标」一行（11 条明确目标、3 条常态维护、2 条暂停；agent-kit、my-skills、carvomoto 写在 README），回读 origin/main 16/16，提交号见 #114 关闭评论。digiworld 主目录拉齐失败（本来就落后，未跟踪的 `项目关系-定稿.html` 挡住了更早的提交），没动。起草时发现日报规格 5.3 两处要改（`- [ ]` 清单多是验收条件不是父 issue；三个项目没有 CURRENT），记在 #110。
-- **唯一下一步**：开工 #110 取数脚本（先出分批计划等常浩确认）。
+- **#110 1a 进行中**：分批计划常浩已确认（3 个 PR，计划在 #110 评论）。1a 在分支 `claude/110-pdaily-data`，提交 `68ecf1d`，已推送、未开 PR，worktree 在 `.claude/worktrees/110-pdaily-data`。独立审查给了 1 个 P0、5 个 P1，清单在 #110 评论，还没改。
+- **唯一下一步**：在 worktree 里按 #110 的审查清单修完 P0、P1，补反例测试，跑全量测试，再审一轮后开 1a 的 PR。
 
 ## 2026-11-08 · Tidings 周报横幅换新图（#106，PR #107 `659fafd`，配合 github-center #86）
 
