@@ -11,6 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE.parent / "multica_night.py"
 FAKE = HERE / "fake_multica.py"
+FAKE_DOCKER = HERE / "fake_docker.py"
 OWNER = "member-owner"
 T0 = "2026-11-08T14:00:00Z"          # 北京时间 22:00
 
@@ -51,28 +52,51 @@ class MulticaNight(unittest.TestCase):
         self.check_file = self.tmp / "container.txt"          # 假 docker inspect 的输出
         self.check_file.write_text("false no", encoding="utf-8")
         plan["freeze_check"] = {"cmd": ["cat", str(self.check_file)], "expect": "false no"}
-        self.plan_file = self.tmp / "plan.json"
-        self.plan_file.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        docker = self.tmp / "docker"                           # 假 docker exec：执行器里的进程（M5 #25、#27）
+        docker.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{FAKE_DOCKER}' \"$@\"\n", encoding="utf-8")
+        docker.chmod(0o755)
+        self.procs = self.tmp / "procs.json"
+        plan["executor"] = {"docker": [str(docker), "--context", "colima-multica"], "container": "agent-1", "kill": True}
+        self.plan_obj = plan
+        self.write_plan()
         wrapper = self.tmp / "multica"
         wrapper.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{FAKE}' \"$@\"\n", encoding="utf-8")
         wrapper.chmod(0o755)
+        self.branches = self.tmp / "branches.txt"              # 远端分支「名字 提交」，测试可改
+        self.branches.write_text("main aaa111\nagent/claude/abc bbb222\n", encoding="utf-8")
+        self.prs = self.tmp / "prs.json"
+        self.prs.write_text(json.dumps([{"number": 7, "title": "SBX-12 导出", "headRefName": "agent/claude/abc", "headRefOid": "bbb222",
+                                         "url": "u", "state": "OPEN", "createdAt": "2026-11-08T14:30:00Z", "mergedAt": None}],
+                                       ensure_ascii=False), encoding="utf-8")
         gh = self.tmp / "gh"
         gh.write_text("#!/bin/sh\n"
-                      "case \"$1\" in api) printf 'main\\nagent/claude/abc\\n';; "
-                      "pr) echo '[{\"number\":7,\"title\":\"SBX-12 导出\",\"headRefName\":\"agent/claude/abc\",\"url\":\"u\",\"state\":\"OPEN\",\"createdAt\":\"2026-11-08T14:30:00Z\",\"mergedAt\":null}]';; esac\n",
-                      encoding="utf-8")
+                      f"case \"$*\" in *commit.sha*) cat '{self.branches}';; api*) cut -d' ' -f1 '{self.branches}';; "
+                      f"pr*) cat '{self.prs}';; esac\n", encoding="utf-8")
         gh.chmod(0o755)
         self.roster = self.tmp / "projects.json"
         self.roster.write_text(json.dumps({"projects": [], "inventory": [
             {"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox"}]}), encoding="utf-8")
         self.env = {**os.environ, "DT_NIGHT_ROOT": str(self.root), "DT_ROSTER": str(self.roster), "DT_MULTICA_CLI": str(wrapper), "DT_GH_CLI": str(gh),
-                    "FAKE_MULTICA_WORLD": str(self.world), "DT_NIGHT_READBACK": "2,0"}
+                    "FAKE_MULTICA_WORLD": str(self.world), "DT_NIGHT_READBACK": "2,0",
+                    "FAKE_DOCKER_PROCS": str(self.procs), "DT_NIGHT_PROCWAIT": "2,0"}
         self.put({"owner": OWNER, "now": "2026-11-08T13:00:00Z", "issues": {
             "SBX-1": {"id": "id-SBX-1", "identifier": "SBX-1", "status": "backlog", "assignee_type": None,
                       "updated_at": "2026-11-07T00:00:00Z"}}, "runs": [], "messages": {}, "wakeups": {}, "autopilots": []})
 
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
+
+    def write_plan(self):
+        self.plan_file = self.tmp / "plan.json"
+        self.plan_file.write_text(json.dumps(self.plan_obj, ensure_ascii=False), encoding="utf-8")
+
+    def set_procs(self, **kw):
+        w = json.loads(self.procs.read_text(encoding="utf-8")) if self.procs.exists() else {}
+        w.update(kw)
+        self.procs.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
+
+    def docker_calls(self):
+        return [c["action"] for c in json.loads(self.procs.read_text(encoding="utf-8")).get("calls", [])] if self.procs.exists() else []
 
     # ---- 世界 ----
     def get(self):
@@ -887,6 +911,137 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("进行中", out)
         self.assertIn("11-09 02:00", out)      # 北京时间显示的截止时刻
+
+    # ---- M5 首夜演练暴露的问题（#97；证据 2026-11-08-M5首夜 00、18、22、24 号）----
+    RESIDUE = ["326726 1 /bin/bash -c source /home/node/.claude/shell-snapshots/snap", "326729 326726 python -c import time; time.sleep(900)"]
+
+    def stop_now(self, minutes=13, **procs):
+        """开跑（开跑前执行器是干净的），之后执行器里出现 procs 描述的进程，再人工停机。"""
+        self.started()
+        if procs:
+            self.set_procs(**procs)
+        return self.run_cli("stop", "--reason", "演练", now=at(minutes))
+
+    def test_m5_25_slow_exiting_procs_are_waited_for_then_stopped(self):
+        """取消后 agent 进程收尾慢一点：等它们自己退出再写 STOPPED，不动手结束。"""
+        code, out = self.stop_now(procs=self.RESIDUE, exit_after=1)
+        self.assertEqual(code, 0, out)
+        self.assert_stopped(out, "人工停机")
+        self.assertIn("执行器里没有 agent 进程", out)
+        self.assertNotIn("kill", self.docker_calls())
+
+    def test_m5_25_residue_without_kill_auth_is_not_stopped_and_freezes(self):
+        """演练 2 的反例：Multica 回读全部终态，但容器里后台进程还活着。没授权结束 → 不写 STOPPED，冻结（停容器）。"""
+        self.plan_obj["executor"]["kill"] = False
+        self.write_plan()
+        res = self.stop_now(procs=self.RESIDUE, stubborn=True)
+        self.assert_frozen(res, "计划没授权结束它们")
+        self.assertNotIn("kill", self.docker_calls())
+        self.assertIn("proc_residue", [r["event"] for r in self.log()])
+
+    def test_m5_27_residue_is_killed_then_rechecked_then_stopped(self):
+        """授权了结束（executor.kill）：结束残留进程，另起一次独立回读确认为空，才写 STOPPED。"""
+        code, out = self.stop_now(procs=self.RESIDUE)
+        self.assertEqual(code, 0, out)
+        self.assert_stopped(out, "人工停机")
+        calls = self.docker_calls()
+        self.assertIn("kill", calls)
+        self.assertEqual(calls[-1], "list", "结束之后还要独立再列一次")
+        kill = [r for r in self.log() if r["event"] == "proc_kill"]
+        self.assertEqual((len(kill[0]["before"]), kill[0]["after"]), (2, []))
+
+    def test_m5_27_unkillable_residue_freezes(self):
+        self.assert_frozen(self.stop_now(procs=self.RESIDUE, stubborn=True), "结束后执行器里仍有 2 个 agent 进程")
+
+    def test_m5_25_unreadable_executor_freezes(self):
+        """docker exec 失败（容器不在、docker 不通）：看不清不等于没有，冻结。"""
+        self.started()
+        self.set_procs(fail=True)
+        self.assert_frozen(self.run_cli("stop", "--reason", "演练", now=at(13)), "执行器进程回读不清")
+
+    def test_m5_25_plan_without_executor_is_rejected(self):
+        del self.plan_obj["executor"]
+        self.write_plan()
+        code, out = self.run_cli("plan", str(self.plan_file))
+        self.assertEqual(code, 1)
+        self.assertIn("缺 executor", out)
+
+    def test_m5_25_start_refuses_dirty_executor(self):
+        self.assertEqual(self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")[0], 0)
+        self.set_procs(procs=self.RESIDUE)
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 1, out)
+        self.assertIn("执行器里已有 2 个非守护进程", out)
+        self.assertFalse(self.state().get("auth"))
+
+    def test_m5_25_procs_reappearing_after_stop_are_killed_and_alarmed(self):
+        code, out = self.stop_now()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.run_cli("tick", now=at(15)), (0, ""))
+        self.set_procs(procs=self.RESIDUE)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1)
+        self.assertIn("执行器里又出现 2 个 agent 进程", out)
+        self.assertIn("已结束。", out)
+        self.assertEqual(self.run_cli("tick", now=at(25)), (0, ""))
+
+    def test_m5_25_remote_snapshot_after_stop_and_change_alarms_once(self):
+        """停机后给远端拍快照；之后远端还在变（后台进程推了提交）就告警一次，晨报里也写出来。"""
+        code, out = self.stop_now()
+        self.assertEqual(code, 0, out)
+        snap = self.state()["remote_at_stop"]
+        self.assertEqual(snap["branches"], {"main": "aaa111", "agent/claude/abc": "bbb222"})
+        self.assertIn("远端：停机（", self.run_cli("report", now=at(14))[1])
+        self.assertIn("后没有变化", self.run_cli("report", now=at(14))[1])
+        self.branches.write_text("main aaa111\nagent/claude/abc ccc333\n", encoding="utf-8")
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1)
+        self.assertIn("停机后远端有变化：分支 agent/claude/abc：bbb222 → ccc333", out)
+        self.assertEqual(self.run_cli("tick", now=at(25)), (0, ""), "同样的变化不重复告警")
+        self.assertIn("⚠️ 停机后有变化", self.run_cli("report", now=at(26))[1])
+
+    def test_m5_25_frozen_night_also_snapshots_remote(self):
+        self.frozen()
+        self.assertIn("branches", self.state()["remote_at_stop"])
+
+    def test_m5_27_orphans_mid_night_are_killed_and_night_continues(self):
+        """夜跑途中：A 的 run 结束了，它放到后台的进程被 docker-init 收养（PPID 1）。每次检查都清掉孤儿、告警，夜跑照常推进；
+        还挂在活着的 agent 底下的进程（PPID 不是 1）不动。"""
+        self.started()
+        live = "500 480 node /usr/local/bin/claude"
+        self.set_procs(procs=[self.RESIDUE[0], live])
+        code, out = self.run_cli("tick", now=at(5))
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 个失去 agent 的后台进程", out)
+        self.assertEqual(json.loads(self.procs.read_text(encoding="utf-8"))["procs"], [live])
+        self.assertFalse(self.state().get("outcome"))
+
+    def test_m5_27_orphans_without_kill_auth_stop_the_night(self):
+        self.plan_obj["executor"]["kill"] = False
+        self.write_plan()
+        self.started()
+        self.set_procs(procs=[self.RESIDUE[0]], stubborn=True)
+        code, out = self.run_cli("tick", now=at(5))
+        self.assertIn("计划没授权结束它们", out)
+        self.assertEqual(self.state()["outcome"], "UNRECONCILED", "停机时残留还在、又没授权结束 → 冻结")
+
+    def test_m5_27_unreadable_executor_mid_night_stops(self):
+        self.started()
+        self.set_procs(fail=True)
+        code, out = self.run_cli("tick", now=at(5))
+        self.assertIn("执行器孤儿进程", out)
+        self.assertTrue(self.state().get("outcome"))
+
+    def test_m5_21_truncated_tail_of_logged_run_is_gap(self):
+        """已记账的 run，消息文件尾部被截掉（文件里最大序号小于已记账的 last_seq）：要查出缺口，不能写 STOPPED。"""
+        def tamper(rid):
+            p = self.root / "night-test" / "messages" / f"{rid}.jsonl"
+            p.write_text('{"seq": 1}\n', encoding="utf-8")
+        self.assert_frozen(self.logged_then_stop(tamper), "最后一次导出时发现运行记录核不清")
+
+    def test_m5_21_deleted_message_file_of_logged_run_is_gap(self):
+        self.assert_frozen(self.logged_then_stop(
+            lambda rid: (self.root / "night-test" / "messages" / f"{rid}.jsonl").unlink()), "最后一次导出时发现运行记录核不清")
 
 
 if __name__ == "__main__":

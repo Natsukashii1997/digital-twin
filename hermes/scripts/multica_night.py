@@ -26,14 +26,16 @@
 
 停机步骤（5.3a）：禁用家族 issue 上的全部 Wakeup → 暂停启用中的 Autopilot → 取消 5 种非终态 run
 → 没交付的子单改 blocked（--no-start；不在子单上评论，评论会唤醒 agent）、原因写在父单 → 回读。
-回读时 run 全部终态、Wakeup 和 Autopilot 都停了才算停机成功；否则冻结：执行计划里的 freeze_cmds（停隔离执行器容器、
+回读时 run 全部终态、Wakeup 和 Autopilot 都停了，再到执行器容器里独立核对：除守护进程外没有 agent 派生的进程
+（计划 executor.kill 为 true 时先结束它们再核对，M5 #25、#27），才算停机成功，并给远端分支和 PR 拍快照（之后每次检查和晨报都比对）；否则冻结：执行计划里的 freeze_cmds（停隔离执行器容器、
 去掉自动重启），记 UNRECONCILED，打印告警（Hermes 定时任务把输出发到常浩私聊），之后不再推进、不再重试；
 冻结期间每次 tick 发现有 run 在跑就再取消一次并告警，直到常浩 release。
 
 所有计数存在夜跑目录的 state.json，进程或机器重启后从这里恢复，不清零。tick 没事时什么都不打印。
 
 环境变量：DT_NIGHT_ROOT 夜跑根目录（默认 ~/Library/Application Support/DigitalTwin/runs）；DT_MULTICA_CLI 换 multica（自测用）；
-DT_GH_CLI 换 gh；DT_ROSTER 名册（开跑前核对仓库标了 sandbox: true）；DT_NOW（ISO 时间）指定现在；DT_NIGHT_READBACK「次数,间隔秒」停机回读（默认 6,5）。
+DT_GH_CLI 换 gh；DT_ROSTER 名册（开跑前核对仓库标了 sandbox: true）；DT_NOW（ISO 时间）指定现在；DT_NIGHT_READBACK「次数,间隔秒」停机回读（默认 12,5）；DT_NIGHT_PROCWAIT「次数,间隔秒」
+停机后等执行器里 agent 进程自己退出（默认 6,5）。
 """
 import argparse
 import datetime as dt
@@ -220,6 +222,10 @@ def validate(plan):
     for f in ("id", "workspace_id", "owner_member_id", "agents", "parent", "children"):
         if f not in plan:
             errs.append(f"缺 {f}")
+    ex = plan.get("executor")
+    if not (isinstance(ex, dict) and isinstance(ex.get("docker"), list) and ex["docker"] and isinstance(ex.get("container"), str)
+            and ex["container"]):
+        errs.append("缺 executor（docker 命令前缀、container 容器名）：停机要到执行器里独立核对进程（M5 #25）")
     if errs:
         return errs
     keys, stages = [], set()
@@ -361,6 +367,9 @@ def export_messages(night, rid, rec):
     have = file_seqs(p)
     # 追加后、存状态前进程被杀：按文件里已有的序号去重；同时核对文件本身从 1 连续，不只看最大值（第 2 轮 P2-01）
     if have and (None in have or have != list(range(1, len(have) + 1))):
+        rec["gap"] = True
+    # 文件尾部被截掉（或整个文件没了）：先追加、后记账，所以文件里的最大序号不会小于已记账的（M5 #21）
+    if max([0] + [s for s in have if s is not None]) < rec["last_seq"]:
         rec["gap"] = True
     rec["last_seq"] = max([rec["last_seq"]] + [s for s in have if s is not None])
     msgs = items(night.mc("issue", "run-messages", rid, "--since", str(rec["last_seq"])), "messages")
@@ -626,6 +635,8 @@ def stop(night, reasons, finished=False, unclear=False):
             ok, left = False, left + [f"回读之后又出现 {len(late)} 个非终态 run，取消后仍没结束"]
     if ok and gap:
         ok, left = False, [f"最后一次导出时发现运行记录核不清（{gap}），不能证明全部 run 已终止"]
+    if ok:                             # ⑧ 执行器进程独立回读：Multica 说停了不算，容器里没有 agent 进程才算（M5 #25、#27）
+        ok, left = settle_executor(night)
     if ok and emergency_file(night.id).exists():   # 停机途中出现了应急冻结：以冻结为准（第 3 轮 P1-01B）
         ok, left = False, ["停机途中出现了应急冻结标记，以应急冻结为准"]
     if ok:
@@ -634,7 +645,9 @@ def stop(night, reasons, finished=False, unclear=False):
         st.pop("stopping", None)
         night.save()
         night.log("stopped", outcome=st["outcome"], reasons=reasons)
-        head = "夜跑全部 stage 已交付，触发源都已关停（回读确认）" if finished else "夜跑已停机（回读确认：run 全部终态，Wakeup、Autopilot 都已停）"
+        take_remote_snapshot(night)
+        head = ("夜跑全部 stage 已交付，触发源都已关停（回读确认，执行器里没有 agent 进程）" if finished else
+                "夜跑已停机（回读确认：run 全部终态，Wakeup、Autopilot 都已停，执行器里没有 agent 进程）")
         return f"{head}。原因：{'；'.join(reasons)}。release 之前新出现的 run 都会被取消。"
     return freeze(night, reasons, left + errs)
 
@@ -716,11 +729,161 @@ def freeze(night, reasons, problems):
     st.pop("stopping", None)
     night.save()
     night.log("freeze", reasons=reasons, problems=problems, commands=results, verified=verified, check=seen)
+    take_remote_snapshot(night)
     lines = ["⚠️ 夜跑停机没有回读通过，已冻结（UNRECONCILED），不会再推进或重试任务。",
              f"停机原因：{'；'.join(reasons)}", "没停干净的：" + "；".join(problems[:6])]
     lines += freeze_lines(night, results, verified, seen)
     lines.append(f"恢复只由常浩在终端里核对后做（见执行单第六节）。记录在 {night.d}")
     return "\n".join(lines)
+
+
+# ---------- 执行器进程（M5 #25、#27） ----------
+# Multica 显示 run 已取消，不等于执行器里的 agent 进程都退了：守护进程只结束 agent 的进程组，
+# agent 放到后台、另开会话的进程（演练 2 的 sleep 900）会被 docker-init 收养、继续活着并能写远端。
+# 所以停机要在 Multica 回读之外，再到执行器容器里独立回读一次进程。
+# 下面的 bash 在容器里执行：列出除 PID 1（docker-init）、守护进程（PID 1 的子进程 multica daemon）、
+# docker exec 会话本身（PPID 0）、本脚本及其子进程、僵尸进程之外的全部进程；kill 时先 TERM、2 秒后 KILL，再列一次。
+# orphans / kill-orphans 只看孤儿：PPID 为 1、又不是守护进程的，即 agent 主进程已经没了、被 docker-init 收养的后台进程。
+# 容器里没有 ps，只读 /proc；扫描只用 bash 内建命令，不派生子进程，免得把自己算进去。
+PROC_SCRIPT = r"""
+me=$$
+scan() {
+  found=; pids=
+  for d in /proc/[0-9]*; do
+    p=${d#/proc/}
+    { [ "$p" = 1 ] || [ "$p" = "$me" ]; } && continue
+    st=; read -r st < "$d/stat" 2>/dev/null || continue
+    set -- ${st##*) }
+    { [ "$1" = Z ] || [ "$2" = 0 ] || [ "$2" = "$me" ]; } && continue
+    a0=; a1=; { IFS= read -r -d '' a0; IFS= read -r -d '' a1; } < "$d/cmdline" 2>/dev/null
+    { [ "$2" = 1 ] && [ "${a0##*/}" = multica ] && [ "$a1" = daemon ]; } && continue
+    [ "$orphans" = 1 ] && [ "$2" != 1 ] && continue
+    found="$found$p $2 ${a0:0:80} ${a1:0:80}"$'\n'
+    pids="$pids $p"
+  done
+}
+orphans=0
+case "$1" in orphans|kill-orphans) orphans=1;; esac
+scan
+if { [ "$1" = kill ] || [ "$1" = kill-orphans ]; } && [ -n "$pids" ]; then
+  kill -TERM $pids 2>/dev/null; sleep 2; scan
+  [ -n "$pids" ] && { kill -KILL $pids 2>/dev/null; sleep 1; scan; }
+fi
+printf '%s' "$found"
+"""
+
+
+def executor_procs(plan, action="list"):
+    """执行器里 agent 派生的进程（每行「pid ppid 命令」，空列表 = 干净）。命令失败、超时都抛 Unclear：看不清不等于没有。"""
+    ex = plan.get("executor") or {}
+    if not ex.get("docker") or not ex.get("container"):
+        raise Unclear("计划里没有 executor（docker、container），核对不了执行器进程")
+    cmd = list(ex["docker"]) + ["exec", ex["container"], "bash", "-c", PROC_SCRIPT, "proc", action]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Unclear(f"查执行器进程失败：{type(e).__name__}") from e
+    if r.returncode != 0:
+        raise Unclear(f"查执行器进程失败（退出码 {r.returncode}）：{(r.stderr or r.stdout).strip()[:200]}")
+    return [x.strip() for x in r.stdout.splitlines() if x.strip()]
+
+
+def settle_executor(night):
+    """停机的第二道回读（M5 #25）：执行器里 agent 派生的进程全部退出才算停住。
+    先给它们一点时间自己退（DT_NIGHT_PROCWAIT「次数,间隔秒」，默认 6,5）；还在，且计划写了 executor.kill: true（Hermes 或常浩批准），
+    就结束它们再独立列一次（#27）；没授权、结束不掉、看不清都返回不通过，由调用方冻结（停容器）。返回 (ok, 说明)。"""
+    tries, gap = (int(x) for x in os.environ.get("DT_NIGHT_PROCWAIT", "6,5").split(","))
+    try:
+        seen = []
+        for i in range(max(tries, 1)):
+            seen = executor_procs(night.plan)
+            if not seen:
+                break
+            if i + 1 < tries:
+                time.sleep(gap)
+        if not seen:
+            night.log("proc_check", ok=True)
+            return True, []
+        night.log("proc_residue", procs=seen)
+        if not night.plan["executor"].get("kill"):
+            return False, [f"执行器里仍有 {len(seen)} 个 agent 进程（计划没授权结束它们）：" + "；".join(seen[:4])]
+        executor_procs(night.plan, "kill")
+        left = executor_procs(night.plan)        # 结束之后另起一次独立回读，不拿 kill 自己的输出作数
+        night.log("proc_kill", before=seen, after=left)
+        if left:
+            return False, [f"结束后执行器里仍有 {len(left)} 个 agent 进程：" + "；".join(left[:4])]
+        return True, []
+    except Unclear as e:
+        night.log("proc_check", ok=False, error=str(e))
+        return False, [f"执行器进程回读不清：{e}"]
+
+
+def reap_orphans(night):
+    """夜跑途中每次检查都清孤儿进程（M5 #27）：run 被 Multica 取消或结束后，agent 放到后台的进程被 docker-init 收养、继续活着，
+    还能接着写远端、和下一个 run 抢工作区。计划写了 executor.kill: true 才动手。
+    返回要告警的文字（没有孤儿返回空串）；没授权、结束不掉、看不清都抛 Unclear，由调用方停机。"""
+    found = executor_procs(night.plan, "orphans")
+    if not found:
+        return ""
+    night.log("orphans", procs=found)
+    if not night.plan["executor"].get("kill"):
+        raise Unclear(f"执行器里有 {len(found)} 个失去 agent 的后台进程，计划没授权结束它们：" + "；".join(found[:3]))
+    executor_procs(night.plan, "kill-orphans")
+    left = executor_procs(night.plan, "orphans")
+    night.log("orphans_killed", before=found, after=left)
+    if left:
+        raise Unclear(f"执行器里的 {len(left)} 个孤儿进程结束不掉：" + "；".join(left[:3]))
+    return f"注意：执行器里有 {len(found)} 个失去 agent 的后台进程（run 已结束或被取消），已结束：" + "；".join(found[:3])
+
+
+# ---------- 远端快照（M5 #25） ----------
+
+def remote_snapshot(night):
+    """远端分支（名字 → 提交）和 PR（编号、状态、头提交）。读不到时返回带 error 的快照，不抛异常。"""
+    repo, at = night.plan.get("repo"), iso(now())
+    if not repo:
+        return {"at": at, "error": "计划里没写 repo"}
+    try:
+        br = subprocess.run([GH, "api", f"repos/{repo}/branches", "--paginate", "--jq", '.[]|.name+" "+.commit.sha'],
+                            capture_output=True, text=True, timeout=TIMEOUT)
+        prs = subprocess.run([GH, "pr", "list", "--repo", repo, "--state", "all", "--limit", "100", "--json",
+                              "number,state,headRefOid"], capture_output=True, text=True, timeout=TIMEOUT)
+        if br.returncode or prs.returncode:
+            raise ValueError((br.stderr or prs.stderr).strip()[:200])
+        branches = dict(x.split(" ", 1) for x in br.stdout.splitlines() if x.strip())
+        pulls = sorted(f"#{p.get('number')} {p.get('state')} {str(p.get('headRefOid'))[:12]}" for p in json.loads(prs.stdout))
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError, TypeError) as e:
+        return {"at": at, "error": f"{type(e).__name__}: {e}"[:200]}
+    return {"at": at, "branches": branches, "prs": pulls}
+
+
+def remote_diff(a, b):
+    """两次快照之间远端的变化（文字列表，空 = 没变）；任一次没读到就返回 None（未核对，不当作没变）。"""
+    if not a or not b or a.get("error") or b.get("error"):
+        return None
+    out = [f"分支 {n}：{(a['branches'].get(n) or '无')[:8]} → {(b['branches'].get(n) or '无')[:8]}"
+           for n in sorted(set(a["branches"]) | set(b["branches"])) if a["branches"].get(n) != b["branches"].get(n)]
+    out += [f"PR 变动：{p}" for p in b["prs"] if p not in a["prs"]]
+    return out
+
+
+def take_remote_snapshot(night):
+    """停机（STOPPED / FINISHED / 冻结）后给远端拍快照，之后的检查和晨报都拿它比。"""
+    snap = remote_snapshot(night)
+    night.state["remote_at_stop"] = snap
+    night.save()
+    night.log("remote_snapshot", when="stop", **snap)
+    return snap
+
+
+def alarm_once(night, kind, text):
+    """同一类告警内容没变就不重复发（每 5 分钟一次检查，避免刷屏）。"""
+    seen = night.state.setdefault("alarms", {})
+    if seen.get(kind) == text:
+        return None
+    seen[kind] = text
+    night.save()
+    return text
 
 
 # ---------- 命令 ----------
@@ -759,6 +922,12 @@ def preflight(night):
         why.append("家族里已有在跑的 run")
     if any(str(a.get("status")).lower() == "active" for a in items(night.mc("autopilot", "list"), "autopilots")):
         why.append("工作区里有启用中的 Autopilot")
+    try:      # 开跑前执行器得是干净的，否则停机时分不清残留是谁的（M5 #25）
+        left = executor_procs(night.plan)
+        if left:
+            why.append(f"执行器里已有 {len(left)} 个非守护进程：" + "；".join(left[:3]))
+    except Unclear as e:
+        why.append(str(e))
     return why
 
 
@@ -821,6 +990,30 @@ def watch_after(night):
         out.append(f"⚠️ 夜跑已结束（{st['outcome']}），还没 release 却有 run 开跑：" + "；".join(left) +
                    "。要接着干活，先在终端 release 再触发。" + ("请核对容器是不是被重启了。" if st.get("frozen") else ""))
         code = 1
+    if not (st.get("frozen") and st.get("freeze_verified")):   # 执行器还在跑：每次都再查一遍进程（M5 #25、#27）
+        try:
+            procs = executor_procs(night.plan)
+            if procs:
+                killed = bool(night.plan["executor"].get("kill"))
+                after = (executor_procs(night.plan, "kill") or executor_procs(night.plan)) if killed else procs
+                night.log("after_end_procs", procs=procs, killed=killed, after=after)
+                out.append(f"⚠️ 夜跑已结束（{st['outcome']}），执行器里又出现 {len(procs)} 个 agent 进程：" + "；".join(procs[:3]) +
+                           ("。已结束" + ("，但仍有残留，请手动停容器。" if after else "。") if killed else "。计划没授权结束它们，请手动停容器。"))
+                code = 1
+        except Unclear as e:
+            msg = alarm_once(night, "procs", f"⚠️ 夜跑已结束（{st['outcome']}），核对执行器进程失败：{e}")
+            if msg:
+                out.append(msg)
+                code = 1
+    base = st.get("remote_at_stop")
+    if base and not base.get("error"):   # 停机后远端还在变，说明还有东西能写（M5 #25）
+        diff = remote_diff(base, remote_snapshot(night))
+        if diff:
+            msg = alarm_once(night, "remote", "⚠️ 停机后远端有变化：" + "；".join(diff[:5]))
+            if msg:
+                night.log("remote_changed_after_stop", diff=diff)
+                out.append(msg)
+                code = 1
     return code, "\n".join(out)
 
 
@@ -904,6 +1097,12 @@ def cmd_tick(night):
         why = violations(night, snap, t)
     except Unclear as e:
         why = [f"核对上限时读不清：{e}"]
+    try:
+        note = reap_orphans(night)
+        if note:
+            out.append(note)
+    except Unclear as e:
+        why.append(f"执行器孤儿进程：{e}")
     if why:
         out.append(stop(night, why))
         return (1 if night.state.get("frozen") else 0), "\n".join(out)
@@ -992,6 +1191,18 @@ def cmd_report(night):
              f"推进：到 stage {st.get('stage')} / {night.last_stage()}"]
     for r in stopped:
         lines.append(f"停机：{r.get('outcome') or 'UNRECONCILED'}，原因 {'；'.join(r.get('reasons', []))}")
+    procs = [r for r in recs if r.get("event") in ("proc_check", "proc_residue", "proc_kill", "after_end_procs")]
+    if procs:
+        kills = [r for r in procs if r["event"] in ("proc_kill", "after_end_procs")]
+        bad = [r for r in procs if r["event"] == "proc_check" and not r.get("ok")]
+        lines.append("执行器进程：" + ("停机时没有残留" if not kills and not bad else
+                     "；".join([f"停机时残留 {len(r.get('before') or r.get('procs') or [])} 个，结束后剩 {len(r.get('after') or [])} 个"
+                                for r in kills] + [f"核对失败（{r.get('error')}）" for r in bad])))
+    if st.get("remote_at_stop"):
+        diff = remote_diff(st["remote_at_stop"], remote_snapshot(night))
+        lines.append("远端：" + ("停机时或现在读不到，未核对" if diff is None else
+                                 f"停机（{bj(st['remote_at_stop']['at'])}）后没有变化" if not diff else
+                                 "⚠️ 停机后有变化：" + "；".join(diff[:5])))
     if gaps:
         lines.append(f"检查间隔异常 {len(gaps)} 次（最长 {max(g['minutes'] for g in gaps)} 分钟）")
     audit, new = gh_audit(night)
