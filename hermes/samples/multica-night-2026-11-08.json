@@ -1,0 +1,52 @@
+{
+  "id": "2026-11-08-todo-lite-v0.2",
+  "workspace_id": "f2a6e4a9-5328-45b0-9752-cba5012d2aba",
+  "project_id": "7d0526b3-3541-437b-b5ca-83f08c9ef9b4",
+  "repo": "Natsukashii1997/dt-sandbox",
+  "owner_member_id": "837cd0c5-7063-4d1d-8e2a-f5480d711eae",
+  "agents": {
+    "claude": "0f7f3f17-38d7-4f4b-9052-fa3694ce1cad",
+    "codex": "d00827bc-5de5-4481-b07e-10c2d8d8e732"
+  },
+  "limits": {"hours": 4, "max_runs": 20, "max_consecutive_failures": 2, "stall_minutes": 30},
+  "freeze_cmds": [
+    ["/opt/homebrew/bin/docker", "--context", "colima-multica", "update", "--restart=no", "multica-isolated-agent-1"],
+    ["/opt/homebrew/bin/docker", "--context", "colima-multica", "stop", "multica-isolated-agent-1"]
+  ],
+  "freeze_check": {
+    "cmd": ["/opt/homebrew/bin/docker", "--context", "colima-multica", "inspect", "-f", "{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}", "multica-isolated-agent-1"],
+    "expect": "false no"
+  },
+  "parent": {
+    "title": "M5 首夜：todo-lite v0.2 无人值守夜跑（Hermes 主控）",
+    "description": "DT-ORC M5 首夜（digital-twin #92）。UNATTENDED，只在 DT 沙盒 / dt-sandbox。\n\n本单指派给常浩（成员），不会唤醒任何 agent；下一 stage 由 Hermes 的 multica_night.py 推进，到上限按 ARCHITECTURE 5.3a 停机。\n今晚不合并、不送审：每张子单做到开 PR、把单改为 in_review 为止，早上由常浩看 PR、送审、决定合并。\n\nstage 1：导出、搜索两个新命令（Claude 开发）\nstage 2：反向验证 stage 1 的两个 PR（Codex 验证）\nstage 3：按验证结论返修，没有要修的就做统计命令（Claude 开发）\nstage 4：回归与夜跑总结（Codex 验证）"
+  },
+  "children": [
+    {
+      "key": "A", "stage": 1, "agent": "claude",
+      "title": "stage1 export 命令（JSON / CSV 导出）",
+      "description": "目标：新增 `python -m todo_lite export --format json|csv [--output 文件]`，把全部待办按 list 的顺序导出；不给 --output 时打印到标准输出。\n验收：\n1) JSON 是数组，每项 {\"id\": 序号, \"text\": 文字, \"done\": 布尔}；中文原样输出（不转义成 \\\\u）。\n2) CSV 有表头 id,text,done，done 写 true/false；文字里有逗号、引号、换行时按 CSV 规则转义，能被 csv 模块原样读回。\n3) 空清单：JSON 输出 []，CSV 只有表头。\n4) --format 缺省或不合法时报错，退出码 2；--output 写文件用原子写入（复用 storage 里现成的写法）。\n5) 以上各有测试；README 命令表加一行。"
+    },
+    {
+      "key": "B", "stage": 1, "agent": "claude",
+      "title": "stage1 list 支持搜索和按状态筛选",
+      "description": "目标：`python -m todo_lite list` 增加 `--search 关键词`（不区分大小写的子串匹配）和 `--status open|done|all`（默认 all）。\n验收：\n1) 序号仍显示原序号（不因筛选重新编号），这样 done / remove 照旧能用。\n2) 两个参数可以同时用；没有匹配时输出“没有符合条件的待办”，退出码 0。\n3) --status 不合法时报错，退出码 2。\n4) 不改 export 命令（另一张单在做），尽量只动 list 相关代码，避免和它冲突。\n5) 以上各有测试；README 命令表更新。"
+    },
+    {
+      "key": "V", "stage": 2, "agent": "codex",
+      "title": "stage2 反向验证 {A} 和 {B}",
+      "description": "目标：独立验证 {A}（export）和 {B}（list 搜索筛选）两个 PR 是否真的满足各自 issue 的验收。\n做法：用 `multica issue get` 和 `multica issue pull-requests` 读两张单和它们的 PR；分别检出两个 PR 的分支跑全部测试；按验收逐条找反例（边界输入、特殊字符、空数据、错误参数、序号）。\n交付：\n1) 在本单评论里分别给出两个 PR 的结论，格式：「{A}：结论：通过 / 需修改」，后面列 P0 / P1 / P2 问题，每条带复现命令和实际输出。\n2) 可以在对应 PR 上留评论；不要在 {A}、{B} 两张单上评论（会唤醒对方 agent）。\n3) 你写的对抗测试推到你自己的 agent/ 分支，基于对应 PR 的分支开 PR（--base 用那个 PR 的分支名），标题带本单编号。\n4) 不改 {A}、{B} 的代码。"
+    },
+    {
+      "key": "R", "stage": 3, "agent": "claude",
+      "title": "stage3 按 {V} 的验证结论返修（没有要修的就做 stats）",
+      "description": "目标：读 {V} 的评论里对 {A}、{B} 的结论。\n- 有 P0 / P1：在对应 PR 原来的 agent/ 分支上追加提交修掉（不 force push），每条在 PR 里回复怎么修的、测试结果；P2 可以只回复理由不修。\n- 两个都是「结论：通过」且没有 P1：改做 `python -m todo_lite stats`，输出总数、已完成、未完成、完成率（百分比取整），空清单输出全 0 和 0%；从 main 拉新分支、开新 PR，带测试，README 加一行。\n交付：本单评论写清这次走的是哪条路、改了哪些 PR、HEAD 和测试原样结果。不要在 {A}、{B}、{V} 上评论。"
+    },
+    {
+      "key": "F", "stage": 4, "agent": "codex",
+      "title": "stage4 回归与夜跑总结",
+      "description": "目标：对今晚所有还开着的 dt-sandbox PR 做一次回归，写夜跑总结给常浩早上看。\n做法：`gh pr list --state open` 列出 PR；逐个检出跑全部测试；检查 {R} 的返修是否回应了 {V} 的每条 P0 / P1。\n交付：在本单评论里写总结：每个 PR 一行（编号、对应单、测试结果、你的结论：建议合并 / 需修改 / 先合并谁再合并谁），合并顺序和可能的冲突；最后列出要常浩决定的事。只写评论，不改代码、不开 PR。"
+    }
+  ],
+  "common": "通用要求（今晚是无人值守夜跑，Hermes 主控）：\n- Python 3.11 标准库 + pytest；代码在 todo_lite/，测试在 tests/；提交前跑 `python -m pytest -q`，原样结果写进 PR 正文和本单评论。\n- PR 标题以本单编号开头；不合并任何 PR，不推 main。\n- 做完（PR 已开或评论已写好）后把本单改为 in_review：`multica issue status <本单> in_review`。这是交付信号，下一 stage 靠它推进。\n- 只动本单：不指派、不改其他 issue 的状态，不在其他 issue 上评论，不建子单，不建 Wakeup / Autopilot。\n- 卡住、需要越界、结果不明时，按你的停机规则把本单改为 blocked 并在本单评论写原因。"
+}
