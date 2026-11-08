@@ -20,7 +20,7 @@
 V4.0 是一次 MAJOR 变更（按 12.3：执行架构变化），决议见 ADR-013：
 
 1. **执行层从 ORCA 换成本机自托管 Multica，锁定 v0.8.1**；Multica daemon 原生跑在 Mac 上，拉起本机的 Claude Code、Codex CLI。ORCA 不再是任何流程的依赖，按 10.3 退役。
-2. **ChatGPT 送审改走驿窗（postpane）的 Chrome 插件通道**（`relay_to_chatgpt`，自动往返最多 2 轮），不再走 ORCA 内嵌浏览器。
+2. **ChatGPT 送审改走驿窗（postpane）的 Chrome 插件通道**（`relay_to_chatgpt`，自动往返按风险级给预算，见 3.3、6.4），不再走 ORCA 内嵌浏览器。
 3. **事实所有权三分**：Hermes `twin_state` 管业务，Multica 管执行，GitHub 管交付（2.2）。
 4. **Multica 不推送也不合并**：agent 只推自己的 `agent/` 分支并开 PR；合并归 Hermes 合并官加策略记录（7.2、5.5）。
 5. **保留 V3.1 中与执行平台无关的部分**：A+ 双模式、`run_authorization` 签发与消耗规则、L0–L3 风险分级、审核契约、异议机制、不确定结果不重发、低风险自动合并的六项条件（本版扩为八项，见 5.5）。
@@ -192,9 +192,9 @@ Hermes 可按**明确规则**排序任务、重试白名单内可确认幂等的
 
 **通道**：`chatgpt.com 标签页（插件内容脚本）⇄ 插件后台 ⇄ Chrome Native Messaging ⇄ 转接程序 ⇄ 驿窗（本机套接字）`。协议以 postpane 仓库 `docs/chatgpt-channel.md` 为准，本文只引用与架构相关的约定：
 
-- `relay_to_chatgpt {title, summary?, brief}` 是驿窗 MCP 的工具；驿窗只认调用方自报的 `CLAUDE_CODE_SESSION_ID`，**非 Claude Code 客户端一律拒绝**；单条文字上限 768 KB。
+- `relay_to_chatgpt {title, summary?, brief, risk?, extra?}` 是驿窗 MCP 的工具（`risk`、`extra` 自 postpane#233 起）；驿窗只认调用方自报的 `CLAUDE_CODE_SESSION_ID`，**非 Claude Code 客户端一律拒绝**；单条文字上限 768 KB。
 - 每次送审是一条「接力」，记录在驿窗数据目录的 `chatgpt/handoffs.json`：阶段 `sending → delivered → working → replied → returned`（另有 `ended / failed`），每一步带时间。
-- **自动往返最多 2 轮**：回信最后一行「结论：通过」→ 自动结束；「结论：需修改」且不到 2 轮 → 把回信全文转回 Claude，Claude 改完再调 `relay_to_chatgpt`；第 2 轮仍需修改、或回信没写结论 → 停下交还常浩。这与 agent-kit《工程流程》第 8 节第 3 条一致：**同一份送审 2 轮未过就由常浩拍板，不开第 3 轮**。
+- **自动往返按风险级给预算**（postpane#233，对齐 multi-agent MA-02 契约）：调用时 `risk` 填任务的 L 级。L1 审 1 轮，回「需修改」就转回 Claude 改完、在 PR 写「补改未复审」后结束；L2、L3 自动最多 2 轮，不填按 2 轮；L0 驿窗拒收。同一个 PR（brief 里第一个 PR 链接）的轮数跨 Claude 会话累计，另开一单不清零。回「结论：通过」自动结束；预算内回「需修改」转回 Claude 返修；预算用完、或回信没写结论，停下交还常浩，常浩授权再审一次时调用带 `extra`（谁授权、为什么）。回信倒数第二行可写「审查出口：通过 / 返修 / 证据不足暂停 / 决策升级」：证据不足暂停转回取证后自动续上，决策升级交常浩，和结论对不上也交常浩。这与 agent-kit《工程流程》第 8 节第 3 条一致。
 - ChatGPT 30 分钟没回信、Claude 2 小时没交回复审，驿窗都停下交还常浩。
 
 **送审包必须绑定版本**（6.2）：brief 第一段固定写 `repo / PR / head_sha（完整 40 位）/ base_sha（完整 40 位）/ multica_issue / packet_sha256`。审查员把驿窗返回的 `handoffId` 和最终结论，以「`head_sha` + 结论 + `handoffId` + 审核模式」写进 PR 评论和 Multica issue 评论，作为**索引**；合并官据 `handoffId` 回到驿窗接力记录核实，PR 评论本身不是证据（5.5 第 1 条）。HEAD 一变，旧结论作废（6.4）。
@@ -207,7 +207,7 @@ Hermes 可按**明确规则**排序任务、重试白名单内可确认幂等的
 2. **调用方身份能否成立**。Multica daemon 会从子进程环境里过滤掉外层的 `CLAUDE_CODE_SESSION_ID`，由它拉起的 Claude Code 自己生成会话 id；这个 id 能否传到驿窗 MCP、被驿窗接受〔待实测〕。
 3. **回信能否回到 Multica**。驿窗的「转回 Claude」经 Claude Code 桌面插件把回信送回发起会话；Multica 拉起的是一次性的 Claude 进程，run 结束后没有会话可接。可选做法：(甲) 驿窗新增「回信写成 Multica issue 评论」，再由 issue 上的 `event` 类 Wakeup 唤醒开发 agent 返修；(乙) 驿窗提供只读查询接口，审查员 agent 用 `every` 类 Wakeup 定期 `checkin`。两者都需要驿窗侧改动，另开 postpane issue，本文不定。
 
-**实测通过之前的做法（现行）**：送审由**常浩桌面上的 Claude Code 会话**调 `relay_to_chatgpt` 发起（本 PR 即如此），自动往返在这个会话里完成；结论按上面的三项写进 PR 评论和 issue 评论。审查员 agent 先不建。
+**实测通过之前的做法（现行）**：送审由**常浩桌面上的 Claude Code 会话**调 `relay_to_chatgpt` 发起，`risk` 填任务的 L 级（本 PR 即如此），自动往返在这个会话里完成；结论按上面的三项写进 PR 评论和 issue 评论。审查员 agent 先不建；以后建时，它的送审调用同样要带 `risk`（任务的 L 级），派单单据里的 L 级就是它的来源。
 
 ---
 
@@ -476,10 +476,10 @@ Claude 对阻断项选择：`ACCEPT`（修复 + 新 HEAD）、`CHALLENGE`（指�
 
 ### 6.4 返修范围与上限
 
-- 每份送审最多 2 轮（驿窗自动往返上限为 2，《工程流程》第 8 节第 3 条）；L1 默认 1 轮返修即可收口。这是**自动循环预算**，不是安全问题可以忽略的上限。
+- 审查预算按风险级（《工程流程》第 8 节第 3 条、multi-agent MA-02 第 5 节）：L1 审 1 轮，需修改就改完在 PR 写「补改未复审」收口；L2、L3 自动最多 2 轮；L0 不送审。同一个 PR 跨会话累计，换 HEAD、另开一单都不清零。这是**自动循环预算**，不是安全问题可以忽略的上限。
 - 第二轮优先审新增 Diff、未关闭意见和直接受影响的相邻模块；不自动追加无关范围。
-- 超限时 Hermes 向常浩汇总已知缺陷、已尝试措施、是否有替代方案，其他无依赖任务继续。
-- HEAD/base/任务契约变化后旧结论失效；不得重用过期结论。
+- 超限时 Hermes 向常浩汇总已知缺陷、已尝试措施、是否有替代方案，其他无依赖任务继续；常浩授权专项续审的，送审带 `extra` 写明授权与理由。
+- HEAD/base/任务契约变化后旧结论失效；不得重用过期结论。结论失效不等于轮数清零：新 HEAD 的复审仍计入同一个 PR 的预算。
 
 ---
 

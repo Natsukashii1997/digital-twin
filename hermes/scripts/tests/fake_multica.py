@@ -13,7 +13,9 @@ world：
   start_runs 改 todo 时是否给 agent 单开一个 queued run（默认 true）
   fail       [命令前缀]：命中就退出码 1
   stuck      [run id]：cancel-task 对它们不生效（模拟取消不掉）
-  spawn      {"on": 命令行, "nth": n, "run": {...}}：这条命令第 n 次被调用时，先往 runs 里加这个 run（模拟中途冒出新 run）
+  spawn      {"on": 命令行, "nth": n, "run": {...}, "write": {"path": 文件, "text": 内容}}：这条命令第 n 次被调用时，
+             先往 runs 里加这个 run（模拟中途冒出新 run）、往 path 写入 text（模拟别的进程中途写出应急标记），两项都可省；
+             触发时把这次调用在 calls 里的下标记进 spawn["fired_at"]，供断言触发点
 参数里的 --workspace-id、--profile、--output 都忽略，但会记下来供断言。
 """
 import json
@@ -74,7 +76,12 @@ sp = w.get("spawn")
 if sp and line == sp["on"]:
     sp["seen"] = sp.get("seen", 0) + 1
     if sp["seen"] == sp["nth"]:
-        w.setdefault("runs", []).append(sp["run"])
+        sp["fired_at"] = len(w["calls"]) - 1
+        if "run" in sp:
+            w.setdefault("runs", []).append(sp["run"])
+        if "write" in sp:
+            with open(sp["write"]["path"], "w", encoding="utf-8") as f:
+                f.write(sp["write"]["text"])
 
 
 def touch(i):

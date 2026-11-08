@@ -790,6 +790,89 @@ class MulticaNight(unittest.TestCase):
         (self.root / "night-test" / "messages" / f"{rid}.jsonl").write_text('{"seq": 1}\n{"seq": 3}\n', encoding="utf-8")
         self.assert_frozen(self.run_cli("tick", now=at(12)), "序号有缺口")
 
+    # ---- ChatGPT High 第 3 轮（#93，驿窗 h1a1b8d23ccb01）----
+    def logged_then_stop(self, tamper):
+        """A 已记账（终态、消息已导出、logged），之后 tamper 造出缺口，再人工停机。"""
+        self.started()
+        self.finish("A")
+        self.assertEqual(self.run_cli("tick", now=at(12)), (0, ""))
+        rid = next(r["id"] for r in self.get()["runs"] if r["issue"] == self.ident("A"))
+        self.assertTrue(self.state()["runs"][rid]["logged"])
+        tamper(rid)
+        return self.run_cli("stop", "--reason", "演练", now=at(13))
+
+    def test_r3_p0_logged_run_remote_gap_at_final_export_freezes(self):
+        """已记账的 run 远端后来冒出跳号消息（2 之后是 4）：最后一次导出要重新核对，不能写 STOPPED。"""
+        res = self.logged_then_stop(lambda rid: self.edit(lambda w: w["messages"][rid].append({"seq": 4})))
+        self.assert_frozen(res, "最后一次导出时发现运行记录核不清")
+
+    def test_r3_p0_logged_run_file_gap_at_final_export_freezes(self):
+        """已记账的 run 的消息文件后来缺了中间一行：最后一次导出要重新核对文件，不能写 STOPPED。"""
+        def tamper(rid):
+            p = self.root / "night-test" / "messages" / f"{rid}.jsonl"
+            p.write_text('{"seq": 1}\n{"seq": 3}\n', encoding="utf-8")
+        self.assert_frozen(self.logged_then_stop(tamper), "最后一次导出时发现运行记录核不清")
+
+    def test_r3_p1_marker_between_get_and_status_blocks_advance(self):
+        """应急标记恰好在 advance 读完 V（issue get）之后、改 todo 之前写出：不推进，转为冻结。"""
+        self.started()
+        self.finish("A")
+        self.finish("B")
+        v = self.ident("V")
+        marker = self.root / "night-test" / "emergency.json"
+        text = json.dumps({"status": "EMERGENCY_REQUESTED", "at": at(19)})
+        # 这次 tick 里 issue get V：第 1 次在对账（collect），第 2 次在 advance
+        self.edit(lambda w: w.update(spawn={"on": f"issue get {v}", "nth": 2, "write": {"path": str(marker), "text": text}}))
+        code, out = self.run_cli("tick", now=at(20))
+        w = self.get()
+        fired = w["spawn"].get("fired_at")
+        self.assertIsNotNone(fired, "标记确实是在 advance 读 V 时写出的")
+        self.assertNotEqual(w["calls"][fired + 1]["args"][:3], ["issue", "runs", v], "触发点不是对账里的那次读取")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.issue("V")["status"], "backlog")
+        self.assertFalse(any(c["args"][:4] == ["issue", "status", v, "todo"] for c in w["calls"]), "从没把 V 改成 todo")
+        self.assertEqual(self.state()["outcome"], "UNRECONCILED")
+
+    def test_r3_p1_marker_during_stop_readback_freezes_and_release_refused(self):
+        """停机回读期间应急标记出现：不写 STOPPED，以冻结为准；非交互 release 被拒。"""
+        self.started()
+        self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
+        marker = self.root / "night-test" / "emergency.json"
+        text = json.dumps({"status": "EMERGENCY_REQUESTED", "at": at(6)})
+        # 停机里 autopilot list：第 1 次在 ② 暂停 Autopilot，第 2 次在 ⑥ 回读
+        self.edit(lambda w: w.update(spawn={"on": "autopilot list", "nth": 2, "write": {"path": str(marker), "text": text}}))
+        code, out = self.run_cli("stop", "--reason", "演练", now=at(6))
+        self.assertIsNotNone(self.get()["spawn"].get("fired_at"))
+        self.assertEqual(code, 1, out)
+        self.assertIn("应急冻结标记", out)
+        self.assertNotEqual(self.state()["outcome"], "STOPPED")
+        self.assertEqual(self.state()["outcome"], "UNRECONCILED")
+        code, out = self.run_cli("release", "--by", "常浩", "--confirm", "night-test:UNRECONCILED", now=at(30))
+        self.assertEqual(code, 1, out)
+        self.assertIn("交互式终端", out)
+        self.assertNotIn("released", self.state())
+
+    def test_r3_p1_marker_after_clean_stop_blocks_non_interactive_release(self):
+        """已正常 STOPPED，之后才出现应急标记：release 也按冻结处理，非交互调用拒绝。"""
+        self.started()
+        code, out = self.run_cli("stop", "--reason", "演练", now=at(5))
+        self.assertEqual((code, self.state()["outcome"]), (0, "STOPPED"), out)
+        (self.root / "night-test" / "emergency.json").write_text(json.dumps({"status": "EMERGENCY_REQUESTED", "at": at(6)}))
+        code, out = self.run_cli("release", "--by", "常浩", "--confirm", "night-test:STOPPED", now=at(7))
+        self.assertEqual(code, 1, out)
+        self.assertIn("交互式终端", out)
+        self.assertNotIn("released", self.state())
+        self.assertTrue((self.root / "night-current").exists())
+
+    def test_r3_p2_blank_line_in_message_file_is_gap(self):
+        """消息文件中间夹一个空行（1、空、2）：算读不懂，不能当作连续。"""
+        self.started()
+        self.finish("A")
+        rid = self.get()["runs"][0]["id"]
+        (self.root / "night-test" / "messages").mkdir(exist_ok=True)
+        (self.root / "night-test" / "messages" / f"{rid}.jsonl").write_text('{"seq": 1}\n\n{"seq": 2}\n', encoding="utf-8")
+        self.assert_frozen(self.run_cli("tick", now=at(12)), "序号有缺口")
+
     # ---- 其他 ----
     def test_tick_gap_is_noted(self):
         self.started()

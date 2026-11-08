@@ -9,15 +9,27 @@
 ## 2026-11-08 · M5 首夜：Hermes 主控的 Multica 夜跑与独立停机检查（#92）
 
 - **来由**：常浩要今晚做 Hermes 主导的 Multica 无人值守测试，11-08 选「方案甲」（Hermes 外部推进，父单指派给常浩）。约 02:00 常浩说「我要去睡了，剩下所有的需要批准的内容都让 Hermes 去批准。」
-- **改了什么**：新增 `hermes/scripts/multica_night.py`（plan / start / tick / stop / status / report / release）：按计划建单、按 stage 推进、边跑边导 run-log 和消息、到上限按 5.3a 停机、回读不过就冻结执行器容器，计数持久化、重启不清零；`tests/fake_multica.py` + `test_multica_night.py` 62 项；`multica_night_tick.py` 是定时任务入口；`approve` 记下几点开跑，到点由 tick 开跑；名册 v1.6 给 dt-sandbox 标 `sandbox: true` 和 Multica 工作区；今晚计划 `hermes/samples/multica-night-2026-11-08.json`；执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md`（写明和架构 7.3 等处的差异、批准来源、开跑前清单、时间线、验收）。
+- **改了什么**：新增 `hermes/scripts/multica_night.py`（plan / start / tick / stop / status / report / release）：按计划建单、按 stage 推进、边跑边导 run-log 和消息、到上限按 5.3a 停机、回读不过就冻结执行器容器，计数持久化、重启不清零；`tests/fake_multica.py` + `test_multica_night.py` 68 项；`multica_night_tick.py` 是定时任务入口；`approve` 记下几点开跑，到点由 tick 开跑；名册 v1.6 给 dt-sandbox 标 `sandbox: true` 和 Multica 工作区；今晚计划 `hermes/samples/multica-night-2026-11-08.json`；执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md`（写明和架构 7.3 等处的差异、批准来源、开跑前清单、时间线、验收）。
 - **测试**：`python3 -B -m unittest discover -s hermes/scripts/tests` → `Ran 464 tests`（系统 Python 3.9，和 Hermes、CI 同版本） / `OK`；`orca/tests` → `OK`。真实 multica 只读冒烟：issue get / runs / wakeup list / autopilot list / run-messages --since / issue list --updated-since 的拼法和输出格式都对。
 - **Hermes 审批（02:48 左右）**：按常浩委托把 7 项（合并、安装、定时任务、清理 SBX-2/3、令牌偏离、真实演练、22:00 开跑）交 Hermes，**7 项全部不批准**：委托经 Claude 转述、未经常浩本人在已核验私聊或亲手操作确认，不能当作授权，也不得记为 owner_approved。请求与原样回复在 `evidence/2026-11-08-M5首夜/`。
 - **独立审查**：子 agent 只读审查出 10 条，第 1–9 条已修并补测试（见第三个提交），第 10 条的测试缺口已补；「取消 running 的 run 实际要多久」留到真实演练量。
 - **Hermes 飞书批复（08:34，`03-Hermes飞书批复.md`）**：常浩在飞书私聊委托后，Hermes 附条件批准第 2–7 项，第 1 项（合并）要先有绑定 HEAD 的独立技术审核。已执行第 4 项（SBX-2、SBX-3 改 cancelled 并回读，`04-清理探针单.md`），核验了第 5 项的隔离前提（`05-隔离前提核验.md`）。
-- **ChatGPT High 独立审查（驿窗 `h1a1b894e96600`，L3）**：第 1 轮「需修改」（P0 ×1、P1 ×7、P2 ×3），已全部返修并补测试；第 2 轮「需修改」、出口决策升级（剩 P0 ×1、P1 ×2、P2 ×1），常浩选「修完再复审」，已返修并送第 3 轮（只看这 4 处）。P1-07（TTY + 绑定确认只防误操作、不是身份证明）的剩余风险待常浩确认。第 3 轮（驿窗 `h1a1b8d23ccb01`，因本会话 MCP 旧版改由无头 claude 代发）仍「需修改」：最终导出跳过已记账 run（P0）、advance 检查与改状态之间的竞态（P1）、停机途中出现应急标记仍写 STOPPED 且 release 不查标记（P1）、空行不算缺口（P2）；代码已修（提交 76012ad），对应的确定性反向测试还没补；满 3 轮，第 4 轮还是常浩直接批，待常浩定。
+- **ChatGPT High 独立审查（驿窗 `h1a1b894e96600`，L3）**：第 1 轮「需修改」（P0 ×1、P1 ×7、P2 ×3），已全部返修并补测试；第 2 轮「需修改」、出口决策升级（剩 P0 ×1、P1 ×2、P2 ×1），常浩选「修完再复审」，已返修并送第 3 轮（只看这 4 处）。P1-07（TTY + 绑定确认只防误操作、不是身份证明）的剩余风险待常浩确认。第 3 轮（驿窗 `h1a1b8d23ccb01`，因本会话 MCP 旧版改由无头 claude 代发）仍「需修改」：最终导出跳过已记账 run（P0）、advance 检查与改状态之间的竞态（P1）、停机途中出现应急标记仍写 STOPPED 且 release 不查标记（P1）、空行不算缺口（P2）；代码已修（提交 76012ad）。反向测试已补 6 项（`test_r3_*`；`fake_multica.py` 的 spawn 可在某条命令第 n 次调用时写文件，模拟应急标记恰在 advance 读单后、停机回读中出现）：换回修复前的主控 6 项全失败，逐处单独撤回修复也各有专门的测试失败。满 3 轮，第 4 轮还是常浩直接批，待常浩定。
 - **未做**：合并、安装、Hermes 定时任务、真实演练、建单、开跑。
 - **范围外发现**：`hermes/scripts/tests/README.md` 里的总数「共 356 项」早已过时（合并前就是 402），没改。
-- **唯一下一步**：常浩确认审批方式（自己批这 7 项，或在飞书私聊里对 Hermes 确认委托范围后由 Hermes 批），然后合并、安装、白天演练，21:30 核对清单，22:00 开跑。
+- **待常浩定（第 3 轮外）**：已记账 run 的消息文件尾部被截掉（如 1、2 变成只剩 1）时查不出来，停机照样写 STOPPED（实测）；`file_seqs` 只查从 1 连续，没比对已记账的 last_seq。一行可修，但不在第 3 轮的 4 处范围内，没改。
+- **唯一下一步**：常浩定第 4 轮复审还是直接批合并，并确认 P1-07 与上面尾部截断一条；之后合并、安装、建定时任务、真实演练，21:30 核对清单，22:00 开跑。
+
+## 2026-11-08 · DT-ORC ARCHITECTURE 对齐 MA-02 审查预算（#94）
+
+- **来由**：multi-agent MA-02 工程审查契约 v0.2（`00131dc`）。常浩 11-07 批准审查预算原则，11-08 在 #94 上回复「照单里改」；驿窗已落地（postpane#233，`fb62a6a`）。
+- **改了什么**：`docs/DT-ORC/ARCHITECTURE.md`
+  - 第 0 节第 2 条：不再写「最多 2 轮」；
+  - 3.3：工具参数加 `risk?`、`extra?`；「自动往返最多 2 轮」一条改为按风险级的预算（L1 1 轮收口、L2/L3 最多 2 轮、L0 拒收、同一 PR 跨会话累计、超预算授权续审、回信倒数第二行审查出口）；现行做法里写明 `risk` 填任务的 L 级；以后建审查员 agent 也要带 `risk`；
+  - 6.4：第一条按风险级改；「HEAD 变化旧结论失效」补「轮数不清零」；超限一条补 `extra`。
+- **派单代码没改**：查过 `hermes/scripts/dispatch.py`、`run_worker.py`，现在没有 worker 调用 `relay_to_chatgpt`。3.3 写明审查员 agent 还没建，送审由常浩桌面上的 Claude 会话发起，所以本单只改文档。以后建审查员 agent 时，再把 `risk` 写进它的契约。
+- **测试**：见 PR。
+- **唯一下一步**：沿用上一节（批 2 与 I-DW-1）。
 
 ## 2026-11-07 · AI 接入按全局规则 P-13 补齐：配置文件、自检命令、不可用报错不换家、留痕
 
