@@ -26,6 +26,7 @@ import progress_data  # noqa: E402  复用名册路径、CURRENT 的“下一步
 TZ = ZoneInfo("Asia/Shanghai")
 DAY_START = dt.time(4, 0)          # 统计日从 04:00 开始：常浩常干到凌晨
 STALE = dt.timedelta(days=1)       # CURRENT 比最近一次合并早这么多就算过期
+LATE_SECTION = dt.timedelta(days=7)   # 分支上写好、晚几天才合进主分支的节，标题日期最多往前认这么多天
 GOAL = re.compile(r"^当前阶段目标：(.+)$")
 GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
 # 交付（安装 / 发布）、验收不从 CURRENT 的文字下结论（常浩 2026-11-09 定「甲：只摘原文」）：
@@ -174,12 +175,16 @@ def show(root, ref, name):
     """某分支上的文件内容；没有这个文件返回 None，git 别的失败抛 Fail（不当成「没有文件」）。"""
     if not ref:
         return None
-    r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True, text=True, env=git_env())
+    r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True, env=git_env())
     if r.returncode == 0:
-        return r.stdout
-    if "does not exist" in r.stderr or "exists on disk, but not in" in r.stderr:
+        try:
+            return r.stdout.decode("utf-8")
+        except UnicodeDecodeError:   # 一个仓库的文件编码不对，只让这一项取不到，不拖垮整份日报
+            raise Fail(f"{name} 不是 UTF-8 编码")
+    err = r.stderr.decode("utf-8", "replace")
+    if "does not exist" in err or "exists on disk, but not in" in err:
         return None
-    raise Fail((r.stderr or r.stdout).strip()[:200] or f"git show 退出码 {r.returncode}")
+    raise Fail((err or r.stdout.decode("utf-8", "replace")).strip()[:200] or f"git show 退出码 {r.returncode}")
 
 
 def goal(root, ref):
@@ -219,15 +224,20 @@ def sections(text):
 
 
 def current_state(root, ref, w):
-    """CURRENT 最上面一节、下一步（及其出处）、最后一次提交 CURRENT 的时间、统计日内改过没有，以及当天日期的各节（摘录用）。
+    """CURRENT 最上面一节、下一步（及其出处）、最后一次提交 CURRENT 的时间、统计日内改过没有，以及当天的节（摘录用）。
     ref 是主分支在统计日结束时的提交。没有 CURRENT 返回 None；git 读不了抛 Fail。"""
     text = show(root, ref, "CURRENT.md")
     if text is None:
         return None
     secs = sections(text)
-    # 统计日开始时已经在 CURRENT 里的节不算当天的：D 凌晨写、标着 D 的节，前一个统计日已经列过（#110 第六轮审查）
+    # 当天的节 = 统计日内新出现在主分支上的节（和统计日开始时的 CURRENT 比）：
+    # - 统计日开始时已经有的不算：D 凌晨写、标着 D 的节，前一个统计日已经列过（#110 第六轮审查）；
+    # - 分支上写好、标着前几天、当天才合进主分支的照样算，否则它在哪一天都不出现（#110 第七轮审查）；
+    # - 已有的节标着 D 或 D+1、当天又往里追加了内容的也算（凌晨写、白天补「已安装」）。
     start = git(root, "rev-list", "-1", "--first-parent", f"--before={(w[0] - dt.timedelta(seconds=1)).isoformat()}", ref).strip()
-    before = {t for t, _, _ in sections(show(root, start, "CURRENT.md") or "")} if start else set()
+    before = {t: b for t, _, b in sections(show(root, start, "CURRENT.md") or "")} if start else {}
+    days = (w[0].date().isoformat(), w[1].date().isoformat())
+    oldest = (w[0].date() - LATE_SECTION).isoformat()
     # --first-parent：普通合并（no-ff）时取合并提交的时间，不沿着分支走到分支上的旧提交
     stamp = git(root, "log", "-1", "--first-parent", "--format=%cI", ref, "--", "CURRENT.md").strip()
     nxt = progress_data.next_step(text.splitlines())
@@ -255,9 +265,9 @@ def current_state(root, ref, w):
         "last_commit": stamp or None,
         # ref 是统计日结束时的快照：截至那时 CURRENT 最后一次提交落在窗口里，就是当天改过（04:00 以后的提交看不到）
         "changed": inside(stamp, w),
-        # 快照截在 D+1 04:00，标着 D+1 的节一定是凌晨写的，也算统计日 D 的；统计日开始前就有（标题没改）的不算
+        # 快照截在 D+1 04:00，标着 D+1 的节一定是凌晨写的，也算统计日 D 的；没写日期的节不认
         "dated_today": [(t, b) for t, d, b in secs
-                        if d in (w[0].date().isoformat(), w[1].date().isoformat()) and t not in before],
+                        if d and oldest <= d <= days[1] and (t not in before or (d in days and before[t] != b))],
     }
 
 
@@ -515,7 +525,7 @@ def project(p, w, hub):
         fresh["current_last_commit"], fresh["top_section_date"] = cur["last_commit"], cur["top_date"]
         delta["current_changed"] = cur["changed"]
         dated = cur["dated_today"]
-        if cur["changed"] and cur["top_date"] and cur["top_date"] < day.isoformat():
+        if cur["changed"] and cur["top_date"] and cur["top_date"] < day.isoformat() and not dated:
             rec["notes"].append(f"CURRENT 当天有提交，但最上面一节是 {cur['top_date']} 的：可能只改了文件头或旧节")
         if not cur["next_step"]:
             rec["notes"].append("CURRENT 最上面一节、文件头和「唯一下一步」节都没写下一步")

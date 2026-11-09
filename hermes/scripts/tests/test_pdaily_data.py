@@ -233,6 +233,44 @@ class RepoTests(Base):
         self.assertEqual(d9["merged_prs"][0]["claims"], [])       # 11-09 不再列、也不挂给同号的新 PR
         self.assertEqual(d9["unmatched_sections"], [])
 
+    def test_section_written_on_branch_and_merged_later_counts_on_merge_day(self):
+        r = make_repo(self.root, "late", {"CURRENT.md": "# 当前状态\n\n## 旧节（2026-10-20）\n旧\n", "x.txt": "0"})
+        sh(r, "checkout", "-q", "-b", "feat")
+        commit(r, "分支写节", "2026-11-07 22:00:00 +0800", "CURRENT.md",
+               "# 当前状态\n\n## 修 X（#50）（2026-11-07，Claude）\n- 已安装到本机\n\n## 更早（#40）（2026-10-30）\n- 已安装：四十\n\n"
+               "## 旧节（2026-10-20）\n旧\n")
+        sh(r, "checkout", "-q", "main")
+        sh(r, "merge", "-q", "--no-ff", "feat", "-m", "Merge PR #51", at="2026-11-08 10:00:00 +0800")
+        self.gh(prs=[{"number": 51, "title": "修 X", "url": "", "body": "Closes #50", "mergedAt": "2026-11-08T02:00:00Z"}])
+        rec = self.run_one(r)["projects"][0]
+        pr = rec["yesterday_delta"]["merged_prs"][0]
+        self.assertEqual([c["quotes"] for c in pr["claims"]], [["- 已安装到本机"]])   # 标着前一天、当天才进主分支：算当天
+        self.assertEqual(rec["yesterday_delta"]["unmatched_sections"], [])          # 早于 7 天的「更早」不认
+        self.assertFalse(any("只改了文件头" in n for n in rec["notes"]))
+
+    def test_section_appended_after_0400_counts_again(self):
+        r = make_repo(self.root, "app", {"CURRENT.md": "# 当前状态\n\n## 旧节（2026-11-01）\n旧\n"})
+        commit(r, "凌晨", "2026-11-08 02:00:00 +0800", "CURRENT.md",
+               "# 当前状态\n\n## 修 Y（#60）（2026-11-08）\n- 开工\n\n## 旧节（2026-11-01）\n旧\n")
+        commit(r, "白天", "2026-11-08 10:00:00 +0800", "CURRENT.md",
+               "# 当前状态\n\n## 修 Y（#60）（2026-11-08）\n- 开工\n- 已安装、回读一致\n\n## 旧节（2026-11-01）\n旧\n")
+        self.gh(prs=[{"number": 61, "title": "修 Y", "url": "", "body": "Closes #60", "mergedAt": "2026-11-08T03:00:00Z"}])
+        pr = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]
+        self.assertEqual(pr["claims"][0]["quotes"], ["- 已安装、回读一致"])
+
+    def test_non_utf8_current_is_an_error_for_that_project_only(self):
+        bad = make_repo(self.root, "gbk", {"README.md": "x"})
+        (bad / "CURRENT.md").write_bytes("# 当前状态\n\n## 节（2026-11-08）\n- 下一步：甲\n".encode("gbk"))
+        sh(bad, "add", "-A")
+        sh(bad, "commit", "-q", "-m", "gbk")
+        good = make_repo(self.root, "ok", {"CURRENT.md": "# 当前状态\n\n## 节（2026-11-08）\n- 下一步：乙\n"})
+        self.gh()
+        out = pd.collect(D, [{"id": r.name, "name": r.name, "path": str(r), "main": "main", "github": None} for r in (bad, good)])
+        b, g = out["projects"]
+        self.assertTrue(any("不是 UTF-8" in e for e in b["errors"]))
+        self.assertIsNone(b["current_state"]["next_step"])
+        self.assertEqual(g["current_state"]["next_step"], "乙")
+
     def test_commits_count_main_from_snapshot_when_local_is_behind(self):
         up = make_repo(self.root, "up2", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
         sh(self.root, "clone", "-q", str(up), "down2")
@@ -400,9 +438,10 @@ class GitHubTests(Base):
         self.assertIn(r.name, out["coverage"]["errors"])
 
     def test_merged_prs_are_unverified_with_quotes_only(self):
-        cur = ("# 当前状态\n\n## 做甲（#4）（2026-11-08，Claude）\n- **已安装**：cmp 一致\n- 常浩实机验收通过\n- 改了 x.py\n"
-               "\n## 更早（#4）（2026-11-07）\n- 已安装：旧的\n")
-        r = make_repo(self.root, "u", {"CURRENT.md": cur}, at=AT8)
+        old = "\n## 更早（#4）（2026-11-07）\n- 已安装：旧的\n"      # 统计日开始前就在主分支上
+        r = make_repo(self.root, "u", {"CURRENT.md": "# 当前状态\n" + old}, at="2026-11-07 10:00:00 +0800")
+        commit(r, "当天", AT8, "CURRENT.md",
+               "# 当前状态\n\n## 做甲（#4）（2026-11-08，Claude）\n- **已安装**：cmp 一致\n- 常浩实机验收通过\n- 改了 x.py\n" + old)
         self.gh(prs=[self.PR, {**self.PR, "number": 3, "mergedAt": "2026-11-07T10:00:00Z"}])   # #3 不在统计日
         prs = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]
         self.assertEqual([p["number"] for p in prs], [5])
