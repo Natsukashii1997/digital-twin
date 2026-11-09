@@ -178,6 +178,12 @@ def risks(w, recs, acts, coverage):
 
 # ---------- 跨项目引用（4.5：只认明文） ----------
 
+def snippet(line, m, n=100):
+    """引用前后各 n 字的原文摘录：长句只留开头的话，后面的编号会被截掉，证据对不上。"""
+    a, b = max(0, m.start() - n), min(len(line), m.end() + n)
+    return ("…" if a else "") + line[a:b] + ("…" if b < len(line) else "")
+
+
 def cross_refs(w, recs, projects):
     """合并 PR 的标题和正文、开着的 PR 的标题里，明文写了名册里别的仓库编号的（niuma-home#31、github-center #83、
     owner/repo#31），各记一条，并查被引用的那张现在关没关（to_closed：True / False，取不到 None）。
@@ -211,7 +217,7 @@ def cross_refs(w, recs, projects):
                     seen.add(key)
                     out.append({"from_project": r["project_id"], "where": where, "from_state": state, "to_project": to,
                                 "to_ref": f"{m.group(2)}#{m.group(3)}", "to_number": int(m.group(3)), "to_closed": None,
-                                "quote": actions.quote(line, 200)})
+                                "quote": snippet(line, m)})
     hub = pdaily_data.GitHub(w)
     for to in sorted({x["to_project"] for x in out}):
         owner, name = repos[to].split("/", 1)

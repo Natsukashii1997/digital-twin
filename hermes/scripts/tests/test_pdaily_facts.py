@@ -300,7 +300,10 @@ class CrossRefTests(Base):
         r = rec("skills", yesterday_delta={"merged_prs": [pr]})
         out = pf.cross_refs(W, [r], ROSTER)
         self.assertEqual([x["to_number"] for x in out], [31, 32, 33, 340, 35])
-        self.assertTrue(out[2]["quote"].startswith("…") and out[2]["quote"].endswith(pd.CUT_MARK))
+        self.assertIn("niuma-home#35", out[4]["quote"])                  # 摘录围绕引用本身，不只留句首
+        long_line, = [x for x in pr["ref_lines"] if "niuma-home#33" in x]          # 1a 截长句：两头标截断
+        self.assertTrue(long_line.startswith("…") and long_line.endswith(pd.CUT_MARK))
+        self.assertIn("niuma-home#33", out[2]["quote"])
 
     def test_bad_roster_github_is_skipped(self):
         r = rec("skills", yesterday_delta={"merged_prs": [merged(1, "配合 niuma-home#31")]})
