@@ -176,6 +176,38 @@ class CheckTests(unittest.TestCase):
         f["projects"][0]["installs"] = [{"ts": "2026-11-08T22:00:00+08:00"}]
         self.assertEqual(self.errs(card_fields(achievements=[{"project": "牛马之家", "text": "已安装到 5280"}]), f=f), [])
 
+    def test_claim_bypasses_caught(self):
+        """复审找到的绕过写法：宽否定词（无 / 待 / 需）和没列全的完成态。"""
+        for text in ("月度策略已安装且运行无报错", "常浩验收已通过待合并", "常浩已实机验收", "已部署到 5280",
+                     "页面已交付常浩", "发布到 5280 了", "装好了并在跑"):
+            e = self.errs(card_fields(achievements=[{"project": "牛马之家", "text": text}]))
+            self.assertTrue(any("安装 / 验收" in x for x in e), (text, e))
+        e = self.errs(card_fields(headline="月度策略已安装无报错"))
+        self.assertTrue(any("headline" in x for x in e), e)
+        for text in ("目标是批 1 上线到 5280", "安装与验收待核", "无法确认是否已安装"):
+            e = self.errs(card_fields(achievements=[{"project": "牛马之家", "text": text}]))
+            self.assertFalse(any("安装 / 验收" in x for x in e), (text, e))
+
+    def test_claims_in_report_section_two(self):
+        secs = [f"## {x}\n- 内容" for x in pp.SECTIONS]
+        secs[1] = "## 二、昨日关键成果\n- 牛马之家：证据口径已安装到 5280\n- 数字分身：合并，交付未核实"
+        report = "一句话：x\n实质推进 1 个项目｜待你决策 1 件｜阻塞 / 风险 1 个项目\n\n" + "\n\n".join(secs)
+        e = self.errs(report=report)
+        self.assertTrue(any("完整报告二段" in x for x in e), e)
+
+    def test_ref_spellings(self):
+        self.assertEqual(self.errs(report=report_text(extra="PR#43 和 issue#102、PR #43")), [])
+        for bad in ("驿窗#999", "牛马之家#999", "Natsukashii1997/niuma-home#999", "pr#999"):
+            e = self.errs(report=report_text(extra=f"见 {bad}"))
+            self.assertTrue(any("999" in x for x in e), (bad, e))
+
+    def test_reply_shells_and_cut(self):
+        c = card_fields(decisions=[dict(card_fields()["decisions"][0], reply="回复「合并」即可")])
+        self.errs(c)
+        self.assertEqual(c["decisions"][0]["reply"], "合并")
+        self.assertEqual(pp.cut("材料记录了 HTTP 业务链，以及授权前置条件的反例测试，还有更多", 20),
+                         "材料记录了 HTTP 业务链…")       # 停在标点上，不切成「授…」
+
     def test_pr_count(self):
         e = self.errs(card_fields(achievements=[{"project": "牛马之家", "text": "合并 9 个 PR"}]))
         self.assertTrue(any("合并 9 个 PR" in x for x in e), e)

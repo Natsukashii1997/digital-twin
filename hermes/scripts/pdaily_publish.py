@@ -37,7 +37,8 @@ TODAY_MAX = 3         # 今日推进卡片最多 3 条（4.0）
 REPORT_TODAY_MAX = 5  # 完整报告今日计划最多 5 项（4.7）
 CLIP = 300            # 材料里每段原文最多保留多少字
 ACT_CLIP = 100        # 行动记录每个字段最多保留多少字（行动多，压短些）
-LIMITS = {"headline": 60, "item": 24, "recommendation": 50, "reply": 20, "text": 50, "owner_action": 50}  # 卡片字段上限
+# 卡片字段硬上限：比提示词给模型的字数（20 / 45 / 15 / 50）宽一点，留余量，超了才截断
+LIMITS = {"headline": 60, "item": 24, "recommendation": 50, "reply": 20, "text": 50, "owner_action": 50}
 WEEK = "一二三四五六日"
 DECISION_TYPES = ("阻断", "限时", "普通")
 LEVELS = {"高": "🔴", "中": "🟠", "低": "🟡", "待识别": "⚪"}
@@ -48,12 +49,13 @@ SECTIONS = ["一、需要你拍板", "二、昨日关键成果", "三、各项�
 KIND_NAMES = {"merge": "合并", "ruling": "裁决", "dispatch": "派单", "supervise": "主控与监护", "refuse": "拒绝",
               "install": "安装", "other": "其他", "cron": "定时任务"}
 SELF_NAMES = {"猛鬼兽", "Hermes", "hermes"}   # 猛鬼兽自身（定时任务、技能、配置、授权）也在日报范围里
-REF = re.compile(r"(?<![\w&/.-])#(\d+)")                 # 裸写的 #N
-QREF = re.compile(r"(?<![\w/.-])([A-Za-z][\w.-]*)#(\d+)")  # 带仓库的 repo#N
+REF = re.compile(r"(?:(?<=PR)|(?<=pr)|(?<=Pr)|(?<=issue)|(?<=Issue)|(?<=ISSUE)|(?<![A-Za-z0-9_&/.-]))#(\d+)")  # 裸写的 #N、PR#N；中文紧挨着也算（「驿窗#12」）
+QREF = re.compile(r"(?<![A-Za-z0-9_.-])(?:[A-Za-z0-9_.-]+/)?(?!(?:PR|pr|Pr|issue|Issue|ISSUE)#)([A-Za-z][\w.-]*)#(\d+)")  # repo#N、owner/repo#N；PR#N、issue#N 当裸编号
 PCT = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]")
-CLAIM = re.compile(r"已(?:经)?(?:安装|发布|上线|装好|装机|验收)|(?:安装|发布|上线)(?:完成|成功|好了)|验收(?:已)?通过|通过(?:了)?(?:实机)?验收")
-NEGATION = re.compile(r"未|不|没|尚|待|无|缺|需|要|仍|还|否|失败|自述")
-INSTALL_WORDS = re.compile(r"安装|发布|上线|装好|装机")
+CLAIM = re.compile(r"已(?:经)?(?:实机)?(?:安装|发布|上线|装好|装上|装机|部署|交付|验收)|(?:安装|发布|上线|部署)(?:完成|成功|好了)"
+                   r"|发布到.{0,12}?了|装好了|验收(?:已)?通过|通过(?:了)?(?:实机)?验收")
+NEGATION = re.compile(r"未|不|没|尚|无法|缺|否|失败|自述|待核|待验")
+INSTALL_WORDS = re.compile(r"安装|发布|上线|装好|装上|装机|部署|交付")
 PR_COUNT = re.compile(r"合并(?:了)?\s*(\d+)\s*个\s*PR")
 TRAIL = "。．.；;，,、 "
 CARD_MARK, REPORT_MARK = "<<<CARD>>>", "<<<REPORT>>>"
@@ -303,6 +305,13 @@ def deadline_source(deadline, cand):
         f"{int(md[:2])}-{int(md[3:])} {hm}" in text
 
 
+def cut(v, n):
+    """截到 n 字以内：尽量停在最后一个标点上，不在词中间切。"""
+    head = v[:n]
+    k = max(head.rfind(c) for c in "，；。、,;")
+    return (head[:k] if k >= n // 2 else head).rstrip(TRAIL) + "…"
+
+
 def normalize(facts, card):
     """就地规整卡片要素，返回提醒清单。只修写法：去尾部标点、去回复外层「回「」」、最晚时间换格式或去掉、超长截断。"""
     warns = []
@@ -317,11 +326,11 @@ def normalize(facts, card):
                 if v is None:
                     continue
                 if f == "reply":
-                    v = re.sub(r"^回?\s*[「“\"](.*)[」”\"]\s*(?:即可)?$", r"\1", v)
+                    v = re.sub(r"^(?:回复?|回答)?\s*[「“\"](.*)[」”\"]\s*(?:即可|就行)?$", r"\1", v)
                 v = v.rstrip(TRAIL)
                 if len(v) > LIMITS[f]:
                     warns.append(f"{key}[{i}].{f} 超过 {LIMITS[f]} 字，已截断")
-                    v = v[:LIMITS[f]] + "…"
+                    v = cut(v, LIMITS[f])
                 x[f] = v
             if key == "decisions" and x.get("deadline") is not None:
                 raw = x.get("deadline")
@@ -337,7 +346,7 @@ def normalize(facts, card):
     h = s(card.get("headline"))
     if h and len(h) > LIMITS["headline"]:
         warns.append(f"headline 超过 {LIMITS['headline']} 字，已截断")
-        card["headline"] = h[:LIMITS["headline"]] + "…"
+        card["headline"] = cut(h, LIMITS["headline"])
     card.pop("progress_note", None)        # 说明列用脚本文案（样例：「其余 N 个无实质推进」）
     return warns
 
@@ -454,9 +463,16 @@ def check(facts, card, report):
     if s(card.get("headline")):
         for c in claims_unverified(card["headline"], None):
             errs.append(f"headline「{clip(c, 30)}」：没有安装 / 验收记录")
+    pos = section_positions(report)
+    if pos[1] >= 0 and pos[2] > pos[1]:          # 报告第二段（昨日关键成果）逐行按行首项目名查
+        for line in report[pos[1]:pos[2]].splitlines()[1:]:
+            m = re.match(r"^\s*(?:\d+[.、]|[-*])\s*\**([^：:*]+?)\**\s*[：:]", line)
+            pid = roster.resolve(m.group(1).strip()) if m else None
+            if pid and pid != "hermes":
+                for c in claims_unverified(line, roster.by_id.get(pid)):
+                    errs.append(f"完整报告二段「{clip(c, 30)}」：快照里没有安装 / 验收记录")
 
     # 完整报告
-    pos = section_positions(report)
     for name, p in zip(SECTIONS, pos):
         if p < 0:
             errs.append(f"完整报告缺「## {name}」")
@@ -491,6 +507,15 @@ def check(facts, card, report):
 
 # ---------- 事实版 ----------
 
+def iso_deadline(v):
+    """快照里的 ISO 时间 → 卡片写法 MM-DD HH:MM；不是时间就原样不显示。"""
+    try:
+        t = pdaily_data.parse_ts(v)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return f"{t:%m-%d %H:%M}" if t else None
+
+
 def latest_pr(prs):
     return max(prs, key=lambda x: x.get("merged_at") or "")
 
@@ -500,7 +525,8 @@ def fallback(facts, reason):
     roster = Roster(facts)
     name = roster.name
     decs = [{"type": None, "project": name(d.get("project_id")), "item": clip(d.get("item"), 60),
-             "recommendation": None, "deadline": d.get("deadline"), "reply": None,
+             "recommendation": None, "reply": None,
+             "deadline": iso_deadline(d.get("deadline")),
              "source": d.get("source"), "evidence": (d.get("evidence") or [])[:2]}
             for d in facts.get("decisions") or []]
     ach = []
