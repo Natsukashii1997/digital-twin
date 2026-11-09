@@ -42,6 +42,11 @@ def rec(pid, **kw):
     return r
 
 
+def merged(number, title, body=""):
+    """一条合并 PR：走 1a 真实的 deliverables 输出（带 ref_lines，不带整段正文）。"""
+    return pd.deliverables([{"number": number, "title": title, "body": body, "mergedAt": IN_DAY}], [])[0][0]
+
+
 def act(**kw):
     """一条 1b 行动（collect 之后的样子：带 origin、auth_gap）。"""
     base = {"action_id": "a1", "ts": IN_DAY, "project_id": "skills", "kind": "other", "request": "做事",
@@ -137,15 +142,31 @@ class DecisionTests(Base):
         self.assertEqual(out[0]["why_owner"], "写入单要常浩确认开跑")
         self.assertEqual(out[1]["why_owner"], "车间回执写了要常浩决定")
 
-    def test_undecided_proposals_before_day_end(self):
+    def item(self, n, key, title, **kw):
+        return {"key": key, "source": "retro", "id": key.split(":")[-1], "title": title, "n": n, "file": "/x/提案.md", **kw}
+
+    def test_proposals_latest_issue_minus_answered(self):
+        """结构照 proposal_digest.py：条目不回写 decided，常浩的回复在 answers[].applied；每期重列上期没定的。"""
         self.sources()
         (self.proposals / "digest.json").write_text(json.dumps({"issues": [
-            {"no": 1, "date": "2026-11-02", "items": [{"id": "P1", "title": "加规则", "decided": False, "rec": "采纳", "why": "两次"},
-                                                    {"id": "P2", "title": "已定", "decided": True}]},
-            {"no": 2, "date": "2026-11-09", "items": [{"id": "P3", "title": "统计日后才发", "decided": False}]}]}))
+            {"no": 1, "date": "2026-11-02", "items": [self.item(1, "r:A1", "老一期"), self.item(2, "r:A2", "老一期没回")],
+             "answers": []},
+            {"no": 2, "date": "2026-11-07", "items": [
+                self.item(1, "r:A2", "老一期没回", rec="采纳", why="两次"), self.item(2, "r:A3", "回了采纳"),
+                self.item(3, "r:A4", "回了待定"), self.item(4, "r:A5", "统计日后才回"), self.item(5, "r:A2", "同 key 重复")],
+             "answers": [{"at": "2026-11-07T08:38:02+08:00", "reply": "按推荐", "applied": {"2": "采纳", "3": "待定"}},
+                         {"at": "2026-11-09T05:00:00+08:00", "reply": "4 否", "applied": {"4": "否决"}}]},
+            {"no": 3, "date": "2026-11-09", "items": [self.item(1, "r:A9", "统计日后才发")], "answers": []}]}))
         out = pf.decisions(W, [], [], self.notes)
-        self.assertEqual([(c["kind"], c["item"]) for c in out], [("proposal", "加规则")])
+        self.assertEqual([(c["kind"], c["item"]) for c in out], [("proposal", "老一期没回"), ("proposal", "统计日后才回")])
         self.assertIn("Hermes 推荐：采纳（两次）", out[0]["evidence"])
+        self.assertEqual(out[0]["source"], "proposals/digest.json 第 2 期第 1 条 A2")
+
+    def test_no_issue_before_day_end(self):
+        self.sources()
+        (self.proposals / "digest.json").write_text(json.dumps({"issues": [
+            {"no": 1, "date": "2026-11-09", "items": [self.item(1, "r:A1", "x")], "answers": []}]}))
+        self.assertEqual(pf.decisions(W, [], [], self.notes), [])
 
     def test_broken_proposals_file_goes_to_notes(self):
         self.sources()
@@ -159,7 +180,8 @@ class DecisionTests(Base):
                 act(action_id="n1", kind="dispatch", origin="夜跑", follow_up="常浩处理受阻的子单"),
                 act(action_id="x1")]
         recs = [rec("skills", current_state={"next_step": "等常浩说「合并」", "next_source": "CURRENT", "next_reliable": True}),
-                rec("niuma", current_state={"next_step": "继续写测试"})]
+                rec("niuma", current_state={"next_step": "继续写测试"}),
+                rec("hub", current_state={"next_step": "常浩验收", "next_reliable": False})]   # 过期的下一步不当依据
         out = pf.decisions(W, recs, acts, self.notes)
         self.assertEqual(self.kinds(out), ["auth", "blocked", "current"])
         self.assertIn("授权不足", out[0]["why_owner"])
@@ -173,7 +195,7 @@ class DecisionTests(Base):
                            [act(auth_gap="授权不足")], self.notes)
         self.assertEqual(len(out), 3)
         for c in out:
-            self.assertEqual((c["type"], c["recommendation"], c["impact"]), (None, None, None))
+            self.assertEqual((c["type"], c["recommendation"], c["impact"], c["reply"]), (None, None, None, None))
             self.assertEqual(c["status"], "待你决定")
             self.assertTrue(c["source"])
 
@@ -207,12 +229,17 @@ class RiskTests(Base):
         acts = [act(action_id="f1", kind="dispatch", result="失败", project_id="niuma"),
                 act(action_id="f2", kind="cron", result="失败", project_id="hermes"),
                 act(action_id="s1", kind="supervise", follow_up="处理这张故障单", project_id="hermes"),
-                act(action_id="u1", kind="dispatch", result="不明", origin="派单台账", project_id="skills"),
-                act(action_id="u2", kind="dispatch", result="不明", origin="夜跑", project_id="skills"),
+                act(action_id="u1", kind="dispatch", result="不明", origin="派单台账", project_id="skills",
+                    verification="没有回执（单子状态 done，单子记的退出码 没记）"),
+                act(action_id="u3:open", kind="dispatch", result="不明", origin="派单台账", verification="开了写入单，没开跑就放弃了"),
+                act(action_id="g1", kind="dispatch", origin="派单台账", follow_up="核对主分支、远端的改动", verification="护栏"),
+                act(action_id="u2", kind="dispatch", result="不明", origin="夜跑", project_id="skills",
+                    verification="没有回执"),                       # 夜跑的「不明」不归派单台账口径
                 act(action_id="ok", kind="dispatch", result="调用成功")]
         out = pf.risks(W, [], acts, cov())
-        self.assertEqual([x["category"] for x in out], ["协作阻塞", "运行风险", "运行风险", "协作阻塞"])
-        self.assertIn("没有回执", out[3]["evidence"])
+        self.assertEqual([(x["category"], x["evidence"][-1]) for x in out],
+                         [("协作阻塞", "actions.jsonl f1"), ("运行风险", "actions.jsonl f2"), ("运行风险", ""),
+                          ("协作阻塞", "没有回执"), ("运行风险", "派单护栏报警")])
 
     def test_open_pr_over_two_days_blocks(self):
         r = rec("niuma", current_state={"open_prs": [
@@ -249,15 +276,20 @@ class RiskTests(Base):
 
 class CrossRefTests(Base):
     def test_only_explicit_roster_refs_with_target_state(self):
-        self.gh_graphql({31: "OPEN", 83: "CLOSED"})
-        r = rec("skills", yesterday_delta={"merged_prs": [{"number": 74, "title": "generate 模式（配合 niuma-home#31）",
-                                                          "body": "关联 o/niuma-home#31\n配合 github-center #83\n"
-                                                                  "本仓库 my-skills#9 不算\nother-repo#4 不在名册\nxniuma-home#5 不是引用"}]})
+        self.gh_graphql({31: "OPEN", 83: "CLOSED", 7: "OPEN"})
+        r = rec("skills", yesterday_delta={"merged_prs": [merged(74, "generate 模式（配合 niuma-home#31）",
+                                                               "关联 o/niuma-home#31\n配合 github-center #83\n见github-center#7\n"
+                                                               "本仓库 my-skills#9 不算\nother-repo#4 不在名册\n"
+                                                               "xniuma-home#5 不是引用\nfork/niuma-home#6 别人的 fork")]})
         out = pf.cross_refs(W, [r], ROSTER)
         self.assertEqual([(x["to_project"], x["to_number"], x["from_state"], x["to_closed"]) for x in out],
-                         [("niuma", 31, "已合并", False), ("hub", 83, "已合并", True)])
+                         [("niuma", 31, "已合并", False), ("hub", 83, "已合并", True), ("hub", 7, "已合并", False)])
         self.assertEqual(out[0]["where"], "合并的 PR #74")
         self.assertIn("配合 niuma-home#31", out[0]["quote"])
+
+    def test_bad_roster_github_is_skipped(self):
+        r = rec("skills", yesterday_delta={"merged_prs": [merged(1, "配合 niuma-home#31")]})
+        self.assertEqual(pf.cross_refs(W, [r], [{"id": "skills", "github": "o/my-skills"}, {"id": "niuma", "github": "niuma-home"}]), [])
 
     def test_open_pr_titles_count_too(self):
         r = rec("hub", current_state={"open_prs": [{"number": 2, "title": "等 my-skills#74", "created": IN_DAY}]})
@@ -267,13 +299,13 @@ class CrossRefTests(Base):
 
     def test_target_state_unknown_when_gh_fails(self):
         (self.state / "fail").write_text("error connecting to api.github.com")
-        r = rec("skills", yesterday_delta={"merged_prs": [{"number": 74, "title": "配合 niuma-home#31"}]})
+        r = rec("skills", yesterday_delta={"merged_prs": [merged(74, "配合 niuma-home#31")]})
         out = pf.cross_refs(W, [r], ROSTER)
         self.assertEqual(len(out), 1)
         self.assertIsNone(out[0]["to_closed"])     # 取不到：不当成开着，也不当成关了
 
     def test_no_roster_github_no_refs(self):
-        r = rec("skills", yesterday_delta={"merged_prs": [{"number": 1, "title": "niuma-home#31"}]})
+        r = rec("skills", yesterday_delta={"merged_prs": [merged(1, "niuma-home#31")]})
         self.assertEqual(pf.cross_refs(W, [r], [{"id": "skills"}]), [])
 
 
@@ -311,6 +343,24 @@ class LessonTests(Base):
         out = [x for x in pf.observations(W, [{"id": "proj", "path": str(r), "main": "main"}], self.notes) if x["kind"] == "新坑"]
         self.assertEqual([x["what"] for x in out], ["proj docs/LESSONS.md：L-02 当天的坑"])
 
+    def test_renamed_or_moved_entries_are_not_new(self):
+        r = self.repo()
+        old = r / "docs" / "LESSONS.md"
+        text = old.read_text().replace("## L-01 老坑", "## L-01 老坑（改了标题）")
+        old.unlink()
+        (r / "LESSONS.md").write_text(text)                       # 改标题 + 从 docs/ 挪到根目录
+        sh(r, "add", "-A")
+        sh(r, "commit", "-qm", "挪位", at="2026-11-08 11:00:00 +0800")
+        out = pf.new_lessons(W, [{"id": "proj", "path": str(r), "main": "main"}], self.notes)
+        self.assertEqual([x["what"] for x in out], ["proj docs/LESSONS.md：L-02 当天的坑"])
+
+    def test_project_without_path_is_skipped(self):
+        r = self.repo()
+        old = os.getcwd()
+        os.chdir(r)                                                # 没登记目录时不能拿当前目录顶替
+        self.addCleanup(os.chdir, old)
+        self.assertEqual(pf.new_lessons(W, [{"id": "nopath", "main": "main"}], self.notes), [])
+
     def test_missing_main_branch_is_a_note_not_a_crash(self):
         r = self.repo(main="trunk")
         out = pf.new_lessons(W, [{"id": "proj", "path": str(r), "main": "main"}], self.notes)
@@ -341,15 +391,18 @@ class ObservationTests(Base):
     def test_failures_grouped_by_job_id_not_name(self):
         fail = lambda i, name, job, ts: actions.act(action_id=f"cron:{i}", ts=ts, project_id="hermes",
                                                     request=f"定时任务「{name}」（{job}）", result="失败")
-        self.sources(cron=[fail(1, "巡检", "j1", "2026-11-02T10:00:00+08:00"),
-                           fail(2, "巡检（改名）", "j1", IN_DAY),       # 改名了，还是同一个任务
+        self.sources(cron=[fail(2, "巡检（改名）", "j1", IN_DAY),       # 改名了，还是同一个任务；库里不保证按时间排
+                           fail(1, "巡检", "j1", "2026-11-02T10:00:00+08:00"),
                            fail(3, "巡检", "j2", IN_DAY)],                # 同名，不是同一个任务
-                     dispatch=[actions.act(action_id="d1", ts=IN_DAY, project_id="niuma", request="派单", result="失败")])
+                     dispatch=[actions.act(action_id="d1", ts=IN_DAY, project_id="niuma", request="派单", result="失败"),
+                               actions.act(action_id="d2", ts=IN_DAY, project_id="niuma", request="另一张单", result="失败")])
         out = [x for x in pf.observations(W, [], self.notes) if x["kind"] in ("失败", "重复失败")]
         got = {x["what"]: (x["kind"], x["count"], x["evidence"]) for x in out}
-        self.assertEqual(got, {"定时任务库：j1": ("重复失败", 2, ["cron:1", "cron:2"]),
+        self.assertEqual(got, {"定时任务库：j1": ("重复失败", 2, ["cron:2", "cron:1"]),
                                "定时任务库：j2": ("失败", 1, ["cron:3"]),
-                               "派单台账：niuma": ("失败", 1, ["d1"])})
+                               "派单台账：niuma d1": ("失败", 1, ["d1"]), "派单台账：niuma d2": ("失败", 1, ["d2"])})
+        j1, = [x for x in out if x["what"] == "定时任务库：j1"]
+        self.assertEqual((j1["first"], j1["last"]), ("2026-11-02T10:00:00+08:00", IN_DAY))
         self.assertEqual(self.calls[0], (W[1] - pf.LOOKBACK, W[1]))      # 失败往回扫 14 天现算
 
     def test_failure_source_error_goes_to_notes(self):
@@ -413,8 +466,8 @@ class BuildTests(Base):
         快照里要同时有：这条引用（这边已合并、那边没关），和 niuma 那边的协作阻塞，两边能对上编号。"""
         self.sources()
         self.gh_graphql({31: "OPEN"})
-        recs = [rec("skills", yesterday_delta={"merged_prs": [{"number": 74, "title": "skill 的 generate 模式",
-                                                              "body": "配合 niuma-home#31，那边接上才算交付"}]}),
+        recs = [rec("skills", yesterday_delta={"merged_prs": [merged(74, "skill 的 generate 模式",
+                                                                   "## 做了什么\n- 加 generate 模式\n配合 niuma-home#31，那边接上才算交付")]}),
                 rec("niuma", current_state={"open_prs": [{"number": 31, "title": "接 generate 模式",
                                                           "created": "2026-11-05T10:00:00+08:00"}]})]
         self.fake_collect(recs, [])
@@ -435,6 +488,23 @@ class BuildTests(Base):
         self.assertEqual(f["projects"][0]["current_state"]["next_step"], "等常浩定方向")
         self.assertEqual([c["kind"] for c in f["decisions"]], ["current"])
         self.assertIn("7 天以上没有新动作", [x["item"] for x in f["risks"]])
+
+    def test_unknown_delta_is_none_not_zero(self):
+        """第 6 节：取数失败写「未知」，不伪造零进展。hermes 自己的风险不算进项目数。"""
+        self.sources()
+        bad = rec("niuma")                                        # 1a 取不到：增量各项都是 None
+        self.fake_collect([rec("skills", yesterday_delta={"merged_prs": [merged(1, "x")], "closed_issues": [],
+                                                          "commits": {"main": 3}}), bad],
+                          [act(action_id="c1", kind="cron", project_id="hermes", result="失败")])
+        f = pf.build(D, ROSTER)
+        self.assertEqual((f["activity"]["merged_prs"], f["activity"]["closed_issues"], f["activity"]["commits"]), (None, None, None))
+        self.assertEqual(f["counts"]["projects_delta_unknown"], ["niuma"])
+        self.assertEqual(f["counts"]["projects_with_delta"], ["skills"])
+        self.assertEqual((f["counts"]["risk_projects"], f["counts"]["hermes_risks"]), ([], 1))
+        self.fake_collect([rec("skills", yesterday_delta={"merged_prs": [merged(1, "x")], "closed_issues": [],
+                                                          "commits": {"main": 3, "dev": 1}})], [])
+        f = pf.build(D, ROSTER)
+        self.assertEqual((f["activity"]["merged_prs"], f["activity"]["closed_issues"], f["activity"]["commits"]), (1, 0, 4))
 
     def test_write_is_atomic_and_dry_run_writes_nothing(self):
         self.sources()

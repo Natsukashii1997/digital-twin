@@ -57,6 +57,9 @@ MILESTONE_QUERY = """query($o:String!,$n:String!){repository(owner:$o,name:$n){i
 number title body subIssues(first:100){nodes{number state}}}}}}"""
 
 
+REF_ANY = re.compile(r"#\d+")
+
+
 class Fail(Exception):
     pass
 
@@ -412,6 +415,12 @@ def section_prs(title, prs):
     return [pr for pr in prs if issues & set(refs_of(pr))]
 
 
+def ref_lines(pr, n=20):
+    """PR 标题和正文里写了「#编号」的原句（各截 200 字，最多 n 句）：给 1c 找跨项目引用用，不带整段正文。"""
+    lines = [pr.get("title") or "", *(pr.get("body") or "").splitlines()]
+    return [quote(x.strip())[:200] for x in lines if REF_ANY.search(x)][:n]
+
+
 def deliverables(prs, dated_sections):
     """每个合并的 PR 一条，三个维度分开记（V2 5.2）：工程「已合并」有 GitHub 为证；交付、验收一律「未核实」，
     只附当天 CURRENT 节和 PR 标题里的自述摘录（claims），不下结论（见文件头）。挂法见 section_prs；
@@ -448,6 +457,7 @@ def deliverables(prs, dated_sections):
             "claims_note": CLAIMS_NOTE if claims else NO_CLAIMS_NOTE,
             "claims_warnings": warnings,
             "evidence": [f"PR #{pr['number']} merged"],
+            "ref_lines": ref_lines(pr),
         })
     return out, unmatched
 

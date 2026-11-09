@@ -34,17 +34,20 @@ IDLE_DAYS = 7                       # 活跃项目这么多天没有动作算管
 DIRTY_MANY = 10                     # 主目录未提交文件到这么多，列「待识别」（4.5：先识别性质，不直接算高风险）
 EPOCH = dt.datetime(2000, 1, 1, tzinfo=TZ)
 ENTRY = re.compile(r"^\+## [LG]-\d+ ")
+DROP = re.compile(r"^-## ([LG]-\d+) ")
 NOT_CONNECTED = [
     "Hermes 对话记录（受阻、超出授权的回复）：没接，要读常浩私聊（常浩 2026-11-09 定）",
     "交付风险：各项目没有里程碑期限和验收记录，取不到延期、验收失败",
     "安装记录：只认 actions.py record(kind=install) 写的，现在还没有脚本写",
+    "跨项目引用：只扫合并 PR 的标题和正文里写了编号的原句、开着的 PR 的标题；issue 正文没扫",
 ]
 
 
 def cand(kind, project_id, item, why, source, evidence=None, **extra):
-    """一条拍板候选（5.5 的事实部分）。type、recommendation、impact 留给 Hermes 判断。"""
+    """一条拍板候选（5.5 的事实部分）。type、recommendation、impact、reply（最短回复）留给 Hermes 判断；
+    deadline 现在没有来源能给，留 None。"""
     return {"kind": kind, "project_id": project_id, "item": item, "why_owner": why, "source": source,
-            "evidence": evidence or [], "type": None, "recommendation": None, "impact": None,
+            "evidence": evidence or [], "type": None, "recommendation": None, "impact": None, "reply": None,
             "deadline": extra.get("deadline"), "status": "待你决定", "since": extra.get("since")}
 
 
@@ -63,14 +66,14 @@ def decisions(w, recs, acts, notes):
     out = []
     wide = (EPOCH, w[1])                      # 待决的事是截至统计日结束的状态，不只看当天新出现的
     try:
-        for rec, _ in actions.merge_officer(wide, notes):
+        for rec, _ in actions.merge_officer(wide, []):   # 宽窗口读到的历史坏行每天都一样，不进 notes
             if rec["follow_up"] == "常浩决定合不合并":
                 out.append(cand("merge", rec["project_id"], rec["request"], "合并官判「问常浩」或 L3，常浩还没点卡片",
                                 "shadow/agreement.csv", [rec["verification"]], since=rec["ts"]))
     except Exception as e:   # 一个来源出错：写进 notes，其余候选照出
         notes.append(f"拍板候选：合并官读不了：{e}")
     try:
-        for rec, _ in actions.dispatch(wide, notes):
+        for rec, _ in actions.dispatch(wide, []):
             # 等确认开跑是当前状态，照列；回执里的「要常浩决定」只收统计日内开跑的（老回执多半早处理了，查不到）
             fresh = w[0] <= pdaily_data.parse_ts(rec["ts"]) < w[1]
             if rec["follow_up"] == "常浩确认开跑或取消" or (fresh and (rec["follow_up"] or "").startswith("常浩决定：")):
@@ -89,7 +92,7 @@ def decisions(w, recs, acts, notes):
                             f"{a['origin']} {a['action_id']}", [a["verification"] or ""], since=a["ts"]))
     for r in recs:
         st = r["current_state"]
-        if st.get("next_step") and "常浩" in st["next_step"]:
+        if st.get("next_step") and "常浩" in st["next_step"] and st.get("next_reliable") is not False:   # 过期的不当依据（第 6 节）
             out.append(cand("current", r["project_id"], st["next_step"],
                             "CURRENT 的下一步原文点名常浩（原句摘录，不判断）",
                             f"CURRENT「{st.get('top_section') or ''}」", [f"下一步出处：{st.get('next_source')}",
@@ -98,22 +101,32 @@ def decisions(w, recs, acts, notes):
 
 
 def proposals(w, notes):
-    """待决提案：DigitalTwin/proposals/digest.json 里还没决定的条目（每周一推一次，常浩回「按推荐」或逐条回）。"""
+    """待决提案：DigitalTwin/proposals/digest.json 里统计日结束前最近一期、到统计日结束还没回复的条目。
+    proposal_digest.py 不回写条目的 decided：常浩的回复记在这一期的 answers[].applied（{序号: 采纳 / 否决 / 待定}），
+    回过的（包括待定，下周会再列一期）都不算待决。每期会把上期没定的重列，所以只看最近一期，按 key 去重。"""
     f = Path(os.environ.get("DT_PROPOSALS", "~/Library/Application Support/DigitalTwin/proposals")).expanduser() / "digest.json"
     if not f.exists():
         return []
     try:
-        issues = json.loads(f.read_text(encoding="utf-8"))["issues"]
-        out = []
-        for iss in issues:
-            if iss.get("date") and iss["date"] >= w[1].date().isoformat():
-                continue                            # 统计日结束后才发的期，不算
-            for it in iss.get("items") or []:
-                if not it.get("decided"):
-                    out.append(cand("proposal", "hermes", it.get("title"), "待决提案要常浩回复（每周收口）",
-                                    f"proposals/digest.json 第 {iss.get('no')} 期 {it.get('id')}",
-                                    [f"Hermes 推荐：{it.get('rec')}（{it.get('why')}）" if it.get("rec") else "还没有推荐",
-                                     it.get("file") or ""], since=iss.get("date")))
+        issues = [i for i in json.loads(f.read_text(encoding="utf-8"))["issues"]
+                  if i.get("date") and i["date"] < w[1].date().isoformat()]   # 每周一 10:00 发，统计日结束后才发的期不算
+        if not issues:
+            return []
+        iss = max(issues, key=lambda i: i["date"])
+        answered = set()
+        for a in iss.get("answers") or []:
+            if a.get("at") and pdaily_data.parse_ts(a["at"]) < w[1]:
+                answered.update(str(n) for n in (a.get("applied") or {}))
+        out, seen = [], set()
+        for it in iss.get("items") or []:
+            key = it.get("key") or it.get("id")
+            if str(it.get("n")) in answered or key in seen:
+                continue
+            seen.add(key)
+            out.append(cand("proposal", "hermes", it.get("title"), "待决提案要常浩回复（每周收口）",
+                            f"proposals/digest.json 第 {iss.get('no')} 期第 {it.get('n')} 条 {it.get('id')}",
+                            [f"Hermes 推荐：{it.get('rec')}（{it.get('why')}）" if it.get("rec") else "还没有推荐",
+                             it.get("file") or ""], since=iss.get("date")))
         return out
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         notes.append(f"拍板候选：待决提案读不了：{e}")
@@ -135,8 +148,11 @@ def risks(w, recs, acts, coverage):
             out.append(risk(cat, a["project_id"], a["request"], [a["verification"] or "", f"{a['origin']} {a['action_id']}"]))
         elif a["kind"] == "supervise" and a["follow_up"] == "处理这张故障单":
             out.append(risk("运行风险", a["project_id"], a["request"], [a["verification"] or ""]))
-        elif a["kind"] == "dispatch" and a["result"] == "不明" and a["origin"] == "派单台账":
-            out.append(risk("协作阻塞", a["project_id"], a["request"], [a["verification"] or "", "没有回执"]))
+        elif (a["kind"] == "dispatch" and a["result"] == "不明" and a["origin"] == "派单台账"
+              and (a["verification"] or "").startswith("没有回执")):   # 没开跑就放弃的写入单也是「不明」，不算
+            out.append(risk("协作阻塞", a["project_id"], a["request"], [a["verification"], "没有回执"]))
+        elif a["follow_up"] == "核对主分支、远端的改动":
+            out.append(risk("运行风险", a["project_id"], a["request"], [a["verification"] or "", "派单护栏报警"]))
     for r in recs:
         pid, st, fr, obj = r["project_id"], r["current_state"], r["freshness"], r.get("objective") or {}
         paused = obj.get("kind") == "暂停"
@@ -168,29 +184,33 @@ def cross_refs(w, recs, projects):
     不推测依赖，不建图谱；「这边已合并、那边还开着」这类状态冲突影不影响另一条主线，由 Hermes 判断。"""
     names, repos = {}, {}
     for p in projects:
-        if p.get("github") and p.get("id"):
-            names[p["github"].split("/")[-1].lower()] = p["id"]
-            repos[p["id"]] = p["github"]
+        gh = p.get("github") or ""
+        if p.get("id") and gh.count("/") == 1:          # 名册写错（不是「所有者/仓库」）的跳过，不拖垮整份
+            names[gh.split("/")[1].lower()] = p["id"]
+            repos[p["id"]] = gh
     if not names:
         return []
-    pat = re.compile(r"(?<![\w/.-])(?:[\w.-]+/)?(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    # 边界只排 ASCII：「配合niuma-home#31」这种中文紧贴的也要认（\w 会把汉字当词字符）
+    pat = re.compile(r"(?<![A-Za-z0-9_/.-])(?:([A-Za-z0-9_.-]+)/)?(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
                      + r") ?#(\d+)\b", re.I)
     out, seen = [], set()
     for r in recs:
-        texts = [(f"合并的 PR #{pr['number']}", "已合并", f"{pr.get('title') or ''}\n{pr.get('body') or ''}")
+        texts = [(f"合并的 PR #{pr['number']}", "已合并", "\n".join(pr.get("ref_lines") or [pr.get("title") or ""]))
                  for pr in (r["yesterday_delta"].get("merged_prs") or [])]
         texts += [(f"开着的 PR #{pr['number']}", "开着", pr.get("title") or "")
                   for pr in (r["current_state"].get("open_prs") or [])]
         for where, state, text in texts:
             for line in text.splitlines():
                 for m in pat.finditer(line):
-                    to = names[m.group(1).lower()]
-                    key = (r["project_id"], where, to, m.group(2))
+                    to = names[m.group(2).lower()]
+                    if m.group(1) and m.group(1).lower() != repos[to].split("/")[0].lower():
+                        continue                        # 别人 fork 的同名仓库不算
+                    key = (r["project_id"], where, to, m.group(3))
                     if to == r["project_id"] or key in seen:
                         continue
                     seen.add(key)
                     out.append({"from_project": r["project_id"], "where": where, "from_state": state, "to_project": to,
-                                "to_ref": f"{m.group(1)}#{m.group(2)}", "to_number": int(m.group(2)), "to_closed": None,
+                                "to_ref": f"{m.group(2)}#{m.group(3)}", "to_number": int(m.group(3)), "to_closed": None,
                                 "quote": actions.quote(line, 200)})
     hub = pdaily_data.GitHub(w)
     for to in sorted({x["to_project"] for x in out}):
@@ -207,7 +227,10 @@ def cross_refs(w, recs, projects):
 def observations(w, projects, notes):
     span = (w[1] - LOOKBACK, w[1])
     out = []
-    out.extend(new_lessons(w, projects, notes))   # 新坑只列统计日内新加的：14 天窗口会把整份新建的 LESSONS 都算进来
+    try:
+        out.extend(new_lessons(w, projects, notes))   # 新坑只列统计日内新加的：14 天窗口会把整份新建的 LESSONS 都算进来
+    except Exception as e:
+        notes.append(f"观察池：LESSONS 读不了：{e}")
     try:
         out.extend(officer_misses(span))
     except Exception as e:
@@ -217,11 +240,13 @@ def observations(w, projects, notes):
         for name, fn in (("定时任务库", actions.cron), ("派单台账", actions.dispatch)):
             for rec, _ in fn(span, []):
                 if rec["result"] == "失败":
-                    key = (name, job_id(rec) if name == "定时任务库" else rec["project_id"])
+                    # 定时任务按任务号归类，同一任务失败 ≥2 次才算重复；派单每张单是不同的事，各记一次，重不重复由 Hermes 读原因判断
+                    key = (name, job_id(rec) if name == "定时任务库" else f"{rec['project_id']} {rec['action_id']}")
                     fails.setdefault(key, []).append(rec)
         for (name, what), rs in fails.items():
             out.append({"kind": "重复失败" if len(rs) >= 2 else "失败", "what": f"{name}：{what}",
-                        "count": len(rs), "first": rs[0]["ts"], "last": rs[-1]["ts"],
+                        "count": len(rs), "first": min((r["ts"] for r in rs), key=pdaily_data.parse_ts),
+                        "last": max((r["ts"] for r in rs), key=pdaily_data.parse_ts),
                         "evidence": [r["action_id"] for r in rs][:10], "threshold_met": len(rs) >= 2})
     except Exception as e:
         notes.append(f"观察池：失败记录读不了：{e}")
@@ -238,35 +263,48 @@ def job_id(rec):
 
 
 def new_lessons(span, projects, notes):
-    """统计日内各项目 LESSONS 新加的条目（主分支上 +## 开头的标题行）；agent-kit 的是全局坑。一条新坑本身不够提案门槛，
-    同一问题在 ≥2 个项目或任务里出现才够，这要 Hermes 读内容判断，这里只列出来。"""
+    """统计日内各项目 LESSONS 新加的条目（主分支上 +## L-xx / G-xx 标题行）；agent-kit 的是全局坑。一条新坑本身不够提案门槛，
+    同一问题在 ≥2 个项目或任务里出现才够，这要 Hermes 读内容判断，这里只列出来。
+    同一提交里同号的条目又有删除行的（改标题、调顺序、从根目录挪到 docs/），不算新坑。"""
     out = []
+    names = ("docs/LESSONS.md", "LESSONS.md")
     for p in projects:
-        root = Path(p.get("path") or "").expanduser()
-        for name in ("docs/LESSONS.md", "LESSONS.md"):
-            if not (root / name).exists():
+        if not p.get("path"):
+            continue                                    # 没登记目录：不能拿当前目录顶替
+        root = Path(p["path"]).expanduser()
+        if not any((root / n).exists() for n in names):
+            continue
+        try:
+            ref = pdaily_data.main_ref(root, p.get("main") or "main")
+            if not ref:
+                raise pdaily_data.Fail("找不到主分支")
+            r = subprocess.run(["git", "-C", str(root), "log", "--first-parent", "-p", "--format=@@%cI",
+                                f"--since={span[0].isoformat()}", f"--until={span[1].isoformat()}", ref, "--", *names],
+                               capture_output=True, text=True, env=pdaily_data.git_env())
+            if r.returncode:
+                raise pdaily_data.Fail((r.stderr.strip().splitlines() or [f"git 退出码 {r.returncode}"])[-1])
+        except (pdaily_data.Fail, OSError, ValueError) as e:   # ValueError：输出不是 UTF-8
+            notes.append(f"观察池：{p.get('id')} 的 LESSONS 读不了：{e}")
+            continue
+        commits, cur, fname = [], None, None
+        for line in r.stdout.splitlines():
+            if line.startswith("@@") and not line.startswith("@@ "):
+                cur = {"when": line[2:], "added": [], "removed": set()}
+                commits.append(cur)
+            elif line.startswith("+++ "):
+                fname = line[6:] if line.startswith("+++ b/") else fname
+            elif cur and ENTRY.match(line) and "<一句话现象>" not in line:   # 模板标题和占位不算
+                cur["added"].append((fname, line[4:].strip()))
+            elif cur and DROP.match(line):
+                cur["removed"].add(DROP.match(line).group(1))
+        for c in commits:
+            if not pdaily_data.inside(c["when"], span):   # git 的 --until 含右端，窗口右端 04:00 整的提交在这里剔掉
                 continue
-            try:
-                ref = pdaily_data.main_ref(root, p.get("main") or "main")
-                if not ref:
-                    raise pdaily_data.Fail("找不到主分支")
-                r = subprocess.run(["git", "-C", str(root), "log", "--first-parent", "-p", "--format=@@%cI",
-                                    f"--since={span[0].isoformat()}", f"--until={span[1].isoformat()}", ref, "--", name],
-                                   capture_output=True, text=True, env=pdaily_data.git_env())
-                if r.returncode:
-                    raise pdaily_data.Fail((r.stderr.strip().splitlines() or [f"git 退出码 {r.returncode}"])[-1])
-            except (pdaily_data.Fail, OSError) as e:
-                notes.append(f"观察池：{p.get('id')} 的 LESSONS 读不了：{e}")
-                break
-            when = None
-            for line in r.stdout.splitlines():
-                if line.startswith("@@") and not line.startswith("@@ "):
-                    when = line[2:]
-                elif ENTRY.match(line) and "<一句话现象>" not in line and when and pdaily_data.inside(when, span):
-                    # 只认 L-xx / G-xx 条目，模板标题和占位不算；git 的 --until 含右端，窗口右端 04:00 整的提交在这里剔掉
-                    out.append({"kind": "新坑", "what": f"{p['id']} {name}：{line[4:].strip()}", "count": 1,
-                                "first": when, "last": when, "evidence": [f"{p['id']}:{name}"], "threshold_met": False})
-            break
+            for fn, title in c["added"]:
+                if title.split(" ", 1)[0] in c["removed"]:
+                    continue
+                out.append({"kind": "新坑", "what": f"{p['id']} {fn}：{title}", "count": 1,
+                            "first": c["when"], "last": c["when"], "evidence": [f"{p['id']}:{fn}"], "threshold_met": False})
     return out
 
 
@@ -325,10 +363,14 @@ def build(day, projects):
     rsk = risks(w, recs, acts, coverage)
     refs = cross_refs(w, recs, projects)
     obs = observations(w, projects, notes)
+    yd = lambda r, k: r["yesterday_delta"].get(k)
+    unknown = [r["project_id"] for r in recs if any(yd(r, k) is None for k in ("merged_prs", "closed_issues", "commits"))]
     delta = [r["project_id"] for r in recs
-             if (r["yesterday_delta"].get("merged_prs") or r["yesterday_delta"].get("closed_issues")
-                 or any((r["yesterday_delta"].get("commits") or {}).values()))]
-    merged = sum(len(r["yesterday_delta"].get("merged_prs") or []) for r in recs)
+             if yd(r, "merged_prs") or yd(r, "closed_issues") or any((yd(r, "commits") or {}).values())]
+
+    def total(k, size=len):   # 有项目这一项取不到：合计写 None（第 6 节：不写成 0）
+        vals = [yd(r, k) for r in recs]
+        return None if any(v is None for v in vals) else sum(size(v) for v in vals)
     by_kind = {}
     for a in acts:
         by_kind[a["kind"]] = by_kind.get(a["kind"], 0) + 1
@@ -341,12 +383,13 @@ def build(day, projects):
         "decisions": dec, "risks": rsk, "cross_refs": refs, "observations": obs,
         "counts": {   # 开头三个数的原料（4.1）：「实质推进」要不要算，由 Hermes 看成果判断
             "projects_with_delta": delta,
+            "projects_delta_unknown": unknown,      # 增量有一项取不到的项目：不当成「没有新动作」
             "decision_candidates": len(dec),
-            "risk_projects": sorted({x["project_id"] for x in rsk}),
+            "risk_projects": sorted({x["project_id"] for x in rsk} & {r["project_id"] for r in recs}),
+            "hermes_risks": sum(1 for x in rsk if x["project_id"] == "hermes"),   # Hermes 自己的（来源取不到、定时任务），不算项目
         },
-        "activity": {"merged_prs": merged,
-                     "closed_issues": sum(len(r["yesterday_delta"].get("closed_issues") or []) for r in recs),
-                     "commits": sum(sum((r["yesterday_delta"].get("commits") or {}).values()) for r in recs),
+        "activity": {"merged_prs": total("merged_prs"), "closed_issues": total("closed_issues"),
+                     "commits": total("commits", lambda c: sum(c.values())),
                      "actions_by_kind": by_kind},
         "coverage": coverage,
         "notes": notes,
