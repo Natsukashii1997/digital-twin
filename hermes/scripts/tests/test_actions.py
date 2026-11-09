@@ -278,7 +278,8 @@ class DispatchTests(Base):
         self.order("D20261108-1", "2026-11-08T10:00:00", mode="write", started="2026-11-08T10:00:00", status="failed",
                    receipt={"tool": "claude", "executor": "Claude Code", "refused": "executor_unavailable", "reason": "claude 没登录"})
         rs = self.by_origin(self.run_day(), "派单台账")
-        a = rs[0]
+        self.assertEqual([x["action_id"] for x in rs], ["dispatch:D20261108-1:open", "dispatch:D20261108-1"])   # 先开单、后开跑
+        a = rs[1]
         self.assertEqual((a["kind"], a["actor"], a["decision"], a["result"], a["auth_gap"]), ("refuse", "Hermes", "拒绝", None, None))
         self.assertIn("查一下 X", a["request"])
         self.assertIn("executor_unavailable：claude 没登录", a["verification"])
@@ -303,7 +304,7 @@ class DispatchTests(Base):
         rs = self.by_origin(self.run_day(), "派单台账")
         self.assertEqual([(a["action_id"][9:], a["decision"], a["auth_tier"], a["result"], bool(a["auth_gap"])) for a in rs],
                          [("D20261108-2", "执行", "A", "调用成功", False), ("D20261107-9", "执行", "A", "调用成功", False),
-                          ("D20261108-3", "执行", None, "失败", True), ("D20261108-3:open", "升级给常浩", None, None, False),
+                          ("D20261108-3:open", "升级给常浩", None, None, False), ("D20261108-3", "执行", None, "失败", True),
                           ("D20261108-4", "执行", "A", "已发起", False), ("D20261108-8", "执行", "A", "已发起", False),
                           ("D20261108-5:open", "升级给常浩", None, None, False), ("D20261108-6:open", "执行", "A", "已发起", False),
                           ("D20261108-7:open", "升级给常浩", None, None, False)])
@@ -312,9 +313,9 @@ class DispatchTests(Base):
         nxt = self.by_origin(self.run_day(D + dt.timedelta(days=1)), "派单台账")
         self.assertEqual([(a["action_id"][9:], a["result"], bool(a["auth_gap"])) for a in nxt],
                          [("D20261108-7", "调用成功", True), ("D20261109-1", "调用成功", False)])   # 同一时刻按单号排
-        self.assertEqual(rs[2]["auth_gap"], "授权不足：这类动作要 D 档，记录是「不知道」")
-        self.assertEqual(rs[2]["follow_up"], "常浩决定：要不要删旧表")
-        self.assertIn("护栏", rs[2]["verification"])
+        self.assertEqual(rs[3]["auth_gap"], "授权不足：这类动作要 D 档，记录是「不知道」")
+        self.assertEqual(rs[3]["follow_up"], "常浩决定：要不要删旧表")
+        self.assertIn("护栏", rs[3]["verification"])
 
     def test_cleaned_queued_and_pending_orders(self):
         ok = {"executor": "Codex", "exit_code": 0}
@@ -323,14 +324,22 @@ class DispatchTests(Base):
         self.order("D20261108-3", "2026-11-08T12:00:00", status="queued", started="2026-11-08T12:00:00",
                    receipt={**ok, "exit_code": 1})                                                     # 跑失败后重跑在排队
         self.order("D20261108-4", "2026-11-08T13:00:00", mode="write", status="queued")                 # 确认了、排队，还没开跑
+        self.order("D20261108-5", "2026-11-08T14:00:00", status="queued")                               # 只读单排队：只记一条
+        for no, code in (("D20261108-6", "0"), ("D20261108-7", "1")):                                    # 没回执，看单子上的退出码
+            self.order(no, "2026-11-08T15:00:00" if code == "0" else "2026-11-08T16:00:00", started=None)
+            o = self.p["dispatch"] / no / "order.json"
+            o.write_text(json.dumps({**json.loads(o.read_text()), "exit_code": code}))
         rs = self.by_origin(self.run_day(), "派单台账")
         self.assertEqual([(a["action_id"][9:], a["decision"], a["result"], bool(a["auth_gap"])) for a in rs],
-                         [("D20261108-1", "执行", "调用成功", True), ("D20261108-1:open", "升级给常浩", None, False),
+                         [("D20261108-1:open", "升级给常浩", None, False), ("D20261108-1", "执行", "调用成功", True),
                           ("D20261108-2:open", "不明", "不明", False), ("D20261108-3", "执行", "失败", False),
-                          ("D20261108-4", "执行", "已发起", True), ("D20261108-4:open", "升级给常浩", None, False)])
-        self.assertIn("开跑时间没记", rs[0]["verification"])
+                          ("D20261108-4:open", "升级给常浩", None, False), ("D20261108-4:queued", "执行", "已发起", True),
+                          ("D20261108-5:open", "执行", "已发起", False), ("D20261108-6", "执行", "调用成功", False),
+                          ("D20261108-7", "执行", "失败", False)])
+        self.assertIn("开跑时间没记", rs[1]["verification"])
         self.assertIn("在排队", rs[3]["verification"])
-        self.assertIsNone(rs[5]["follow_up"])                         # 已经确认了，不再要常浩确认
+        self.assertIsNone(rs[4]["follow_up"])                         # 已经确认了，不再要常浩确认
+        self.assertIn("单子记的退出码 1", rs[8]["verification"])
 
     def test_bad_orders_are_skipped_not_fatal(self):
         ok = {"executor": "Codex", "exit_code": 0}
@@ -386,6 +395,12 @@ class CronTests(Base):
         new = [a for a in rs if a["action_id"].startswith("cron-job:")]
         self.assertEqual([(a["request"][:12], a["auth_gap"]) for a in new], [("新建定时任务「夜跑主控」", "授权不足：这类动作要 D 档，记录是「不知道」")])
         self.assertEqual(sorted(os.listdir(self.p["cron"])), ["executions.db", "jobs.json"])   # 只读：没留下 -wal、-shm
+
+    def test_bad_alert_time_is_noted_once(self):
+        self.cron_db(incs=[("i9", "j1", "open", "config", "2026-11-08T11:00:00+08:00", "2026-11-08T11:00:00+08:00", "坏", None, None)])
+        out = self.run_day()
+        self.assertEqual(len([n for n in out["notes"] if "定时任务故障单 i9" in n]), 1)
+        self.assertEqual(self.by_origin(out, "定时任务库")[0]["decision"], "执行")
 
     def test_bad_jobs_file_is_a_note(self):
         self.cron_db(execs=[("e1", "j1", "completed", "2026-11-08T10:00:00+08:00", "delivered", None)], jobs=["坏"])

@@ -14,7 +14,7 @@
   C 档授权文件逐项写明的 D 档动作（清单 5.1），记 auth_tier=D、auth_source 写到「文件路径 第几条」；只写了 C 文件的照样标。
 action_id 约定（以后脚本直接写同一个动作时用同样的号，actions.jsonl 的那条为准，适配器那条不再列）：
   shadow:<仓库>#<PR>@<版本前 12 位>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、merge-run:<目录名>、
-  dispatch:<单号>（写入单等确认那条加 :open）、  cron:<执行号>、cron-job:<任务号>、cron-incident:<故障单号>:<日期>、night:<夜跑>:<行号>、ruling:<证据目录下的路径>。
+  dispatch:<单号>:open（开单）、dispatch:<单号>:queued（写入单确认后排队、还没开跑）、dispatch:<单号>（开跑）、  cron:<执行号>、cron-job:<任务号>、cron-incident:<故障单号>:<日期>、night:<夜跑>:<行号>、ruling:<证据目录下的路径>。
 取不到的来源在 coverage 里记 ok=false、count=null 和原因，不当成 0；来源里个别坏行跳过并写进 notes，不拖垮整个来源。
 """
 import argparse
@@ -324,7 +324,7 @@ def dispatch(w, notes):
       写入单不管当天有没有开跑都记这一条，「升级给常浩」的条数不随确认有没有跨过 04:00 变；
     - 开跑（时间取开跑时间）：running 的记「已发起」，不看可能是上一次留下的回执；其他按回执记，refused 的记「拒绝」；
       跑没跑过看有没有回执或单子上的退出码（clean 会把跑过没合并的单改成 abandoned），没记开跑时间的老单子按开单时间算；
-      确认后在排队、还没开跑的（queued、没有开跑时间）也算执行，记「已发起」；
+      写入单确认后在排队、还没开跑的（queued、没有开跑时间）也算执行，记「已发起」（action_id 加 :queued）；
     - 只读单 A 档；写入单要 D 档（清单第 4 节），确认记录没接入台账，档位记 null，执行了会标 auth_gap；
     - 续跑会改写单子的开跑时间，之前那次开跑看不到（之前的回执在 out/receipt-N.json，没接）。"""
     root = progress_data.DISPATCH
@@ -396,8 +396,8 @@ def one_order(d, w, notes):
         out.append((act(action_id=f"dispatch:{d.name}:open", ts=created, project_id=order.get("project"), kind="dispatch",
                         request=req, actor="Hermes", auth_tier=tier, auth_source=source, decision=dec, result=res,
                         verification=proof, follow_up=follow), None))
-    if pending and opened_today:
-        out.append((act(action_id=f"dispatch:{d.name}", ts=created, project_id=order.get("project"), kind="dispatch",
+    if pending and opened_today and mode != "read":   # 只读单的排队已经记在开单那条里
+        out.append((act(action_id=f"dispatch:{d.name}:queued", ts=created, project_id=order.get("project"), kind="dispatch",
                         request=req, actor=tool, auth_tier=tier, auth_source=source, decision="执行", result="已发起",
                         verification="确认了，在排队，还没开跑（单子状态 queued）"), required))
     if not ran_today:
@@ -625,7 +625,8 @@ def collect(day):
             actions.append({**rec, "origin": name, "auth_gap": gap(rec, required)})
             n += 1
         coverage[name] = {"ok": True, "count": n, "error": None}
-    actions.sort(key=lambda a: (pdaily_data.parse_ts(a["ts"]), a["action_id"]))
+    # 同一时刻：开单（:open）排在排队、开跑前面，按事情发生的顺序
+    actions.sort(key=lambda a: (pdaily_data.parse_ts(a["ts"]), not a["action_id"].endswith(":open"), a["action_id"]))
     return {"stat_day": day.isoformat(), "window": [w[0].isoformat(), w[1].isoformat()],
             "fetched_at": dt.datetime.now(TZ).isoformat(timespec="seconds"),
             "actions": actions, "coverage": coverage, "notes": notes}
