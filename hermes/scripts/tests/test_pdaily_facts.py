@@ -289,12 +289,17 @@ class CrossRefTests(Base):
 
     def test_chinese_right_after_ref_and_long_lines(self):
         """编号后面紧跟汉字也要认；长句里编号在 200 字以后、正文里本仓库编号很多，都不能把跨仓库那句丢掉。"""
-        self.gh_graphql({31: "OPEN", 32: "OPEN", 33: "OPEN", 34: "OPEN"})
+        self.gh_graphql({31: "OPEN", 32: "OPEN", 33: "OPEN", 34: "OPEN", 35: "OPEN"})
         body = "\n".join([f"- 第 {i} 步（#{i}）" for i in range(1, 40)]
-                          + ["配合niuma-home#31的接口", "niuma-home#32号", "甲" * 450 + "等niuma-home#33合并后" + "乙" * 300, "niuma-home#340"])
-        r = rec("skills", yesterday_delta={"merged_prs": [merged(74, "做乙", body)]})
+                          + [f"见 PR #{i}" for i in range(1, 25)]                 # 本仓库「PR #i」很多也不能挤掉后面的
+                          + ["配合niuma-home#31的接口", "niuma-home#32号", "甲" * 450 + "等niuma-home#33合并后" + "乙" * 300,
+                             "niuma-home#340", "接着 PR #5 做，" + "丙" * 450 + "配合 niuma-home#35"])
+        pr = merged(74, "做乙", body)
+        self.assertFalse([x for x in pr["ref_lines"] if "步（#" in x])        # 「（#12）」这种本仓库编号不收，快照不带整段正文
+        self.assertEqual(len(pr["ref_lines"]), 29)
+        r = rec("skills", yesterday_delta={"merged_prs": [pr]})
         out = pf.cross_refs(W, [r], ROSTER)
-        self.assertEqual([x["to_number"] for x in out], [31, 32, 33, 340])
+        self.assertEqual([x["to_number"] for x in out], [31, 32, 33, 340, 35])
         self.assertTrue(out[2]["quote"].startswith("…") and out[2]["quote"].endswith(pd.CUT_MARK))
 
     def test_bad_roster_github_is_skipped(self):
@@ -528,6 +533,18 @@ class BuildTests(Base):
         self.assertTrue(any(n.startswith("跨项目引用算不出来") for n in f["notes"]))
         self.assertEqual([c["kind"] for c in f["decisions"]], ["current"])          # 其余照出
         self.assertEqual(f["projects"][0]["actions"], ["x1"])
+
+    def test_main_reports_unknown_part_and_exits_zero(self):
+        """一段降级成 None 时快照照写，main 正常结束，打印里写「未知」和算不出来的段。"""
+        self.sources()
+        self.fake_collect([rec("skills")], [])
+        roster = self.root / "projects.json"
+        roster.write_text(json.dumps({"projects": ROSTER[:1]}))
+        with mock.patch.object(progress_data, "ROSTER", roster), mock.patch.object(pf, "risks", side_effect=KeyError("x")), \
+                mock.patch.object(sys, "argv", ["pdaily_facts.py", "--date", "2026-11-08"]), mock.patch("builtins.print") as out:
+            pf.main()
+        self.assertIn("未知 条风险候选；算不出来的：风险", out.call_args[0][0])
+        self.assertIsNone(json.loads((self.root / "daily" / "2026-11-08.facts.json").read_text())["risks"])
 
     def test_write_is_atomic_and_dry_run_writes_nothing(self):
         self.sources()

@@ -436,8 +436,10 @@ def main():
         print(json.dumps(facts, ensure_ascii=False, indent=2))
         return
     f = write(facts)
+    n = lambda k: "未知" if facts[k] is None else len(facts[k])
+    failed = facts["coverage"]["failed_parts"]
     print(f"已写 {f}：{len(facts['projects'])} 个项目，{len(facts['actions'])} 条行动，"
-          f"{len(facts['decisions'])} 条拍板候选，{len(facts['risks'])} 条风险候选")
+          f"{n('decisions')} 条拍板候选，{n('risks')} 条风险候选" + (f"；算不出来的：{'、'.join(failed)}" if failed else ""))
 
 
 if __name__ == "__main__":
