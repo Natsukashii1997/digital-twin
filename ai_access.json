@@ -74,6 +74,14 @@
       "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。"
     },
     {
+      "id": "pdaily",
+      "name": "个人项目日报 V2 写稿（pdaily_publish.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后出甲版卡片；#111）",
+      "executor": "hermes",
+      "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
+      "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json（2a 只生成不发送；发送和云文档在 2b）",
+      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+    },
+    {
       "id": "proposal-digest",
       "name": "每周待决提案的推荐（Hermes 带模型定时任务，每周一 10:00）",
       "executor": "hermes",
