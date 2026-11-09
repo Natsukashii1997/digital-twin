@@ -13,7 +13,7 @@
   卡片合并 B；安装、新建或修改定时任务、写入类派单 D（清单第 4 节：写入派单降到 C 还没开始）；夜跑 C。
   C 档授权文件逐项写明的 D 档动作（清单 5.1），记 auth_tier=D、auth_source 写到「文件路径 第几条」；只写了 C 文件的照样标。
 action_id 约定（以后脚本直接写同一个动作时用同样的号，actions.jsonl 的那条为准，适配器那条不再列）：
-  shadow:<仓库>#<PR>@<版本前 12 位>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、merge-run:<目录名>、
+  shadow:<仓库>#<PR>@<版本前 12 位>、shadow-backfill:<统计日>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、merge-run:<目录名>、
   dispatch:<单号>:open（开单）、dispatch:<单号>:queued（写入单确认后排队、还没开跑）、dispatch:<单号>（开跑）、  cron:<执行号>、cron-job:<任务号>、cron-incident:<故障单号>:<日期>、night:<夜跑>:<行号>、ruling:<证据目录下的路径>。
 取不到的来源在 coverage 里记 ok=false、count=null 和原因，不当成 0；来源里个别坏行跳过并写进 notes，不拖垮整个来源。
 """
@@ -626,7 +626,9 @@ def collect(day):
             n += 1
         coverage[name] = {"ok": True, "count": n, "error": None}
     # 同一时刻：开单（:open）排在排队、开跑前面，按事情发生的顺序
-    actions.sort(key=lambda a: (pdaily_data.parse_ts(a["ts"]), not a["action_id"].endswith(":open"), a["action_id"]))
+    # action_id 里的数字按大小排（夜跑第 9 行在第 10 行前）
+    actions.sort(key=lambda a: (pdaily_data.parse_ts(a["ts"]), not a["action_id"].endswith(":open"),
+                                re.sub(r"\d+", lambda m: m.group().zfill(12), a["action_id"])))
     return {"stat_day": day.isoformat(), "window": [w[0].isoformat(), w[1].isoformat()],
             "fetched_at": dt.datetime.now(TZ).isoformat(timespec="seconds"),
             "actions": actions, "coverage": coverage, "notes": notes}

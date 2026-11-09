@@ -316,6 +316,11 @@ class DispatchTests(Base):
         self.assertEqual(rs[3]["auth_gap"], "授权不足：这类动作要 D 档，记录是「不知道」")
         self.assertEqual(rs[3]["follow_up"], "常浩决定：要不要删旧表")
         self.assertIn("护栏", rs[3]["verification"])
+        self.assertEqual(rs[0]["actor"], "Codex")                                       # 执行者取回执里的 executor
+        self.order("D20261108-9", "2026-11-08T15:00:00", mode="write", started="2026-11-08T15:00:00",
+                   receipt={**ok, "executor": "Claude Code", "guard_remote_changed": True})
+        g = next(a for a in self.by_origin(self.run_day(), "派单台账") if a["action_id"] == "dispatch:D20261108-9")
+        self.assertEqual((g["actor"], g["follow_up"]), ("Claude Code", "核对主分支、远端的改动"))
 
     def test_cleaned_queued_and_pending_orders(self):
         ok = {"executor": "Codex", "exit_code": 0}
@@ -339,6 +344,7 @@ class DispatchTests(Base):
         self.assertIn("开跑时间没记", rs[1]["verification"])
         self.assertIn("在排队", rs[3]["verification"])
         self.assertIsNone(rs[4]["follow_up"])                         # 已经确认了，不再要常浩确认
+        self.assertEqual(rs[5]["actor"], "Codex")                      # 排队那条记执行方，不是 Hermes
         self.assertIn("单子记的退出码 1", rs[8]["verification"])
 
     def test_bad_orders_are_skipped_not_fatal(self):
@@ -360,6 +366,7 @@ class DispatchTests(Base):
         self.assertTrue(out["coverage"]["派单台账"]["ok"])
         self.assertEqual([a["action_id"] for a in rs], ["dispatch:D20261108-1", "dispatch:D20261108-2", "dispatch:D20261108-4"])
         self.assertEqual(rs[1]["result"], "不明")                       # 回执坏了：当成还没有回执
+        self.assertTrue(any("D20261108-2 的回执读不了" in n for n in out["notes"]))
         self.assertTrue(any("D20261108-3 跳过" in n for n in out["notes"]))
         self.assertTrue(any("D20261108-9 只有 task.md" in n for n in out["notes"]))
         self.assertFalse(any("D20261026-1" in n for n in out["notes"]))          # 旧残单不天天提
@@ -448,6 +455,13 @@ class NightTests(Base):
         self.assertEqual([(a["request"], a["actor"]) for a in rs], [("夜跑 演练 开跑", "不明"), ("夜跑 坏编码 解除冻结", "不明")])
         self.assertIn("夜跑 演练 第 1 行不是 JSON 对象，跳过", out["notes"])
         self.assertTrue(any(n.startswith("夜跑 演练 第 3 行 时间认不出") for n in out["notes"]))
+
+    def test_same_second_rows_keep_line_order(self):
+        rows = [{"ts": "2026-11-08T14:00:00Z", "event": "plan"}] * 8 + [
+            {"ts": "2026-11-08T14:05:00Z", "event": "run", "issue": "SBX-1", "status": "completed"},
+            {"ts": "2026-11-08T14:05:00Z", "event": "advance", "stage": 2}]
+        self.night_log("n1", rows)
+        self.assertEqual([a["action_id"] for a in self.by_origin(self.run_day(), "夜跑")], ["night:n1:9", "night:n1:10"])
 
     def test_start_without_approver_is_a_gap_and_old_format_is_kept(self):
         self.night_log("无批准", [{"ts": "2026-11-08T14:00:00Z", "event": "start", "deadline": "y", "limits": {}},
