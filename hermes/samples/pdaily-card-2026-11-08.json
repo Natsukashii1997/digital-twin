@@ -1,0 +1,154 @@
+{
+ "schema": "2.0",
+ "config": {
+  "update_multi": true
+ },
+ "header": {
+  "title": {
+   "tag": "plain_text",
+   "content": "📅 猛鬼兽日报 · 11-08（周日）"
+  },
+  "subtitle": {
+   "tag": "plain_text",
+   "content": "甲版·仪表盘｜模拟测试"
+  },
+  "template": "blue"
+ },
+ "body": {
+  "elements": [
+   {
+    "tag": "markdown",
+    "content": "**📈 核心数据速览**"
+   },
+   {
+    "tag": "table",
+    "page_size": 10,
+    "row_height": "low",
+    "header_style": {
+     "text_align": "left",
+     "text_size": "normal",
+     "background_style": "grey",
+     "bold": true,
+     "lines": 1
+    },
+    "columns": [
+     {
+      "name": "k",
+      "display_name": "指标",
+      "data_type": "lark_md",
+      "width": "auto"
+     },
+     {
+      "name": "v",
+      "display_name": "昨日",
+      "data_type": "lark_md",
+      "width": "auto"
+     },
+     {
+      "name": "n",
+      "display_name": "说明",
+      "data_type": "lark_md",
+      "width": "auto"
+     }
+    ],
+    "rows": [
+     {
+      "k": "有推进的项目",
+      "v": "**9** / 16",
+      "n": "其余 7 个无新动作"
+     },
+     {
+      "k": "合并 PR",
+      "v": "55",
+      "n": "统计日 04:00→04:00"
+     },
+     {
+      "k": "待你拍板",
+      "v": "<font color='red'>**2**</font>",
+      "n": "限时 1 件，最晚 06:00"
+     },
+     {
+      "k": "风险 / 阻塞",
+      "v": "3 个项目",
+      "n": "运行 1、管理失真 2"
+     },
+     {
+      "k": "Hermes 代理动作",
+      "v": "24",
+      "n": "合并 5、裁决 17、拒绝 1、停机 1"
+     }
+    ]
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**🎯 需要你拍板**"
+   },
+   {
+    "tag": "markdown",
+    "content": "<font color='red'>**限时**</font>｜**数字分身·夜跑收尾**：22:19 停机后主控还开着，推荐你亲口交代、我按授权 72 收尾。最晚 **11-09 06:00**，回「按授权 72 收尾」\n<font color='grey'>普通</font>｜**数字分身·PR #102（L3）**：推荐夜跑复盘后再定，今天不用回。"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**✅ 昨日关键成果**"
+   },
+   {
+    "tag": "markdown",
+    "content": "1. **牛马之家**：月度策略批 1 主体合并（9 个 PR），里程碑 #24 到 5/8\n2. **管培生工作台**：后端骨架、业务表、授权入口合并（11 个 PR）\n3. **数字分身**：M5 夜跑首夜开跑，3 次 run 后停机，原因待核\n4. **GitHub 快速中心**：周报卡片改版，19:30 推送已装好，今晚验收\n5. **驿窗**：磁盘瘦身挂件你已实机验收通过（#242）"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**⚠️ 风险与阻塞**"
+   },
+   {
+    "tag": "markdown",
+    "content": "🔴 **运行风险｜数字分身**：停机后收尾没人接（见拍板 1）\n🟠 **管理失真｜牛马之家 ↔ 自建技能库**：my-skills #74 已合并，niuma-home #31 未关\n🟠 **管理失真｜管培生工作台**：当天合并 11 个，主目录不在 main"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**💡 今日推进**"
+   },
+   {
+    "tag": "markdown",
+    "content": "1. **P0 夜跑收尾**：你回拍板 1 → 我 release、暂停主控、查 blocked 原因\n2. **P1 数码世界终验**：你在 5178 终验，通过或给出具体问题\n3. **P1 管理失真清零**：我协调牛马之家核对 #31、管培生补 CURRENT（需你授权）"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "button",
+    "text": {
+     "tag": "plain_text",
+     "content": "📄 查看完整报告"
+    },
+    "type": "primary_filled",
+    "size": "medium",
+    "behaviors": [
+     {
+      "type": "open_url",
+      "default_url": "https://vm94j8bzy7.feishu.cn/docx/Ox6CdrkWyoNlacxA4PFcDjtZnKd",
+      "pc_url": "https://vm94j8bzy7.feishu.cn/docx/Ox6CdrkWyoNlacxA4PFcDjtZnKd",
+      "ios_url": "https://vm94j8bzy7.feishu.cn/docx/Ox6CdrkWyoNlacxA4PFcDjtZnKd",
+      "android_url": "https://vm94j8bzy7.feishu.cn/docx/Ox6CdrkWyoNlacxA4PFcDjtZnKd"
+     }
+    ]
+   },
+   {
+    "tag": "markdown",
+    "content": "<font color='grey'>生成：Hermes（模拟，由 Claude 手写）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:58</font>",
+    "text_size": "notation"
+   }
+  ]
+ }
+}
