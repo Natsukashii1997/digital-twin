@@ -91,6 +91,9 @@ def check(rec):
     for k, allowed in (("kind", KINDS), ("decision", DECISIONS)):
         if rec[k] not in allowed:
             raise ValueError(f"{k} 只能是 {' / '.join(allowed)}，收到「{rec[k]}」")
+    for k in ("project_id", "auth_source", "verification", "follow_up"):
+        if rec.get(k) is not None and not isinstance(rec[k], str):
+            raise ValueError(f"{k} 要是字符串或 null，收到 {rec[k]!r}")
     if rec.get("result") is not None and rec["result"] not in RESULTS:
         raise ValueError(f"result 只能是 {' / '.join(RESULTS)} 或 null，收到「{rec['result']}」")
     if rec.get("auth_tier") is not None and rec["auth_tier"] not in TIERS:
@@ -317,11 +320,13 @@ def merge_runs(w, notes):
 
 def dispatch(w, notes):
     """派单台账 ~/.hermes/dispatch/<单号>/：order.json（单子）+ out/receipt.json（回执）+ task.md。
-    - 写入单开了单、当天没开跑：记一条「升级给常浩」（等确认），时间取开单时间；隔天才开跑的，开单那天照样有这一条；
-    - 只读单不用确认：开了单还没跑的记「已发起」；
-    - 开跑了（有 run_started）：再记一条，时间取开跑时间；还在跑（running、queued）的记「已发起」，不看可能是上一次留下的回执；
-      回执有 refused 的记「拒绝」；
-    - 只读单 A 档；写入单要 D 档（清单第 4 节），确认记录没接入台账，档位记 null，会标 auth_gap。"""
+    - 开单（时间取开单时间，action_id 加 :open）：写入单要常浩确认，记「升级给常浩」；只读单不用确认，记「已发起」；
+      写入单不管当天有没有开跑都记这一条，「升级给常浩」的条数不随确认有没有跨过 04:00 变；
+    - 开跑（时间取开跑时间）：running 的记「已发起」，不看可能是上一次留下的回执；其他按回执记，refused 的记「拒绝」；
+      跑没跑过看有没有回执或单子上的退出码（clean 会把跑过没合并的单改成 abandoned），没记开跑时间的老单子按开单时间算；
+      确认后在排队、还没开跑的（queued、没有开跑时间）也算执行，记「已发起」；
+    - 只读单 A 档；写入单要 D 档（清单第 4 节），确认记录没接入台账，档位记 null，执行了会标 auth_gap；
+    - 续跑会改写单子的开跑时间，之前那次开跑看不到（之前的回执在 out/receipt-N.json，没接）。"""
     root = progress_data.DISPATCH
     if not root.exists():
         raise Fail(f"找不到 {root}")
@@ -349,9 +354,21 @@ def one_order(d, w, notes):
     status, mode = order.get("status"), order.get("mode")
     created = stamp(order["created"], "开单时间") if order.get("created") else None
     started = stamp(order["run_started"], "开跑时间") if order.get("run_started") else None
-    guessed = not started and status in ("done", "failed", "guard", "merged", "cleaned") and bool(created)
-    if guessed:   # 跑完了、但单子没记开跑时间（老单子）：按开单时间算开跑，说明里写明
+    rf = d / "out" / "receipt.json"
+    receipt = None
+    if rf.exists():
+        try:
+            receipt = json.loads(rf.read_text(encoding="utf-8", errors="replace"))
+        except ValueError:
+            pass
+        if not isinstance(receipt, dict):
+            notes.append(f"派单 {d.name} 的回执读不了（不是 JSON 对象），当成还没有回执")
+            receipt = None
+    ran = bool(started) or receipt is not None or order.get("exit_code") not in (None, "")
+    guessed = ran and not started and bool(created)
+    if guessed:   # 跑过、但单子没记开跑时间（老单子）：按开单时间算开跑，说明里写明
         started = created
+    pending = status == "queued" and not started          # 确认了、在排队，还没开跑
     opened_today = bool(created) and inside(created, w)
     ran_today = bool(started) and inside(started, w)
     if not (opened_today or ran_today):
@@ -366,41 +383,36 @@ def one_order(d, w, notes):
         tier, source, required = None, f"派单 {d.name}：写入单要 D 档，常浩的确认没记进台账", "D"
     req = f"Hermes 派单 {d.name}（{tool}，{'只读' if mode == 'read' else mode}）：{quote(what, 80)}"
     out = []
-    if opened_today and not ran_today:
-        if mode == "read" or (not started and status not in ("new", None)):
-            # 只读单不用确认；写入单从没开跑、状态又不是 new（排队、放弃）：按状态记。后来才开跑的写入单，开单那天是在等确认
-            decision = "不明" if status == "abandoned" else "执行"
-            out.append((act(action_id=f"dispatch:{d.name}", ts=created, project_id=order.get("project"), kind="dispatch",
-                            request=req, actor="Hermes", auth_tier=tier, auth_source=source, decision=decision,
-                            result="不明" if status == "abandoned" else "已发起",
-                            verification=f"开了单，统计日内没开跑（单子状态 {status}）"
-                                         + (f"；{started} 开跑" if started else "")), None))
+    if opened_today and (mode != "read" or not ran_today):
+        later = f"；{started} 开跑" if started and not guessed else ""
+        if mode == "read":
+            dec, res, proof = "执行", "已发起", f"开了只读单（不用确认），统计日内没开跑（单子状态 {status}）{later}"
+            follow = None
+        elif status == "abandoned" and not ran:
+            dec, res, proof, follow = "不明", "不明", "开了写入单，没开跑就放弃了", None
         else:
-            out.append((act(action_id=f"dispatch:{d.name}:open", ts=created, project_id=order.get("project"), kind="dispatch",
-                            request=req, actor="Hermes", auth_tier=tier, auth_source=source, decision="升级给常浩",
-                            result=None, verification="开了写入单，等常浩确认开跑" + (f"；{started} 开跑" if started else ""),
-                            follow_up=None if started else "常浩确认开跑或取消"), None))
+            dec, res, proof = "升级给常浩", None, "开了写入单，等常浩确认开跑" + later
+            follow = None if ran or pending else "常浩确认开跑或取消"
+        out.append((act(action_id=f"dispatch:{d.name}:open", ts=created, project_id=order.get("project"), kind="dispatch",
+                        request=req, actor="Hermes", auth_tier=tier, auth_source=source, decision=dec, result=res,
+                        verification=proof, follow_up=follow), None))
+    if pending and opened_today:
+        out.append((act(action_id=f"dispatch:{d.name}", ts=created, project_id=order.get("project"), kind="dispatch",
+                        request=req, actor=tool, auth_tier=tier, auth_source=source, decision="执行", result="已发起",
+                        verification="确认了，在排队，还没开跑（单子状态 queued）"), required))
     if not ran_today:
         return out
-    rf = d / "out" / "receipt.json"
-    receipt = None
-    if rf.exists():
-        try:
-            receipt = json.loads(rf.read_text(encoding="utf-8", errors="replace"))
-        except ValueError:
-            pass
-        if not isinstance(receipt, dict):
-            notes.append(f"派单 {d.name} 的回执读不了（不是 JSON 对象），当成还没有回执")
-            receipt = None
     kind, actor, decision, follow = "dispatch", (receipt or {}).get("executor") or tool, "执行", None
     refused = (receipt or {}).get("refused")
-    if status in ("running", "queued"):
-        result, proof = "已发起", f"还在跑（单子状态 {status}），回执可能是上一次留下的，不算"
+    if status == "running":
+        result, proof = "已发起", "还在跑（单子状态 running），回执可能是上一次留下的，不算"
     elif refused:
         kind, actor, decision, result = "refuse", "Hermes", "拒绝", None
         proof = f"回执 refused={refused}：{receipt.get('reason')}"
     elif receipt is None:
-        result, proof = "不明", f"没有回执（单子状态 {status}）"
+        code = order.get("exit_code")
+        result = "不明" if code in (None, "") else "调用成功" if str(code) == "0" else "失败"
+        proof = f"没有回执（单子状态 {status}，单子记的退出码 {code if code not in (None, '') else '没记'}）"
     else:
         bad = receipt.get("timed_out") or receipt.get("worker_error") or receipt.get("exit_code") not in (0, "0")
         result = "失败" if bad else "调用成功"
@@ -411,6 +423,8 @@ def one_order(d, w, notes):
             follow = "核对主分支、远端的改动"
         if receipt.get("need_decision"):
             follow = f"常浩决定：{quote(str(receipt['need_decision']), 120)}"
+    if status == "queued":
+        proof += "；现在在排队等重跑"
     if guessed:
         proof += "；开跑时间没记，按开单时间算"
     out.append((act(
@@ -468,10 +482,11 @@ def cron(w, notes):
                 auth_tier=None, auth_source="jobs.json 的 created_at；创建时的授权没接入", decision="执行", result="调用成功",
                 verification=f"现在的状态：{'暂停' if j.get('paused_at') else '启用' if j.get('enabled') else '停用'}"), "D"))
     for iid, job, state, ftype, first, last, alerted, closed, error in incs:
-        hits = [t for t in (when(x, w, notes, f"定时任务故障单 {iid}") if x else None for x in (first, alerted, closed)) if t]
+        seen_at = [when(x, w, notes, f"定时任务故障单 {iid}") if x else None for x in (first, alerted, closed)]
+        hits = [t for t in seen_at if t]
         if not hits:
             continue
-        alerted_today = bool(alerted) and bool(when(alerted, w, notes, f"定时任务故障单 {iid} 的告警"))
+        alerted_today = bool(seen_at[1])
         out.append((act(
             action_id=f"cron-incident:{iid}:{w[0].date().isoformat()}", ts=min(hits), project_id="hermes", kind="supervise",
             request=f"定时任务故障单「{name.get(job, job)}」（{job}，{ftype}）", actor="Hermes", auth_tier="A",
