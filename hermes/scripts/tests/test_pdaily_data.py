@@ -511,6 +511,28 @@ class GitHubTests(Base):
             self.assertEqual(quotes[n], ["- 已发布：七八七九"])
             self.assertTrue(any("同时挂给" in w for w in prs[n]["claims_warnings"]))
 
+    def test_title_ranges_and_unmatched_sections(self):
+        cur = ("# 当前状态\n\n## 第二批 9 张（#257–#265）（2026-11-08；已发布 `b977cfc5aa5e` 回读通过）\n- 改了九处\n\n"
+               "## 写错的范围（#1–#999）（2026-11-08）\n- 已发布：不展开\n\n"
+               "## 没写编号的一节（2026-11-08，Claude）\n- 已安装：没编号\n- 改了别的\n")
+        r = make_repo(self.root, "rng", {"CURRENT.md": cur})
+        pr = lambda n, title: {"number": n, "title": title, "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(266, "甲（#257）"), pr(267, "乙（#258）"), pr(500, "丙（#500）")])
+        delta = self.run_one(r)["projects"][0]["yesterday_delta"]
+        prs = {p["number"]: p for p in delta["merged_prs"]}
+        for n in (266, 267):                                     # 范围展开：两个 PR 都挂上，并注明分不清
+            self.assertEqual(prs[n]["claims"][0]["quotes"], ["第二批 9 张（#257–#265）（2026-11-08；已发布 `b977cfc5aa5e` 回读通过）"])
+            self.assertTrue(prs[n]["claims_warnings"])
+        self.assertEqual(prs[500]["claims"], [])                 # 「#1–#999」超过上限不展开
+        self.assertEqual([u["section"] for u in delta["unmatched_sections"]],
+                         ["写错的范围（#1–#999）（2026-11-08）", "没写编号的一节（2026-11-08，Claude）"])
+        self.assertEqual(delta["unmatched_sections"][1]["quotes"], ["- 已安装：没编号"])
+        self.assertEqual(pd.short("甲" * 41), "甲" * 40 + "…")   # 截短的标题要看得出截了
+        (self.state / "fail").write_text("error connecting to api.github.com\n")   # 合并 PR 取不到：当天的节全列为没挂上
+        delta = self.run_one(r)["projects"][0]["yesterday_delta"]
+        self.assertIsNone(delta["merged_prs"])
+        self.assertEqual(len(delta["unmatched_sections"]), 3)
+
     def test_section_date_prefers_title_start_or_first_bracket(self):
         secs = pd.sections("## 复盘 2026-11-01 事故（2026-11-08，Claude）\n\n## 2026-11-07 · 甲（#1）\n\n## 乙 2026-11-05\n")
         self.assertEqual([d for _, d, _ in secs], ["2026-11-08", "2026-11-07", "2026-11-05"])
@@ -610,6 +632,28 @@ class GitHubTests(Base):
         self.assertEqual([(m["number"], m["done"], m["total"], m["source"]) for m in ms],
                          [(1, 1, 2, "原生子任务"), (2, 1, 2, "正文清单")])
 
+    def test_checklist_milestone_counts_closed_refs_and_flags_conflicts(self):
+        api = {"graphql": {"data": {"repository": {
+            "issues": {"nodes": [{"number": 2, "title": "清单父单", "body": "- [x] #10 甲\n- [ ] #11 乙\n- [ ] #12 丙\n",
+                                  "subIssues": {"nodes": []}}]},
+            "i10": {"state": "OPEN"}, "i11": {"state": "CLOSED"}}}}}    # 假 gh 两次 graphql 回同一份：两种字段都放
+        r = make_repo(self.root, "ms", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        self.gh(api=api)
+        m = self.run_one(r)["projects"][0]["milestones"][0]
+        self.assertEqual((m["done"], m["total"]), (2, 3))       # 勾了的 #10 + 已关的 #11
+        self.assertEqual(m["notes"], ["清单勾了但 #10 还开着", "清单没勾但 #11 已关", "#12 的状态没取到"])
+        (self.state / "fail_match").write_text("issueOrPullRequest")   # 状态查询失败：只按勾选算，并注明
+        m = self.run_one(r)["projects"][0]["milestones"][0]
+        self.assertEqual((m["done"], m["notes"]), (1, ["清单引用的 issue 状态没取到，只按勾选算"]))
+
+    def test_empty_next_step_and_bad_roster_entry_are_explained(self):
+        r = make_repo(self.root, "nn", {"CURRENT.md": "# 当前状态\n\n## 节（2026-11-08）\n- 没写\n"})
+        self.gh()
+        rec = self.run_one(r)["projects"][0]
+        self.assertTrue(any("都没写下一步" in n for n in rec["notes"]))
+        out = pd.collect(D, [{"id": "坏", "name": "坏"}])
+        self.assertEqual(out["coverage"]["errors"], {"坏": ["名册这一项缺字段 'path'"]})
+
     def test_project_without_github_has_empty_lists(self):
         r = make_repo(self.root, "l", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
         rec = self.run_one(r, github=None)["projects"][0]
@@ -640,6 +684,15 @@ class NextStepTests(unittest.TestCase):
             sh(r, "checkout", "-q", "--", "CURRENT.md")
             os.utime(f, (t, t))
             self.assertFalse(progress_data.touched_on(r, f, D))   # 干净时按提交日期 11-06
+
+    def test_only_whole_line_next_step_titles_count(self):
+        lines = ("# 当前状态\n\n更新：2026-11-08。唯一下一步：头部的\n\n"
+                 "## #38 命令：成果、评审、下一步行动、认定（2026-11-08）\n- 时间：开工\n").splitlines()
+        self.assertEqual(progress_data.next_step(lines), "头部的")           # 标题里的「下一步行动」不是下一步
+        lines = "# 当前状态\n\n## 最新\n- 没写\n\n## 历史下一步（157快照）\n旧的\n".splitlines()
+        self.assertIsNone(progress_data.next_step(lines))
+        lines = "# 当前状态\n\n## 最新\n- 没写\n\n## 唯一下一步（11-07）\n老的\n".splitlines()
+        self.assertEqual(progress_data.next_step(lines), "老的")
 
     def test_older_sections_are_not_used(self):
         lines = "# 当前状态\n\n## 最新\n- 没写\n\n## 更早\n- 下一步：更早的\n".splitlines()

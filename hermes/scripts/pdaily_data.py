@@ -30,7 +30,7 @@ GOAL = re.compile(r"^当前阶段目标：(.+)$")
 GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
 # 交付（安装 / 发布）、验收不从 CURRENT 的文字下结论（常浩 2026-11-09 定「甲：只摘原文」）：
 # CURRENT 是 Claude 写的自述，V2 第 6 节规定文档写了「已安装」不算安装成功、Claude 说做完不算常浩通过；
-# 前三轮审查也证明正则判断中文语义总有漏网写法。所以 1a 一律记「未核实」，只把当天那一节里提到安装、发布、
+# 前几轮审查也证明正则判断中文语义总有漏网写法。所以 1a 一律记「未核实」，只把当天那一节里提到安装、发布、
 # 验收的句子原样摘出来（claims），标明是自述摘录；真正的判定等 1b 接入安装记录和回读证据。
 UNVERIFIED = "未核实"
 CLAIMS_NOTE = "CURRENT / PR 标题的自述摘录，未判定；安装、验收以行动记录和回读证据为准（#110 1b）"
@@ -40,6 +40,8 @@ CLAIM_MAX = 12                     # 每节最多摘这么多句，多出来的�
 QUOTE_MAX = 400                    # 每句最多这么多字，超出的标「（后文截断）」：后半句可能有否定、回滚
 CUT_MARK = "…（后文截断）"
 SPLIT = re.compile(r"[（）()，,；;、。：:]")
+RANGE = re.compile(r"^#(\d+)\s*[–—\-~～]\s*#?(\d+)$")   # 「（#257–#265）」：一批票写成范围
+RANGE_MAX = 30                     # 范围最多展开这么多个号，写错成「#1–#999」不至于挂满
 REF_CLAUSE = re.compile(r"^(?:PR\s*)?#\d+(?:\s*PR\s*#\d+)?(?:\s*(?:squash\s*)?(?:合并为\s*)?`[0-9a-f]{7,40}`)?$")
 PR_IN_TITLE = re.compile(r"PR\s*#(\d+)")
 HEAD_UPDATED = re.compile(r"更新[：:]\s*(\d{4}-\d{2}-\d{2})")   # 文件头「更新：2026-11-08。……唯一下一步：……」
@@ -56,6 +58,10 @@ number title body subIssues(first:100){nodes{number state}}}}}}"""
 
 class Fail(Exception):
     pass
+
+
+def short(text, n=40):
+    return text if len(text) <= n else text[:n] + "…"
 
 
 def quote(line):
@@ -78,7 +84,10 @@ def title_refs(title):
     prs = set()
     for c in SPLIT.split(title):
         c = c.strip()
-        if REF_CLAUSE.match(c):
+        r = RANGE.match(c)
+        if r and 0 <= int(r.group(2)) - int(r.group(1)) < RANGE_MAX:
+            issues |= set(range(int(r.group(1)), int(r.group(2)) + 1))
+        elif REF_CLAUSE.match(c):
             named = {int(n) for n in PR_IN_TITLE.findall(c)}
             prs |= named
             issues |= {int(n) for n in REF.findall(c)} - named
@@ -111,8 +120,13 @@ def inside(ts, w):
 
 # ---------- 本机仓库 ----------
 
+def git_env():
+    """git 报错固定英文：show() 按报错文字区分「没有这个文件」。每次现取，跟着当时的环境变量走。"""
+    return {**os.environ, "LC_ALL": "C"}
+
+
 def git(root, *args):
-    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, env=git_env())
     if r.returncode:
         raise Fail((r.stderr or r.stdout).strip()[:200] or f"git 退出码 {r.returncode}")
     return r.stdout
@@ -140,7 +154,7 @@ def main_ref(root, main):
     不读工作区：主目录可能检出别的分支（管培生工作台）、可能还没拉齐（数码世界），读到的不是项目的正式状态。"""
     refs = []
     for ref in (f"origin/{main}", main):
-        r = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%ct", ref], capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%ct", ref], capture_output=True, text=True, env=git_env())
         if r.returncode == 0 and r.stdout.strip():
             refs.append((int(r.stdout.strip()), ref))
     return max(refs)[1] if refs else None
@@ -157,7 +171,7 @@ def show(root, ref, name):
     """某分支上的文件内容；没有这个文件返回 None，git 别的失败抛 Fail（不当成「没有文件」）。"""
     if not ref:
         return None
-    r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{name}"], capture_output=True, text=True, env=git_env())
     if r.returncode == 0:
         return r.stdout
     if "does not exist" in r.stderr or "exists on disk, but not in" in r.stderr:
@@ -307,19 +321,48 @@ class GitHub:
         owner, name = repo.split("/", 1)
         data = self._run("api", "graphql", "-f", f"query={MILESTONE_QUERY}", "-f", f"o={owner}", "-f", f"n={name}")
         nodes = ((((data or {}).get("data") or {}).get("repository") or {}).get("issues") or {}).get("nodes") or []
-        return [m for m in (milestone(n) for n in self._cap(repo, "milestones", nodes)) if m]
+        nodes = self._cap(repo, "milestones", nodes)
+        refs = sorted({int(n) for x in nodes if not ((x.get("subIssues") or {}).get("nodes"))
+                       for _, n in CHECK_REF.findall(x.get("body") or "")})[:100]
+        states = self.states(owner, name, refs) if refs else {}
+        return [m for m in (milestone(n, states) for n in nodes) if m]
+
+    def states(self, owner, name, numbers):
+        """清单里引用的 issue / PR 现在是不是关了：{号: True/False}；取不到返回 None（只按勾选算，并注明）。"""
+        fields = " ".join(f"i{n}: issueOrPullRequest(number:{n}){{... on Issue{{state}} ... on PullRequest{{state}}}}"
+                          for n in numbers)
+        try:
+            data = self._run("api", "graphql", "-f", f"query=query($o:String!,$n:String!){{repository(owner:$o,name:$n){{{fields}}}}}",
+                             "-f", f"o={owner}", "-f", f"n={name}")
+        except Fail:
+            return None
+        repo = ((data or {}).get("data") or {}).get("repository") or {}
+        return {n: (repo.get(f"i{n}") or {}).get("state") in ("CLOSED", "MERGED") for n in numbers if repo.get(f"i{n}")}
 
 
-def milestone(issue):
-    """开着的父 issue 才算里程碑：先认原生子任务，再认正文清单里引用了别的 issue 号的；只有验收清单的不算（#110 评论）。"""
+def milestone(issue, states=None):
+    """开着的父 issue 才算里程碑：先认原生子任务，再认正文清单里引用了别的 issue 号的；只有验收清单的不算（#110 评论）。
+    清单项按「勾了或引用的 issue 已关」算完成（V2 5.3）；勾选和关闭对不上的写进 notes（V2 第 6 节：来源冲突要标出）。"""
     subs = ((issue.get("subIssues") or {}).get("nodes")) or []
     if subs:
         done = sum(1 for s in subs if s.get("state") == "CLOSED")
         return {"number": issue["number"], "title": issue["title"], "done": done, "total": len(subs), "source": "原生子任务"}
     items = CHECK_REF.findall(issue.get("body") or "")
     if len(items) >= MIN_CHILDREN:
-        done = sum(1 for mark, _ in items if mark.lower() == "x")
-        return {"number": issue["number"], "title": issue["title"], "done": done, "total": len(items), "source": "正文清单"}
+        done, notes = 0, []
+        for mark, n in items:
+            ticked, closed = mark.lower() == "x", (states or {}).get(int(n))
+            done += ticked or bool(closed)
+            if states is not None and closed is None:
+                notes.append(f"#{n} 的状态没取到")
+            elif ticked and closed is False:
+                notes.append(f"清单勾了但 #{n} 还开着")
+            elif not ticked and closed:
+                notes.append(f"清单没勾但 #{n} 已关")
+        if states is None:
+            notes.append("清单引用的 issue 状态没取到，只按勾选算")
+        return {"number": issue["number"], "title": issue["title"], "done": done, "total": len(items), "source": "正文清单",
+                "notes": notes}
     return None
 
 
@@ -347,10 +390,15 @@ def section_prs(title, prs):
 def deliverables(prs, dated_sections):
     """每个合并的 PR 一条，三个维度分开记（V2 5.2）：工程「已合并」有 GitHub 为证；交付、验收一律「未核实」，
     只附当天 CURRENT 节和 PR 标题里的自述摘录（claims），不下结论（见文件头）。挂法见 section_prs；
-    一节同时挂给几个 PR 时照挂，在 claims_warnings 里注明分不清属于哪一个。没有摘录也写 claims_note，说明不代表没安装。"""
+    一节同时挂给几个 PR 时照挂，在 claims_warnings 里注明分不清属于哪一个。没有摘录也写 claims_note，说明不代表没安装。
+    返回 (每个 PR 一条, 当天没挂上任何 PR 的节)：后者照样列标题和摘录，读者才知道「有自述，只是分不清属于哪个 PR」。"""
     attached = {pr["number"]: [] for pr in prs}
+    unmatched = []
     for title, body in dated_sections:
         owners = section_prs(title, prs)
+        if not owners:
+            quotes, omitted = claims_of(title, body)
+            unmatched.append({"section": short(title), "quotes": quotes, "omitted": omitted})
         for pr in owners:
             attached[pr["number"]].append((title, body, [o["number"] for o in owners]))
     out = []
@@ -359,10 +407,10 @@ def deliverables(prs, dated_sections):
         for title, body, owners in attached[pr["number"]]:
             quotes, omitted = claims_of(title, body)
             if quotes:
-                claims.append({"source": f"CURRENT「{title[:40]}」", "quotes": quotes, "omitted": omitted})
+                claims.append({"source": f"CURRENT「{short(title)}」", "quotes": quotes, "omitted": omitted})
             if len(owners) > 1:
                 others = "、".join(f"#{n}" for n in owners if n != pr["number"])
-                warnings.append(f"「{title[:30]}」这一节同时挂给 {others}，分不清属于哪一个")
+                warnings.append(f"「{short(title, 30)}」这一节同时挂给 {others}，分不清属于哪一个")
         if CLAIM.search(pr.get("title", "")):
             claims.append({"source": f"PR #{pr['number']} 标题", "quotes": [quote(pr["title"])], "omitted": 0})
         out.append({
@@ -370,13 +418,13 @@ def deliverables(prs, dated_sections):
             "engineering": "已合并",
             "delivery": UNVERIFIED,
             "acceptance": UNVERIFIED,
-            "matched_sections": [t[:40] for t, _, _ in attached[pr["number"]]],
+            "matched_sections": [short(t) for t, _, _ in attached[pr["number"]]],
             "claims": claims,
             "claims_note": CLAIMS_NOTE if claims else NO_CLAIMS_NOTE,
             "claims_warnings": warnings,
             "evidence": [f"PR #{pr['number']} merged"],
         })
-    return out
+    return out, unmatched
 
 
 def project(p, w, hub):
@@ -384,7 +432,8 @@ def project(p, w, hub):
     root = Path(os.path.expanduser(p["path"]))
     day = w[0].date()
     rec = {"project_id": p["id"], "name": p["name"], "type": p.get("type"), "objective": None, "milestones": None,
-           "yesterday_delta": {"merged_prs": None, "closed_issues": None, "commits": None, "current_changed": None},
+           "yesterday_delta": {"merged_prs": None, "closed_issues": None, "commits": None, "current_changed": None,
+                               "unmatched_sections": []},
            "current_state": {"top_section": None, "next_step": None, "next_source": None, "next_reliable": None, "open_prs": None,
                              "checkout_branch": None, "dirty_files": None},
            "freshness": {"current_last_commit": None, "top_section_date": None, "current_as_of": None,
@@ -442,6 +491,8 @@ def project(p, w, hub):
         dated = cur["dated_today"]
         if cur["changed"] and cur["top_date"] and cur["top_date"] < day.isoformat():
             rec["notes"].append(f"CURRENT 当天有提交，但最上面一节是 {cur['top_date']} 的：可能只改了文件头或旧节")
+        if not cur["next_step"]:
+            rec["notes"].append("CURRENT 最上面一节、文件头和「唯一下一步」节都没写下一步")
     elif cur is None and snap:
         rec["notes"].append(f"{ref} 上没有 CURRENT.md：没有可信的下一步")
         state["next_reliable"] = False
@@ -467,8 +518,10 @@ def project(p, w, hub):
     else:
         delta["merged_prs"], delta["closed_issues"], state["open_prs"], rec["milestones"] = [], [], [], []
         rec["notes"].append("名册里没有 GitHub 仓库：PR、issue、里程碑按空记")
+    # 合并 PR 取不到时，当天的节全算没挂上：自述照样列出来，PR 那一项仍是 null
+    merged, delta["unmatched_sections"] = deliverables(delta["merged_prs"] or [], dated)
     if delta["merged_prs"] is not None:
-        delta["merged_prs"] = deliverables(delta["merged_prs"], dated)
+        delta["merged_prs"] = merged
     if delta["closed_issues"] is not None:
         delta["closed_issues"] = [{"number": i["number"], "title": i["title"]} for i in delta["closed_issues"]]
     # 新鲜度：CURRENT 最近一节比主分支上最近一次别的改动早一天以上，就不把它的“下一步”当可信依据（V2 第 6 节）。
@@ -488,7 +541,13 @@ def project(p, w, hub):
 def collect(day, projects):
     w = window(day)
     hub = GitHub(w)
-    recs = [project(p, w, hub) for p in projects]
+    recs = []
+    for p in projects:
+        try:
+            recs.append(project(p, w, hub))
+        except KeyError as e:   # 名册某一项缺 id、name、path：记下来，不让整份日报中断
+            pid = p.get("id") or p.get("name") or "（名册项缺 id）"
+            recs.append({"project_id": pid, "name": p.get("name"), "notes": [], "errors": [f"名册这一项缺字段 {e}"]})
     return {
         "stat_day": day.isoformat(), "timezone": "Asia/Shanghai",
         "window": {"start": w[0].isoformat(), "end": w[1].isoformat()},

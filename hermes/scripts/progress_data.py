@@ -19,7 +19,9 @@ from pathlib import Path
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
 DISPATCH = Path(os.environ.get("DT_DISPATCH", "~/.hermes/dispatch")).expanduser()
 CLIP = 200  # “下一步”最多保留多少字
-NEXT = re.compile(r"下一步\**\s*[：:|]|^#+.*下一步")  # “下一步：…”“**下一步**：…”、表格“| 唯一下一步 |”、标题“## 唯一下一步”
+# 标题只认整行就是“(唯一)下一步”的（可带括号注）：“## #38 命令：成果、评审、下一步行动”“## 历史下一步”都不是
+NEXT_TITLE = re.compile(r"^#+\s*(?:唯一)?下一步\s*(?:[（(][^）)]*[）)])?\s*$")
+NEXT = re.compile(r"下一步\**\s*[：:|]|" + NEXT_TITLE.pattern)  # “下一步：…”“**下一步**：…”、表格“| 唯一下一步 |”、标题“## 唯一下一步”
 
 
 def git(cwd, *args):
@@ -102,7 +104,7 @@ def next_step(lines):
     starts = [i for i, x in enumerate(lines) if x.startswith("## ")]
     top = (starts[0], starts[1] if len(starts) > 1 else len(lines)) if starts else (0, len(lines))
     head = (0, starts[0] if starts else len(lines))
-    rest = [(s, s + 1) for s in starts if re.match(r"^#+.*下一步", lines[s])]
+    rest = [(s, s + 1) for s in starts if NEXT_TITLE.match(lines[s])]
     for lo, hi in (top, head, *rest):
         for i in range(lo, hi):
             x = lines[i]
