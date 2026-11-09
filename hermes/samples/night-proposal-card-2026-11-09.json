@@ -1,0 +1,108 @@
+{
+ "schema": "2.0",
+ "config": {
+  "update_multi": true
+ },
+ "header": {
+  "title": {
+   "tag": "plain_text",
+   "content": "🌙 夜间行动提案 · 11-09（周一）"
+  },
+  "subtitle": {
+   "tag": "plain_text",
+   "content": "甲版·清单｜模拟测试"
+  },
+  "template": "indigo"
+ },
+ "body": {
+  "elements": [
+   {
+    "tag": "markdown",
+    "content": "**📊 今晚概况**"
+   },
+   {
+    "tag": "table",
+    "page_size": 10,
+    "row_height": "low",
+    "header_style": {
+     "text_align": "left",
+     "text_size": "normal",
+     "background_style": "grey",
+     "bold": true,
+     "lines": 1
+    },
+    "columns": [
+     {
+      "name": "k",
+      "display_name": "项目",
+      "data_type": "lark_md",
+      "width": "auto"
+     },
+     {
+      "name": "v",
+      "display_name": "数量",
+      "data_type": "lark_md",
+      "width": "auto"
+     },
+     {
+      "name": "n",
+      "display_name": "说明",
+      "data_type": "lark_md",
+      "width": "auto"
+     }
+    ],
+    "rows": [
+     {
+      "k": "今晚可以替你做",
+      "v": "**4** 件",
+      "n": "推荐其中 3 件（⭐）"
+     },
+     {
+      "k": "要你白天做",
+      "v": "3 件",
+      "n": "要你拍方向或验收，夜里不做"
+     },
+     {
+      "k": "今晚上限",
+      "v": "3 单",
+      "n": "每单 ≤2 小时，同一时间 1 单，Codex"
+     }
+    ]
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**🌙 今晚可以替你做**"
+   },
+   {
+    "tag": "markdown",
+    "content": "⭐ **1｜自建技能库·背景卡适用范围改读结构化字段**（my-skills#78）\n<font color='grey'>L1｜Codex 约 1 小时｜产出：PR + 测试｜前置 niuma-home #43 昨天已合并，卡住的事解开了；关系到牛马之家批 1 目标</font>\n⭐ **2｜GitHub 快速中心·B0-02 星数统计日界专项核对**（github-center#75）\n<font color='grey'>L0｜Codex 约 40 分钟｜产出：核对报告（PR 内文档）｜阶段目标「批次 B 检索达标」的前置；只读核对，风险最低</font>\n⭐ **3｜数码世界·删除误提交的测试残留并加忽略**（digiworld#59）\n<font color='grey'>L0｜Codex 约 20 分钟｜产出：PR｜标了可派单 4 天没人做；顺手清掉，减少主目录未提交文件</font>\n**4｜管培生工作台·第 3 步 · C 级占位与旧代码清理**（trainee-hub#50）\n<font color='grey'>L1｜Codex 约 2 小时｜产出：PR + 测试｜阶段目标第 2 步的收尾；但和版式选定（#43）有关，建议你先选版式</font>"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**☀️ 要你白天做**"
+   },
+   {
+    "tag": "markdown",
+    "content": "1. **管培生工作台**：在挑版页选定版式（#43）。选完后第 3 步 5 张单（#47–#51）可以排进夜里\n2. **数字分身**：日报 1a 的判定方向，在 Claude 会话里选\n3. **数码世界**：在 5178 终验新页面"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**怎么回**：「做 1 3」只做这几单｜「按推荐」做标 ⭐ 的｜「今晚不做」\n<font color='grey'>00:30 前没回，今晚不做。只做到开 PR（测试 + 自审），不合并、不安装；明早 08:00 日报汇报结果。</font>"
+   },
+   {
+    "tag": "markdown",
+    "content": "<font color='grey'>生成：Hermes（模拟，由 Claude 手写）｜接入：Hermes 派单｜取数 11-09 22:28｜模拟测试，请勿在此回复</font>",
+    "text_size": "notation"
+   }
+  ]
+ }
+}
