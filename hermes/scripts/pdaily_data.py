@@ -57,6 +57,9 @@ MILESTONE_QUERY = """query($o:String!,$n:String!){repository(owner:$o,name:$n){i
 number title body subIssues(first:100){nodes{number state}}}}}}"""
 
 
+REF_ANY = re.compile(r"[A-Za-z0-9_.-] ?#\d+")
+
+
 class Fail(Exception):
     pass
 
@@ -412,6 +415,30 @@ def section_prs(title, prs):
     return [pr for pr in prs if issues & set(refs_of(pr))]
 
 
+def ref_lines(pr):
+    """PR 标题和正文里写了「名字#编号」的原句：给 1c 找跨项目引用用，不带整段正文。
+    只收编号前紧挨着字母、数字或「名字 #」的（niuma-home#31、github-center #83、PR #5），本仓库「（#12）」这种不收；
+    不设句数上限（一个 PR 正文的行数有限，设了上限会把跨仓库那句挤掉）。长句只留每个编号前后各 100 字，截掉的地方标出来。"""
+    out = []
+    for x in [pr.get("title") or "", *(pr.get("body") or "").splitlines()]:
+        x = x.strip()
+        hits = list(REF_ANY.finditer(x))
+        if not hits:
+            continue
+        if len(x) > QUOTE_MAX:
+            spans = []
+            for m in hits:                       # 每个编号各取一段，重叠的合并
+                a, b = max(0, m.start() - 100), min(len(x), m.end() + 100)
+                if spans and a <= spans[-1][1]:
+                    spans[-1][1] = b
+                else:
+                    spans.append([a, b])
+            x = (("…" if spans[0][0] else "") + "…".join(x[a:b] for a, b in spans)
+                 + (CUT_MARK if spans[-1][1] < len(x) else ""))
+        out.append(x)
+    return out
+
+
 def deliverables(prs, dated_sections):
     """每个合并的 PR 一条，三个维度分开记（V2 5.2）：工程「已合并」有 GitHub 为证；交付、验收一律「未核实」，
     只附当天 CURRENT 节和 PR 标题里的自述摘录（claims），不下结论（见文件头）。挂法见 section_prs；
@@ -448,6 +475,7 @@ def deliverables(prs, dated_sections):
             "claims_note": CLAIMS_NOTE if claims else NO_CLAIMS_NOTE,
             "claims_warnings": warnings,
             "evidence": [f"PR #{pr['number']} merged"],
+            "ref_lines": ref_lines(pr),
         })
     return out, unmatched
 
