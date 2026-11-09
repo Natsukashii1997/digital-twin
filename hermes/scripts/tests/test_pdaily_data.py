@@ -21,6 +21,7 @@ import pdaily_data as pd  # noqa: E402
 import progress_data  # noqa: E402
 
 D = dt.date(2026, 11, 8)
+AT8 = "2026-11-08 10:00:00 +0800"   # 统计日 D 当天：这时写的节才算当天的
 GOAL_LINE = "当前阶段目标：做完甲（2026-11-08 常浩确认，digital-twin#114）"
 
 
@@ -217,6 +218,30 @@ class RepoTests(Base):
         self.assertEqual(rec["yesterday_delta"]["merged_prs"][0]["claims"][0]["quotes"], ["- 已安装：cmp 一致"])   # D+1 凌晨的节算 D
         self.assertFalse(any("文件头" in n for n in rec["notes"]))
 
+    def test_early_morning_section_is_not_listed_again_next_day(self):
+        r = make_repo(self.root, "early", {"README.md": "x", "CURRENT.md": "# 当前状态\n\n## 旧（2026-11-07）\n"},
+                      at="2026-11-07 10:00:00 +0800")
+        commit(r, "凌晨记一节", "2026-11-09 02:00:00 +0800", "CURRENT.md",
+               "# 当前状态\n\n## 凌晨（#70）（2026-11-09）\n- 已安装：七十\n\n## 旧（2026-11-07）\n")
+        pr = {"number": 71, "title": "做（#70）", "url": "", "body": "", "mergedAt": "2026-11-08T18:00:00Z"}   # 北京 11-09 02:00
+        self.gh(prs=[pr])
+        p = {"id": r.name, "name": r.name, "path": str(r), "main": "main", "github": "o/fx"}
+        d8 = pd.collect(D, [p])["projects"][0]["yesterday_delta"]
+        self.assertEqual(d8["merged_prs"][0]["claims"][0]["quotes"], ["- 已安装：七十"])   # 属于统计日 11-08
+        self.gh(prs=[{**pr, "number": 75, "title": "撤回（#70）", "mergedAt": "2026-11-09T06:00:00Z"}])
+        d9 = pd.collect(D + dt.timedelta(days=1), [p])["projects"][0]["yesterday_delta"]
+        self.assertEqual(d9["merged_prs"][0]["claims"], [])       # 11-09 不再列、也不挂给同号的新 PR
+        self.assertEqual(d9["unmatched_sections"], [])
+
+    def test_commits_count_main_from_snapshot_when_local_is_behind(self):
+        up = make_repo(self.root, "up2", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        sh(self.root, "clone", "-q", str(up), "down2")
+        commit(up, "当天合并", "2026-11-08 12:00:00 +0800", "a.py", "x")
+        down = self.root / "down2"
+        sh(down, "fetch", "-q")                                   # 本机 main 没拉，origin/main 有当天的提交
+        self.gh()
+        self.assertEqual(self.run_one(down)["projects"][0]["yesterday_delta"]["commits"], {"main": 1})
+
     def test_main_without_commits_before_day_end(self):
         r = make_repo(self.root, "late", {"CURRENT.md": f"# 当前状态\n\n{GOAL_LINE}\n"}, at="2026-11-10 10:00:00 +0800")
         self.gh()
@@ -377,7 +402,7 @@ class GitHubTests(Base):
     def test_merged_prs_are_unverified_with_quotes_only(self):
         cur = ("# 当前状态\n\n## 做甲（#4）（2026-11-08，Claude）\n- **已安装**：cmp 一致\n- 常浩实机验收通过\n- 改了 x.py\n"
                "\n## 更早（#4）（2026-11-07）\n- 已安装：旧的\n")
-        r = make_repo(self.root, "u", {"CURRENT.md": cur})
+        r = make_repo(self.root, "u", {"CURRENT.md": cur}, at=AT8)
         self.gh(prs=[self.PR, {**self.PR, "number": 3, "mergedAt": "2026-11-07T10:00:00Z"}])   # #3 不在统计日
         prs = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]
         self.assertEqual([p["number"] for p in prs], [5])
@@ -394,7 +419,7 @@ class GitHubTests(Base):
         lines = ["常浩验收未通过", "等常浩验收通过后再装", "- **已安装**：**否**", "已发布 `abcdef1` 回读未通过",
                  "下一步：常浩实机验收通过", "已安装，但回读不一致", "回读：未做", "已安装；后发现没生效，已卸载"]
         body = "".join(f"- {x}\n" for x in lines)
-        r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n## 事（#100）（2026-11-08）\n{body}- 改了别的\n"})
+        r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n## 事（#100）（2026-11-08）\n{body}- 改了别的\n"}, at=AT8)
         pr = lambda n, title: {"number": n, "title": title, "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
         self.gh(prs=[pr(101, "做（#100）"), pr(102, "无关（#99）")])
         prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
@@ -453,7 +478,7 @@ class GitHubTests(Base):
     def test_only_own_title_and_closing_refs_link_claims(self):
         cur = ("# 当前状态\n\n## 别的（#60）（2026-11-08）\n- 已安装：六十\n\n"
                "## 甲（#49）（2026-11-08）\n- 已安装：四九\n\n## 自己（#52）（2026-11-08）\n- 已安装：五二\n")
-        r = make_repo(self.root, "refs", {"CURRENT.md": cur})
+        r = make_repo(self.root, "refs", {"CURRENT.md": cur}, at=AT8)
         pr = lambda n, title, body: {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
         self.gh(prs=[pr(50, "做乙", "参考 #60 的做法"), pr(53, "做甲", "Closes #49"), pr(52, "做丙", "")])
         prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
@@ -465,7 +490,7 @@ class GitHubTests(Base):
         cur = ("# 当前状态\n\n## 修 #196 引入的问题（#200）（2026-11-08，常浩实点 #196 后说点不动）\n- 已安装：二百\n\n"
                "## #110 1a 收尾（#110，PR #115 `abcdef1`）（2026-11-08）\n- 已安装：一一五\n\n"
                "## 1c（#120）（2026-11-08）\n- 已安装：一二零\n")
-        r = make_repo(self.root, "inc", {"CURRENT.md": cur})
+        r = make_repo(self.root, "inc", {"CURRENT.md": cur}, at=AT8)
         pr = lambda n, title, body="": {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
         self.gh(prs=[pr(197, "做（#196）"), pr(201, "修（#200）"), pr(115, "1a（#110）"), pr(116, "1b", "Closes #110"),
                      pr(121, "1c 上（#120）"), pr(122, "1c 下（#120）")])
@@ -484,7 +509,7 @@ class GitHubTests(Base):
     def test_quotes_are_capped_and_truncated_visibly(self):
         long = "- 已发布" + "长" * 500 + "，但回读不一致，已回滚"
         body = long + "\n" + "".join(f"- 已安装第 {i} 条\n" for i in range(15))
-        r = make_repo(self.root, "cap2", {"CURRENT.md": f"# 当前状态\n\n## 长（#130）（2026-11-08）\n{body}"})
+        r = make_repo(self.root, "cap2", {"CURRENT.md": f"# 当前状态\n\n## 长（#130）（2026-11-08）\n{body}"}, at=AT8)
         self.gh(prs=[{"number": 131, "title": "做（#130）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}])
         c = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]["claims"][0]
         self.assertEqual(len(c["quotes"]), pd.CLAIM_MAX)
@@ -497,7 +522,7 @@ class GitHubTests(Base):
                "## #41 B 级查询（2026-11-08，Claude）\n- 已发布：四一\n\n"
                "## 修 PR #196 引入的回归（#200）（2026-11-08）\n- 已发布：二百\n\n"
                "## 批次 A 合并（#78、#79）（2026-11-08）\n- 已发布：七八七九\n")
-        r = make_repo(self.root, "named", {"CURRENT.md": cur})
+        r = make_repo(self.root, "named", {"CURRENT.md": cur}, at=AT8)
         pr = lambda n, title, body="": {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
         self.gh(prs=[pr(58, "B 级查询", "Closes #41"), pr(59, "A 级查询（#42）"), pr(196, "旧（#195）"), pr(201, "修（#200）"),
                      pr(80, "甲（#78）"), pr(81, "乙（#79）")])
@@ -515,7 +540,7 @@ class GitHubTests(Base):
         cur = ("# 当前状态\n\n## 第二批 9 张（#257–#265）（2026-11-08；已发布 `b977cfc5aa5e` 回读通过）\n- 改了九处\n\n"
                "## 写错的范围（#1–#999）（2026-11-08）\n- 已发布：不展开\n\n"
                "## 没写编号的一节（2026-11-08，Claude）\n- 已安装：没编号\n- 改了别的\n")
-        r = make_repo(self.root, "rng", {"CURRENT.md": cur})
+        r = make_repo(self.root, "rng", {"CURRENT.md": cur}, at=AT8)
         pr = lambda n, title: {"number": n, "title": title, "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
         self.gh(prs=[pr(266, "甲（#257）"), pr(267, "乙（#258）"), pr(500, "丙（#500）")])
         delta = self.run_one(r)["projects"][0]["yesterday_delta"]
@@ -642,7 +667,7 @@ class GitHubTests(Base):
         m = self.run_one(r)["projects"][0]["milestones"][0]
         self.assertEqual((m["done"], m["total"]), (2, 3))       # 勾了的 #10 + 已关的 #11
         self.assertEqual(m["notes"], ["清单勾了但 #10 还开着", "清单没勾但 #11 已关", "#12 的状态没取到"])
-        (self.state / "fail_match").write_text("issueOrPullRequest")   # 状态查询失败：只按勾选算，并注明
+        (self.state / "fail_match").write_text("issueOrPullRequest")   # 状态查询失败且没有 data：只按勾选算，并注明
         m = self.run_one(r)["projects"][0]["milestones"][0]
         self.assertEqual((m["done"], m["notes"]), (1, ["清单引用的 issue 状态没取到，只按勾选算"]))
 
@@ -651,8 +676,9 @@ class GitHubTests(Base):
         self.gh()
         rec = self.run_one(r)["projects"][0]
         self.assertTrue(any("都没写下一步" in n for n in rec["notes"]))
-        out = pd.collect(D, [{"id": "坏", "name": "坏"}])
-        self.assertEqual(out["coverage"]["errors"], {"坏": ["名册这一项缺字段 'path'"]})
+        out = pd.collect(D, [{"id": "坏", "name": "坏"}, {"id": "空", "name": "空", "path": None}])
+        self.assertEqual(out["coverage"]["errors"], {"坏": ["名册这一项缺字段：path"], "空": ["名册这一项缺字段：path"]})
+        self.assertEqual(set(out["projects"][0]), set(rec))          # 坏项的记录结构和正常记录一样
 
     def test_project_without_github_has_empty_lists(self):
         r = make_repo(self.root, "l", {"CURRENT.md": "# 当前状态\n\n## 节\n"})

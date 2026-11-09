@@ -132,11 +132,14 @@ def git(root, *args):
     return r.stdout
 
 
-def commits(root, w, main):
+def commits(root, w, main, snap=None):
     """统计日内的提交数，按分支归；一个提交只算在第一个含它的分支下，主分支优先。按提交时间算，不按作者时间。
-    列分支时就记下各分支指向的提交，后面按提交号查：别的会话中途删掉分支也不出错。"""
+    列分支时就记下各分支指向的提交，后面按提交号查：别的会话中途删掉分支也不出错。
+    主分支按统计日结束时的快照（snap，可能是 origin 上的）数：本机主分支没拉齐时，当天合并的提交也数得到。"""
     heads = [line.split(" ", 1)[::-1] for line in
              git(root, "for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads").splitlines() if line]
+    if snap:
+        heads = [(b, sha) for b, sha in heads if b != main] + [(main, snap)]
     heads.sort(key=lambda bh: bh[0] != main)
     seen, out = set(), {}
     for b, sha in heads:
@@ -222,6 +225,9 @@ def current_state(root, ref, w):
     if text is None:
         return None
     secs = sections(text)
+    # 统计日开始时已经在 CURRENT 里的节不算当天的：D 凌晨写、标着 D 的节，前一个统计日已经列过（#110 第六轮审查）
+    start = git(root, "rev-list", "-1", "--first-parent", f"--before={(w[0] - dt.timedelta(seconds=1)).isoformat()}", ref).strip()
+    before = {t for t, _, _ in sections(show(root, start, "CURRENT.md") or "")} if start else set()
     # --first-parent：普通合并（no-ff）时取合并提交的时间，不沿着分支走到分支上的旧提交
     stamp = git(root, "log", "-1", "--first-parent", "--format=%cI", ref, "--", "CURRENT.md").strip()
     nxt = progress_data.next_step(text.splitlines())
@@ -249,8 +255,9 @@ def current_state(root, ref, w):
         "last_commit": stamp or None,
         # ref 是统计日结束时的快照：截至那时 CURRENT 最后一次提交落在窗口里，就是当天改过（04:00 以后的提交看不到）
         "changed": inside(stamp, w),
-        # 快照截在 D+1 04:00，标着 D+1 的节一定是凌晨写的，也算统计日 D 的
-        "dated_today": [(t, b) for t, d, b in secs if d in (w[0].date().isoformat(), w[1].date().isoformat())],
+        # 快照截在 D+1 04:00，标着 D+1 的节一定是凌晨写的，也算统计日 D 的；统计日开始前就有（标题没改）的不算
+        "dated_today": [(t, b) for t, d, b in secs
+                        if d in (w[0].date().isoformat(), w[1].date().isoformat()) and t not in before],
     }
 
 
@@ -271,7 +278,8 @@ class GitHub:
         self.exe = shutil.which("gh", path=os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin"]))
         self.down = None if self.exe else "找不到 gh 命令"
 
-    def _run(self, *args):
+    def _run(self, *args, partial=False):
+        """partial=True：gh 退出码非 0 但输出里有 data（graphql 里某个编号查不到）时，照样返回已查到的部分。"""
         if self.down:
             raise Fail(self.down)
         try:
@@ -282,6 +290,13 @@ class GitHub:
         except OSError as e:
             self.down = f"gh 启动失败：{e}"
             raise Fail(self.down)
+        if r.returncode and partial:
+            try:
+                data = json.loads(r.stdout or "null")
+                if isinstance(data, dict) and data.get("data"):
+                    return data
+            except ValueError:
+                pass
         if r.returncode:
             msg = (r.stderr or r.stdout).strip()
             msg = msg.splitlines()[-1][:150] if msg else f"gh 退出码 {r.returncode}"
@@ -333,7 +348,7 @@ class GitHub:
                           for n in numbers)
         try:
             data = self._run("api", "graphql", "-f", f"query=query($o:String!,$n:String!){{repository(owner:$o,name:$n){{{fields}}}}}",
-                             "-f", f"o={owner}", "-f", f"n={name}")
+                             "-f", f"o={owner}", "-f", f"n={name}", partial=True)
         except Fail:
             return None
         repo = ((data or {}).get("data") or {}).get("repository") or {}
@@ -427,11 +442,10 @@ def deliverables(prs, dated_sections):
     return out, unmatched
 
 
-def project(p, w, hub):
-    """一个名册项目的记录。任何一个来源取不到：那一项记 null，原因写进 errors。"""
-    root = Path(os.path.expanduser(p["path"]))
-    day = w[0].date()
-    rec = {"project_id": p["id"], "name": p["name"], "type": p.get("type"), "objective": None, "milestones": None,
+def blank(p):
+    """一条全是「未知」的项目记录，结构和正常记录一样。"""
+    return {"project_id": p.get("id") or p.get("name") or "（名册项缺 id）", "name": p.get("name"), "type": p.get("type"),
+            "objective": None, "milestones": None,
            "yesterday_delta": {"merged_prs": None, "closed_issues": None, "commits": None, "current_changed": None,
                                "unmatched_sections": []},
            "current_state": {"top_section": None, "next_step": None, "next_source": None, "next_reliable": None, "open_prs": None,
@@ -439,6 +453,18 @@ def project(p, w, hub):
            "freshness": {"current_last_commit": None, "top_section_date": None, "current_as_of": None,
                          "last_merge": None, "stale": None},
            "notes": [], "errors": []}
+
+
+def project(p, w, hub):
+    """一个名册项目的记录。任何一个来源取不到：那一项记 null，原因写进 errors。"""
+    rec = blank(p)
+    missing = [k for k in ("id", "name", "path") if not isinstance(p.get(k), str) or not p.get(k)]
+    if missing:   # 名册这一项写坏了：记下来，不让整份日报中断
+        rec["objective"] = {"kind": "未知", "text": None, "source": None}
+        rec["errors"].append(f"名册这一项缺字段：{'、'.join(missing)}")
+        return rec
+    root = Path(os.path.expanduser(p["path"]))
+    day = w[0].date()
     delta, state, fresh = rec["yesterday_delta"], rec["current_state"], rec["freshness"]
     if not root.exists():
         rec["objective"] = {"kind": "未知", "text": None, "source": None}
@@ -470,7 +496,7 @@ def project(p, w, hub):
             rec["errors"].append(f"本机 git：读阶段目标失败：{e}")
     if is_repo:
         try:
-            delta["commits"] = commits(root, w, main)
+            delta["commits"] = commits(root, w, main, snap)
             state["checkout_branch"] = git(root, "branch", "--show-current").strip() or "（游离 HEAD）"
             state["dirty_files"] = len(git(root, "status", "--porcelain").splitlines())
         except (Fail, OSError) as e:
@@ -541,13 +567,7 @@ def project(p, w, hub):
 def collect(day, projects):
     w = window(day)
     hub = GitHub(w)
-    recs = []
-    for p in projects:
-        try:
-            recs.append(project(p, w, hub))
-        except KeyError as e:   # 名册某一项缺 id、name、path：记下来，不让整份日报中断
-            pid = p.get("id") or p.get("name") or "（名册项缺 id）"
-            recs.append({"project_id": pid, "name": p.get("name"), "notes": [], "errors": [f"名册这一项缺字段 {e}"]})
+    recs = [project(p, w, hub) for p in projects]
     return {
         "stat_day": day.isoformat(), "timezone": "Asia/Shanghai",
         "window": {"start": w[0].isoformat(), "end": w[1].isoformat()},
