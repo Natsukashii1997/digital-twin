@@ -4,12 +4,13 @@
 规格：docs/个人项目日报-V2-设计.md 第 3 节（篇幅、留痕）、4.0（卡片）、4.1–4.9（完整报告）、第 6 节（证据）、7.1。
 用法：
   python3 pdaily_publish.py build [--date 统计日] [--facts 快照] [--reply 模型回复文件] [--fallback] [--out 目录]
-      默认读 DigitalTwin/daily/<统计日>.facts.json（没有就先跑 pdaily_facts 生成），调 Hermes 单次写稿，
-      写出 <统计日>.card.json、<统计日>.report.md、<统计日>.build.json，最后打印一行 JSON 摘要。
-      --reply 用现成的模型回复（回放、测试用），--fallback 直接出事实版。
+      默认读 DigitalTwin/daily/<统计日>.facts.json（没有、或是统计日结束前取的，就先跑 pdaily_facts 重取），
+      调 Hermes 单次写稿，写出 <统计日>.card.json、.report.md、.card-fields.json、.build.json，最后打印一行 JSON 摘要。
+      --reply 用现成的模型回复（回放、测试用），--fallback 直接出事实版。取数本身失败时出一张「取数失败」的最小卡片。
   python3 pdaily_publish.py material [--date 统计日] [--facts 快照]   只打印交给模型的压缩材料
-分工：能从快照算出来的数（合并 PR、代理动作、覆盖）由脚本算；判断（什么算实质推进、拍板类型、风险等级、推荐、
-今日计划）由模型写；脚本只核对格式、数字一致、出处存在，不替模型判断。
+分工：能从快照算出来的（核心数据五行、成果为空时是没进展还是没数据、留痕）由脚本算；判断（什么算实质推进、拍板类型、
+风险等级、推荐、今日计划）由模型写。脚本核对：编号、百分比、PR 数、「已安装 / 已验收」这类说法要有快照出处，
+七段齐全、三个数和卡片一致；编造类问题判不通过（出事实版），写法问题（最晚时间格式、超长）自动修正并记提醒。
 留痕（P-13）：模型取 Hermes 会话库里这次写稿会话实际用过的主模型（含回退）。
 """
 import argparse
@@ -36,6 +37,7 @@ TODAY_MAX = 3         # 今日推进卡片最多 3 条（4.0）
 REPORT_TODAY_MAX = 5  # 完整报告今日计划最多 5 项（4.7）
 CLIP = 300            # 材料里每段原文最多保留多少字
 ACT_CLIP = 100        # 行动记录每个字段最多保留多少字（行动多，压短些）
+LIMITS = {"headline": 60, "item": 24, "recommendation": 50, "reply": 20, "text": 50, "owner_action": 50}  # 卡片字段上限
 WEEK = "一二三四五六日"
 DECISION_TYPES = ("阻断", "限时", "普通")
 LEVELS = {"高": "🔴", "中": "🟠", "低": "🟡", "待识别": "⚪"}
@@ -46,7 +48,14 @@ SECTIONS = ["一、需要你拍板", "二、昨日关键成果", "三、各项�
 KIND_NAMES = {"merge": "合并", "ruling": "裁决", "dispatch": "派单", "supervise": "主控与监护", "refuse": "拒绝",
               "install": "安装", "other": "其他", "cron": "定时任务"}
 SELF_NAMES = {"猛鬼兽", "Hermes", "hermes"}   # 猛鬼兽自身（定时任务、技能、配置、授权）也在日报范围里
-REF = re.compile(r"(?<![\w&/])#(\d+)")
+REF = re.compile(r"(?<![\w&/.-])#(\d+)")                 # 裸写的 #N
+QREF = re.compile(r"(?<![\w/.-])([A-Za-z][\w.-]*)#(\d+)")  # 带仓库的 repo#N
+PCT = re.compile(r"(\d+(?:\.\d+)?)\s*[%％]")
+CLAIM = re.compile(r"已(?:经)?(?:安装|发布|上线|装好|装机|验收)|(?:安装|发布|上线)(?:完成|成功|好了)|验收(?:已)?通过|通过(?:了)?(?:实机)?验收")
+NEGATION = re.compile(r"未|不|没|尚|待|无|缺|需|要|仍|还|否|失败|自述")
+INSTALL_WORDS = re.compile(r"安装|发布|上线|装好|装机")
+PR_COUNT = re.compile(r"合并(?:了)?\s*(\d+)\s*个\s*PR")
+TRAIL = "。．.；;，,、 "
 CARD_MARK, REPORT_MARK = "<<<CARD>>>", "<<<REPORT>>>"
 
 
@@ -54,15 +63,20 @@ class GenError(Exception):
     """写稿没成：调用失败、回复格式不对。原因进留痕行和 build.json，不含凭据。"""
 
 
+def s(x):
+    """取字符串字段：不是字符串（模型写成列表、数字）一律当 None，交给核对报错，不让它在别处崩。"""
+    return x.strip() if isinstance(x, str) and x.strip() else None
+
+
+def clip(v, n=CLIP):
+    v = "" if v is None else str(v)
+    return v if len(v) <= n else v[:n] + "…"
+
+
 # ---------- 材料 ----------
 
-def clip(s, n=CLIP):
-    s = "" if s is None else str(s)
-    return s if len(s) <= n else s[:n] + "…"
-
-
 def material(facts):
-    """压缩给模型的材料：定时任务按结果合并成计数（失败的逐条留着），长原文截断；判断要用的字段都留着。"""
+    """压缩给模型的材料：例行定时任务按结果合并成计数（有授权缺口的逐条留着），长原文截断；判断要用的字段都留着。"""
     projects = []
     for p in facts.get("projects") or []:
         d = p.get("yesterday_delta") or {}
@@ -85,15 +99,16 @@ def material(facts):
     routine, actions = {}, []
     for a in facts.get("actions") or []:
         if a.get("kind") == "cron" and a.get("result") == "调用成功" and not a.get("auth_gap"):
-            key = f"{a.get('result')}｜{clip(a.get('verification'), 20)}"
+            key = f"{a.get('result')}｜{clip(a.get('verification'), 40)}"
             routine[key] = routine.get(key, 0) + 1
             continue
         actions.append({k: (clip(v, ACT_CLIP) if isinstance(v, str) else v) for k, v in a.items() if k != "action_id"})
+    decisions = [dict(d, candidate=i) for i, d in enumerate(facts.get("decisions") or [])]
     return {
         "stat_day": facts.get("stat_day"), "window": facts.get("window"), "fetched_at": facts.get("fetched_at"),
         "projects": projects,
         "actions": actions, "routine_cron": routine,
-        "decisions": facts.get("decisions"), "risks": facts.get("risks"), "cross_refs": facts.get("cross_refs"),
+        "decisions": decisions, "risks": facts.get("risks"), "cross_refs": facts.get("cross_refs"),
         "observations": facts.get("observations"), "counts": facts.get("counts"),
         "activity": facts.get("activity"), "coverage": facts.get("coverage"), "notes": facts.get("notes"),
     }
@@ -107,9 +122,10 @@ def query(facts):
 
 
 def session_model(session_id):
-    """这次写稿会话实际用过的主模型（含回退，按首次使用排），查不到返回 None。"""
+    """这次写稿会话实际用过的主模型（含回退，按首次使用排），查不到返回 None。只读打开，库不在不新建。"""
+    db = HERMES_HOME / "state.db"
     try:
-        con = sqlite3.connect(HERMES_HOME / "state.db", timeout=10)
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
         rows = con.execute("select model from session_model_usage where session_id=? and task='' "
                            "order by first_seen", (session_id,)).fetchall()
         con.close()
@@ -129,12 +145,11 @@ def generate(facts, workdir):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=BUDGET + 120, cwd=str(workdir))
     except (OSError, subprocess.SubprocessError) as e:
         raise GenError(f"Hermes 跑不起来（{type(e).__name__}）")
-    sid = (re.findall(r"session_id:\s*(\S+)", r.stderr + r.stdout) or [None])[-1]
+    sid = (re.findall(r"session_id:\s*(\S+)", r.stderr) or [None])[-1]   # -Q 模式把会话号打在 stderr
     if r.returncode != 0:
         tail = (r.stderr or r.stdout).strip().splitlines()
         raise GenError(f"Hermes 退出码 {r.returncode}：{clip(tail[-1] if tail else '', 120)}")
-    out = re.sub(r"\n?session_id:\s*\S+\s*$", "", r.stdout.strip())
-    return out, sid, session_model(sid) if sid else None
+    return r.stdout.strip(), sid, session_model(sid) if sid else None
 
 
 def parse_reply(text):
@@ -146,10 +161,46 @@ def parse_reply(text):
     try:
         card = json.loads(card_part)
     except ValueError as e:
-        raise GenError(f"卡片要素不是合法 JSON（{e.msg}，第 {e.lineno} 行）")
+        raise GenError(f"卡片要素不是合法 JSON（{getattr(e, 'msg', e)}）")
     if not isinstance(card, dict):
         raise GenError("卡片要素不是 JSON 对象")
     return card, report.strip()
+
+
+# ---------- 项目名 ----------
+
+class Roster:
+    """名册里的项目：按 id、全名、括号里的简称（「个人 AI 工作台（数码世界）」→ 数码世界）认。"""
+    def __init__(self, facts):
+        self.by_id = {p.get("project_id"): p for p in facts.get("projects") or [] if p.get("project_id")}
+        self.alias = {}
+        for pid, p in self.by_id.items():
+            name = p.get("name") or pid
+            for a in [pid, name] + re.findall(r"[（(]([^）)]+)[）)]", name) + [re.sub(r"[（(].*?[）)]", "", name).strip()]:
+                if a and len(a) >= 2:
+                    self.alias.setdefault(a, pid)
+
+    def resolve(self, name):
+        """返回 project_id、"hermes"（猛鬼兽自身）或 None（不认识）。"""
+        if name in SELF_NAMES:
+            return "hermes"
+        return self.alias.get(name)
+
+    def name(self, pid):
+        p = self.by_id.get(pid)
+        return (p.get("name") or pid) if p else ("猛鬼兽" if pid in (None, "hermes") else pid)
+
+
+def split_names(v):
+    return [x.strip() for x in re.split(r"[↔、,，/]| 和 ", v or "") if x.strip()]
+
+
+def risk_projects(card):
+    out = set()
+    for r in card.get("risks") or []:
+        if isinstance(r, dict):
+            out.update(split_names(s(r.get("project"))))
+    return sorted(out)
 
 
 # ---------- 算数 ----------
@@ -167,8 +218,14 @@ def num(v):
     return "未知" if v is None else str(v)
 
 
+def delta_unknown(facts):
+    """GitHub 取不到合并 PR 的项目（成果为空时，要说是没数据不是没进展）。"""
+    return [p.get("project_id") for p in facts.get("projects") or []
+            if (p.get("yesterday_delta") or {}).get("merged_prs") is None]
+
+
 def action_counts(facts):
-    """代理动作：定时任务单列，其余按类别计数；有来源取不到就整体记「未知」并写明。"""
+    """代理动作：定时任务单列，其余按类别计数；有来源取不到就写「N+」并写明。"""
     by = (facts.get("activity") or {}).get("actions_by_kind")
     srcs = ((facts.get("coverage") or {}).get("actions") or {})
     bad = [k for k, v in srcs.items() if not (v or {}).get("ok")]
@@ -180,126 +237,197 @@ def action_counts(facts):
         parts.append(f"另定时任务 {by['cron']} 次")
     note = "、".join(parts) or "无"
     if bad:
-        note += f"；{'、'.join(bad)}取不到"
-        return f"{sum(main.values())}+", note
+        return f"{sum(main.values())}+", note + f"；{'、'.join(bad)}取不到"
     return str(sum(main.values())), note
 
 
-def risk_projects(card):
-    return sorted({r.get("project") for r in card.get("risks") or [] if r.get("project")})
+def progress_ids(card):
+    p = card.get("progress_projects")
+    return None if not isinstance(p, list) else sorted({x for x in p if isinstance(x, str)})
 
 
 def metrics(facts, card):
-    """核心数据速览五行（4.0）。"""
+    """核心数据速览五行（4.0），写法照甲版样例。"""
     n = roster_size(facts)
-    progress = card.get("progress_projects")
-    other = n - len(progress) if isinstance(progress, list) else None
+    progress = progress_ids(card)
     act_v, act_n = action_counts(facts)
-    dec = card.get("decisions") or []
-    by_type = [f"{t} {sum(1 for d in dec if d.get('type') == t)}" for t in DECISION_TYPES
+    dec = [d for d in card.get("decisions") or [] if isinstance(d, dict)]
+    degraded = card.get("degraded")
+    by_type = [f"{t} {sum(1 for d in dec if d.get('type') == t)} 件" for t in DECISION_TYPES
                if any(d.get("type") == t for d in dec)]
-    deadlines = sorted(d["deadline"] for d in dec if d.get("deadline"))
-    risks = card.get("risks") or []
+    deadlines = sorted(d["deadline"] for d in dec if s(d.get("deadline")))
+    risks = [r for r in card.get("risks") or [] if isinstance(r, dict)]
     cats = [f"{c.replace('风险', '')} {sum(1 for r in risks if r.get('category') == c)}"
             for c in CATEGORIES if any(r.get("category") == c for r in risks)]
     merged = (facts.get("activity") or {}).get("merged_prs")
-    rows = [
+    if degraded:
+        dec_v, dec_n = (f"候选 {len(dec)}", "分析降级，类型未判断")
+    else:
+        dec_v = f"<font color='red'>**{len(dec)}**</font>" if dec else "0"
+        dec_n = "、".join(by_type) + (f"，最晚 {deadlines[0]}" if deadlines else "")
+    return [
         ("有推进的项目", "未知" if progress is None else f"**{len(progress)}** / {n}",
-         card.get("progress_note") or ("" if other is None else f"其余 {other} 个无实质推进")),
+         "分析降级，没判断" if progress is None else f"其余 {n - len(progress)} 个无实质推进"),
         ("合并 PR", num(merged), "统计日 04:00→04:00" if merged is not None else "GitHub 取不到"),
-        ("待你拍板", f"<font color='red'>**{len(dec)}**</font>" if dec else "0",
-         ("、".join(by_type) or ("类型未判断" if dec else "")) + (f"，最晚 {deadlines[0]}" if deadlines else "")),
+        ("待你拍板", dec_v, dec_n),
         ("风险 / 阻塞", f"{len(risk_projects(card))} 个项目", "、".join(cats)),
         ("Hermes 代理动作", act_v or "未知", act_n),
     ]
-    return rows
 
 
-def header_numbers(facts, card):
+def header_numbers(card):
     """完整报告开头三个数（4.1），和卡片同源。"""
-    progress = card.get("progress_projects")
-    return ("未知" if progress is None else str(len(progress)), str(len(card.get("decisions") or [])),
-            str(len(risk_projects(card))))
+    progress = progress_ids(card)
+    return ("未知" if progress is None else str(len(progress)),
+            str(len([d for d in card.get("decisions") or [] if isinstance(d, dict)])), str(len(risk_projects(card))))
 
 
-# ---------- 核对 ----------
+# ---------- 规整（写法问题自动修，记提醒） ----------
 
-def facts_refs(facts):
-    """快照里出现过的编号：PR、issue、原文里写的 #N。"""
-    dump = json.dumps(facts, ensure_ascii=False)
-    refs = set(REF.findall(dump))
-    refs |= {str(m) for m in re.findall(r'"(?:number|to_number)": (\d+)', dump)}
-    return refs, dump
-
-
-def names_ok(facts):
-    ok = set(SELF_NAMES)
-    for p in facts.get("projects") or []:
-        ok.update(x for x in (p.get("project_id"), p.get("name")) if x)
-    return ok
-
-
-def split_names(s):
-    return [x.strip() for x in re.split(r"[↔、,，/]| 和 ", s or "") if x.strip()]
-
-
-def deadline_ok(deadline, dump):
-    """最晚时间要有出处：快照里能找到同一个日期时间。写法「MM-DD HH:MM」或「HH:MM」。"""
-    m = re.fullmatch(r"(?:(\d{1,2})-(\d{1,2}) )?(\d{1,2}):(\d{2})", deadline.strip())
+def norm_deadline(v, year):
+    """「2026-11-09 06:00」「11-09 06:00」「11月9日 06:00」→「11-09 06:00」；只有时刻、写不清的返回 None。"""
+    m = re.fullmatch(r"(?:(\d{4})-)?(\d{1,2})[-月/](\d{1,2})日?\s*(\d{1,2}):(\d{2})", v.strip())
     if not m:
+        return None
+    _, mo, d, h, mi = m.groups()
+    return f"{int(mo):02d}-{int(d):02d} {int(h):02d}:{mi}"
+
+
+def deadline_source(deadline, cand):
+    """最晚时间只认对应拍板候选的 deadline 字段、事项原文或证据里写着的同一个日期时间。"""
+    if not isinstance(cand, dict):
         return False
-    mo, d, h, mi = m.groups()
-    hm = f"{int(h):02d}:{mi}"
-    if not mo:
-        return hm in dump
-    md = f"{int(mo):02d}-{int(d):02d}"
-    return f"{md}T{hm}" in dump or f"{md} {hm}" in dump or f"{int(mo)}-{int(d)} {hm}" in dump
+    md, hm = deadline.split()
+    text = json.dumps({k: cand.get(k) for k in ("deadline", "item", "evidence", "why_owner")}, ensure_ascii=False)
+    return f"{md}T{hm}" in text or f"{md} {hm}" in text or \
+        f"{int(md[:2])}-{int(md[3:])} {hm}" in text
+
+
+def normalize(facts, card):
+    """就地规整卡片要素，返回提醒清单。只修写法：去尾部标点、去回复外层「回「」」、最晚时间换格式或去掉、超长截断。"""
+    warns = []
+    cands = facts.get("decisions") or []
+    year = (facts.get("stat_day") or "2000")[:4]
+    for key in ("decisions", "achievements", "risks", "today"):
+        for i, x in enumerate(card.get(key) or []):
+            if not isinstance(x, dict):
+                continue
+            for f in ("item", "recommendation", "text", "owner_action", "reply"):
+                v = s(x.get(f))
+                if v is None:
+                    continue
+                if f == "reply":
+                    v = re.sub(r"^回?\s*[「“\"](.*)[」”\"]\s*(?:即可)?$", r"\1", v)
+                v = v.rstrip(TRAIL)
+                if len(v) > LIMITS[f]:
+                    warns.append(f"{key}[{i}].{f} 超过 {LIMITS[f]} 字，已截断")
+                    v = v[:LIMITS[f]] + "…"
+                x[f] = v
+            if key == "decisions" and x.get("deadline") is not None:
+                raw = x.get("deadline")
+                dl = norm_deadline(raw, year) if isinstance(raw, str) else None
+                ci = x.get("candidate")
+                cand = cands[ci] if isinstance(ci, int) and not isinstance(ci, bool) and 0 <= ci < len(cands) else None
+                if dl is None:
+                    warns.append(f"decisions[{i}] 的最晚时间「{raw}」写法认不出（要 MM-DD HH:MM），已去掉")
+                elif not deadline_source(dl, cand):
+                    warns.append(f"decisions[{i}] 的最晚时间「{dl}」在对应拍板候选里找不到出处，已去掉")
+                    dl = None
+                x["deadline"] = dl
+    h = s(card.get("headline"))
+    if h and len(h) > LIMITS["headline"]:
+        warns.append(f"headline 超过 {LIMITS['headline']} 字，已截断")
+        card["headline"] = h[:LIMITS["headline"]] + "…"
+    card.pop("progress_note", None)        # 说明列用脚本文案（样例：「其余 N 个无实质推进」）
+    return warns
+
+
+# ---------- 核对（编造类，不通过就出事实版） ----------
+
+def known_refs(facts):
+    """快照里出现过的编号：裸的 N（PR、issue、原文 #N）和带仓库的 repo#N。"""
+    dump = json.dumps(facts, ensure_ascii=False)
+    bare = set(REF.findall(dump)) | {m for m in re.findall(r'"(?:number|to_number)": (\d+)', dump)}
+    qual = {f"{r}#{n}" for r, n in QREF.findall(dump)}
+    qual |= {f"{r}#{n}" for r, n in re.findall(r"github\.com/[\w.-]+/([\w.-]+)/(?:pull|issues)/(\d+)", dump)}
+    for p in facts.get("projects") or []:
+        d = p.get("yesterday_delta") or {}
+        for x in (d.get("merged_prs") or []) + (d.get("closed_issues") or []):
+            qual.add(f"{p.get('project_id')}#{x.get('number')}")
+            bare.add(str(x.get("number")))
+    bare |= {q.split("#")[1] for q in qual}
+    return bare, qual, dump
+
+
+def project_verified(p, words):
+    """项目有没有能撑住「已安装 / 已验收」的结构化证据：安装认 installs，验收认合并 PR 的 acceptance。"""
+    if INSTALL_WORDS.search(words):
+        return bool(p.get("installs"))
+    prs = (p.get("yesterday_delta") or {}).get("merged_prs") or []
+    return any(x.get("acceptance") not in (None, "未核实", "未知") for x in prs)
+
+
+def claims_unverified(text, record):
+    """一句话里有没有没证据的「已安装 / 已发布 / 验收通过」：按逗号句号切成小句，带否定词的小句不算。"""
+    bad = []
+    for clause in re.split(r"[，。；;,、！!？?\n]", text or ""):
+        if CLAIM.search(clause) and not NEGATION.search(clause) and not project_verified(record or {}, clause):
+            bad.append(clause.strip())
+    return bad
+
+
+def section_positions(report):
+    out = []
+    for name in SECTIONS:
+        m = re.search(rf"^#{{1,3}}\s*{re.escape(name)}", report, re.M)
+        out.append(m.start() if m else -1)
+    return out
 
 
 def check(facts, card, report):
-    """返回问题清单，空表示通过。只查格式、数字一致、出处存在，不评判写得好不好。"""
+    """返回问题清单，空表示通过。只查编造和结构，不评判写得好不好。先跑 normalize。"""
     errs = []
-    refs, dump = facts_refs(facts)
-    names = names_ok(facts)
-    ids = {p.get("project_id") for p in facts.get("projects") or []}
+    roster = Roster(facts)
+    bare, qual, dump = known_refs(facts)
 
     def need_list(key, fields, allowed=None):
         v = card.get(key)
         if not isinstance(v, list):
             errs.append(f"卡片要素缺 {key}（要一个列表，没有就给空列表）")
             return []
+        out = []
         for i, x in enumerate(v):
             if not isinstance(x, dict):
                 errs.append(f"{key}[{i}] 不是对象")
                 continue
             for f in fields:
-                if not isinstance(x.get(f), str) or not x.get(f).strip():
-                    errs.append(f"{key}[{i}] 缺 {f}")
+                if s(x.get(f)) is None:
+                    errs.append(f"{key}[{i}] 缺 {f}（要非空字符串）")
             for f, ok in (allowed or {}).items():
                 if x.get(f) not in ok:
                     errs.append(f"{key}[{i}].{f}「{x.get(f)}」不在 {'/'.join(ok)} 里")
-            for n in split_names(x.get("project")):
-                if n not in names:
+            for n in split_names(s(x.get("project"))):
+                if roster.resolve(n) is None:
                     errs.append(f"{key}[{i}] 的项目「{n}」不在名册里")
-        return [x for x in v if isinstance(x, dict)]
+            out.append(x)
+        return out
 
-    if not isinstance(card.get("headline"), str) or not card["headline"].strip():
+    if s(card.get("headline")) is None:
         errs.append("卡片要素缺 headline（一句话）")
     progress = card.get("progress_projects")
     if not isinstance(progress, list):
         errs.append("卡片要素缺 progress_projects（实质推进的项目 id 列表）")
     else:
-        delta = set(((facts.get("counts") or {}).get("projects_with_delta")) or [])
         for p in progress:
-            if p not in ids:
+            rec = roster.by_id.get(p) if isinstance(p, str) else None
+            if rec is None:
                 errs.append(f"progress_projects 里的「{p}」不是名册项目 id")
-            elif p not in delta:
-                errs.append(f"progress_projects 里的「{p}」昨天没有任何增量，不能算实质推进")
-    decs = need_list("decisions", ("project", "item", "recommendation", "reply"), {"type": DECISION_TYPES})
-    for i, d in enumerate(decs):
-        if d.get("deadline") and not deadline_ok(str(d["deadline"]), dump):
-            errs.append(f"decisions[{i}] 的最晚时间「{d['deadline']}」在材料里找不到出处")
-    need_list("achievements", ("project", "text"))
+                continue
+            d = rec.get("yesterday_delta") or {}
+            if not (d.get("merged_prs") or d.get("closed_issues") or rec.get("installs")):
+                errs.append(f"progress_projects 里的「{p}」昨天没有合并、关闭或安装，只有提交或 CURRENT 改动不算实质推进")
+    need_list("decisions", ("project", "item", "recommendation", "reply"), {"type": DECISION_TYPES})
+    ach = need_list("achievements", ("project", "text"))
     need_list("risks", ("project", "text"), {"level": tuple(LEVELS), "category": CATEGORIES})
     today = need_list("today", ("item", "owner_action"), {"priority": PRIORITIES})
     if len(today) > TODAY_MAX:
@@ -308,74 +436,109 @@ def check(facts, card, report):
     for key in ("decisions", "achievements", "risks"):
         for x in card.get(key) or []:
             if isinstance(x, dict):
-                mentioned.update(split_names(x.get("project")))
+                mentioned.update(split_names(s(x.get("project"))))
     for i, t in enumerate(today):
-        text = f"{t.get('item', '')}{t.get('owner_action', '')}"
+        text = f"{s(t.get('item')) or ''}{s(t.get('owner_action')) or ''}"
         if not any(n in text for n in mentioned):
             errs.append(f"today[{i}]「{clip(t.get('item'), 30)}」和拍板、成果、风险里的项目都对不上")
+    for i, a in enumerate(ach):
+        for n in split_names(s(a.get("project"))):
+            rec = roster.by_id.get(roster.resolve(n))
+            for c in claims_unverified(s(a.get("text")), rec):
+                errs.append(f"achievements[{i}]「{clip(c, 30)}」：快照里没有安装 / 验收记录，只能写未核实")
+            m = PR_COUNT.search(s(a.get("text")) or "")
+            prs = ((rec or {}).get("yesterday_delta") or {}).get("merged_prs")
+            if m and rec is not None and len(split_names(s(a.get("project")))) == 1 and \
+                    (prs is None or int(m.group(1)) != len(prs)):
+                errs.append(f"achievements[{i}] 写合并 {m.group(1)} 个 PR，快照是 {num(None if prs is None else len(prs))}")
+    if s(card.get("headline")):
+        for c in claims_unverified(card["headline"], None):
+            errs.append(f"headline「{clip(c, 30)}」：没有安装 / 验收记录")
 
     # 完整报告
-    pos = [report.find(s) for s in SECTIONS]
-    for s, p in zip(SECTIONS, pos):
+    pos = section_positions(report)
+    for name, p in zip(SECTIONS, pos):
         if p < 0:
-            errs.append(f"完整报告缺「{s}」")
+            errs.append(f"完整报告缺「## {name}」")
     found = [p for p in pos if p >= 0]
     if found != sorted(found):
         errs.append("完整报告七段顺序不对")
-    m = re.search(r"实质推进\s*(\S+?)\s*个项目｜待你决策\s*(\S+?)\s*件｜阻塞\s*/\s*风险\s*(\S+?)\s*个项目", report)
-    want = header_numbers(facts, card)
+    plain = report.replace("*", "")
+    m = re.search(r"实质推进\s*(\S+?)\s*个项目\s*[｜|]\s*待你决策\s*(\S+?)\s*件\s*[｜|]\s*阻塞\s*/\s*风险\s*(\S+?)\s*个项目", plain)
+    want = header_numbers(card)
     if not m:
         errs.append("完整报告开头缺「实质推进 N 个项目｜待你决策 N 件｜阻塞 / 风险 N 个项目」")
     elif m.groups() != want:
         errs.append(f"完整报告开头三个数 {'/'.join(m.groups())} 和卡片 {'/'.join(want)} 对不上")
-    sec6 = report[pos[5]:pos[6]] if pos[5] >= 0 and pos[6] > pos[5] else ""
-    items6 = re.findall(r"^\s*(?:\d+[.、]|[-*])\s", sec6, re.M)
-    if len(items6) > REPORT_TODAY_MAX:
-        errs.append(f"今日推进计划最多 {REPORT_TODAY_MAX} 项，写了 {len(items6)} 项")
-    if (facts.get("activity") or {}).get("merged_prs") is None and re.search(r"合并\s*0\s*个|0\s*个\s*PR", report):
+    if pos[5] >= 0 and pos[6] > pos[5]:
+        items6 = re.findall(r"^(?:\d+[.、]|[-*])\s", report[pos[5]:pos[6]], re.M)   # 只数顶格条目
+        if len(items6) > REPORT_TODAY_MAX:
+            errs.append(f"今日推进计划最多 {REPORT_TODAY_MAX} 项，写了 {len(items6)} 项")
+    if (facts.get("activity") or {}).get("merged_prs") is None and re.search(r"合并\s*0\s*个|0\s*个\s*PR", plain):
         errs.append("合并数取不到，报告里不能写 0")
     cardtext = json.dumps(card, ensure_ascii=False)
     for where, text in (("卡片", cardtext), ("完整报告", report)):
-        bad = sorted({r for r in REF.findall(text) if r not in refs}, key=int)
-        if bad:
-            errs.append(f"{where}里的编号 {'、'.join('#' + b for b in bad)} 在材料里找不到")
-    if re.search(r"\d+(?:\.\d+)?\s*%", cardtext + report) and not re.search(r"\d+(?:\.\d+)?\s*%", dump):
-        errs.append("写了百分比，材料里没有任何百分比出处（不编完成百分比）")
+        badq = sorted({f"{r}#{n}" for r, n in QREF.findall(text) if f"{r}#{n}" not in qual})
+        badb = sorted({n for n in REF.findall(text) if n not in bare}, key=int)
+        if badq or badb:
+            errs.append(f"{where}里的编号 {'、'.join(badq + ['#' + b for b in badb])} 在材料里找不到")
+        have = set(PCT.findall(dump))
+        badp = sorted({p for p in PCT.findall(text) if p not in have})
+        if badp:
+            errs.append(f"{where}里的百分比 {'、'.join(p + '%' for p in badp)} 在材料里找不到（不编完成百分比）")
     return errs
 
 
 # ---------- 事实版 ----------
 
+def latest_pr(prs):
+    return max(prs, key=lambda x: x.get("merged_at") or "")
+
+
 def fallback(facts, reason):
-    """模型不可用或核对不过时的事实版：只摘快照，不判断；标「分析降级」。返回 (卡片要素, 完整报告)。"""
-    names = {p.get("project_id"): p.get("name") or p.get("project_id") for p in facts.get("projects") or []}
-    name = lambda pid: names.get(pid) or ("猛鬼兽" if pid in (None, "hermes") else pid)
+    """模型不可用或核对不过时的事实版：只摘快照，不判断；带出处，标「分析降级」。返回 (卡片要素, 完整报告)。"""
+    roster = Roster(facts)
+    name = roster.name
     decs = [{"type": None, "project": name(d.get("project_id")), "item": clip(d.get("item"), 60),
-             "recommendation": "未判断（分析降级）", "deadline": d.get("deadline"), "reply": None}
+             "recommendation": None, "deadline": d.get("deadline"), "reply": None,
+             "source": d.get("source"), "evidence": (d.get("evidence") or [])[:2]}
             for d in facts.get("decisions") or []]
     ach = []
     for p in facts.get("projects") or []:
         prs = (p.get("yesterday_delta") or {}).get("merged_prs") or []
         if prs:
+            last = latest_pr(prs)
             ach.append((len(prs), {"project": name(p.get("project_id")),
-                                   "text": f"合并 {len(prs)} 个 PR（最近：#{prs[-1].get('number')} {clip(prs[-1].get('title'), 30)}）；交付、验收未核实"}))
+                                   "text": f"合并 {len(prs)} 个 PR（最近：#{last.get('number')} {clip(last.get('title'), 30)}）；交付、验收未核实"}))
     ach = [x for _, x in sorted(ach, key=lambda x: -x[0])]
-    risks = [{"level": r.get("level") if r.get("level") in LEVELS else "待识别", "category": r.get("category"),
-              "project": name(r.get("project_id")), "text": clip(r.get("item"), 60)} for r in facts.get("risks") or []]
-    card = {"headline": f"分析降级：{reason}。以下只摘事实，没有判断和推荐",
-            "progress_projects": None, "progress_note": "降级：没判断哪些算实质推进",
+    risks = [{"level": r.get("level") if r.get("level") in LEVELS else "待识别", "category": r.get("category") or "待分类",
+              "project": name(r.get("project_id")), "text": clip(r.get("item"), 60), "evidence": r.get("evidence") or []}
+             for r in facts.get("risks") or []]
+    card = {"headline": f"分析降级：{reason}。以下只摘事实，没有判断和推荐", "progress_projects": None,
             "decisions": decs, "achievements": ach, "risks": risks, "today": [], "degraded": reason}
+    unknown = delta_unknown(facts)
+    src = lambda x: f"（出处：{'；'.join(str(e) for e in ([x.get('source')] if x.get('source') else []) + list(x.get('evidence') or []))}）" \
+        if x.get("source") or x.get("evidence") else ""
     lines = [f"⚠️ 分析降级：{reason}。本报告只摘事实快照，没有定级、排序和推荐；拍板类型、风险等级都未判断。", ""]
     lines.append(f"实质推进 未知 个项目｜待你决策 {len(decs)} 件｜阻塞 / 风险 {len(risk_projects(card))} 个项目")
-    lines += ["", "## 一、需要你拍板（候选，未判断）"] + ([f"- {d['project']}：{d['item']}" for d in decs] or ["- 无"])
-    lines += ["", "## 二、昨日关键成果（只列合并，交付、验收未核实）"] + ([f"- {a['project']}：{a['text']}" for a in ach] or ["- 无"])
+    lines += ["", "## 一、需要你拍板（候选，未判断）"] + ([f"- {d['project']}：{d['item']}{src(d)}" for d in decs] or ["- 无"])
+    empty2 = f"- 未知：{len(unknown)} 个项目 GitHub 取不到（{'、'.join(name(u) for u in unknown)}）" if unknown else "- 昨天没有合并"
+    lines += ["", "## 二、昨日关键成果（只列合并，交付、验收未核实）"] + [f"- {a['project']}：{a['text']}" for a in ach]
+    if not ach or unknown:
+        lines.append(empty2)
     lines += ["", "## 三、各项目推进"]
     for p in facts.get("projects") or []:
         st = p.get("current_state") or {}
-        obj = (p.get("objective") or {}).get("text") or "未设目标"
-        lines.append(f"- {name(p.get('project_id'))}：目标 {clip(obj, 60)}｜当前 {clip(st.get('top_section'), 60)}"
-                     f"｜下一步 {clip(st.get('next_step'), 60) if st.get('next_reliable') else '未知（CURRENT 不可信或没写）'}")
-    lines += ["", "## 四、风险、阻塞与跨项目依赖（候选，未定级）"] + ([f"- {r['category']}｜{r['project']}：{r['text']}" for r in risks] or ["- 无"])
+        obj = p.get("objective")
+        obj = (obj.get("text") if isinstance(obj, dict) else obj) or "未设目标"
+        d = p.get("yesterday_delta") or {}
+        prs, commits = d.get("merged_prs"), d.get("commits")
+        inc = f"合并 {num(None if prs is None else len(prs))}、提交 {num(None if commits is None else sum(commits.values()))}"
+        nxt = clip(st.get("next_step"), 60) if st.get("next_reliable") and st.get("next_step") else "未知（CURRENT 不可信或没写）"
+        lines.append(f"- {name(p.get('project_id'))}：目标 {clip(obj, 60)}｜昨日 {inc}"
+                     f"｜当前 {clip(st.get('top_section'), 60) if st.get('top_section') else '未知'}｜下一步 {nxt}")
+    lines += ["", "## 四、风险、阻塞与跨项目依赖（候选，未定级）"] + \
+        ([f"- {r['category']}｜{r['project']}：{r['text']}{src(r)}" for r in risks] or ["- 无"])
     v, n = action_counts(facts)
     lines += ["", "## 五、Hermes 代理述职", f"- 共 {v or '未知'} 条：{n}（明细在本地完整日报）"]
     lines += ["", "## 六、今日推进计划", "- 分析降级，没有排今日计划；请看上面的拍板候选和风险。"]
@@ -397,6 +560,8 @@ def coverage_line(facts):
         parts.append("CURRENT 过期：" + "、".join(cov["stale"]))
     if cov.get("failed_parts"):
         parts.append("算不出来：" + "、".join(cov["failed_parts"]))
+    if cov.get("not_connected"):
+        parts.append("没接：" + "；".join(cov["not_connected"]))
     parts.append(f"合并 PR {num(act.get('merged_prs'))}、关闭 issue {num(act.get('closed_issues'))}、提交 {num(act.get('commits'))}")
     return "；".join(parts)
 
@@ -410,21 +575,22 @@ def short_day(day):
 
 def window_text(facts):
     w = facts.get("window") or {}
-    s, e = (pdaily_data.parse_ts(w[k]) for k in ("start", "end"))
-    return f"{s:%m-%d %H:%M} → {e:%m-%d %H:%M}"
-
-
-def more(items, total):
-    return f"\n<font color='grey'>另 {total - len(items)} 条见完整报告</font>" if total > len(items) else ""
+    try:
+        st, en = (pdaily_data.parse_ts(w[k]) for k in ("start", "end"))
+    except (KeyError, TypeError, ValueError):
+        return "窗口未知"
+    return f"{st:%m-%d %H:%M} → {en:%m-%d %H:%M}"
 
 
 def md(text):
     return {"tag": "markdown", "content": text}
 
 
-def section(title, items, empty, total=None):
+def section(title, items, empty, total):
     body = "\n".join(items) if items else empty
-    return [{"tag": "hr"}, md(f"**{title}**"), md(body + more(items, total if total is not None else len(items)))]
+    if total > len(items):
+        body += f"\n<font color='grey'>共 {total} 条，另 {total - len(items)} 条见完整报告</font>"
+    return [{"tag": "hr"}, md(f"**{title}**"), md(body)]
 
 
 def sort_decisions(decs):
@@ -436,9 +602,23 @@ def sort_risks(risks):
     return sorted(risks, key=lambda r: order.index(r["level"]) if r.get("level") in order else 9)
 
 
+def dline(d):
+    """拍板一行，照样例：标签｜**项目·事项**：推荐。最晚 **时间**，回「…」。"""
+    t = d.get("type")
+    tag = f"<font color='red'>**{t}**</font>" if t in ("阻断", "限时") else f"<font color='grey'>{t or '候选'}</font>"
+    line = f"{tag}｜**{d.get('project')}·{d.get('item')}**"
+    if d.get("recommendation"):
+        line += f"：{d['recommendation']}"
+    tail = []
+    if d.get("deadline"):
+        tail.append(f"最晚 **{d['deadline']}**")
+    if d.get("reply"):
+        tail.append(f"回「{d['reply']}」")
+    return line + ("。" + "，".join(tail) if tail else "")
+
+
 def build_card(facts, card, trace, doc_url=None, doc_error=None):
     """甲版卡片 JSON 2.0（4.0），排版和样例 hermes/samples/pdaily-card-2026-11-08.json 一致；默认宽度。"""
-    day = facts["stat_day"]
     sub = [f"统计日 {window_text(facts)}"]
     if unread(facts):
         sub.append(f"{len(unread(facts))} 个项目未读到")
@@ -451,27 +631,20 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None):
         "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": "auto"}
                     for k, n in (("k", "指标"), ("v", "昨日"), ("n", "说明"))],
         "rows": rows}]
-    decs = sort_decisions(card.get("decisions") or [])
-    def dline(d):
-        t = d.get("type")
-        tag = "<font color='red'>**" + t + "**</font>" if t in ("阻断", "限时") else f"<font color='grey'>{t or '待定'}</font>"
-        s = f"{tag}｜**{d['project']}**：{d['item']}"
-        if d.get("recommendation"):
-            s += f"。推荐：{d['recommendation']}"
-        if d.get("deadline"):
-            s += f"。最晚 **{d['deadline']}**"
-        if d.get("reply"):
-            s += f"，回「{d['reply']}」"
-        return s
+    decs = sort_decisions([d for d in card.get("decisions") or [] if isinstance(d, dict)])
     els += section("🎯 需要你拍板", [dline(d) for d in decs[:CARD_MAX]], "今天没有要你拍板的事", len(decs))
-    ach = card.get("achievements") or []
-    els += section("✅ 昨日关键成果", [f"{i}. **{a['project']}**：{a['text']}" for i, a in enumerate(ach[:CARD_MAX], 1)],
-                   card.get("achievements_empty") or "昨天没有新成果", len(ach))
-    risks = sort_risks(card.get("risks") or [])
-    els += section("⚠️ 风险与阻塞", [f"{LEVELS.get(r.get('level'), '⚪')} **{r.get('category') or '待分类'}｜{r['project']}**：{r['text']}"
+    ach = [a for a in card.get("achievements") or [] if isinstance(a, dict)]
+    unknown = delta_unknown(facts)
+    empty = f"未知：{len(unknown)} 个项目 GitHub 取不到，没法判断昨天有没有成果" if unknown else "昨天没有新成果"
+    els += section("✅ 昨日关键成果", [f"{i}. **{a.get('project')}**：{a.get('text')}" for i, a in enumerate(ach[:CARD_MAX], 1)],
+                   empty, len(ach))
+    risks = sort_risks([r for r in card.get("risks") or [] if isinstance(r, dict)])
+    els += section("⚠️ 风险与阻塞", [f"{LEVELS.get(r.get('level'), '⚪')} **{r.get('category') or '待分类'}｜{r.get('project')}**：{r.get('text')}"
                                    for r in risks[:CARD_MAX]], "没有风险和阻塞", len(risks))
-    today = card.get("today") or []
-    els += section("💡 今日推进", [f"{i}. **{t['priority']} {t['item']}**：{t['owner_action']}" for i, t in enumerate(today[:TODAY_MAX], 1)],
+    today = sorted([t for t in card.get("today") or [] if isinstance(t, dict)],
+                   key=lambda t: PRIORITIES.index(t["priority"]) if t.get("priority") in PRIORITIES else 9)
+    els += section("💡 今日推进", [f"{i}. **{t.get('priority')} {t.get('item')}**：{t.get('owner_action')}"
+                                 for i, t in enumerate(today[:TODAY_MAX], 1)],
                    "分析降级，没有排今日计划" if card.get("degraded") else "今天没有排推进事项", len(today))
     els.append({"tag": "hr"})
     if doc_url:
@@ -483,39 +656,71 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None):
         trace += f"｜完整报告未生成：{doc_error or '未知原因'}"
     els.append({"tag": "markdown", "content": f"<font color='grey'>{trace}</font>", "text_size": "notation"})
     return {"schema": "2.0", "config": {"update_multi": True},
-            "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(day)}"},
+            "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(facts['stat_day'])}"},
                        "subtitle": {"tag": "plain_text", "content": "｜".join(sub)}, "template": "blue"},
             "body": {"elements": els}}
 
 
-def trace_line(facts, model, degraded):
-    fetched = pdaily_data.parse_ts(facts["fetched_at"]) if facts.get("fetched_at") else None
-    who = f"生成：脚本事实版（{degraded}）｜接入：本机脚本" if degraded else \
+def failure_card(day, reason):
+    """取数或生成整体失败时的最小卡片（7.3：失败也要留证据、让常浩知道）。"""
+    return {"schema": "2.0", "config": {"update_multi": True},
+            "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(day)}"},
+                       "subtitle": {"tag": "plain_text", "content": "今天的日报没出成"}, "template": "red"},
+            "body": {"elements": [md(f"**⚠️ 日报没出成**\n{reason}\n今天的项目情况请直接问我，或等修好后补发。"),
+                                  {"tag": "markdown", "content": "<font color='grey'>生成：本机脚本｜接入：本机脚本</font>",
+                                   "text_size": "notation"}]}}
+
+
+def who(model, degraded):
+    return f"生成：脚本事实版（{degraded}）｜接入：本机脚本" if degraded else \
         f"生成：Hermes（{model or '模型查不到'}）｜接入：Hermes 派单"
-    return f"{who}｜统计日 {window_text(facts)}｜取数 {f'{fetched:%m-%d %H:%M}' if fetched else '未知'}"
 
 
-def report_doc(facts, card, report, trace):
-    """完整报告全文：标题 + 留痕 + 模型（或事实版）正文。"""
-    return f"# 📅 猛鬼兽日报｜统计日 {short_day(facts['stat_day'])}\n\n{trace}\n\n{report.strip()}\n"
+def fetched_text(facts):
+    try:
+        return f"取数 {pdaily_data.parse_ts(facts['fetched_at']):%m-%d %H:%M}"
+    except (KeyError, TypeError, ValueError):
+        return "取数时间未知"
+
+
+def trace_line(facts, model, degraded):
+    """卡片底部灰字：生成方｜接入｜统计日｜取数（4.0 样例的顺序）。"""
+    return f"{who(model, degraded)}｜统计日 {window_text(facts)}｜{fetched_text(facts)}"
+
+
+def report_doc(facts, report, model, degraded):
+    """完整报告全文：标题 + 留痕（第 4 节样例顺序：生成｜接入｜取数｜统计日）+ 正文。"""
+    return (f"# 📅 猛鬼兽日报｜统计日 {short_day(facts['stat_day'])}\n\n"
+            f"{who(model, degraded)}｜{fetched_text(facts)}｜统计日 {window_text(facts)}\n\n{report.strip()}\n")
 
 
 # ---------- 入口 ----------
 
 def load_facts(path, day):
-    f = Path(path) if path else DAILY / f"{day}.facts.json"
-    if not f.exists() and not path:
-        projects = json.loads(pdaily_facts.progress_data.ROSTER.read_text())["projects"]
-        pdaily_facts.write(pdaily_facts.build(day, projects))
-    return json.loads(f.read_text(encoding="utf-8"))
+    """读事实快照；没给路径时，文件不在、或是统计日结束前取的（不完整），就重取一份。"""
+    if path:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    f = DAILY / f"{day}.facts.json"
+    facts = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+    if facts is not None:
+        try:
+            done = pdaily_data.parse_ts(facts["fetched_at"]) >= pdaily_data.parse_ts(facts["window"]["end"])
+        except (KeyError, TypeError, ValueError):
+            done = False
+        if done:
+            return facts
+    projects = json.loads(pdaily_facts.progress_data.ROSTER.read_text())["projects"]
+    facts = pdaily_facts.build(day, projects)
+    pdaily_facts.write(facts)
+    return facts
 
 
 def build(facts, out, reply=None, force_fallback=False):
-    """出一天的卡片和完整报告（不发送）。返回 build 摘要 dict。"""
+    """出一天的卡片和完整报告（不发送）。返回 build 摘要 dict。任何一步出错都还有事实版，事实版也出错就出最小卡片。"""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     day = facts["stat_day"]
-    meta = {"stat_day": day, "model": None, "session_id": None, "degraded": None, "check_errors": []}
+    meta = {"stat_day": day, "model": None, "session_id": None, "degraded": None, "check_errors": [], "warnings": []}
     card = report = None
     if force_fallback:
         meta["degraded"] = "按要求出事实版"
@@ -525,19 +730,27 @@ def build(facts, out, reply=None, force_fallback=False):
                 reply, meta["session_id"], meta["model"] = generate(facts, out)
             (out / f"{day}.reply.md").write_text(reply, encoding="utf-8")
             card, report = parse_reply(reply)
+            meta["warnings"] = normalize(facts, card)
             meta["check_errors"] = check(facts, card, report)
             if meta["check_errors"]:
                 meta["degraded"] = f"模型稿核对没过 {len(meta['check_errors'])} 处"
         except GenError as e:
             meta["degraded"] = f"模型没写成：{e}"
-    if meta["degraded"]:
-        card, report = fallback(facts, meta["degraded"])
-    trace = trace_line(facts, meta["model"], meta["degraded"])
-    (out / f"{day}.report.md").write_text(report_doc(facts, card, report, trace), encoding="utf-8")
-    (out / f"{day}.card-fields.json").write_text(json.dumps(card, ensure_ascii=False, indent=1), encoding="utf-8")
-    preview = build_card(facts, card, trace, doc_error="预览，未发送")
+        except Exception as e:  # noqa: BLE001  模型稿千奇百怪，任何意外都转事实版，不能让日报出不来
+            meta["degraded"] = f"模型稿处理出错（{type(e).__name__}）"
+    try:
+        if meta["degraded"]:
+            card, report = fallback(facts, meta["degraded"])
+        preview = build_card(facts, card, trace_line(facts, meta["model"], meta["degraded"]), doc_error="预览，未发送")
+        doc = report_doc(facts, report, meta["model"], meta["degraded"])
+    except Exception as e:  # noqa: BLE001
+        meta["degraded"] = f"事实版也没出成（{type(e).__name__}：{clip(e, 80)}）"
+        card, doc, preview = None, None, failure_card(day, meta["degraded"])
+    if doc is not None:
+        (out / f"{day}.report.md").write_text(doc, encoding="utf-8")
+        (out / f"{day}.card-fields.json").write_text(json.dumps(card, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / f"{day}.card.json").write_text(json.dumps(preview, ensure_ascii=False, indent=1), encoding="utf-8")
-    meta["trace"] = trace
+    meta["trace"] = trace_line(facts, meta["model"], meta["degraded"])
     (out / f"{day}.build.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     return meta
 
@@ -546,9 +759,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="个人项目日报写稿与核对（不发送）")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in ("build", "material"):
-        s = sub.add_parser(name)
-        s.add_argument("--date", help="统计日 YYYY-MM-DD，默认最近一个已经结束的统计日")
-        s.add_argument("--facts", help="事实快照文件，默认 DigitalTwin/daily/<统计日>.facts.json")
+        sp = sub.add_parser(name)
+        sp.add_argument("--date", help="统计日 YYYY-MM-DD，默认最近一个已经结束的统计日")
+        sp.add_argument("--facts", help="事实快照文件，默认 DigitalTwin/daily/<统计日>.facts.json")
     b = sub.choices["build"]
     b.add_argument("--reply", help="用现成的模型回复文件（回放、测试用）")
     b.add_argument("--fallback", action="store_true", help="直接出事实版")
@@ -556,9 +769,19 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         day = dt.date.fromisoformat(a.date) if a.date else pdaily_data.default_day()
+    except ValueError:
+        print(json.dumps({"ok": False, "error": f"日期写法不对：{a.date}"}, ensure_ascii=False))
+        return 1
+    try:
         facts = load_facts(a.facts, day)
-    except (OSError, ValueError, KeyError) as e:
-        print(json.dumps({"ok": False, "error": f"读不了事实快照：{e}"}, ensure_ascii=False))
+    except Exception as e:  # noqa: BLE001  取数失败也要留一张卡片和原因（7.3）
+        reason = f"取数失败（{type(e).__name__}：{clip(e, 120)}）"
+        if a.cmd == "build":
+            out = Path(a.out or DAILY)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{day}.card.json").write_text(json.dumps(failure_card(day.isoformat(), reason), ensure_ascii=False, indent=1),
+                                                  encoding="utf-8")
+        print(json.dumps({"ok": False, "stat_day": day.isoformat(), "error": reason}, ensure_ascii=False))
         return 1
     if a.cmd == "material":
         print(json.dumps(material(facts), ensure_ascii=False, indent=1))

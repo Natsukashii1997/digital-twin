@@ -42,7 +42,8 @@ def facts():
         "fetched_at": "2026-11-09T07:52:00+08:00",
         "projects": [project("work-desk", "牛马之家", [(43, "月度策略证据口径")]),
                      project("digital-twin", "数字分身", [(102, "M5 小修")]),
-                     project("disk-slim", "磁盘瘦身", commits={})],
+                     project("disk-slim", "磁盘瘦身", commits={"main": 2}),
+                     project("personal-ai-workbench", "个人 AI 工作台（数码世界）", commits={})],
         "actions": [
             {"action_id": "c1", "ts": "2026-11-08T05:00:00+08:00", "project_id": "hermes", "kind": "cron",
              "request": "定时任务「Tidings」", "actor": "Hermes", "auth_tier": None, "auth_source": "已登记的定时任务",
@@ -63,7 +64,7 @@ def facts():
         "counts": {"projects_with_delta": ["work-desk", "digital-twin"], "projects_delta_unknown": [],
                    "decision_candidates": 1, "risk_projects": ["work-desk"], "non_project_risks": 0},
         "activity": {"merged_prs": 2, "closed_issues": 1, "commits": 2, "actions_by_kind": {"cron": 1, "merge": 1}},
-        "coverage": {"projects": {"projects": 3, "read_ok": 3, "errors": {}},
+        "coverage": {"projects": {"projects": 4, "read_ok": 4, "errors": {}},
                      "actions": {"合并官": {"ok": True, "count": 1, "error": None},
                                  "定时任务库": {"ok": True, "count": 1, "error": None}},
                      "action_notes": [], "stale": [], "not_connected": ["Hermes 对话记录：没接"], "failed_parts": []},
@@ -75,7 +76,7 @@ def card_fields(**over):
     c = {
         "headline": "牛马之家证据口径合并；今天先收尾夜跑",
         "progress_projects": ["work-desk"],
-        "decisions": [{"type": "限时", "project": "猛鬼兽", "item": "夜跑收尾", "recommendation": "按授权 72 收尾",
+        "decisions": [{"type": "限时", "candidate": 0, "project": "猛鬼兽", "item": "夜跑收尾", "recommendation": "按授权 72 收尾",
                        "deadline": "11-09 06:00", "reply": "按授权 72 收尾"}],
         "achievements": [{"project": "牛马之家", "text": "证据口径对齐合并（#43），未发布"}],
         "risks": [{"level": "待识别", "category": "管理失真", "project": "牛马之家", "text": "主目录 15 处未提交"}],
@@ -116,7 +117,9 @@ class ParseTests(unittest.TestCase):
 
 class CheckTests(unittest.TestCase):
     def errs(self, card=None, report=None, f=None):
-        return pp.check(f or facts(), card or card_fields(), report or report_text())
+        f, card = f or facts(), card or card_fields()
+        self.warns = pp.normalize(f, card)
+        return pp.check(f, card, report or report_text())
 
     def test_good_passes(self):
         self.assertEqual(self.errs(), [])
@@ -127,7 +130,7 @@ class CheckTests(unittest.TestCase):
 
     def test_dependency_pair_names_checked(self):
         ok = card_fields(risks=[{"level": "中", "category": "管理失真", "project": "牛马之家 ↔ 数字分身", "text": "x"}])
-        self.assertEqual(self.errs(ok), [])
+        self.assertEqual(self.errs(ok, report_text(n=("1", "1", "2"))), [])   # 依赖两头各算一个项目
         bad = card_fields(risks=[{"level": "中", "category": "管理失真", "project": "牛马之家 ↔ 外星项目", "text": "x"}])
         self.assertTrue(any("外星项目" in x for x in self.errs(bad)))
 
@@ -136,8 +139,71 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any("#999" in x for x in e), e)
 
     def test_deadline_needs_source(self):
-        bad = card_fields(decisions=[dict(card_fields()["decisions"][0], deadline="11-10 09:00")])
-        self.assertTrue(any("最晚时间" in x for x in self.errs(bad)))
+        """最晚时间只认对应候选里写着的时间：编的、只写时刻的、不连候选的都去掉（不显示），不让整份降级。"""
+        d0 = card_fields()["decisions"][0]
+        for dl, cand in (("11-10 09:00", 0), ("06:00", 0), ("11-09 06:00", None), ("今天 18:00", 0)):
+            card = card_fields(decisions=[dict(d0, deadline=dl, candidate=cand)])
+            self.assertEqual(self.errs(card), [], dl)
+            self.assertIsNone(card["decisions"][0]["deadline"], dl)
+            self.assertTrue(any("最晚时间" in w for w in self.warns), dl)
+
+    def test_deadline_formats_normalized(self):
+        for dl in ("2026-11-09 06:00", "11-09 06:00", "11月9日 06:00", "11-9 6:00"):
+            card = card_fields(decisions=[dict(card_fields()["decisions"][0], deadline=dl)])
+            self.assertEqual(self.errs(card), [])
+            self.assertEqual(card["decisions"][0]["deadline"], "11-09 06:00", dl)
+
+    def test_wrong_types_do_not_crash(self):
+        """模型把 project 写成列表、progress 套了一层：报错，不抛异常。"""
+        bad = card_fields(achievements=[{"project": ["牛马之家", "数字分身"], "text": "x"}],
+                          progress_projects=[["work-desk"]], decisions="无")
+        e = self.errs(bad)
+        self.assertTrue(any("achievements[0] 缺 project" in x for x in e), e)
+        self.assertTrue(any("progress_projects" in x for x in e), e)
+        self.assertTrue(any("缺 decisions" in x for x in e), e)
+
+    def test_alias_names(self):
+        ok = card_fields(risks=[{"level": "低", "category": "协作阻塞", "project": "数码世界", "text": "PR 开着"}])
+        self.assertEqual(self.errs(ok), [])
+
+    def test_install_and_acceptance_claims(self):
+        for text, bad in (("证据口径已安装到 5280", True), ("已上线并经常浩验收通过", True), ("发布成功", True),
+                          ("已合并，未安装", False), ("合并了，交付、验收未核实", False), ("批 1 上线前的最后一步合并", False),
+                          ("不能以自述的已发布替代", False)):
+            e = self.errs(card_fields(achievements=[{"project": "牛马之家", "text": text}]))
+            self.assertEqual(any("安装 / 验收" in x for x in e), bad, (text, e))
+        f = facts()
+        f["projects"][0]["installs"] = [{"ts": "2026-11-08T22:00:00+08:00"}]
+        self.assertEqual(self.errs(card_fields(achievements=[{"project": "牛马之家", "text": "已安装到 5280"}]), f=f), [])
+
+    def test_pr_count(self):
+        e = self.errs(card_fields(achievements=[{"project": "牛马之家", "text": "合并 9 个 PR"}]))
+        self.assertTrue(any("合并 9 个 PR" in x for x in e), e)
+        self.assertEqual(self.errs(card_fields(achievements=[{"project": "牛马之家", "text": "合并 1 个 PR"}])), [])
+
+    def test_qualified_refs(self):
+        e = self.errs(report=report_text(extra="见 my-skills#999"))
+        self.assertTrue(any("my-skills#999" in x for x in e), e)
+        self.assertEqual(self.errs(report=report_text(extra="见 work-desk#43")), [])
+
+    def test_percent_must_be_in_material(self):
+        f = facts()
+        f["projects"][0]["current_state"]["top_section"] = "压到原来 70%"
+        self.assertEqual(self.errs(report=report_text(extra="压到 70%"), f=f), [])
+        e = self.errs(report=report_text(extra="完成 85%"), f=f)
+        self.assertTrue(any("85%" in x for x in e), e)
+
+    def test_progress_dedup(self):
+        self.assertEqual(pp.header_numbers(card_fields(progress_projects=["work-desk", "work-desk"])), ("1", "1", "1"))
+
+    def test_no_false_alarms(self):
+        """正常写法不误拦：正文提前提到段名、第六段带缩进子条目、开头数字加粗、｜两侧空格。"""
+        secs = "\n\n".join(f"## {x}\n- 内容" for x in pp.SECTIONS)
+        secs = secs.replace("## 一、需要你拍板\n- 内容", "## 一、需要你拍板\n- 内容，细节见六、今日推进计划")
+        secs = secs.replace("## 六、今日推进计划\n- 内容", "## 六、今日推进计划\n" + "\n".join(
+            f"{i}. 目标{i}\n   - 负责人：Hermes\n   - 动作：做\n   - 完成标准：有证据" for i in range(1, 6)))
+        report = f"一句话：x\n实质推进 **1** 个项目 ｜ 待你决策 **1** 件 ｜ 阻塞 / 风险 **1** 个项目\n\n{secs}"
+        self.assertEqual(self.errs(report=report), [])
 
     def test_header_numbers_must_match_card(self):
         e = self.errs(report=report_text(n=("3", "1", "1")))
@@ -152,7 +218,7 @@ class CheckTests(unittest.TestCase):
 
     def test_progress_needs_delta(self):
         e = self.errs(card_fields(progress_projects=["disk-slim"]), report_text())
-        self.assertTrue(any("没有任何增量" in x for x in e), e)
+        self.assertTrue(any("不算实质推进" in x for x in e), e)
 
     def test_today_limit_and_link(self):
         t = card_fields()["today"][0]
@@ -182,7 +248,8 @@ class MetricTests(unittest.TestCase):
 
     def test_normal(self):
         r = self.rows()
-        self.assertEqual(r["有推进的项目"][0], "**1** / 3")
+        self.assertEqual(r["有推进的项目"], ("**1** / 4", "其余 3 个无实质推进"))
+        self.assertEqual(r["待你拍板"][1], "限时 1 件，最晚 11-09 06:00")
         self.assertEqual(r["合并 PR"][0], "2")
         self.assertIn("red", r["待你拍板"][0])
         self.assertIn("最晚 11-09 06:00", r["待你拍板"][1])
@@ -303,7 +370,8 @@ class BuildTests(unittest.TestCase):
             if rc == 0:
                 print(open({str(self.reply)!r}, encoding="utf-8").read())
             sys.stderr.write("模型报错了\\n" if rc else "")
-            sys.stderr.write("\\nsession_id: s1\\n")
+            if not os.environ.get("FAKE_NOSID"):
+                sys.stderr.write("\\nsession_id: s1\\n")
             sys.exit(rc)
             """), encoding="utf-8")
         self.cli.chmod(0o755)
@@ -346,6 +414,173 @@ class BuildTests(unittest.TestCase):
         meta = pp.build(facts(), self.tmp / "out", reply=reply_text())
         self.assertIsNone(meta["degraded"])
         self.assertIsNone(meta["session_id"])
+
+
+class SampleLayoutTests(unittest.TestCase):
+    """逐行对齐甲版样例 hermes/samples/pdaily-card-2026-11-08.json 的写法（常浩 11-09 定稿）。"""
+    def lines(self, fields):
+        f = facts()
+        pp.normalize(f, fields)
+        c = pp.build_card(f, fields, "灰字")
+        return [e["content"] for e in c["body"]["elements"] if e.get("tag") == "markdown"]
+
+    def test_decision_line(self):
+        d = dict(card_fields()["decisions"][0], item="夜跑收尾。", recommendation="按授权 72 收尾。",
+                 reply="回「按授权 72 收尾」即可")
+        body = self.lines(card_fields(decisions=[d, dict(d, type="普通", deadline=None, reply=None,
+                                                                    item="PR #102", recommendation="复盘后再定，今天不用回")]))[2]
+        self.assertEqual(body.split("\n")[0], "<font color='red'>**限时**</font>｜**猛鬼兽·夜跑收尾**：按授权 72 收尾。"
+                                              "最晚 **11-09 06:00**，回「按授权 72 收尾」")
+        self.assertEqual(body.split("\n")[1], "<font color='grey'>普通</font>｜**猛鬼兽·PR #102**：复盘后再定，今天不用回")
+        self.assertNotIn("。。", body)
+        self.assertNotIn("回「回「", body)
+
+    def test_other_lines(self):
+        ls = self.lines(card_fields(today=[{"priority": "P1", "item": "牛马之家盲测", "owner_action": "Hermes 协调"},
+                                           {"priority": "P0", "item": "夜跑收尾", "owner_action": "你回拍板 1"}]))
+        self.assertEqual(ls[4], "1. **牛马之家**：证据口径对齐合并（#43），未发布")
+        self.assertEqual(ls[6], "⚪ **管理失真｜牛马之家**：主目录 15 处未提交")
+        self.assertEqual(ls[8], "1. **P0 夜跑收尾**：你回拍板 1\n2. **P1 牛马之家盲测**：Hermes 协调")   # P0 在前
+
+    def test_more_shows_total(self):
+        r = card_fields()["risks"][0]
+        body = self.lines(card_fields(risks=[r] * 8))[6]
+        self.assertIn("共 8 条，另 3 条见完整报告", body)
+
+    def test_overlong_clipped(self):
+        f, c = facts(), card_fields(achievements=[{"project": "牛马之家", "text": "很长" * 40}])
+        w = pp.normalize(f, c)
+        self.assertTrue(any("已截断" in x for x in w))
+        self.assertLessEqual(len(c["achievements"][0]["text"]), pp.LIMITS["text"] + 1)
+
+    def test_trace_orders(self):
+        f = facts()
+        self.assertEqual(pp.trace_line(f, "m", None), "生成：Hermes（m）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52")
+        doc = pp.report_doc(f, "正文", "m", None)
+        self.assertIn("生成：Hermes（m）｜接入：Hermes 派单｜取数 11-09 07:52｜统计日 11-08 04:00 → 11-09 04:00", doc)
+
+
+class FallbackMoreTests(unittest.TestCase):
+    def test_unknown_github_not_no_progress(self):
+        """GitHub 取不到：成果段写未知，不写「昨天没有新成果」（7.1 取数失败写未知）。"""
+        f = facts()
+        for p in f["projects"]:
+            p["yesterday_delta"]["merged_prs"] = None
+        card, report = pp.fallback(f, "x")
+        t = json.dumps(pp.build_card(f, card, "t"), ensure_ascii=False)
+        self.assertIn("未知：4 个项目 GitHub 取不到", t)
+        self.assertNotIn("昨天没有新成果", t)
+        self.assertIn("未知：4 个项目 GitHub 取不到", report)
+        self.assertIn("合并 未知", report)
+
+    def test_latest_pr_by_merged_at(self):
+        f = facts()
+        f["projects"][0]["yesterday_delta"]["merged_prs"] = [
+            {"number": 43, "title": "新的", "merged_at": "2026-11-08T12:45:31Z"},
+            {"number": 23, "title": "旧的", "merged_at": "2026-11-08T01:00:00Z"}]
+        card, _ = pp.fallback(f, "x")
+        self.assertIn("最近：#43 新的", card["achievements"][0]["text"])
+
+    def test_sources_kept(self):
+        f = facts()
+        f["decisions"][0]["evidence"] = ["run-log 第 3 行"]
+        _, report = pp.fallback(f, "x")
+        self.assertIn("出处：run-log；run-log 第 3 行", report)
+        self.assertIn("出处：本机 git status", report)
+
+    def test_odd_shapes_do_not_crash(self):
+        f = facts()
+        f["projects"][0]["objective"] = "直接是字符串"
+        f["projects"][1]["current_state"] = {}
+        f["risks"][0]["category"] = None
+        del f["window"]
+        card, report = pp.fallback(f, "x")
+        self.assertIn("目标 直接是字符串", report)
+        self.assertIn("待分类｜", report)
+        self.assertNotIn("None", report)
+        self.assertIn("窗口未知", json.dumps(pp.build_card(f, card, pp.trace_line(f, None, "x")), ensure_ascii=False))
+
+    def test_degraded_metrics(self):
+        card, _ = pp.fallback(facts(), "x")
+        r = {k: (v, n) for k, v, n in pp.metrics(facts(), card)}
+        self.assertEqual(r["待你拍板"], ("候选 1", "分析降级，类型未判断"))
+        self.assertEqual(r["有推进的项目"][0], "未知")
+
+
+class RobustBuildTests(BuildTests):
+    def test_wrong_types_degrade_not_crash(self):
+        bad = card_fields(achievements=[{"project": ["牛马之家"], "text": "x"}], progress_projects=[["work-desk"]])
+        meta = pp.build(facts(), self.tmp / "out", reply=reply_text(card=bad))
+        self.assertIn("核对没过", meta["degraded"])
+        self.assertIn("分析降级", self.out("report.md"))
+
+    def test_unexpected_error_degrades(self):
+        with mock.patch.object(pp, "check", side_effect=RuntimeError("意外")):
+            meta = pp.build(facts(), self.tmp / "out", reply=reply_text())
+        self.assertEqual(meta["degraded"], "模型稿处理出错（RuntimeError）")
+        self.assertIn("分析降级", self.out("report.md"))
+
+    def test_fallback_error_gives_failure_card(self):
+        with mock.patch.object(pp, "fallback", side_effect=KeyError("projects")):
+            meta = pp.build(facts(), self.tmp / "out", force_fallback=True)
+        self.assertIn("事实版也没出成", meta["degraded"])
+        card = json.loads(self.out("card.json"))
+        self.assertEqual(card["header"]["subtitle"]["content"], "今天的日报没出成")
+
+    def test_session_id_from_stderr_only(self):
+        self.reply.write_text(reply_text(report=report_text(extra="session_id: 假的")), encoding="utf-8")
+        meta = pp.build(facts(), self.tmp / "out")
+        self.assertEqual(meta["session_id"], "s1")
+
+    def test_session_id_in_reply_ignored(self):
+        """模型正文里出现「session_id:」不能当成会话号（-Q 模式会话号只在 stderr）。"""
+        self.reply.write_text(reply_text(report=report_text(extra="session_id: 假的")), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"FAKE_NOSID": "1"}):
+            meta = pp.build(facts(), self.tmp / "out")
+        self.assertIsNone(meta["session_id"])
+
+    def test_missing_state_db_not_created(self):
+        with mock.patch.object(pp, "HERMES_HOME", self.tmp / "nowhere"):
+            self.assertIsNone(pp.session_model("s1"))
+        self.assertFalse((self.tmp / "nowhere" / "state.db").exists())
+
+
+class LoadTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.roster = self.tmp / "projects.json"
+        self.roster.write_text(json.dumps({"projects": []}), encoding="utf-8")
+        self.patches = [mock.patch.object(pp, "DAILY", self.tmp),
+                        mock.patch.object(pp.pdaily_facts.progress_data, "ROSTER", self.roster),
+                        mock.patch.object(pp.pdaily_facts, "write")]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def test_complete_snapshot_reused(self):
+        (self.tmp / f"{DAY}.facts.json").write_text(json.dumps(facts()), encoding="utf-8")
+        with mock.patch.object(pp.pdaily_facts, "build") as b:
+            self.assertEqual(pp.load_facts(None, pp.dt.date(2026, 11, 8))["stat_day"], DAY)
+        b.assert_not_called()
+
+    def test_partial_snapshot_refetched(self):
+        """统计日没结束时取的快照不完整（样稿 22:35 取的那种），08:00 发报要重取。"""
+        early = dict(facts(), fetched_at="2026-11-08T22:35:00+08:00")
+        (self.tmp / f"{DAY}.facts.json").write_text(json.dumps(early), encoding="utf-8")
+        with mock.patch.object(pp.pdaily_facts, "build", return_value=facts()) as b:
+            pp.load_facts(None, pp.dt.date(2026, 11, 8))
+        b.assert_called_once()
+
+    def test_fetch_failure_writes_failure_card(self):
+        with mock.patch.object(pp.pdaily_facts, "build", side_effect=RuntimeError("gh 挂了")):
+            with mock.patch("sys.stdout"):
+                rc = pp.main(["build", "--date", DAY, "--out", str(self.tmp / "o")])
+        self.assertEqual(rc, 1)
+        card = json.loads((self.tmp / "o" / f"{DAY}.card.json").read_text(encoding="utf-8"))
+        self.assertIn("取数失败（RuntimeError：gh 挂了）", json.dumps(card, ensure_ascii=False))
 
 
 class MaterialTests(unittest.TestCase):
