@@ -333,8 +333,9 @@ def dispatch(w, notes):
 
 def one_order(d, w, notes):
     f = d / "order.json"
-    if not f.exists():
-        if (d / "task.md").exists():
+    if not f.exists():   # 只有 task.md 的残单：task.md 是统计日内写的才提一句，旧残单不天天提
+        task = d / "task.md"
+        if task.exists() and inside(stamp(dt.datetime.fromtimestamp(task.stat().st_mtime, TZ)), w):
             notes.append(f"派单 {d.name} 只有 task.md、没有 order.json，跳过")
         return None
     order = json.loads(f.read_text(encoding="utf-8", errors="replace"))

@@ -298,16 +298,20 @@ class DispatchTests(Base):
         (self.p["dispatch"] / "D20261108-3" / "order.json").write_text("[]")
         self.order("D20261108-4", "2026-11-08T10:00:00", receipt=ok, started="2026-11-08T10:00:00")
         (self.p["dispatch"] / "D20261108-4" / "task.md").write_bytes("坏编码".encode("gbk"))
-        d = self.p["dispatch"] / "D20261026-1"
-        d.mkdir()
-        (d / "task.md").write_text("旧单")
+        for no, when in (("D20261108-9", "2026-11-08T10:00:00+08:00"), ("D20261026-1", "2026-10-26T10:00:00+08:00")):
+            d = self.p["dispatch"] / no
+            d.mkdir()
+            (d / "task.md").write_text("残单")
+            t = dt.datetime.fromisoformat(when).timestamp()
+            os.utime(d / "task.md", (t, t))
         out = self.run_day()
         rs = self.by_origin(out, "派单台账")
         self.assertTrue(out["coverage"]["派单台账"]["ok"])
         self.assertEqual([a["action_id"] for a in rs], ["dispatch:D20261108-1", "dispatch:D20261108-2", "dispatch:D20261108-4"])
         self.assertEqual(rs[1]["result"], "不明")                       # 回执坏了：当成还没有回执
         self.assertTrue(any("D20261108-3 跳过" in n for n in out["notes"]))
-        self.assertTrue(any("D20261026-1 只有 task.md" in n for n in out["notes"]))
+        self.assertTrue(any("D20261108-9 只有 task.md" in n for n in out["notes"]))
+        self.assertFalse(any("D20261026-1" in n for n in out["notes"]))          # 旧残单不天天提
 
 
 class CronTests(Base):
