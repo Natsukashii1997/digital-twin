@@ -13,8 +13,8 @@
   卡片合并 B；安装、新建或修改定时任务、写入类派单 D（清单第 4 节：写入派单降到 C 还没开始）；夜跑 C。
   C 档授权文件逐项写明的 D 档动作（清单 5.1），记 auth_tier=D、auth_source 写到「文件路径 第几条」；只写了 C 文件的照样标。
 action_id 约定（以后脚本直接写同一个动作时用同样的号，actions.jsonl 的那条为准，适配器那条不再列）：
-  shadow:<仓库>#<PR>@<版本前 12 位>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、merge-run:<目录名>、dispatch:<单号>、
-  cron:<执行号>、cron-job:<任务号>、cron-incident:<故障单号>:<日期>、night:<夜跑>:<行号>、ruling:<证据目录下的路径>。
+  shadow:<仓库>#<PR>@<版本前 12 位>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、merge-run:<目录名>、
+  dispatch:<单号>（写入单等确认那条加 :open）、  cron:<执行号>、cron-job:<任务号>、cron-incident:<故障单号>:<日期>、night:<夜跑>:<行号>、ruling:<证据目录下的路径>。
 取不到的来源在 coverage 里记 ok=false、count=null 和原因，不当成 0；来源里个别坏行跳过并写进 notes，不拖垮整个来源。
 """
 import argparse
@@ -86,6 +86,8 @@ def check(rec):
     for k in ("action_id", "ts", "kind", "request", "actor", "decision"):
         if not rec.get(k):
             raise ValueError(f"缺字段：{k}")
+        if not isinstance(rec[k], str):
+            raise ValueError(f"{k} 要是字符串，收到 {rec[k]!r}")
     for k, allowed in (("kind", KINDS), ("decision", DECISIONS)):
         if rec[k] not in allowed:
             raise ValueError(f"{k} 只能是 {' / '.join(allowed)}，收到「{rec[k]}」")
@@ -153,10 +155,11 @@ def from_file(w, notes):
         try:
             rec = check(json.loads(line))
             rec["ts"] = stamp(rec["ts"])
+            dup = rec["action_id"] in seen
         except ROW_ERRORS as e:
             notes.append(f"actions.jsonl 第 {i} 行跳过：{e}")
             continue
-        if rec["action_id"] in seen:
+        if dup:
             notes.append(f"actions.jsonl 第 {i} 行和前面的 action_id 重复（{rec['action_id']}），只用第一条")
             continue
         seen.add(rec["action_id"])
@@ -200,7 +203,8 @@ def act(**kw):
 def merge_officer(w, notes):
     """合并官 shadow/agreement.csv：
     - 影子判定（A 档）：同一个「PR + 版本」只算一条，时间取第一次判定，内容取统计日结束前的最后一次（V2 第 6 节去重）；
-      判「问常浩」或 L3 的，只有这个 PR 还没有结局、而且这是它最新的版本，才写「常浩决定」的后续（结局按现在的记录）；
+      判「问常浩」或 L3 的，只有这个 PR 还没有结局、常浩还没点过这个版本的卡片、而且这是它最新的版本，
+      才写「常浩决定」的后续（结局、点击都按现在的记录）；
     - 历史回填（source=backfill，事后判定，不计入放权门槛）：统计日内的合成一条，写明条数，不逐条列、不带后续；
     - owner 列（常浩点卡片的「合并」「退回」，B 档）：merge_act 回读到 PR 已合并、或留言成功后才写这一列。"""
     ledger = SHADOW / "agreement.csv"
@@ -208,7 +212,7 @@ def merge_officer(w, notes):
         raise Fail(f"找不到 {ledger}")
     with ledger.open(encoding="utf-8", errors="replace", newline="") as f:
         rows = list(csv.DictReader(f))
-    ids, out, versions, owners, backfill, latest = roster_ids(), [], {}, {}, [], {}
+    ids, out, versions, owners, backfill, latest, decided = roster_ids(), [], {}, {}, [], {}, set()
     for i, r in enumerate(rows, 2):
         try:
             if not (r.get("repo") and r.get("pr") and r.get("head_sha")):
@@ -228,6 +232,7 @@ def merge_officer(w, notes):
                 latest[pr] = (r["_at"], key[2])
         if r.get("owner") and r.get("owner_at"):
             owners.setdefault(key + (r["owner"],), r)
+            decided.add(key)
     for (repo, pr, sha), rs in versions.items():
         rs.sort(key=lambda r: r["_at"])
         first, last = rs[0], rs[-1]
@@ -245,7 +250,8 @@ def merge_officer(w, notes):
             kind="ruling", request=f"影子合并官判定 {repo}#{pr}@{sha[:7]}：{last.get('title')}", actor="Hermes",
             auth_tier="A", auth_source="常设授权清单 A 档：影子合并官判定（#61）", decision="执行", result="调用成功",
             verification=proof,
-            follow_up="常浩决定合不合并" if ask and not ending and latest[(repo, pr)][1] == sha else None), None))
+            follow_up="常浩决定合不合并" if ask and not ending and (repo, pr, sha) not in decided
+                                                and latest[(repo, pr)][1] == sha else None), None))
     if backfill:
         backfill.sort(key=lambda r: r["_at"])
         repos = sorted({r["repo"] for r in backfill})
@@ -311,8 +317,10 @@ def merge_runs(w, notes):
 
 def dispatch(w, notes):
     """派单台账 ~/.hermes/dispatch/<单号>/：order.json（单子）+ out/receipt.json（回执）+ task.md。
-    - 开了单、还在等常浩确认（status=new）：记「升级给常浩」，时间取开单时间；
-    - 开跑了（有 run_started）：时间取开跑时间；回执有 refused 的记「拒绝」；
+    - 写入单开了单、当天没开跑：记一条「升级给常浩」（等确认），时间取开单时间；隔天才开跑的，开单那天照样有这一条；
+    - 只读单不用确认：开了单还没跑的记「已发起」；
+    - 开跑了（有 run_started）：再记一条，时间取开跑时间；还在跑（running、queued）的记「已发起」，不看可能是上一次留下的回执；
+      回执有 refused 的记「拒绝」；
     - 只读单 A 档；写入单要 D 档（清单第 4 节），确认记录没接入台账，档位记 null，会标 auth_gap。"""
     root = progress_data.DISPATCH
     if not root.exists():
@@ -322,12 +330,9 @@ def dispatch(w, notes):
         if not d.is_dir():
             continue
         try:
-            item = one_order(d, w, notes)
+            out.extend(one_order(d, w, notes))
         except ROW_ERRORS + (OSError,) as e:
             notes.append(f"派单 {d.name} 跳过：{e}")
-            continue
-        if item:
-            out.append(item)
     return out
 
 
@@ -337,14 +342,46 @@ def one_order(d, w, notes):
         task = d / "task.md"
         if task.exists() and inside(stamp(dt.datetime.fromtimestamp(task.stat().st_mtime, TZ)), w):
             notes.append(f"派单 {d.name} 只有 task.md、没有 order.json，跳过")
-        return None
+        return []
     order = json.loads(f.read_text(encoding="utf-8", errors="replace"))
     if not isinstance(order, dict):
         raise ValueError("order.json 不是对象")
-    status, started = order.get("status"), order.get("run_started")
-    ts = stamp(started or order.get("created"), "派单时间")
-    if not inside(ts, w):
-        return None
+    status, mode = order.get("status"), order.get("mode")
+    created = stamp(order["created"], "开单时间") if order.get("created") else None
+    started = stamp(order["run_started"], "开跑时间") if order.get("run_started") else None
+    guessed = not started and status in ("done", "failed", "guard", "merged", "cleaned") and bool(created)
+    if guessed:   # 跑完了、但单子没记开跑时间（老单子）：按开单时间算开跑，说明里写明
+        started = created
+    opened_today = bool(created) and inside(created, w)
+    ran_today = bool(started) and inside(started, w)
+    if not (opened_today or ran_today):
+        return []
+    task = d / "task.md"
+    what = (next((x.strip() for x in task.read_text(encoding="utf-8", errors="replace").splitlines() if x.strip()), "")
+            if task.exists() else "")
+    tool = {"claude": "Claude", "codex": "Codex"}.get(order.get("tool"), order.get("tool")) or "不明"
+    if mode == "read":
+        tier, source, required = "A", "常设授权清单 A 档：派只读单", None
+    else:
+        tier, source, required = None, f"派单 {d.name}：写入单要 D 档，常浩的确认没记进台账", "D"
+    req = f"Hermes 派单 {d.name}（{tool}，{'只读' if mode == 'read' else mode}）：{quote(what, 80)}"
+    out = []
+    if opened_today and not ran_today:
+        if mode == "read" or (not started and status not in ("new", None)):
+            # 只读单不用确认；写入单从没开跑、状态又不是 new（排队、放弃）：按状态记。后来才开跑的写入单，开单那天是在等确认
+            decision = "不明" if status == "abandoned" else "执行"
+            out.append((act(action_id=f"dispatch:{d.name}", ts=created, project_id=order.get("project"), kind="dispatch",
+                            request=req, actor="Hermes", auth_tier=tier, auth_source=source, decision=decision,
+                            result="不明" if status == "abandoned" else "已发起",
+                            verification=f"开了单，统计日内没开跑（单子状态 {status}）"
+                                         + (f"；{started} 开跑" if started else "")), None))
+        else:
+            out.append((act(action_id=f"dispatch:{d.name}:open", ts=created, project_id=order.get("project"), kind="dispatch",
+                            request=req, actor="Hermes", auth_tier=tier, auth_source=source, decision="升级给常浩",
+                            result=None, verification="开了写入单，等常浩确认开跑" + (f"；{started} 开跑" if started else ""),
+                            follow_up=None if started else "常浩确认开跑或取消"), None))
+    if not ran_today:
+        return out
     rf = d / "out" / "receipt.json"
     receipt = None
     if rf.exists():
@@ -355,28 +392,15 @@ def one_order(d, w, notes):
         if not isinstance(receipt, dict):
             notes.append(f"派单 {d.name} 的回执读不了（不是 JSON 对象），当成还没有回执")
             receipt = None
-    task = d / "task.md"
-    what = (next((x.strip() for x in task.read_text(encoding="utf-8", errors="replace").splitlines() if x.strip()), "")
-            if task.exists() else "")
-    tool = (receipt or {}).get("executor") or {"claude": "Claude", "codex": "Codex"}.get(order.get("tool"), order.get("tool")) or "不明"
-    mode = order.get("mode")
-    if mode == "read":
-        tier, source, required = "A", "常设授权清单 A 档：派只读单", None
-    else:
-        tier, source, required = None, f"派单 {d.name}：写入单要 D 档，常浩的确认没记进台账", "D"
-    kind, actor, decision, follow = "dispatch", tool, "执行", None
+    kind, actor, decision, follow = "dispatch", (receipt or {}).get("executor") or tool, "执行", None
     refused = (receipt or {}).get("refused")
-    if refused:
+    if status in ("running", "queued"):
+        result, proof = "已发起", f"还在跑（单子状态 {status}），回执可能是上一次留下的，不算"
+    elif refused:
         kind, actor, decision, result = "refuse", "Hermes", "拒绝", None
         proof = f"回执 refused={refused}：{receipt.get('reason')}"
-    elif status == "new" and not started:
-        actor, decision, result = "Hermes", "升级给常浩", None
-        proof, follow = "开了单，等常浩确认开跑", "常浩确认开跑或取消"
     elif receipt is None:
-        result = "已发起" if status in ("queued", "running") else "不明"
-        if status == "abandoned" and not started:
-            decision = "不明"
-        proof = f"还没有回执（单子状态 {status}）"
+        result, proof = "不明", f"没有回执（单子状态 {status}）"
     else:
         bad = receipt.get("timed_out") or receipt.get("worker_error") or receipt.get("exit_code") not in (0, "0")
         result = "失败" if bad else "调用成功"
@@ -387,18 +411,20 @@ def one_order(d, w, notes):
             follow = "核对主分支、远端的改动"
         if receipt.get("need_decision"):
             follow = f"常浩决定：{quote(str(receipt['need_decision']), 120)}"
-    return (act(
-        action_id=f"dispatch:{d.name}", ts=ts, project_id=order.get("project"), kind=kind,
-        request=f"Hermes 派单 {d.name}（{tool}，{'只读' if mode == 'read' else mode}）：{quote(what, 80)}",
+    if guessed:
+        proof += "；开跑时间没记，按开单时间算"
+    out.append((act(
+        action_id=f"dispatch:{d.name}", ts=started, project_id=order.get("project"), kind=kind, request=req,
         actor=actor, auth_tier=tier, auth_source=source, decision=decision, result=result, verification=proof,
-        follow_up=follow), required)
+        follow_up=follow), required))
+    return out
 
 
 def cron(w, notes):
     """Hermes 定时任务（~/.hermes/cron）：
     - executions.db 每次执行一条：照登记的任务跑，不另查授权；completed 只算「调用成功」，不算业务做成；
     - jobs.json 里统计日内新建的任务各一条：新建定时任务要 D 档，创建时的授权没接入，档位记 null，会标 auth_gap；
-    - cron_incidents 故障单：统计日内首次出现、告警或关闭的，各一条。"""
+    - cron_incidents 故障单：统计日内首次出现、告警或关闭的，各一条；告警落在当天的才算「升级给常浩」。"""
     db = CRON / "executions.db"
     if not db.exists():
         raise Fail(f"找不到 {db}")
@@ -445,11 +471,12 @@ def cron(w, notes):
         hits = [t for t in (when(x, w, notes, f"定时任务故障单 {iid}") if x else None for x in (first, alerted, closed)) if t]
         if not hits:
             continue
+        alerted_today = bool(alerted) and bool(when(alerted, w, notes, f"定时任务故障单 {iid} 的告警"))
         out.append((act(
             action_id=f"cron-incident:{iid}:{w[0].date().isoformat()}", ts=min(hits), project_id="hermes", kind="supervise",
             request=f"定时任务故障单「{name.get(job, job)}」（{job}，{ftype}）", actor="Hermes", auth_tier="A",
-            auth_source="常设授权清单 A 档：只读巡检", decision="升级给常浩" if alerted else "执行",
-            result=None if alerted else "调用成功",
+            auth_source="常设授权清单 A 档：只读巡检", decision="升级给常浩" if alerted_today else "执行",
+            result=None if alerted_today else "调用成功",
             verification=f"故障单状态 {state}，首次 {first}，最近 {last}，告警 {alerted or '没有'}，关闭 {closed or '没有'}"
                          + (f"；错误：{quote(str(error).splitlines()[0], 120)}" if error else ""),
             follow_up=None if state in ("closed", "resolved") else "处理这张故障单"), None))
@@ -458,8 +485,9 @@ def cron(w, notes):
 
 def night(w, notes):
     """夜跑 runs/<夜跑>/run-log.jsonl（C 档，单次授权）：approve、start、advance、run（子单）、stopped、release 各记一条；
-    旧格式（没有 event 字段，一行一个子单）按 run 记。执行者按 start 的 approved_by、release 的 by 开头写的是谁（Claude、
-    Codex、Hermes），认不出记「不明」；子单的执行者是 Multica 执行器。停机按同一夜的 stop_readback 回读结论算有没有验证。"""
+    旧格式（没有 event 字段，一行一个子单）按 run 记。执行者：有 approve 记录的夜跑由 Hermes 定时任务（tick）拉起，记 Hermes；
+    没有的（手工演练）记「不明」——approved_by 写的是批准人，不拿来当执行者；release 的 by 写的就是解除的人，按开头认
+    （Claude、Codex、Hermes，认不出记「不明」）；子单的执行者是 Multica 执行器。停机按同一夜的 stop_readback 回读结论算。"""
     if not NIGHT_ROOT.exists():
         raise Fail(f"找不到 {NIGHT_ROOT}")
     out = []
@@ -479,9 +507,10 @@ def night(w, notes):
         start = next((r for _, r in rows if r.get("event") == "start"), {})
         auth_by = start.get("approved_by")
         readback = next((r for _, r in rows if r.get("event") == "stop_readback"), None)
+        actor = "Hermes" if any(r.get("event") == "approve" for _, r in rows) else "不明"
         for i, r in rows:
             try:
-                item = night_row(name, i, r, w, notes, auth_by, readback)
+                item = night_row(name, i, r, w, notes, auth_by, readback, actor)
             except ROW_ERRORS as e:
                 notes.append(f"夜跑 {name} 第 {i} 行跳过：{e}")
                 continue
@@ -490,18 +519,18 @@ def night(w, notes):
     return out
 
 
-def night_row(name, i, r, w, notes, auth_by, readback):
+def night_row(name, i, r, w, notes, auth_by, readback, actor):
     ev = r.get("event") or "run"
     if ev not in ("approve", "start", "advance", "run", "stopped", "release"):
         return None           # plan、stop_begin、stop_readback、proc_*、remote_snapshot 是过程记录，并进这几条
     ts = when(r.get("ts") or r.get("completed_at") or r.get("created_at"), w, notes, f"夜跑 {name} 第 {i} 行")
     if not ts:
         return None
-    base = dict(action_id=f"night:{name}:{i}", ts=ts, project_id="hermes", actor=who(auth_by), decision="执行",
+    base = dict(action_id=f"night:{name}:{i}", ts=ts, project_id="hermes", actor=actor, decision="执行",
                 auth_tier="C" if auth_by else None, auth_source=auth_by or "这一夜没有 start 记录的批准人")
     required = "C"
     if ev == "approve":
-        rec = act(**{**base, "kind": "supervise", "auth_tier": "C" if r.get("by") else None, "actor": who(r.get("by")),
+        rec = act(**{**base, "kind": "supervise", "auth_tier": "C" if r.get("by") else None,
                      "auth_source": r.get("by") or "没写批准人", "result": "调用成功",
                      "request": f"夜跑 {name} 记下开跑时刻 {r.get('start_at')}（上限 {r.get('max_runs')} 单 / {r.get('hours')} 小时）"})
     elif ev == "start":
