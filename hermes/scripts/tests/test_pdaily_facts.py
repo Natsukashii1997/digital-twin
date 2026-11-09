@@ -287,6 +287,16 @@ class CrossRefTests(Base):
         self.assertEqual(out[0]["where"], "合并的 PR #74")
         self.assertIn("配合 niuma-home#31", out[0]["quote"])
 
+    def test_chinese_right_after_ref_and_long_lines(self):
+        """编号后面紧跟汉字也要认；长句里编号在 200 字以后、正文里本仓库编号很多，都不能把跨仓库那句丢掉。"""
+        self.gh_graphql({31: "OPEN", 32: "OPEN", 33: "OPEN", 34: "OPEN"})
+        body = "\n".join([f"- 第 {i} 步（#{i}）" for i in range(1, 40)]
+                          + ["配合niuma-home#31的接口", "niuma-home#32号", "甲" * 450 + "等niuma-home#33合并后" + "乙" * 300, "niuma-home#340"])
+        r = rec("skills", yesterday_delta={"merged_prs": [merged(74, "做乙", body)]})
+        out = pf.cross_refs(W, [r], ROSTER)
+        self.assertEqual([x["to_number"] for x in out], [31, 32, 33, 340])
+        self.assertTrue(out[2]["quote"].startswith("…") and out[2]["quote"].endswith(pd.CUT_MARK))
+
     def test_bad_roster_github_is_skipped(self):
         r = rec("skills", yesterday_delta={"merged_prs": [merged(1, "配合 niuma-home#31")]})
         self.assertEqual(pf.cross_refs(W, [r], [{"id": "skills", "github": "o/my-skills"}, {"id": "niuma", "github": "niuma-home"}]), [])
@@ -495,16 +505,29 @@ class BuildTests(Base):
         bad = rec("niuma")                                        # 1a 取不到：增量各项都是 None
         self.fake_collect([rec("skills", yesterday_delta={"merged_prs": [merged(1, "x")], "closed_issues": [],
                                                           "commits": {"main": 3}}), bad],
-                          [act(action_id="c1", kind="cron", project_id="hermes", result="失败")])
+                          [act(action_id="c1", kind="cron", project_id="hermes", result="失败"),
+                           act(action_id="d9", kind="dispatch", project_id=None, result="失败")])
         f = pf.build(D, ROSTER)
         self.assertEqual((f["activity"]["merged_prs"], f["activity"]["closed_issues"], f["activity"]["commits"]), (None, None, None))
         self.assertEqual(f["counts"]["projects_delta_unknown"], ["niuma"])
         self.assertEqual(f["counts"]["projects_with_delta"], ["skills"])
-        self.assertEqual((f["counts"]["risk_projects"], f["counts"]["hermes_risks"]), ([], 1))
+        self.assertEqual((f["counts"]["risk_projects"], f["counts"]["non_project_risks"]), ([], 2))
         self.fake_collect([rec("skills", yesterday_delta={"merged_prs": [merged(1, "x")], "closed_issues": [],
                                                           "commits": {"main": 3, "dev": 1}})], [])
         f = pf.build(D, ROSTER)
         self.assertEqual((f["activity"]["merged_prs"], f["activity"]["closed_issues"], f["activity"]["commits"]), (1, 0, 4))
+
+    def test_one_part_failing_is_unknown_not_empty(self):
+        self.sources()
+        self.fake_collect([rec("skills", current_state={"next_step": "常浩定"})], [act(action_id="x1")])
+        with mock.patch.object(pf, "cross_refs", side_effect=RuntimeError("坏了")), \
+                mock.patch.object(pf, "risks", side_effect=KeyError("x")):
+            f = pf.build(D, ROSTER)
+        self.assertEqual((f["cross_refs"], f["risks"], f["counts"]["risk_projects"]), (None, None, None))
+        self.assertEqual(f["coverage"]["failed_parts"], ["风险", "跨项目引用"])
+        self.assertTrue(any(n.startswith("跨项目引用算不出来") for n in f["notes"]))
+        self.assertEqual([c["kind"] for c in f["decisions"]], ["current"])          # 其余照出
+        self.assertEqual(f["projects"][0]["actions"], ["x1"])
 
     def test_write_is_atomic_and_dry_run_writes_nothing(self):
         self.sources()

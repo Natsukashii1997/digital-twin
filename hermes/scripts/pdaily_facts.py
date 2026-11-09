@@ -192,7 +192,7 @@ def cross_refs(w, recs, projects):
         return []
     # 边界只排 ASCII：「配合niuma-home#31」这种中文紧贴的也要认（\w 会把汉字当词字符）
     pat = re.compile(r"(?<![A-Za-z0-9_/.-])(?:([A-Za-z0-9_.-]+)/)?(" + "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
-                     + r") ?#(\d+)\b", re.I)
+                     + r") ?#(\d+)(?![0-9])", re.I)    # 右边也不用 \b：「niuma-home#31的接口」要认
     out, seen = [], set()
     for r in recs:
         texts = [(f"合并的 PR #{pr['number']}", "已合并", "\n".join(pr.get("ref_lines") or [pr.get("title") or ""]))
@@ -355,14 +355,24 @@ def build(day, projects):
     p1 = pdaily_data.collect(day, projects)
     p2 = actions.collect(day)
     recs, acts = p1["projects"], p2["actions"]
-    others = attach(recs, acts, projects)
+    failed = []
+
+    def part(name, fn, *args):   # 一段出意外：这段记 None（未知）并写明，其余照出（第 6 节）
+        try:
+            return fn(*args)
+        except Exception as e:
+            failed.append(name)
+            notes.append(f"{name}算不出来：{type(e).__name__}：{e}")
+            return None
+    others = part("行动挂到项目", attach, recs, acts, projects)
     coverage = {"projects": p1["coverage"], "actions": p2["coverage"], "action_notes": p2["notes"],
                 "stale": [r["project_id"] for r in recs if r["freshness"].get("stale")],
-                "not_connected": NOT_CONNECTED}
-    dec = decisions(w, recs, acts, notes)
-    rsk = risks(w, recs, acts, coverage)
-    refs = cross_refs(w, recs, projects)
-    obs = observations(w, projects, notes)
+                "not_connected": NOT_CONNECTED, "failed_parts": failed}
+    dec = part("拍板候选", decisions, w, recs, acts, notes)
+    rsk = part("风险", risks, w, recs, acts, coverage)
+    refs = part("跨项目引用", cross_refs, w, recs, projects)
+    obs = part("观察池", observations, w, projects, notes)
+    ids = {r["project_id"] for r in recs}
     yd = lambda r, k: r["yesterday_delta"].get(k)
     unknown = [r["project_id"] for r in recs if any(yd(r, k) is None for k in ("merged_prs", "closed_issues", "commits"))]
     delta = [r["project_id"] for r in recs
@@ -384,9 +394,10 @@ def build(day, projects):
         "counts": {   # 开头三个数的原料（4.1）：「实质推进」要不要算，由 Hermes 看成果判断
             "projects_with_delta": delta,
             "projects_delta_unknown": unknown,      # 增量有一项取不到的项目：不当成「没有新动作」
-            "decision_candidates": len(dec),
-            "risk_projects": sorted({x["project_id"] for x in rsk} & {r["project_id"] for r in recs}),
-            "hermes_risks": sum(1 for x in rsk if x["project_id"] == "hermes"),   # Hermes 自己的（来源取不到、定时任务），不算项目
+            "decision_candidates": None if dec is None else len(dec),
+            "risk_projects": None if rsk is None else sorted({x["project_id"] for x in rsk} & ids),
+            # 不归名册项目的风险：Hermes 自己的（来源取不到、定时任务），以及没对上项目的派单、merge-runs
+            "non_project_risks": None if rsk is None else sum(1 for x in rsk if x["project_id"] not in ids),
         },
         "activity": {"merged_prs": total("merged_prs"), "closed_issues": total("closed_issues"),
                      "commits": total("commits", lambda c: sum(c.values())),

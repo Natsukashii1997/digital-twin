@@ -57,7 +57,7 @@ MILESTONE_QUERY = """query($o:String!,$n:String!){repository(owner:$o,name:$n){i
 number title body subIssues(first:100){nodes{number state}}}}}}"""
 
 
-REF_ANY = re.compile(r"#\d+")
+REF_ANY = re.compile(r"[A-Za-z0-9_.-] ?#\d+")
 
 
 class Fail(Exception):
@@ -416,9 +416,20 @@ def section_prs(title, prs):
 
 
 def ref_lines(pr, n=20):
-    """PR 标题和正文里写了「#编号」的原句（各截 200 字，最多 n 句）：给 1c 找跨项目引用用，不带整段正文。"""
-    lines = [pr.get("title") or "", *(pr.get("body") or "").splitlines()]
-    return [quote(x.strip())[:200] for x in lines if REF_ANY.search(x)][:n]
+    """PR 标题和正文里写了「名字#编号」的原句（最多 n 句）：给 1c 找跨项目引用用，不带整段正文。
+    只收编号前紧挨着字母、数字或「名字 #」的（niuma-home#31、github-center #83、PR #5），本仓库「（#12）」这种不收，免得把跨仓库那句挤掉；
+    长句只留编号前后各 100 字，截掉的地方标出来。"""
+    out = []
+    for x in [pr.get("title") or "", *(pr.get("body") or "").splitlines()]:
+        x = x.strip()
+        m = REF_ANY.search(x)
+        if not m:
+            continue
+        if len(x) > QUOTE_MAX:
+            a, b = max(0, m.start() - 100), min(len(x), m.end() + 100)
+            x = ("…" if a else "") + x[a:b] + (CUT_MARK if b < len(x) else "")
+        out.append(x)
+    return out[:n]
 
 
 def deliverables(prs, dated_sections):
