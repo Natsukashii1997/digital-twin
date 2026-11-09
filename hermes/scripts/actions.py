@@ -171,13 +171,14 @@ def act(**kw):
 def merge_officer(w, notes):
     """合并官 shadow/agreement.csv：
     - 影子判定（A 档）：同一个「PR + 版本」只算一条，时间取第一次判定，内容取统计日结束前的最后一次（V2 第 6 节去重）；
+    - 历史回填（source=backfill，事后判定，不计入放权门槛）：统计日内的合成一条，写明条数，不逐条列、不带后续；
     - owner 列（常浩点卡片的「合并」「退回」，B 档）：合并有 GitHub 结局就算业务已验证。"""
     ledger = SHADOW / "agreement.csv"
     if not ledger.exists():
         raise Fail(f"找不到 {ledger}")
     with ledger.open(encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
-    ids, out, versions, owners = roster_ids(), [], {}, {}
+    ids, out, versions, owners, backfill = roster_ids(), [], {}, {}, []
     for i, r in enumerate(rows, 2):
         key = (r["repo"], r["pr"], r["head_sha"])
         try:
@@ -185,7 +186,10 @@ def merge_officer(w, notes):
         except (ValueError, TypeError) as e:
             notes.append(f"agreement.csv 第 {i} 行判定时间认不出（{r.get('evaluated_at')}：{e}），跳过")
             continue
-        if r["_at"] < w[1]:
+        if r.get("source") == "backfill":
+            if w[0] <= r["_at"] < w[1]:
+                backfill.append(r)
+        elif r["_at"] < w[1]:
             versions.setdefault(key, []).append(r)
         if r.get("owner") and r.get("owner_at"):
             owners.setdefault(key + (r["owner"],), r)
@@ -202,6 +206,14 @@ def merge_officer(w, notes):
             verification=f"最后一次判定（{stamp(last['evaluated_at'])}，规则 v{last['rules_version']}，{last['tier']}）："
                          f"{last['suggestion']}{why}；这个版本到统计日结束共判定 {len(rs)} 次",
             follow_up="常浩决定合不合并" if last["suggestion"] == "问常浩" or last["tier"] == "L3" else None), None))
+    if backfill:
+        backfill.sort(key=lambda r: r["_at"])
+        repos = sorted({r["repo"] for r in backfill})
+        out.append((act(
+            action_id=f"shadow-backfill:{w[0].date().isoformat()}", ts=stamp(backfill[0]["_at"]), project_id="hermes",
+            kind="ruling", request=f"合并官回填历史 PR 判定 {len(backfill)} 条（{len(repos)} 个仓库，事后判定）", actor="Hermes",
+            auth_tier="A", auth_source="常设授权清单 A 档：影子合并官判定（#61）", decision="执行", result="调用成功",
+            verification=f"仓库：{'、'.join(repos)}；回填看不到当时的检查和冲突状态，一致率单列，不计入放权门槛"), None))
     for (repo, pr, sha, owner), r in owners.items():
         if not when(r["owner_at"], w, notes, f"agreement.csv {repo}#{pr} 的 owner_at"):
             continue

@@ -167,10 +167,15 @@ class MergeOfficerTests(Base):
             self.row("2026-11-08T10:00:00+08:00", head_sha="b" * 40),                            # 新版本另算一条
             self.row("2026-11-07T23:00:00+08:00", pr="6", head_sha="c" * 40),                    # 前一天第一次判的：不再算
             self.row("2026-11-08T11:00:00+08:00", pr="6", head_sha="c" * 40),
+            self.row("2026-11-08T07:00:00+08:00", source="backfill", pr="1", suggestion="问常浩"),   # 回填：合成一条
+            self.row("2026-11-08T07:00:01+08:00", source="backfill", pr="2", repo="o/other"),
+            self.row("2026-11-07T07:00:00+08:00", source="backfill", pr="3"),
         ])
         out = self.run_day()
-        rs = [a for a in self.by_origin(out, "合并官") if a["kind"] == "ruling"]
+        rs = [a for a in self.by_origin(out, "合并官") if a["action_id"].startswith("shadow:")]
         self.assertEqual(len(rs), 2)
+        bf = [a for a in self.by_origin(out, "合并官") if a["action_id"].startswith("shadow-backfill:")]
+        self.assertEqual([(a["request"], a["follow_up"]) for a in bf], [("合并官回填历史 PR 判定 2 条（2 个仓库，事后判定）", None)])
         a = rs[0]
         self.assertEqual((a["ts"], a["project_id"], a["auth_tier"], a["decision"], a["result"]),
                          ("2026-11-08T09:00:00+08:00", "twin", "A", "执行", "调用成功"))
@@ -178,7 +183,7 @@ class MergeOfficerTests(Base):
         self.assertIn("共判定 2 次", a["verification"])
         self.assertEqual(a["follow_up"], "常浩决定合不合并")
         self.assertEqual(rs[1]["request"].split("@")[1][:7], "bbbbbbb")
-        prev = [a for a in self.by_origin(self.run_day(D - dt.timedelta(days=1)), "合并官") if a["kind"] == "ruling"]
+        prev = [a for a in self.by_origin(self.run_day(D - dt.timedelta(days=1)), "合并官") if a["action_id"].startswith("shadow:")]
         self.assertEqual([a["request"].split("#")[1][:1] for a in prev], ["6"])   # PR 6 这个版本只出现在 11-07
 
     def test_owner_clicks_are_tier_b(self):
