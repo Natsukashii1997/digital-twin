@@ -1,8 +1,7 @@
 {
  "schema": "2.0",
  "config": {
-  "update_multi": true,
-  "width_mode": "fill"
+  "update_multi": true
  },
  "header": {
   "title": {
