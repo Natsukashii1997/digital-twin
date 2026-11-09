@@ -67,18 +67,18 @@ class Base(unittest.TestCase):
         con = sqlite3.connect(db)
         con.execute("create table executions (id text, job_id text, status text, claimed_at text, delivery_outcome text, error text)")
         con.execute("create table cron_incidents (id text, job_id text, state text, failure_type text, first_seen_at text, "
-                    "last_seen_at text, alerted_at text, error text)")
+                    "last_seen_at text, alerted_at text, closed_at text, error text)")
         con.executemany("insert into executions values (?,?,?,?,?,?)", execs)
-        con.executemany("insert into cron_incidents values (?,?,?,?,?,?,?,?)", incs)
+        con.executemany("insert into cron_incidents values (?,?,?,?,?,?,?,?,?)", incs)
         con.commit()
         con.close()
         (self.p["cron"] / "jobs.json").write_text(json.dumps(jobs if jobs is not None else {"jobs": [{"id": "j1", "name": "巡检"}]}))
 
-    def order(self, no, created, mode="read", receipt=None, task="查一下 X\n细节"):
+    def order(self, no, created, mode="read", receipt=None, task="查一下 X\n细节", status="done", started=None):
         d = self.p["dispatch"] / no
         (d / "out").mkdir(parents=True)
         (d / "order.json").write_text(json.dumps({"no": no, "project": "twin", "tool": "codex", "mode": mode,
-                                                  "status": "done", "created": created}))
+                                                  "status": status, "created": created, "run_started": started}))
         (d / "task.md").write_text(task)
         if receipt is not None:
             (d / "out" / "receipt.json").write_text(json.dumps(receipt))
@@ -116,6 +116,20 @@ class RecordTests(Base):
             self.assertIn(word, str(e.exception))
         self.assertFalse(self.actions_file.exists())
         actions.record(**dict(ok, decision="拒绝", result=None))      # 拒绝可以没有 result
+
+    def test_partial_line_null_id_and_duplicates(self):
+        self.actions_file.write_text('{"kind": "oth')                      # 上一个写的人被杀，留下半行
+        a = actions.record(action_id=None, kind="other", request="r", actor="Hermes", decision="执行", result="调用成功",
+                           ts="2026-11-08T10:00:00+08:00")
+        self.assertTrue(a["action_id"].startswith("other-"))
+        actions.record(action_id=a["action_id"], kind="other", request="又一条", actor="Hermes", decision="执行",
+                       result="调用成功", ts="2026-11-08T11:00:00+08:00")
+        out = self.run_day()
+        self.assertEqual([x["request"] for x in self.by_origin(out, "actions.jsonl")], ["r"])
+        self.assertTrue(any("action_id 重复" in n for n in out["notes"]))
+        self.assertTrue(any(n.startswith("actions.jsonl 第 1 行跳过") for n in out["notes"]))
+        with self.assertRaises(ValueError):
+            actions.record(kind="other", request="r", actor="Hermes", decision="执行", result="调用成功", ts=123)
 
     def test_cli_record_and_bad_json(self):
         env = {**os.environ, "DT_ACTIONS": str(self.actions_file)}
@@ -181,10 +195,32 @@ class MergeOfficerTests(Base):
                          ("2026-11-08T09:00:00+08:00", "twin", "A", "执行", "调用成功"))
         self.assertIn("问常浩：碰了 AGENTS", a["verification"])
         self.assertIn("共判定 2 次", a["verification"])
-        self.assertEqual(a["follow_up"], "常浩决定合不合并")
+        self.assertIsNone(a["follow_up"])                        # 问常浩，但 10:00 有了新版本：旧版本不再要常浩决定
         self.assertEqual(rs[1]["request"].split("@")[1][:7], "bbbbbbb")
         prev = [a for a in self.by_origin(self.run_day(D - dt.timedelta(days=1)), "合并官") if a["action_id"].startswith("shadow:")]
         self.assertEqual([a["request"].split("#")[1][:1] for a in prev], ["6"])   # PR 6 这个版本只出现在 11-07
+
+    def test_follow_up_only_for_latest_version_without_outcome(self):
+        self.ledger([
+            self.row("2026-11-08T09:00:00+08:00", suggestion="问常浩"),
+            self.row("2026-11-08T09:00:00+08:00", pr="6", tier="L3"),
+            self.row("2026-11-08T09:30:00+08:00", pr="6", tier="L3", outcome="合并", outcome_at="2026-11-08T03:00:00Z"),
+        ])
+        rs = {a["request"].split("#")[1][:1]: a for a in self.by_origin(self.run_day(), "合并官")}
+        self.assertEqual(rs["5"]["follow_up"], "常浩决定合不合并")
+        self.assertIsNone(rs["6"]["follow_up"])
+        self.assertIn("PR 结局：合并", rs["6"]["verification"])
+
+    def test_bad_rows_are_skipped_not_fatal(self):
+        path = self.p["shadow"] / "agreement.csv"
+        self.ledger([self.row("2026-11-08T09:00:00+08:00")])
+        with path.open("a", encoding="utf-8") as f:
+            f.write("2026-11-08T09:00:00+08:00,live,o/x\n")                  # 列数不够
+            f.write("坏时间,live,o/x,9,t," + SHA + "\n")
+        out = self.run_day()
+        self.assertTrue(out["coverage"]["合并官"]["ok"])
+        self.assertEqual(out["coverage"]["合并官"]["count"], 1)
+        self.assertEqual(len([n for n in out["notes"] if n.startswith("agreement.csv 第")]), 2)
 
     def test_owner_clicks_are_tier_b(self):
         self.ledger([
@@ -195,7 +231,7 @@ class MergeOfficerTests(Base):
         ])
         own = [a for a in self.by_origin(self.run_day(), "合并官") if a["action_id"].startswith("owner:")]
         self.assertEqual([(a["kind"], a["auth_tier"], a["result"], a["auth_gap"]) for a in own],
-                         [("merge", "B", "业务已验证", None), ("merge", "B", "不明", None), ("other", "B", "调用成功", None)])
+                         [("merge", "B", "业务已验证", None), ("merge", "B", "业务已验证", None), ("other", "B", "调用成功", None)])
         self.assertIn("ddddddd", own[0]["verification"])
 
     def test_missing_ledger_is_unknown_not_zero_and_others_still_run(self):
@@ -218,7 +254,8 @@ class MergeRunTests(Base):
         (self.p["merge-runs"] / "digital-twin-6-bbbbbbb-20261109-050000").mkdir()   # 第二天
         out = self.run_day()
         rs = self.by_origin(out, "merge-runs")
-        self.assertEqual([(a["ts"], a["project_id"], a["result"]) for a in rs], [("2026-11-08T10:00:00+08:00", "twin", "不明")])
+        self.assertEqual([(a["ts"], a["project_id"], a["kind"], a["result"]) for a in rs],
+                         [("2026-11-08T10:00:00+08:00", "twin", "supervise", "不明")])     # 合并本身看 owner 那条，不重复算
         self.assertIn("最后一行：OK", rs[0]["verification"])
         self.assertIn("merge-runs 里认不出的目录：怪目录", out["notes"])
 
@@ -236,16 +273,41 @@ class DispatchTests(Base):
 
     def test_dispatch_results_and_tiers(self):
         ok = {"executor": "Codex", "exit_code": 0, "timed_out": False, "worker_error": False, "committed_files": ["a"], "uncommitted": []}
-        self.order("D20261108-2", "2026-11-08T10:00:00", receipt=ok)
-        self.order("D20261108-3", "2026-11-08T11:00:00", mode="write",
+        self.order("D20261108-2", "2026-11-08T10:00:00", receipt=ok, started="2026-11-08T10:00:00")
+        self.order("D20261108-3", "2026-11-08T11:00:00", mode="write", started="2026-11-08T11:00:00",
                    receipt={**ok, "exit_code": 1, "need_decision": "要不要删旧表", "guard_main_changed": True})
-        self.order("D20261108-4", "2026-11-08T12:00:00")                              # 没回执
-        self.order("D20261109-1", "2026-11-09T05:00:00", receipt=ok)                   # 第二天
+        self.order("D20261108-4", "2026-11-08T12:00:00", started="2026-11-08T12:00:00", status="running")   # 没回执
+        self.order("D20261109-1", "2026-11-09T05:00:00", receipt=ok, started="2026-11-09T05:00:00")         # 第二天
+        self.order("D20261107-9", "2026-11-07T23:50:00", receipt=ok, started="2026-11-08T10:30:00")         # 隔天才开跑
+        self.order("D20261108-5", "2026-11-08T13:00:00", status="new")                                      # 等常浩确认
         rs = self.by_origin(self.run_day(), "派单台账")
-        self.assertEqual([(a["actor"], a["auth_tier"], a["result"]) for a in rs],
-                         [("Codex", "A", "调用成功"), ("Codex", None, "失败"), ("Codex", "A", "不明")])
-        self.assertEqual(rs[1]["follow_up"], "常浩决定：要不要删旧表")
-        self.assertIn("护栏", rs[1]["verification"])
+        self.assertEqual([(a["action_id"][9:], a["decision"], a["auth_tier"], a["result"], bool(a["auth_gap"])) for a in rs],
+                         [("D20261108-2", "执行", "A", "调用成功", False), ("D20261107-9", "执行", "A", "调用成功", False),
+                          ("D20261108-3", "执行", None, "失败", True), ("D20261108-4", "执行", "A", "已发起", False),
+                          ("D20261108-5", "升级给常浩", "A", None, False)])
+        self.assertEqual(rs[4]["follow_up"], "常浩确认开跑或取消")
+        self.assertEqual(rs[2]["auth_gap"], "授权不足：这类动作要 D 档，记录是「不知道」")
+        self.assertEqual(rs[2]["follow_up"], "常浩决定：要不要删旧表")
+        self.assertIn("护栏", rs[2]["verification"])
+
+    def test_bad_orders_are_skipped_not_fatal(self):
+        ok = {"executor": "Codex", "exit_code": 0}
+        self.order("D20261108-1", "2026-11-08T10:00:00", receipt=ok, started="2026-11-08T10:00:00")
+        self.order("D20261108-2", "2026-11-08T10:00:00", receipt=["坏"], started="2026-11-08T10:00:00")
+        self.order("D20261108-3", "2026-11-08T10:00:00", receipt=ok, started="2026-11-08T10:00:00")
+        (self.p["dispatch"] / "D20261108-3" / "order.json").write_text("[]")
+        self.order("D20261108-4", "2026-11-08T10:00:00", receipt=ok, started="2026-11-08T10:00:00")
+        (self.p["dispatch"] / "D20261108-4" / "task.md").write_bytes("坏编码".encode("gbk"))
+        d = self.p["dispatch"] / "D20261026-1"
+        d.mkdir()
+        (d / "task.md").write_text("旧单")
+        out = self.run_day()
+        rs = self.by_origin(out, "派单台账")
+        self.assertTrue(out["coverage"]["派单台账"]["ok"])
+        self.assertEqual([a["action_id"] for a in rs], ["dispatch:D20261108-1", "dispatch:D20261108-2", "dispatch:D20261108-4"])
+        self.assertEqual(rs[1]["result"], "不明")                       # 回执坏了：当成还没有回执
+        self.assertTrue(any("D20261108-3 跳过" in n for n in out["notes"]))
+        self.assertTrue(any("D20261026-1 只有 task.md" in n for n in out["notes"]))
 
 
 class CronTests(Base):
@@ -256,19 +318,27 @@ class CronTests(Base):
                             ("e3", "jx", "unknown", "2026-11-08T12:00:00+08:00", None, None),
                             ("e4", "j1", "completed", "2026-11-09T04:00:00+08:00", "delivered", None)],
                      incs=[("i1", "j1", "open", "config", "2026-11-08T11:00:00+08:00", "2026-11-08T11:00:00+08:00",
-                            "2026-11-08T11:01:00+08:00", "Script exited with code 1"),
-                           ("i2", "j1", "closed", "config", "2026-11-07T11:00:00+08:00", "2026-11-08T11:00:00+08:00", None, None)])
+                            "2026-11-08T11:01:00+08:00", None, "Script exited with code 1"),
+                           ("i2", "j1", "closed", "config", "2026-11-07T11:00:00+08:00", "2026-11-08T11:00:00+08:00", None,
+                            "2026-11-08T12:00:00+08:00", None),                       # 前一天出现、当天关闭：照样列
+                           ("i3", "j1", "closed", "config", "2026-11-07T11:00:00+08:00", "2026-11-07T11:00:00+08:00", None,
+                            "2026-11-07T12:00:00+08:00", None)],
+                     jobs={"jobs": [{"id": "j1", "name": "巡检", "created_at": "2026-10-01T10:00:00+08:00"},
+                                    {"id": "j2", "name": "夜跑主控", "created_at": "2026-11-08T10:08:00+08:00", "enabled": True}]})
         out = self.run_day()
         self.assertTrue(any(n.startswith("定时任务执行 e0 时间认不出") for n in out["notes"]) or sys.version_info >= (3, 11))
         rs = self.by_origin(out, "定时任务库")
-        runs = [a for a in rs if a["kind"] == "cron" and a["action_id"] != "cron:e0"]
+        runs = [a for a in rs if a["action_id"].startswith("cron:") and a["action_id"] != "cron:e0"]
         self.assertEqual([(a["result"], a["auth_gap"]) for a in runs], [("调用成功", None), ("失败", None), ("不明", None)])
         self.assertIn("「巡检」", runs[0]["request"])
         self.assertIn("jx", runs[2]["request"])
         self.assertIn("Script exited with code 1", runs[1]["verification"])
         self.assertNotIn("stdout", runs[1]["verification"])
         inc = [a for a in rs if a["kind"] == "supervise"]
-        self.assertEqual([(a["decision"], a["result"], a["follow_up"]) for a in inc], [("升级给常浩", None, "处理这张故障单")])
+        self.assertEqual([(a["decision"], a["result"], a["follow_up"]) for a in inc],
+                         [("升级给常浩", None, "处理这张故障单"), ("执行", "调用成功", None)])
+        new = [a for a in rs if a["action_id"].startswith("cron-job:")]
+        self.assertEqual([(a["request"][:12], a["auth_gap"]) for a in new], [("新建定时任务「夜跑主控」", "授权不足：这类动作要 D 档，记录是「不知道」")])
         self.assertEqual(sorted(os.listdir(self.p["cron"])), ["executions.db", "jobs.json"])   # 只读：没留下 -wal、-shm
 
     def test_bad_jobs_file_is_a_note(self):
@@ -302,8 +372,21 @@ class NightTests(Base):
             ("supervise", "C", "调用成功"), ("supervise", "C", "已发起"), ("dispatch", "C", "调用成功"),
             ("dispatch", "C", "不明"), ("supervise", "C", "业务已验证"), ("supervise", None, "调用成功")])
         self.assertTrue(all(a["auth_gap"] is None for a in rs))
+        self.assertEqual([a["actor"] for a in rs], ["Hermes", "Hermes", "Multica 执行器", "Multica 执行器", "Hermes", "Claude"])
         self.assertEqual(rs[3]["follow_up"], "常浩处理受阻的子单")
-        self.assertIn("停机取消", rs[3]["verification"])
+
+    def test_bad_night_lines_and_drill_run_by_claude(self):
+        self.night_log("演练", [[], {"ts": "2026-11-08T14:00:00Z", "event": "start", "approved_by": "Claude 会话 local_x 执行"},
+                               {"event": "advance", "stage": 2}])
+        d = self.p["runs"] / "坏编码"
+        d.mkdir()
+        (d / "run-log.jsonl").write_bytes(b'{"ts": "2026-11-08T15:00:00Z", "event": "release", "by": "\xff\xfe"}\n')
+        out = self.run_day()
+        rs = self.by_origin(out, "夜跑")
+        self.assertTrue(out["coverage"]["夜跑"]["ok"])                 # 坏行、坏编码都不拖垮整个来源
+        self.assertEqual([(a["request"], a["actor"]) for a in rs], [("夜跑 演练 开跑", "Claude"), ("夜跑 坏编码 解除冻结", "不明")])
+        self.assertIn("夜跑 演练 第 1 行不是 JSON 对象，跳过", out["notes"])
+        self.assertTrue(any(n.startswith("夜跑 演练 第 3 行 时间认不出") for n in out["notes"]))
 
     def test_start_without_approver_is_a_gap_and_old_format_is_kept(self):
         self.night_log("无批准", [{"ts": "2026-11-08T14:00:00Z", "event": "start", "deadline": "y", "limits": {}},
@@ -317,7 +400,7 @@ class NightTests(Base):
         self.assertEqual([(a["auth_tier"], a["result"], bool(a["auth_gap"])) for a in rs],
                          [(None, "调用成功", False), (None, "已发起", True), (None, "不明", True)])
         self.assertEqual(rs[0]["auth_source"], "常浩（本地体验）")
-        self.assertIn("夜跑 SBX-9 第 2 行不是 JSON，跳过", out["notes"])
+        self.assertIn("夜跑 SBX-9 第 2 行不是 JSON 对象，跳过", out["notes"])
 
 
 class RulingTests(Base):
@@ -335,7 +418,7 @@ class RulingTests(Base):
             os.utime(f, (t, t))
         rs = self.by_origin(self.run_day(), "裁决文件")
         self.assertEqual([(a["kind"], a["decision"], a["result"], a["auth_gap"]) for a in rs],
-                         [("ruling", "不明", "不明", None), ("other", "不明", "不明", None)])
+                         [("ruling", "不明", "不明", None), ("ruling", "不明", "不明", None)])     # 带「授权」也不按标题分类
         self.assertIn("时间预算复核裁决", rs[0]["request"])
         self.assertIn("首段原文：第4项：不批准", rs[0]["verification"])
         self.assertNotIn("额外注意", rs[0]["verification"])
