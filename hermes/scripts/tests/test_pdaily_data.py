@@ -671,6 +671,26 @@ class GitHubTests(Base):
         m = self.run_one(r)["projects"][0]["milestones"][0]
         self.assertEqual((m["done"], m["notes"]), (1, ["清单引用的 issue 状态没取到，只按勾选算"]))
 
+    def test_checklist_states_partial_success_uses_what_was_found(self):
+        api = {"graphql": {"data": {"repository": {"issues": {"nodes": [
+            {"number": 2, "title": "清单父单", "body": "- [x] #10 甲\n- [ ] #11 乙\n- [ ] #12 丙\n", "subIssues": {"nodes": []}}]}}}}}
+        real = subprocess.run
+
+        def fake(argv, *a, **k):   # 状态查询：#12 查不到，gh 退出码 1，但 stdout 带着查到的 #10、#11
+            if argv[0].endswith("gh") and any("issueOrPullRequest" in x for x in argv):
+                out = {"data": {"repository": {"i10": {"state": "OPEN"}, "i11": {"state": "CLOSED"}, "i12": None}},
+                       "errors": [{"message": "Could not resolve to an issue or pull request with the number of 12."}]}
+                return subprocess.CompletedProcess(argv, 1, json.dumps(out), "gh: Could not resolve to an issue\n")
+            return real(argv, *a, **k)
+        r = make_repo(self.root, "mp", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        self.gh(api=api)
+        with mock.patch.object(pd.subprocess, "run", side_effect=fake):
+            rec = self.run_one(r)["projects"][0]
+        m = rec["milestones"][0]
+        self.assertEqual((m["done"], m["total"]), (2, 3))
+        self.assertEqual(m["notes"], ["清单勾了但 #10 还开着", "清单没勾但 #11 已关", "#12 的状态没取到"])
+        self.assertFalse([e for e in rec["errors"] if e.startswith("GitHub")])
+
     def test_empty_next_step_and_bad_roster_entry_are_explained(self):
         r = make_repo(self.root, "nn", {"CURRENT.md": "# 当前状态\n\n## 节（2026-11-08）\n- 没写\n"})
         self.gh()
