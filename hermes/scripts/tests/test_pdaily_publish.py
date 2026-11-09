@@ -162,6 +162,12 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any("progress_projects" in x for x in e), e)
         self.assertTrue(any("缺 decisions" in x for x in e), e)
 
+    def test_today_matches_alias(self):
+        """前面写全名、今日推进写简称（11-07 真实稿误拦过）。"""
+        c = card_fields(risks=[{"level": "低", "category": "协作阻塞", "project": "个人 AI 工作台（数码世界）", "text": "x"}],
+                        today=[{"priority": "P1", "item": "数码世界终验收口", "owner_action": "常浩终验"}])
+        self.assertEqual(self.errs(c, report_text(n=("1", "1", "1"))), [])
+
     def test_alias_names(self):
         ok = card_fields(risks=[{"level": "低", "category": "协作阻塞", "project": "数码世界", "text": "PR 开着"}])
         self.assertEqual(self.errs(ok), [])

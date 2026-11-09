@@ -446,9 +446,11 @@ def check(facts, card, report):
         for x in card.get(key) or []:
             if isinstance(x, dict):
                 mentioned.update(split_names(s(x.get("project"))))
+    pids = {roster.resolve(n) for n in mentioned} - {None}
+    words = set(mentioned) | {a for a, pid in roster.alias.items() if pid in pids} | (SELF_NAMES if "hermes" in pids else set())
     for i, t in enumerate(today):
         text = f"{s(t.get('item')) or ''}{s(t.get('owner_action')) or ''}"
-        if not any(n in text for n in mentioned):
+        if not any(n in text for n in words):       # 全名、简称、id 都算点到
             errs.append(f"today[{i}]「{clip(t.get('item'), 30)}」和拍板、成果、风险里的项目都对不上")
     for i, a in enumerate(ach):
         for n in split_names(s(a.get("project"))):
