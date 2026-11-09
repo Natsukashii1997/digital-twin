@@ -16,7 +16,7 @@ hermes/
     ai_access.py       AI 接入自检与切换：status 打印四块，check 查一家，set 切换（常浩的选择存在 DigitalTwin/ai-access.json）
     brief_data.py      晨报取数（第 4 批挂起中）
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
-    pdaily_data.py     个人项目日报取数（#110，PRD D22）：按统计日（04:00→04:00，Asia/Shanghai）给名册每个项目出一条记录（阶段目标、里程碑、昨日增量、三维完成状态、当前状态、新鲜度），JSON 输出；交付、验收一律记「未核实」，只附 CURRENT 当天那一节的自述摘录，等 #110 1b 的行动记录再判；CURRENT 和目标行从主分支读，不读工作区；取不到记 null 不当 0；只读，未安装
+    pdaily_data.py     个人项目日报取数（#110，PRD D22）：按统计日（04:00→04:00，Asia/Shanghai）给名册每个项目出一条记录（阶段目标、里程碑、昨日增量、工程 / 交付 / 验收三项、当前状态、新鲜度），JSON 输出；交付、验收一律记「未核实」，只附自述摘录（当天 CURRENT 节、PR 标题），等 #110 1b 的行动记录再判；目标、CURRENT、新鲜度读主分支在统计日结束时的快照，不读工作区；取不到记 null 不当 0；只读，未安装
     report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md

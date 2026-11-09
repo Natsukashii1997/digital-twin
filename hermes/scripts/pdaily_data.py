@@ -1,11 +1,12 @@
 """个人项目日报取数（#110 批 1a）：把一个统计日里名册项目的事实整理成结构化记录，给 Hermes 写日报用（只读，只用标准库）。
 
-规格：docs/个人项目日报-V2-设计.md 第 3、5、6 节。
+规格：docs/个人项目日报-V2-设计.md 第 3、5、6、7 节。
 用法：python3 pdaily_data.py [--date 统计日] [--project id或别名]
   统计日 D = D 04:00 到 D+1 04:00（Asia/Shanghai，写死，不看机器时区）；不给 --date 时取最近一个已经结束的统计日。
 输出：JSON 到 stdout。每个项目一条记录：阶段目标、里程碑、昨日增量、当前状态、新鲜度、证据、取数错误。
   取不到的来源记为 null 并写进 errors 和 coverage，不当成 0；没有新动作的项目照样给出当前状态。
-  合并的 PR：工程「已合并」；交付、验收一律「未核实」，只附 CURRENT 当天那一节的自述摘录（claims），不下结论。
+  合并的 PR：工程「已合并」；交付、验收一律「未核实」，只附自述摘录（claims：当天 CURRENT 节、PR 标题），不下结论。
+  阶段目标、CURRENT、新鲜度都读主分支在统计日结束（D+1 04:00）时的快照，不读工作区。
 名册读不了：输出「取数失败：原因」，退出码 1。
 """
 import argparse
@@ -33,12 +34,16 @@ GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
 # 验收的句子原样摘出来（claims），标明是自述摘录；真正的判定等 1b 接入安装记录和回读证据。
 UNVERIFIED = "未核实"
 CLAIMS_NOTE = "CURRENT / PR 标题的自述摘录，未判定；安装、验收以行动记录和回读证据为准（#110 1b）"
+NO_CLAIMS_NOTE = "没有摘录：当天 CURRENT 没有对得上的节，或对上的节里没提安装、发布、验收；不代表没安装"
 CLAIM = re.compile(r"安装|装机|已装|发布|上线|验收|回读|cmp|回滚|卸载|生效|重启", re.I)
-CLAIM_MAX = 8                      # 每节最多摘这么多句
-QUOTE_MAX = 160                    # 每句最多这么多字
+CLAIM_MAX = 12                     # 每节最多摘这么多句，多出来的记 omitted
+QUOTE_MAX = 400                    # 每句最多这么多字，超出的标「（后文截断）」：后半句可能有否定、回滚
+CUT_MARK = "…（后文截断）"
 SPLIT = re.compile(r"[（）()，,；;、。：:]")
 REF_CLAUSE = re.compile(r"^(?:PR\s*)?#\d+(?:\s*PR\s*#\d+)?(?:\s*(?:squash\s*)?(?:合并为\s*)?`[0-9a-f]{7,40}`)?$")
 PR_IN_TITLE = re.compile(r"PR\s*#(\d+)")
+HEAD_UPDATED = re.compile(r"更新[：:]\s*(\d{4}-\d{2}-\d{2})")   # 文件头「更新：2026-11-08。……唯一下一步：……」
+TITLE_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})|（(\d{4}-\d{2}-\d{2})")   # 节的日期：标题开头，或第一个括号开头
 GH_LIMIT = {"merged_prs": 200, "closed_issues": 200, "open_prs": 100, "milestones": 100}
 REF = re.compile(r"#(\d+)")
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)", re.I)
@@ -55,23 +60,29 @@ class Fail(Exception):
 
 def quote(line):
     line = line.strip()
-    return line if len(line) <= QUOTE_MAX else line[:QUOTE_MAX] + "…"
+    return line if len(line) <= QUOTE_MAX else line[:QUOTE_MAX] + CUT_MARK
 
 
 def claims_of(title, body):
-    """一节 CURRENT 里提到安装、发布、验收的句子，原样摘出（不判断真假）：节标题算一句，正文每行算一句。"""
+    """一节 CURRENT 里提到安装、发布、验收的句子，原样摘出（不判断真假）：节标题算一句，正文每行算一句。
+    返回 (摘录, 超出条数上限没列出的句数)。"""
     lines = [title, *(x for x in body.splitlines() if x.strip())]
-    return [quote(x) for x in lines if CLAIM.search(x)][:CLAIM_MAX]
+    hits = [quote(x) for x in lines if CLAIM.search(x)]
+    return hits[:CLAIM_MAX], max(0, len(hits) - CLAIM_MAX)
 
 
 def title_refs(title):
-    """节标题里专门写交付编号的段：「（#247）」「（#67，PR #68 `fa81bc8`）」「#43 导航…」开头的号。
-    「常浩实点 #196 后说……」这种从句里顺带提到的号不算。"""
-    nums = {int(m.group(1))} if (m := re.match(r"#(\d+)\s", title)) else set()
-    for c in SPLIT.split(title.replace("、", "，")):
-        if REF_CLAUSE.match(c.strip()):
-            nums |= {int(n) for n in REF.findall(c)}
-    return nums
+    """节标题里专门写交付编号的段，分成 (issue 号, PR 号)：「（#247）」「（#67，PR #68 `fa81bc8`）」「#43 导航…」开头的号。
+    「常浩实点 #196 后说……」「修 PR #196 引入的回归」这种从句里顺带提到的号都不算。"""
+    issues = {int(m.group(1))} if (m := re.match(r"#(\d+)\s", title)) else set()
+    prs = set()
+    for c in SPLIT.split(title):
+        c = c.strip()
+        if REF_CLAUSE.match(c):
+            named = {int(n) for n in PR_IN_TITLE.findall(c)}
+            prs |= named
+            issues |= {int(n) for n in REF.findall(c)} - named
+    return issues, prs
 
 
 # ---------- 时间 ----------
@@ -178,8 +189,9 @@ def sections(text):
         if not p.startswith("## "):
             continue
         title, _, body = p.partition("\n")
-        date = None
-        for d in SECTION_DATE.findall(title):
+        date = None   # 标题开头或第一个括号里的日期；「复盘 2026-11-01 事故（2026-11-08）」取 11-08
+        m = TITLE_DATE.search(title[3:].strip())
+        for d in ([m.group(1) or m.group(2)] if m else SECTION_DATE.findall(title)):
             try:
                 date = dt.date.fromisoformat(d).isoformat()
                 break
@@ -190,17 +202,36 @@ def sections(text):
 
 
 def current_state(root, ref, w):
-    """CURRENT 最上面一节、下一步、最后一次提交 CURRENT 的时间、统计日内改过没有，以及当天日期的各节（找安装、验收证据用）。
+    """CURRENT 最上面一节、下一步（及其出处）、最后一次提交 CURRENT 的时间、统计日内改过没有，以及当天日期的各节（摘录用）。
     ref 是主分支在统计日结束时的提交。没有 CURRENT 返回 None；git 读不了抛 Fail。"""
     text = show(root, ref, "CURRENT.md")
     if text is None:
         return None
     secs = sections(text)
-    stamp = git(root, "log", "-1", "--format=%cI", ref, "--", "CURRENT.md").strip()
+    # --first-parent：普通合并（no-ff）时取合并提交的时间，不沿着分支走到分支上的旧提交
+    stamp = git(root, "log", "-1", "--first-parent", "--format=%cI", ref, "--", "CURRENT.md").strip()
+    nxt = progress_data.next_step(text.splitlines())
+    top_next = progress_data.next_step(f"## {secs[0][0]}\n{secs[0][2]}".splitlines()) if secs else None
+    head = re.split(r"^## ", text, maxsplit=1, flags=re.M)[0]
+    head_next = progress_data.next_step(head.splitlines())
+    m = HEAD_UPDATED.search(head)
+    head_updated = None
+    if m:
+        try:
+            head_updated = dt.date.fromisoformat(m.group(1)).isoformat()
+        except ValueError:
+            pass
+    top_date = secs[0][1] if secs else None
+    source = None if not nxt else "最上面一节" if nxt == top_next else "文件头" if nxt == head_next else "「唯一下一步」节"
     return {
         "top_section": secs[0][0] if secs else None,
-        "top_date": secs[0][1] if secs else None,
-        "next_step": progress_data.next_step(text.splitlines()),
+        "top_date": top_date,
+        "next_step": nxt,
+        # 最上面一节没写下一步时，next_step 会退到文件头或旧的「唯一下一步」节，那里可能是几天前的。
+        # 文件头写了「更新：日期」且不早于最上面一节，才当它是现行的（多数项目把正式的下一步写在文件头）
+        "next_source": source,
+        "next_current": source == "最上面一节" or (source == "文件头" and bool(head_updated)
+                                                  and (top_date is None or head_updated >= top_date)),
         "last_commit": stamp or None,
         # ref 是统计日结束时的快照：截至那时 CURRENT 最后一次提交落在窗口里，就是当天改过（04:00 以后的提交看不到）
         "changed": inside(stamp, w),
@@ -268,14 +299,14 @@ class GitHub:
 
     def open_prs(self, repo):
         rows = self._run("pr", "list", "-R", repo, "--state", "open", "--limit", str(GH_LIMIT["open_prs"]),
-                         "--json", "number,title,createdAt,isDraft,mergedAt,closedAt")
+                         "--json", "number,title,createdAt")
         return [{"number": r["number"], "title": r["title"], "created": r.get("createdAt")}
-                for r in self._cap(repo, "open_prs", rows) if not r.get("mergedAt") and not r.get("closedAt")]
+                for r in self._cap(repo, "open_prs", rows)]
 
     def milestones(self, repo):
         owner, name = repo.split("/", 1)
         data = self._run("api", "graphql", "-f", f"query={MILESTONE_QUERY}", "-f", f"o={owner}", "-f", f"n={name}")
-        nodes = (((data or {}).get("data") or {}).get("repository") or {}).get("issues", {}).get("nodes") or []
+        nodes = ((((data or {}).get("data") or {}).get("repository") or {}).get("issues") or {}).get("nodes") or []
         return [m for m in (milestone(n) for n in self._cap(repo, "milestones", nodes)) if m]
 
 
@@ -301,39 +332,49 @@ def refs_of(pr):
     return [pr["number"], *sorted(linked - {pr["number"]})]
 
 
+def section_prs(title, prs):
+    """一节当天 CURRENT 挂给哪些 PR。节标题里点名的 PR 号，只有它确实关联这一节的 issue 号（或这一节没写 issue 号）
+    才算数：trainee-hub 的节标题会顺带写上一张票的 PR 号，直接信点名会整排错挂。没有有效点名，就按 issue 号挂给
+    关联它的 PR（PR 自己的号、PR 标题里的号、正文 Closes / Fixes 的号）。"""
+    issues, named = title_refs(title)
+    by_num = {pr["number"]: pr for pr in prs}
+    valid = [by_num[n] for n in sorted(named) if n in by_num and (not issues or issues & set(refs_of(by_num[n])[1:]))]
+    if valid:
+        return valid
+    return [pr for pr in prs if issues & set(refs_of(pr))]
+
+
 def deliverables(prs, dated_sections):
     """每个合并的 PR 一条，三个维度分开记（V2 5.2）：工程「已合并」有 GitHub 为证；交付、验收一律「未核实」，
-    只附当天 CURRENT 节和 PR 标题里的自述摘录（claims），不下结论（见文件头）。
-    摘录怎么挂到 PR 上：节标题里专门写交付编号的段（title_refs）对上 PR 自己的号、PR 标题里的号或正文 Closes 的号；
-    节标题写了「PR #N」的，只挂给这几个 PR。同一个编号当天关联几个 PR 时照样挂，但注明分不清属于哪一个。"""
-    shared = {}
-    for pr in prs:
-        for n in refs_of(pr)[1:]:
-            shared[n] = shared.get(n, 0) + 1
+    只附当天 CURRENT 节和 PR 标题里的自述摘录（claims），不下结论（见文件头）。挂法见 section_prs；
+    一节同时挂给几个 PR 时照挂，在 claims_warnings 里注明分不清属于哪一个。没有摘录也写 claims_note，说明不代表没安装。"""
+    attached = {pr["number"]: [] for pr in prs}
+    for title, body in dated_sections:
+        owners = section_prs(title, prs)
+        for pr in owners:
+            attached[pr["number"]].append((title, body, [o["number"] for o in owners]))
     out = []
     for pr in prs:
-        refs = refs_of(pr)
-        claims, notes = [], []
-        for title, body in dated_sections:
-            only = {int(n) for n in PR_IN_TITLE.findall(title)}
-            hit = [n for n in refs if n in title_refs(title)]
-            if not hit or (only and pr["number"] not in only):
-                continue
-            quotes = claims_of(title, body)
+        claims, warnings = [], []
+        for title, body, owners in attached[pr["number"]]:
+            quotes, omitted = claims_of(title, body)
             if quotes:
-                claims.append({"source": f"CURRENT「{title[:40]}」", "quotes": quotes})
-            notes += [f"#{n} 当天关联 {shared[n]} 个 PR，这一节的摘录分不清属于哪一个"
-                      for n in hit if n != pr["number"] and shared.get(n, 0) > 1 and not only]
+                claims.append({"source": f"CURRENT「{title[:40]}」", "quotes": quotes, "omitted": omitted})
+            if len(owners) > 1:
+                others = "、".join(f"#{n}" for n in owners if n != pr["number"])
+                warnings.append(f"「{title[:30]}」这一节同时挂给 {others}，分不清属于哪一个")
         if CLAIM.search(pr.get("title", "")):
-            claims.append({"source": f"PR #{pr['number']} 标题", "quotes": [quote(pr["title"])]})
+            claims.append({"source": f"PR #{pr['number']} 标题", "quotes": [quote(pr["title"])], "omitted": 0})
         out.append({
             "number": pr["number"], "title": pr["title"], "url": pr.get("url"), "merged_at": pr.get("mergedAt"),
             "engineering": "已合并",
             "delivery": UNVERIFIED,
             "acceptance": UNVERIFIED,
+            "matched_sections": [t[:40] for t, _, _ in attached[pr["number"]]],
             "claims": claims,
-            "claims_note": CLAIMS_NOTE if claims else None,
-            "evidence": [f"PR #{pr['number']} merged", *dict.fromkeys(notes)],
+            "claims_note": CLAIMS_NOTE if claims else NO_CLAIMS_NOTE,
+            "claims_warnings": warnings,
+            "evidence": [f"PR #{pr['number']} merged"],
         })
     return out
 
@@ -344,13 +385,14 @@ def project(p, w, hub):
     day = w[0].date()
     rec = {"project_id": p["id"], "name": p["name"], "type": p.get("type"), "objective": None, "milestones": None,
            "yesterday_delta": {"merged_prs": None, "closed_issues": None, "commits": None, "current_changed": None},
-           "current_state": {"top_section": None, "next_step": None, "next_reliable": None, "open_prs": None,
+           "current_state": {"top_section": None, "next_step": None, "next_source": None, "next_reliable": None, "open_prs": None,
                              "checkout_branch": None, "dirty_files": None},
            "freshness": {"current_last_commit": None, "top_section_date": None, "current_as_of": None,
                          "last_merge": None, "stale": None},
            "notes": [], "errors": []}
     delta, state, fresh = rec["yesterday_delta"], rec["current_state"], rec["freshness"]
     if not root.exists():
+        rec["objective"] = {"kind": "未知", "text": None, "source": None}
         rec["errors"].append(f"本机没有仓库目录 {root}")
         return rec
     main = p.get("main", "main")
@@ -394,7 +436,7 @@ def project(p, w, hub):
             rec["errors"].append(f"本机 git：读 {ref} 失败：{e}")
             cur = cur or False   # False = 读失败，None = 主分支上确实没有 CURRENT
     if cur:
-        state["top_section"], state["next_step"] = cur["top_section"], cur["next_step"]
+        state["top_section"], state["next_step"], state["next_source"] = cur["top_section"], cur["next_step"], cur["next_source"]
         fresh["current_last_commit"], fresh["top_section_date"] = cur["last_commit"], cur["top_date"]
         delta["current_changed"] = cur["changed"]
         dated = cur["dated_today"]
@@ -439,7 +481,7 @@ def project(p, w, hub):
         cur_ts, last_merge = (min(stamps) if stamps else None), parse_ts(fresh["last_merge"])
         fresh["current_as_of"] = cur_ts.isoformat() if cur_ts else None
         fresh["stale"] = bool(last_merge) and (cur_ts is None or last_merge - cur_ts > STALE)
-        state["next_reliable"] = bool(state["next_step"]) and not fresh["stale"]
+        state["next_reliable"] = bool(state["next_step"]) and not fresh["stale"] and cur["next_current"]
     return rec
 
 
@@ -465,7 +507,11 @@ def main():
     ap.add_argument("--date", help="统计日 YYYY-MM-DD（D 04:00 到 D+1 04:00），默认最近一个已经结束的统计日")
     ap.add_argument("--project", help="只看一个项目（id 或别名）")
     a = ap.parse_args()
-    day = dt.date.fromisoformat(a.date) if a.date else default_day()
+    try:
+        day = dt.date.fromisoformat(a.date) if a.date else default_day()
+    except ValueError:
+        print(f"取数失败：--date 要写成 YYYY-MM-DD，收到「{a.date}」")
+        sys.exit(1)
     try:
         projects = json.loads(progress_data.ROSTER.read_text())["projects"]
     except (OSError, ValueError, KeyError) as e:
