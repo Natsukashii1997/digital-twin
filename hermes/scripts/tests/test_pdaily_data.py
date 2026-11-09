@@ -213,7 +213,7 @@ class RepoTests(Base):
         self.assertEqual(rec["objective"]["kind"], "目标")
         self.assertEqual(rec["freshness"]["current_last_commit"], "2026-11-09T00:30:00+08:00")
         self.assertEqual(rec["freshness"]["last_merge"], "2026-11-08T10:00:00+08:00")   # 11-09 12:00 的合并不算
-        self.assertEqual(rec["yesterday_delta"]["merged_prs"][0]["delivery"], "已安装或已发布")   # D+1 凌晨的节算 D
+        self.assertEqual(rec["yesterday_delta"]["merged_prs"][0]["claims"][0]["quotes"], ["- 已安装：cmp 一致"])   # D+1 凌晨的节算 D
         self.assertFalse(any("文件头" in n for n in rec["notes"]))
 
     def test_main_without_commits_before_day_end(self):
@@ -329,28 +329,41 @@ class GitHubTests(Base):
         self.assertEqual(out["coverage"]["read_ok"], 0)
         self.assertIn(r.name, out["coverage"]["errors"])
 
-    def test_merged_but_not_installed_is_unknown_delivery(self):
-        r = make_repo(self.root, "d", {"CURRENT.md": "# 当前状态\n\n## 别的事（2026-11-08）\n- 正文顺带提到 #5 已安装\n"})
-        commit(r, "记 CURRENT", "2026-11-08 11:00:00 +0800")
-        self.gh(prs=[self.PR, {**self.PR, "number": 3, "mergedAt": "2026-11-07T10:00:00Z"}])  # #3 不在统计日
-        rec = self.run_one(r)["projects"][0]
-        prs = rec["yesterday_delta"]["merged_prs"]
+    def test_merged_prs_are_unverified_with_quotes_only(self):
+        cur = ("# 当前状态\n\n## 做甲（#4）（2026-11-08，Claude）\n- **已安装**：cmp 一致\n- 常浩实机验收通过\n- 改了 x.py\n"
+               "\n## 更早（#4）（2026-11-07）\n- 已安装：旧的\n")
+        r = make_repo(self.root, "u", {"CURRENT.md": cur})
+        self.gh(prs=[self.PR, {**self.PR, "number": 3, "mergedAt": "2026-11-07T10:00:00Z"}])   # #3 不在统计日
+        prs = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]
         self.assertEqual([p["number"] for p in prs], [5])
-        self.assertEqual((prs[0]["engineering"], prs[0]["delivery"], prs[0]["acceptance"]), ("已合并", "未知", "未知"))
+        p = prs[0]
+        self.assertEqual((p["engineering"], p["delivery"], p["acceptance"]), ("已合并", "未核实", "未核实"))
+        self.assertEqual(p["claims"], [{"source": "CURRENT「做甲（#4）（2026-11-08，Claude）」",
+                                        "quotes": ["- **已安装**：cmp 一致", "- 常浩实机验收通过"]}])   # 只摘当天那一节
+        self.assertEqual(p["claims_note"], pd.CLAIMS_NOTE)
+        self.assertEqual(p["evidence"], ["PR #5 merged"])
 
-    def test_installed_and_accepted_need_explicit_record(self):
-        cur = ("# 当前状态\n\n## 做甲（#4）（2026-11-08，Claude）\n- 已安装：从 main 复制，cmp 一致\n"
-               "\n## 更早的（#6）（2026-11-07）\n- 已安装\n")
-        r = make_repo(self.root, "i", {"CURRENT.md": cur})
-        acc = {"number": 7, "title": "交接补记：常浩实机验收乙通过（#6）", "url": "u7", "body": "", "mergedAt": "2026-11-08T05:00:00Z"}
-        six = {"number": 8, "title": "做乙（#6）", "url": "u8", "body": "", "mergedAt": "2026-11-08T04:00:00Z"}
-        self.gh(prs=[self.PR, acc, six])
+    def test_negative_wording_is_quoted_verbatim_not_judged(self):
+        lines = ["常浩验收未通过", "等常浩验收通过后再装", "- **已安装**：**否**", "已发布 `abcdef1` 回读未通过",
+                 "下一步：常浩实机验收通过", "已安装，但回读不一致", "回读：未做", "已安装；后发现没生效，已卸载"]
+        body = "".join(f"- {x}\n" for x in lines)
+        r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n## 事（#100）（2026-11-08）\n{body}- 改了别的\n"})
+        pr = lambda n, title: {"number": n, "title": title, "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(101, "做（#100）"), pr(102, "无关（#99）")])
         prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
-        self.assertEqual(prs[5]["delivery"], "已安装或已发布")   # 当天的节、标题带 #4
-        self.assertEqual(prs[5]["acceptance"], "未知")
-        self.assertEqual(prs[8]["delivery"], "未知")             # #6 的安装记在 11-07 的节里，不算这一天
-        self.assertEqual(prs[8]["acceptance"], "已通过")         # PR #7 标题明写常浩验收通过（#6）
-        self.assertIn("PR #7 标题", prs[8]["evidence"][-1])
+        self.assertEqual((prs[101]["delivery"], prs[101]["acceptance"]), ("未核实", "未核实"))
+        self.assertEqual(prs[101]["claims"][0]["quotes"], [f"- {x}" for x in lines])   # 原样摘出，不判断
+        self.assertEqual((prs[102]["claims"], prs[102]["claims_note"]), ([], None))
+
+    def test_pr_title_claim_is_quoted_for_that_pr_only(self):
+        r = make_repo(self.root, "t", {"CURRENT.md": "# 当前状态\n\n## 节\n"})
+        acc = {"number": 7, "title": "交接补记：常浩实机验收乙通过（#6）", "url": "", "body": "", "mergedAt": "2026-11-08T05:00:00Z"}
+        six = {"number": 8, "title": "做乙（#6）", "url": "", "body": "", "mergedAt": "2026-11-08T04:00:00Z"}
+        self.gh(prs=[acc, six])
+        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
+        self.assertEqual(prs[7]["claims"], [{"source": "PR #7 标题", "quotes": ["交接补记：常浩实机验收乙通过（#6）"]}])
+        self.assertEqual(prs[7]["acceptance"], "未核实")
+        self.assertEqual(prs[8]["claims"], [])
 
     def test_stale_current_makes_next_step_unreliable(self):
         r = make_repo(self.root, "s", {"CURRENT.md": "# 当前状态\n\n## 老的一节（2026-11-06）\n- 下一步：老的\n"},
@@ -390,107 +403,44 @@ class GitHubTests(Base):
         self.assertIs(rec["freshness"]["stale"], False)
         self.assertIs(rec["current_state"]["next_reliable"], True)
 
-    def test_negated_and_future_forms_do_not_count(self):
-        bad = ["常浩验收未通过", "常浩验收还没通过", "等常浩验收通过后再装", "未装机", "待装机", "已安装失败，回滚了",
-               # 第二轮审查：条件、前提、将来时、转折、撤回
-               "下一步：常浩装机", "等合并后装机", "需要重新装机", "装机命令见下", "是否已安装要再确认",
-               "如果已安装就重启网关", "撤掉已安装的旧版", "等常浩验收通过", "需要常浩实机验收通过才能装",
-               "常浩验收通过后合并", "若常浩验收通过即可装", "交接：常浩实机验收通过后装机。",
-               "已安装，但回读不一致", "已安装，随后回滚", "已安装；后发现没生效，已卸载",
-               # 第三轮审查：白名单之外的写法一律不算
-               "已安装：否", "已安装：❌", "[ ] 已安装", "~~已安装~~", "状态：已安装？", "已安装吗", "应已安装", "可能已安装",
-               "Codex 声称已安装", "已安装 → 已回退", "**已安装（失败）**：x", "实机验收无法通过", "实机验收部分通过",
-               "实机验收 3/5 通过", "常浩验收只通过了一半", "实机验收应能通过", "常浩验收：通过？", "Claude 实机验收通过",
-               "Codex 自测实机验收通过", "常浩实机验收 3/5 通过", "已安装：装好了吗", "~~已安装：x~~"]
-        secs = "".join(f"## 事{i}（#{100 + i}）（2026-11-08）\n- {t}\n\n" for i, t in enumerate(bad))
-        secs += ("## 自述（#30）（2026-11-08）\n- 已安装：复制过去了\n- 另一行：cmp 过别的文件\n\n"
-                 "## 回读（#31）（2026-11-08）\n- 已安装：从 main 复制，cmp 一致\n- 常浩实机验收通过\n")
-        r = make_repo(self.root, "neg", {"CURRENT.md": f"# 当前状态\n\n{secs}"})
-        pr = lambda n, title=None: {"number": n, "title": title or f"做（#{n}）", "url": "", "body": "",
-                                    "mergedAt": "2026-11-08T03:00:00Z"}
-        self.gh(prs=[pr(100 + i) for i in range(len(bad))] + [pr(30), pr(31), pr(40, "交接补记：常浩实机验收未通过（#41）"), pr(41)])
-        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
-        for i, text in enumerate(bad):
-            with self.subTest(text):
-                self.assertEqual((prs[100 + i]["delivery"], prs[100 + i]["acceptance"]), ("未知", "未知"))
-                self.assertIsNone(prs[100 + i]["delivery_basis"])
-        self.assertEqual(prs[41]["acceptance"], "未知")                       # PR 标题写的是未通过
-        self.assertEqual((prs[30]["delivery"], prs[30]["delivery_basis"]), ("已安装或已发布", "仅自述"))
-        self.assertEqual((prs[31]["delivery_basis"], prs[31]["acceptance"]), ("有回读或 cmp 记录", "已通过"))
-        self.assertEqual(prs[31]["acceptance_basis"], "交接记录（非本人回执）")
-        self.assertIsNone(prs[30]["acceptance_basis"])
-
-    def test_only_own_title_and_closing_refs_link_evidence(self):
-        cur = ("# 当前状态\n\n## 别的（#60）（2026-11-08）\n- 已安装：cmp 一致\n\n"
-               "## 甲（#49）（2026-11-08）\n- 已安装：cmp 一致\n\n"
-               "## 自己（#52）（2026-11-08）\n- 已安装：cmp 一致\n\n## 关联（#51）（2026-11-08）\n- 已安装：没核\n")
+    def test_only_own_title_and_closing_refs_link_claims(self):
+        cur = ("# 当前状态\n\n## 别的（#60）（2026-11-08）\n- 已安装：六十\n\n"
+               "## 甲（#49）（2026-11-08）\n- 已安装：四九\n\n## 自己（#52）（2026-11-08）\n- 已安装：五二\n")
         r = make_repo(self.root, "refs", {"CURRENT.md": cur})
         pr = lambda n, title, body: {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
-        self.gh(prs=[pr(50, "做乙", "参考 #60 的做法"), pr(53, "做甲", "Closes #49"), pr(52, "做丙（#51）", "")])
+        self.gh(prs=[pr(50, "做乙", "参考 #60 的做法"), pr(53, "做甲", "Closes #49"), pr(52, "做丙", "")])
         prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
-        self.assertEqual(prs[50]["delivery"], "未知")                       # 正文顺带提到 #60 不继承
-        self.assertEqual(prs[53]["delivery"], "已安装或已发布")               # Closes #49 算
-        self.assertEqual(prs[52]["delivery_basis"], "有回读或 cmp 记录")      # 自己的号优先，不随 set 顺序变
-        self.assertIn("安装：CURRENT「自己（#52）", prs[52]["evidence"][1])
-        self.assertIn("节级证据", prs[52]["evidence"][1])
+        self.assertEqual(prs[50]["claims"], [])                                  # 正文顺带提到 #60 不挂
+        self.assertEqual(prs[53]["claims"][0]["quotes"], ["- 已安装：四九"])       # Closes #49 算
+        self.assertEqual(prs[52]["claims"][0]["quotes"], ["- 已安装：五二"])       # 自己的号
 
-    def test_real_formats_are_recognised(self):
-        cur = ("# 当前状态\n\n"
-               "## 2026-11-08 · 甲（#61，PR #62 `61a47a0`），已安装、网关已重启\n"
-               "- **已安装（11-08 22:56，常浩说「安装并重启」）**：\n  - `x.py` 从 main 复制，`cmp` 一致\n\n"
-               "## 乙（#63）（2026-11-08，Claude；已提交、squash 合并、已发布 `b18150e21b61` 回读通过）\n- 改了 x\n\n"
-               "## 丙（#65）（2026-11-08，已发布 655）\n- 改了 y\n\n"
-               "## 丁（#67）（2026-11-08，Claude）\n- 发布与回读：打包装机，产物 `70ad4a4648bb` / 已装 `70ad4a4648bb`，回滚：`open x`\n\n"
-               "## 戊（#69）（2026-11-08）\n- 发布与回读：产物 `70ad4a4648bb` / 已装 `11114a4648bb`\n\n"
-               "## 己（#71）（2026-11-08，未提交、视觉稿已发布为 Artifact；已发布 Artifact）\n- 改了 z\n\n"
-               "## 庚（#73）（2026-11-08）\n- **已安装**：shadow 合并官\n\n"
-               "## 辛（#75）（2026-11-08）\n- **已安装**：从 main 复制，~~cmp 一致~~\n")
-        r = make_repo(self.root, "fmt", {"CURRENT.md": cur})
-        pr = lambda n: {"number": n, "title": f"做（#{n - 1}）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
-        self.gh(prs=[pr(n) for n in (62, 64, 66, 68, 70, 72, 74, 76)])
-        prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
-        got = {n: (p["delivery"], p["delivery_basis"]) for n, p in prs.items()}
-        self.assertEqual(got, {
-            62: ("已安装或已发布", "有回读或 cmp 记录"),    # 节标题自己的号 #62；条目行加缩进子条目里的 cmp
-            64: ("已安装或已发布", "有回读或 cmp 记录"),    # 已发布 <哈希> 回读通过
-            66: ("已安装或已发布", "仅自述"),              # 已发布 <版本号>
-            68: ("已安装或已发布", "有回读或 cmp 记录"),    # 产物哈希 = 已装哈希
-            70: ("未知", None),                          # 两个哈希不一致
-            72: ("未知", None),                          # 已发布 Artifact 不是发布
-            74: ("已安装或已发布", "仅自述"),              # shadow 里的 sha 不算校验值
-            76: ("已安装或已发布", "仅自述"),              # 划掉的 cmp 不算回读
-        })
-
-    def test_incidental_title_refs_and_shared_issue_do_not_inherit(self):
-        cur = ("# 当前状态\n\n## 修 #196 引入的问题（#200）（2026-11-08，常浩实点 #196 后说点不动）\n"
-               "- **已安装**：cmp 一致\n- 常浩实机验收通过\n\n"
-               "## 1a（#110）（2026-11-08）\n- **已安装**：cmp 一致\n")
+    def test_incidental_refs_pr_numbers_in_title_and_shared_issue(self):
+        cur = ("# 当前状态\n\n## 修 #196 引入的问题（#200）（2026-11-08，常浩实点 #196 后说点不动）\n- 已安装：二百\n\n"
+               "## #110 1a 收尾（#110，PR #115 `abcdef1`）（2026-11-08）\n- 已安装：一一五\n\n"
+               "## 1c（#120）（2026-11-08）\n- 已安装：一二零\n")
         r = make_repo(self.root, "inc", {"CURRENT.md": cur})
-        pr = lambda n, title: {"number": n, "title": title, "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}
-        self.gh(prs=[pr(197, "做（#196）"), pr(201, "修（#200）"), pr(120, "1a（#110）"), pr(121, "1b（#110）")])
+        pr = lambda n, title, body="": {"number": n, "title": title, "url": "", "body": body, "mergedAt": "2026-11-08T03:00:00Z"}
+        self.gh(prs=[pr(197, "做（#196）"), pr(201, "修（#200）"), pr(115, "1a（#110）"), pr(116, "1b", "Closes #110"),
+                     pr(121, "1c 上（#120）"), pr(122, "1c 下（#120）")])
         prs = {p["number"]: p for p in self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"]}
-        self.assertEqual((prs[197]["delivery"], prs[197]["acceptance"]), ("未知", "未知"))   # #196 只是顺带提到
-        self.assertEqual((prs[201]["delivery"], prs[201]["acceptance"]), ("已安装或已发布", "已通过"))
-        self.assertEqual(prs[201]["evidence"][2][:3], "验收：")
-        for n in (120, 121):   # 同一个 #110 当天两个 PR：分不清是哪一个装的
-            self.assertEqual(prs[n]["delivery"], "未知")
+        quotes = {n: [q for c in p["claims"] for q in c["quotes"]] for n, p in prs.items()}
+        self.assertEqual(quotes[197], [])                       # #196 只是顺带提到
+        self.assertEqual(quotes[201], ["- 已安装：二百"])
+        self.assertEqual(quotes[115], ["- 已安装：一一五"])      # 节标题写了 PR #115：只挂给它
+        self.assertEqual(quotes[116], [])
+        for n in (121, 122):                                    # 同一个 #120 当天两个 PR：照挂，注明分不清
+            self.assertEqual(quotes[n], ["- 已安装：一二零"])
             self.assertTrue(any("关联 2 个 PR" in e for e in prs[n]["evidence"]))
+        self.assertEqual(prs[115]["evidence"], ["PR #115 merged"])
 
-    def test_template_label_and_rollback_plan_are_not_revocation(self):
-        cur = ("# 当前状态\n\n## 甲（#82）（2026-11-08）\n- **已安装**：cmp 一致\n"
-               "- 与授权不一致之处、遗留问题、范围外发现：无\n- 回滚：`open old.app`；临时配置用完已还原\n")
-        r = make_repo(self.root, "tpl", {"CURRENT.md": cur})
-        self.gh(prs=[{"number": 83, "title": "做（#82）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}])
-        p = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]
-        self.assertEqual((p["delivery"], p["delivery_basis"]), ("已安装或已发布", "有回读或 cmp 记录"))
-
-    def test_revocation_on_a_later_line_voids_the_section(self):
-        cur = ("# 当前状态\n\n## 甲（#80）（2026-11-08）\n- **已安装**：cmp 一致\n- 常浩实机验收通过\n"
-               "- 22:10 常浩反馈没生效，已回滚到旧版\n")
-        r = make_repo(self.root, "rev", {"CURRENT.md": cur})
-        self.gh(prs=[{"number": 81, "title": "做（#80）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}])
-        p = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]
-        self.assertEqual((p["delivery"], p["acceptance"]), ("未知", "未知"))
+    def test_quotes_are_capped_and_truncated(self):
+        body = "".join(f"- 已安装第 {i} 条\n" for i in range(10)) + "- 已发布" + "长" * 300 + "\n"
+        r = make_repo(self.root, "cap2", {"CURRENT.md": f"# 当前状态\n\n## 长（#130）（2026-11-08）\n- 已发布" + "长" * 300 + "\n" + body})
+        self.gh(prs=[{"number": 131, "title": "做（#130）", "url": "", "body": "", "mergedAt": "2026-11-08T03:00:00Z"}])
+        q = self.run_one(r)["projects"][0]["yesterday_delta"]["merged_prs"][0]["claims"][0]["quotes"]
+        self.assertEqual(len(q), pd.CLAIM_MAX)
+        self.assertEqual(len(q[0]), pd.QUOTE_MAX + 1)
+        self.assertTrue(q[0].endswith("…"))
 
     def test_header_only_commit_does_not_refresh_stale_current(self):
         r = make_repo(self.root, "hd", {"CURRENT.md": "# 当前状态\n\n## 旧节（2026-11-05）\n- 下一步：旧的\n"},

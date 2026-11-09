@@ -5,6 +5,7 @@
   统计日 D = D 04:00 到 D+1 04:00（Asia/Shanghai，写死，不看机器时区）；不给 --date 时取最近一个已经结束的统计日。
 输出：JSON 到 stdout。每个项目一条记录：阶段目标、里程碑、昨日增量、当前状态、新鲜度、证据、取数错误。
   取不到的来源记为 null 并写进 errors 和 coverage，不当成 0；没有新动作的项目照样给出当前状态。
+  合并的 PR：工程「已合并」；交付、验收一律「未核实」，只附 CURRENT 当天那一节的自述摘录（claims），不下结论。
 名册读不了：输出「取数失败：原因」，退出码 1。
 """
 import argparse
@@ -26,27 +27,18 @@ DAY_START = dt.time(4, 0)          # 统计日从 04:00 开始：常浩常干到
 STALE = dt.timedelta(days=1)       # CURRENT 比最近一次合并早这么多就算过期
 GOAL = re.compile(r"^当前阶段目标：(.+)$")
 GOAL_HEAD = 12                     # 目标行只在文件头这么多行里找
-# 安装、验收只认固定格式的完成记录（白名单，V2 第 6 节：文档写了不等于做了）。格式之外的写法一律「未知」，
-# 宁可漏报，不误报。格式取自名册各项目 CURRENT 的真实写法（2026-11-09 核过）：
-#   节标题里单独一段：「，已安装，」「已安装到本机、」「已发布 `b18150e21b61` 回读通过」「已发布 nm-…」「已发布 653」
-#   条目行开头（冒号必须有，冒号后不能是「否、无、未……」）：「- **已安装**：」「- 已安装：」「- **已安装（11-08 22:56，常浩说「…」）**：」「- **已合并、已安装（…）**」「- **已安装、已重启（…）**」
-#   发布与回读行：「- 发布与回读：… 产物 `70ad4a4648bb` / 已装 `70ad4a4648bb` …」（两个哈希一致才算）
-#   验收：一段话以「常浩 / 用户 / 本人 / 所有者」开头、以「验收通过」结尾，例如「常浩实机验收通过」「交接补记：常浩实机验收乙通过」
-# 同一节里任何一行写了撤回（已回滚、已卸载、没生效、cmp / 回读不一致……），这一节的安装、验收都不算。
+# 交付（安装 / 发布）、验收不从 CURRENT 的文字下结论（常浩 2026-11-09 定「甲：只摘原文」）：
+# CURRENT 是 Claude 写的自述，V2 第 6 节规定文档写了「已安装」不算安装成功、Claude 说做完不算常浩通过；
+# 前三轮审查也证明正则判断中文语义总有漏网写法。所以 1a 一律记「未核实」，只把当天那一节里提到安装、发布、
+# 验收的句子原样摘出来（claims），标明是自述摘录；真正的判定等 1b 接入安装记录和回读证据。
+UNVERIFIED = "未核实"
+CLAIMS_NOTE = "CURRENT / PR 标题的自述摘录，未判定；安装、验收以行动记录和回读证据为准（#110 1b）"
+CLAIM = re.compile(r"安装|装机|已装|发布|上线|验收|回读|cmp|回滚|卸载|生效|重启", re.I)
+CLAIM_MAX = 8                      # 每节最多摘这么多句
+QUOTE_MAX = 160                    # 每句最多这么多字
 SPLIT = re.compile(r"[（）()，,；;、。：:]")
-INSTALL_CLAUSE = re.compile(r"^(?:已安装|已上线)(?:到本机)?$|"
-                            r"^已发布\s*`?(?:[0-9a-f]{7,40}|nm-[\w-]+|wb-[\w-]+|\d+)`?(?P<rb>\s*回读[^，]{0,6}通过)?$")
-INSTALL_LINE = re.compile(r"^\s*[-*]\s*(?:\*\*)?(?:已合并、)?已安装(?:、[^*（：:]{1,8})?(?:（(?P<note>[^）]*)）)?(?:\*\*)?\s*[：:]"
-                          r"(?!\s*(?:否|❌|✗|✘|无|未|没|不|待))")
-READBACK_LINE = re.compile(r"^\s*[-*]\s*(?:\*\*)?发布与回读(?:\*\*)?\s*[：:].*?产物\s*`?([0-9a-f]{7,40})`?\s*/\s*已装\s*`?([0-9a-f]{7,40})`?")
-ACCEPT_CLAUSE = re.compile(r"^(?:常浩|用户|本人|所有者)(?:已经?)?(?:实机|真机|真屏)?验收(?P<mid>[^，]{0,8}?)通过了?$")
-SHAKY = re.compile(r"未|没|不|无|非|别|待|失败|部分|一半|只|/|？|\?|吗|应|可能|预计|估计|算|Claude|Codex|自测|自验", re.I)
-# 撤回只认明确写法；「与授权不一致之处」是 CURRENT 模板小标题，「回滚：命令」是回滚办法，都不算撤回
-REVOKED = re.compile(r"已回滚|回滚了|已撤回|已卸载|卸载了|没生效|未生效|装回旧版|"
-                     r"(?:cmp|回读|哈希|校验值?|产物|已装)[^，。；\n]{0,8}不一致", re.I)
-VERIFIED = re.compile(r"回读|cmp|校验值|sha256|sha1|\bsha\b", re.I)   # 和安装记录写在同一条才算有回读，否则只是自述
 REF_CLAUSE = re.compile(r"^(?:PR\s*)?#\d+(?:\s*PR\s*#\d+)?(?:\s*(?:squash\s*)?(?:合并为\s*)?`[0-9a-f]{7,40}`)?$")
-HANDOVER = "交接记录（非本人回执）"                        # CURRENT、PR 标题都是 Claude 写的，不是常浩本人的回执
+PR_IN_TITLE = re.compile(r"PR\s*#(\d+)")
 GH_LIMIT = {"merged_prs": 200, "closed_issues": 200, "open_prs": 100, "milestones": 100}
 REF = re.compile(r"#(\d+)")
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)", re.I)
@@ -61,55 +53,15 @@ class Fail(Exception):
     pass
 
 
-def clean(line):
-    """去掉删除线和加粗记号；未勾选、已勾选的清单行，带问号的行，都不当完成记录（返回 None）。"""
-    line = re.sub(r"~~.*?~~", "", line)
-    if re.match(r"^\s*[-*]\s*\[[ xX]\]", line) or re.search(r"[?？]|吗", line):
-        return None
-    return line
+def quote(line):
+    line = line.strip()
+    return line if len(line) <= QUOTE_MAX else line[:QUOTE_MAX] + "…"
 
 
-def clauses(line):
-    return [c.strip().replace("**", "") for c in SPLIT.split(re.sub(r"^\s*[-*]\s*", "", line))]
-
-
-def accepted_in(line):
-    """一行里有没有「常浩……验收通过」这样单独成段的记录。"""
-    line = clean(line)
-    return line is not None and any((m := ACCEPT_CLAUSE.match(c)) and not SHAKY.search(m.group("mid")) and not SHAKY.search(c)
-                                    for c in clauses(line))
-
-
-def section_status(title, body):
-    """一节 CURRENT 的安装、验收记录：(安装证据等级或 None, 有没有验收)。只认白名单格式，有撤回整节不算。"""
-    lines = [title, *body.splitlines()]
-    if any(REVOKED.search(re.sub(r"~~.*?~~", "", x)) for x in lines):
-        return None, False
-    installs = []   # 每条安装记录有没有回读
-    t = clean(title)
-    for c in clauses(t) if t is not None else []:
-        m = INSTALL_CLAUSE.match(c)
-        if m:
-            installs.append(bool(m.groupdict().get("rb")))
-    body_lines = body.splitlines()
-    for i, raw in enumerate(body_lines):
-        line = clean(raw)
-        if line is None:
-            continue
-        m = INSTALL_LINE.match(line)
-        if m and not SHAKY.search(re.sub(r"常浩说「[^」]*」", "", m.group("note") or "")):
-            indent = len(raw) - len(raw.lstrip())
-            block = [line]   # 条目行加下面缩进更深的子条目，算同一条记录
-            for nxt in body_lines[i + 1:]:
-                if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= indent:
-                    break
-                block.append(nxt)
-            installs.append(bool(VERIFIED.search("\n".join(block))))
-        r = READBACK_LINE.match(line)
-        if r and r.group(1) == r.group(2):
-            installs.append(True)   # 产物哈希和已装哈希一致，本身就是回读
-    basis = None if not installs else "有回读或 cmp 记录" if any(installs) else "仅自述"
-    return basis, any(accepted_in(x) for x in lines)
+def claims_of(title, body):
+    """一节 CURRENT 里提到安装、发布、验收的句子，原样摘出（不判断真假）：节标题算一句，正文每行算一句。"""
+    lines = [title, *(x for x in body.splitlines() if x.strip())]
+    return [quote(x) for x in lines if CLAIM.search(x)][:CLAIM_MAX]
 
 
 def title_refs(title):
@@ -245,15 +197,13 @@ def current_state(root, ref, w):
         return None
     secs = sections(text)
     stamp = git(root, "log", "-1", "--format=%cI", ref, "--", "CURRENT.md").strip()
-    # 改过没有看统计日窗口里的提交，不看最后一次：04:00 以后又提交一次、回放历史日期时，最后一次都会落在窗口外
-    rows = git(root, "log", ref, f"--since={w[0].isoformat()}", f"--until={w[1].isoformat()}", "--format=%cI",
-               "--", "CURRENT.md").split()
     return {
         "top_section": secs[0][0] if secs else None,
         "top_date": secs[0][1] if secs else None,
         "next_step": progress_data.next_step(text.splitlines()),
         "last_commit": stamp or None,
-        "changed": any(inside(t, w) for t in rows),
+        # ref 是统计日结束时的快照：截至那时 CURRENT 最后一次提交落在窗口里，就是当天改过（04:00 以后的提交看不到）
+        "changed": inside(stamp, w),
         # 快照截在 D+1 04:00，标着 D+1 的节一定是凌晨写的，也算统计日 D 的
         "dated_today": [(t, b) for t, d, b in secs if d in (w[0].date().isoformat(), w[1].date().isoformat())],
     }
@@ -346,55 +296,44 @@ def milestone(issue):
 
 def refs_of(pr):
     """一个 PR 关联的编号，按固定顺序：自己的号在前，再按数字排标题里的号和正文里 Closes / Fixes 的号。
-    正文里顺带提到的别的号不算：否则会把别的节的安装、验收挂到这个 PR 上。"""
+    正文里顺带提到的别的号不算：否则会把别的节的摘录挂到这个 PR 上。"""
     linked = {int(n) for n in REF.findall(pr.get("title", ""))} | {int(n) for n in CLOSES.findall(pr.get("body") or "")}
     return [pr["number"], *sorted(linked - {pr["number"]})]
 
 
 def deliverables(prs, dated_sections):
-    """每个合并的 PR 一条，三个维度分开记（V2 5.2）。交付、验收只认当天日期、标题里专门写了这个编号的 CURRENT 节
-    （白名单格式，见文件头），或 PR 标题里单独成段的「常浩……验收通过」，否则「未知」。证据等级另记（V2 第 6 节）：
-    delivery_basis 有回读或 cmp 记录 / 仅自述；acceptance_basis 目前都是交接记录，本人回执要等行动记录（1b）。
-    同一个编号当天有几个 PR 关联（如 #110 的 1a、1b），这个编号上的记录不分给它们：分不清是哪一个装的。"""
-    installed, accepted = {}, {}
-    for title, body in dated_sections:
-        basis, acc = section_status(title, body)
-        where = f"CURRENT「{title[:40]}」（节级证据）"   # 节标题写了几个交付编号，这一节的证据就算给每一个
-        for n in title_refs(title):
-            if basis:
-                installed.setdefault(n, (where, basis))
-            if acc:
-                accepted.setdefault(n, where)
-    for pr in prs:  # 「交接补记：常浩实机验收……通过（#242）」这类文档 PR 本身就是验收记录
-        if accepted_in(pr.get("title", "")):
-            for n in {pr["number"], *title_refs(pr.get("title", ""))}:
-                accepted.setdefault(n, f"PR #{pr['number']} 标题")
+    """每个合并的 PR 一条，三个维度分开记（V2 5.2）：工程「已合并」有 GitHub 为证；交付、验收一律「未核实」，
+    只附当天 CURRENT 节和 PR 标题里的自述摘录（claims），不下结论（见文件头）。
+    摘录怎么挂到 PR 上：节标题里专门写交付编号的段（title_refs）对上 PR 自己的号、PR 标题里的号或正文 Closes 的号；
+    节标题写了「PR #N」的，只挂给这几个 PR。同一个编号当天关联几个 PR 时照样挂，但注明分不清属于哪一个。"""
     shared = {}
     for pr in prs:
-        if accepted_in(pr.get("title", "")):   # 验收记录 PR 本身不是交付，不算「同号多 PR」
-            continue
         for n in refs_of(pr)[1:]:
             shared[n] = shared.get(n, 0) + 1
     out = []
     for pr in prs:
-        refs, notes = [], []
-        for n in refs_of(pr):
-            if n != pr["number"] and shared.get(n, 0) > 1:
-                if n in installed or n in accepted:
-                    notes.append(f"#{n} 当天关联 {shared[n]} 个 PR，它的安装 / 验收记录不分给本 PR")
+        refs = refs_of(pr)
+        claims, notes = [], []
+        for title, body in dated_sections:
+            only = {int(n) for n in PR_IN_TITLE.findall(title)}
+            hit = [n for n in refs if n in title_refs(title)]
+            if not hit or (only and pr["number"] not in only):
                 continue
-            refs.append(n)
-        inst = next((installed[n] for n in refs if n in installed), None)
-        acc = next((accepted[n] for n in refs if n in accepted), None)
+            quotes = claims_of(title, body)
+            if quotes:
+                claims.append({"source": f"CURRENT「{title[:40]}」", "quotes": quotes})
+            notes += [f"#{n} 当天关联 {shared[n]} 个 PR，这一节的摘录分不清属于哪一个"
+                      for n in hit if n != pr["number"] and shared.get(n, 0) > 1 and not only]
+        if CLAIM.search(pr.get("title", "")):
+            claims.append({"source": f"PR #{pr['number']} 标题", "quotes": [quote(pr["title"])]})
         out.append({
             "number": pr["number"], "title": pr["title"], "url": pr.get("url"), "merged_at": pr.get("mergedAt"),
             "engineering": "已合并",
-            "delivery": "已安装或已发布" if inst else "未知",
-            "delivery_basis": inst[1] if inst else None,
-            "acceptance": "已通过" if acc else "未知",
-            "acceptance_basis": HANDOVER if acc else None,
-            "evidence": [f"PR #{pr['number']} merged", *(["安装：" + inst[0]] if inst else []),
-                         *(["验收：" + acc] if acc else []), *notes],
+            "delivery": UNVERIFIED,
+            "acceptance": UNVERIFIED,
+            "claims": claims,
+            "claims_note": CLAIMS_NOTE if claims else None,
+            "evidence": [f"PR #{pr['number']} merged", *dict.fromkeys(notes)],
         })
     return out
 
