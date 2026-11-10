@@ -36,6 +36,7 @@ hermes/
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
     proposal-digest/   记下常浩对每周待决提案的选择（#61，调 proposal_digest.py apply）
   plugins/merge-buttons/ PR 卡片按钮（#78）：注册 /card，把「合并 / 退回」点击转给 merge_act.py button（不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
+  plugins/workdesk-gate/ 亚古兽工具拦截（#142）：飞书里发起人不是常浩（open_id 或企业 user_id `e9cgcf77`）时只放行安全工具（提问、读文档、文档评论、网页、技能查看、生图、语音、待办），本机命令行和定时任务不受限；牛马之家只在常浩本人私聊可用并写入真实提问人；安装在 ~/.hermes/profiles/agumon/plugins/，测试 hermes/scripts/tests/test_workdesk_gate_plugin.py
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是三报规则
   samples/             样稿

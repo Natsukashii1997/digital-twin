@@ -1,0 +1,3 @@
+name: workdesk-gate
+version: "2.0"
+description: 亚古兽工具拦截：他人在飞书里只能用安全工具，常浩本人不受限；牛马之家（workdesk MCP）只在常浩本人飞书私聊里可用，并写入可信的提问人
