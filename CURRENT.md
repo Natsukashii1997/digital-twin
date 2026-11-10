@@ -8,6 +8,12 @@
 
 ---
 
+## 2026-11-11 凌晨 · 影子合并官暂停；猛鬼兽只读核查
+
+- **已暂停**（常浩要求「把猛鬼兽的影子合并官的 cron 关闭」）：`hermes cron pause 8994fb76d03e`，回读为 `[paused]`；任务没删，`hermes cron resume 8994fb76d03e` 可恢复。任务表改前改后在 `evidence/mengguishou-review-20261111/`。影响：飞书不再有新的 PR 卡片，「引用卡片回合并」暂时没有新卡可用；已发卡片的按钮（merge-buttons 插件）仍可用；一致率统计停在暂停前。工程流程.md 第 5 节、AGENTS 里对合并官的描述未改。
+- **猛鬼兽核查结论**（只读，未改）：用户画像记忆 USER.md 已用 1360 / 1375 字，含重复条目；人设三处口径不一致（SOUL、`personalities.work-worn`、USER.md）；`obsidian` 技能开着，可直接改 Vault；MEMORY.md 停在 10-22 的配置；`web_extract` 后端只能搜不能抓正文。待常浩选做哪几项。
+- **待观察**：11-11 07:30 日报是第一次用 Claude 跑（11-10 失败是旧模型 gpt 单次调用约 300 秒、会话租约失效被中断）。
+
 ## 2026-11-10 晚 · 亚古兽核查与修正（niuma-home#53、#54；#147、#148，均已合并）
 
 - **已合并并安装**（常浩说「合并」）：niuma-home#54 `f859bc9`（#53 关闭，规程安装副本与 main `cmp` 一致）；#148 `4c33acb`（#147 关闭），`ops/health_check.py` 已装到 `DigitalTwin/bin/`，`cmp` 一致，旧版备份在 `evidence/agumon-hardening-20261110/health_check.py.before`；用 launchd 同款 `/usr/bin/python3` 在安装位置 `--dry-run` 正常（只报猛鬼兽昨天回退 16 次、1 条定时任务失败）。没有 kickstart 巡检任务，免得真发一条飞书；第一次正式运行是 11-11 09:45。两边 worktree 和分支已清理，主目录已拉齐（niuma-home 主目录另有他人未提交的 `docs/策略规则/README.md`，没动）。
