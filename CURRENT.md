@@ -15,8 +15,9 @@
   - 两只机器人主模型 `claude-opus-5-5[1m]`（插件 `claude-subscription-directsdk-experimental` 调本机 `claude` 命令行），思考强度 high，回退 deepseek-flash，辅助任务 openai-codex gpt-6-luna。猛鬼兽是常浩 11:43 让它自己改的，亚古兽 12:02 按猛鬼兽逐项对齐（27 项，复核零差异），并装同版插件（`a4e311e`）。
   - 飞书从 11-10 起推送带常浩企业 user_id `e9cgcf77`，Hermes 优先用它核对，两只机器人的允许名单已加上（原 open_id 保留）；亚古兽曾因此拒收常浩消息（11:40），11:51 恢复。
   - 亚古兽：开放群 `oc_08a3…` 已删、群聊关闭；飞书工具集和猛鬼兽一致，另保留牛马之家；加 Vault 读取；`workdesk-gate` 扩为他人只能用安全工具（#143，合并前已安装）。
-- **待合并**：PR #141（日报 / 周报开跑前等主模型通道，探测地址按主模型提供方自动选）、#143（拦截插件）、#144（本文档同步）、niuma-home#46（亚古兽规程，L1 补改未复审）。合并后：#141 同步 `~/.hermes/scripts/report_data.py`；niuma-home#46 同步亚古兽 SOUL / HERMES 并重启。
-- **未验证**：两只机器人在飞书里由 Claude 实际回复（常浩还没发测试消息）；他人在文档评论里被拦的真实端到端。
+- **已合并并安装**（常浩说「合并」）：#143 拦截插件 `b82a2c4`（安装副本与 main 一致）；niuma-home#46 亚古兽规程 `18badc5`（L1 补改未复审；已装 SOUL / HERMES 并于 12:36 重启亚古兽）；#141 等主模型通道 `b5b3f71`（探测地址按主模型提供方自动选，现为 api.anthropic.com；已装 `~/.hermes/scripts/report_data.py`）；#145 本文档同步（巡检脚本合并后同步到 DigitalTwin/bin/）。#141、#143 的 ChatGPT L1 审查没有转回「需修改」；#145 送审被驿窗以「预算已用完」拒收，未审。
+- **已验证**：12:28 常浩分别私聊两只机器人，都由 `claude-opus-5-5[1m]` 回复，无回退、无拒收。
+- **未验证**：他人在文档评论里被拦的真实端到端（要那两位成员配合）。
 - **范围外**：11-10 07:30 日报 08:06 失败（`Operation interrupted: waiting for model response`）未查；亚古兽启动安全审计提示本机 SSH 允许密码登录。
 
 ## 2026-11-09 · 托管规格 V5.1 已合并：通道改走 Multica issue（#130、#138；PR #139 `6bffc49`）
