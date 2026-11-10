@@ -553,7 +553,10 @@ class MergeAct(unittest.TestCase):
 
 
 class CustodyCredential(unittest.TestCase):
-    """托管合并凭据（#132）：从钥匙串取合并执行器令牌，只放进合并子进程；取不到就停，不退回本机 gh 登录。"""
+    """托管合并入口（#132、PR #146 审查返修）：凭据在函数里强制取、取不到不发写命令、最小环境不继承宿主凭据、
+    结果分 merged / failed / unsure、输出里的令牌打码。用假的 subprocess.run，不碰钥匙串和 GitHub。"""
+    REPO = "Natsukashii1997/dt-sandbox"
+    TOKEN = "github_pat_TESTSECRET"
 
     @classmethod
     def setUpClass(cls):
@@ -561,53 +564,117 @@ class CustodyCredential(unittest.TestCase):
         import merge_act
         cls.ma = merge_act
 
-    def fake_security(self, code=0, out="github_pat_TEST\n"):
-        seen = []
+    def card(self, repo=None):
+        return {"pr": 5, "repo": repo or self.REPO, "head": "a" * 40}
+
+    def fake(self, sec_code=0, sec_out=None, sec_exc=None, merge_code=0, merge_err="", merge_timeout=False,
+             view=None, view_code=0):
+        """按命令分派：security 读钥匙串、gh pr merge、gh pr view。记下每次调用的命令和 env。"""
+        calls = []
+        view = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "m" * 40}} if view is None else view
 
         def run(cmd, **kw):
-            seen.append(cmd)
-            return subprocess.CompletedProcess(cmd, code, stdout=out, stderr="")
-        return run, seen
+            calls.append((cmd, kw.get("env")))
+            if cmd[0] == self.ma.SECURITY:
+                if sec_exc:
+                    raise sec_exc
+                return subprocess.CompletedProcess(cmd, sec_code, stdout=self.TOKEN + "\n" if sec_out is None else sec_out, stderr="")
+            if cmd[1:3] == ["pr", "merge"]:
+                if merge_timeout:
+                    raise subprocess.TimeoutExpired(cmd, 1)
+                return subprocess.CompletedProcess(cmd, merge_code, stdout="", stderr=merge_err)
+            if cmd[1:3] == ["pr", "view"]:
+                return subprocess.CompletedProcess(cmd, view_code, stdout=json.dumps(view), stderr="")
+            raise AssertionError(cmd)
+        return run, calls
 
-    def test_reads_keychain_and_sets_only_gh_token(self):
-        run, seen = self.fake_security()
-        env_before = {"GITHUB_TOKEN": "other", "HERMES_HOME": "/h", "PATH": "/bin"}
-        with unittest.mock.patch.dict(os.environ, env_before, clear=True), \
+    def go(self, run, card=None, env=None):
+        with unittest.mock.patch.dict(os.environ, env or {"PATH": "/usr/bin"}, clear=True), \
                 unittest.mock.patch.object(self.ma.subprocess, "run", run):
-            env = self.ma.custody_merge_env("Natsukashii1997/dt-sandbox")
-        self.assertEqual(seen, [["/usr/bin/security", "find-generic-password", "-s", "dt-merge-executor",
-                                 "-a", "dt-sandbox", "-w"]])
-        self.assertEqual(env["GH_TOKEN"], "github_pat_TEST")
-        self.assertNotIn("GITHUB_TOKEN", env)
-        self.assertNotIn("HERMES_HOME", env)
-        self.assertEqual(env["PATH"], "/bin")
+            return self.ma.run_custody_merge(card or self.card())
 
-    def test_missing_keychain_item_stops(self):
-        run, _ = self.fake_security(code=44, out="")
-        with unittest.mock.patch.object(self.ma.subprocess, "run", run):
+    def gh_calls(self, calls):
+        return [c for c in calls if c[0][0] != self.ma.SECURITY]
+
+    def test_reads_keychain_by_full_repo_and_merges(self):
+        run, calls = self.fake()
+        out = self.go(run)
+        self.assertEqual(calls[0][0], [self.ma.SECURITY, "find-generic-password", "-s", "dt-merge-executor",
+                                       "-a", "dt-sandbox", "-w"])
+        self.assertEqual(out["status"], "merged")
+        self.assertEqual(out["identity"], "custody")
+        self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)], [["pr", "merge"], ["pr", "view"]])
+
+    def test_unregistered_or_other_owner_repo_stops_before_keychain(self):
+        for repo in ("Natsukashii1997/digital-twin", "someone-else/dt-sandbox"):
+            run, calls = self.fake()
             with self.assertRaises(self.ma.Stop) as c:
-                self.ma.custody_merge_env("Natsukashii1997/dt-sandbox")
-        self.assertIn("钥匙串里没有合并执行器令牌", c.exception.why)
+                self.go(run, self.card(repo))
+            self.assertEqual(calls, [])
+            self.assertIn("没有托管合并凭据", c.exception.why)
 
-    def test_unregistered_repo_stops_without_reading_keychain(self):
-        run, seen = self.fake_security()
+    def test_keychain_failures_stop_without_any_gh_call(self):
+        cases = [dict(sec_code=44, sec_out=""), dict(sec_out="   \n"),
+                 dict(sec_exc=FileNotFoundError()), dict(sec_exc=subprocess.TimeoutExpired("security", 30))]
+        for kw in cases:
+            run, calls = self.fake(**kw)
+            with self.assertRaises(self.ma.Stop):
+                self.go(run)
+            self.assertEqual(self.gh_calls(calls), [], kw)
+
+    def test_minimal_env_ignores_host_credentials_and_hosts(self):
+        host = {"PATH": "/evil/bin:/usr/bin", "GH_HOST": "evil.example.com", "GH_ENTERPRISE_TOKEN": "e1",
+                "GITHUB_ENTERPRISE_TOKEN": "e2", "GITHUB_TOKEN": "host", "GH_TOKEN": "host2", "GH_CONFIG_DIR": "/host/gh",
+                "GH_DEBUG": "api", "HERMES_HOME": "/h", "HTTPS_PROXY": "http://127.0.0.1:8086", "HOME": "/Users/x"}
+        run, calls = self.fake()
+        self.go(run, env=host)
+        envs = [e for _, e in self.gh_calls(calls)]
+        self.assertEqual(len(envs), 2)
+        self.assertIs(envs[0], envs[1])                       # 写和回读用同一个受控环境
+        e = envs[0]
+        self.assertEqual(e["GH_TOKEN"], self.TOKEN)
+        self.assertEqual(e["GH_HOST"], "github.com")
+        self.assertEqual(e["PATH"], self.ma.CUSTODY_PATH)
+        self.assertNotEqual(e["GH_CONFIG_DIR"], "/host/gh")
+        self.assertFalse(Path(e["GH_CONFIG_DIR"]).exists())    # 临时空配置目录用完即删
+        for k in ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GH_DEBUG", "HERMES_HOME"):
+            self.assertNotIn(k, e)
+        self.assertEqual(e["HTTPS_PROXY"], "http://127.0.0.1:8086")
+        self.assertEqual(e["HOME"], "/Users/x")
+
+    def test_status_matrix(self):
+        merged = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "m" * 40}}
+        open_ = {"state": "OPEN", "headRefOid": "a" * 40, "mergeCommit": None}
+        cases = [
+            (dict(merge_code=0, view=merged), "merged"),
+            (dict(merge_code=1, merge_err="Cannot update this protected ref", view=open_), "failed"),
+            (dict(merge_code=1, view=merged), "unsure"),                     # 命令失败却已合并：可能是别人合的
+            (dict(merge_code=0, view=open_), "unsure"),
+            (dict(merge_timeout=True, view=merged), "unsure"),
+            (dict(merge_timeout=True, view=open_), "unsure"),
+            (dict(merge_code=0, view_code=1), "unsure"),                     # 回读失败
+            (dict(merge_code=0, view={**merged, "headRefOid": "b" * 40}), "unsure"),
+        ]
+        for kw, want in cases:
+            run, calls = self.fake(**kw)
+            out = self.go(run)
+            self.assertEqual(out["status"], want, kw)
+            self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)].count(["pr", "merge"]), 1, kw)  # 不重发
+
+    def test_token_in_gh_output_is_redacted(self):
+        run, _ = self.fake(merge_code=1, merge_err=f"bad credentials for {self.TOKEN}",
+                           view={"state": "OPEN", "headRefOid": "a" * 40})
+        out = self.go(run)
+        self.assertNotIn(self.TOKEN, json.dumps(out))
+        self.assertIn("***", out["why"])
+
+    def test_owner_merge_uses_local_login(self):
+        run, calls = self.fake()
         with unittest.mock.patch.object(self.ma.subprocess, "run", run):
-            with self.assertRaises(self.ma.Stop) as c:
-                self.ma.custody_merge_env("Natsukashii1997/digital-twin")
-        self.assertEqual(seen, [])
-        self.assertIn("没有托管合并凭据", c.exception.why)
-
-    def test_run_merge_passes_env_and_default_is_local_login(self):
-        seen = []
-
-        def run(cmd, **kw):
-            seen.append(kw.get("env"))
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        card = {"pr": 5, "repo": "o/dt-sandbox", "head": "a" * 40}
-        with unittest.mock.patch.object(self.ma.subprocess, "run", run):
-            self.ma.run_merge(card)
-            self.ma.run_merge(card, env={"GH_TOKEN": "x"})
-        self.assertEqual(seen, [None, {"GH_TOKEN": "x"}])
+            out = self.ma.run_owner_merge(self.card())
+        self.assertEqual(out["identity"], "owner")
+        self.assertEqual([(c[0][1:3], c[1]) for c in calls], [(["pr", "merge"], None)])
+        self.assertEqual(out["returncode"], 0)
 
 
 if __name__ == "__main__":

@@ -26,8 +26,9 @@
 环境变量同 merge_officer.py，另有 DT_MERGE_RUNS（测试运行目录，默认 DigitalTwin/merge-runs）、
 DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）。
 
-托管合并（#136）的凭据（#132）：custody_merge_env 从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
-内容、拉取请求读写），只放进合并子进程的 GH_TOKEN；取不到就停，不退回常浩本人的 gh 登录。卡片合并（B 档）照旧用本机 gh 登录。
+托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
+内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
+不退回常浩本人的 gh 登录；返回 merged / failed / unsure，unsure 只做只读对账、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
 """
 import argparse
 import contextlib
@@ -40,6 +41,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -63,7 +65,10 @@ UNCHANGED = "PR 没有任何改动"
 STEP = ["核对版本"]                                    # 现在做到哪一步，失败提示开头说卡在这里
 UNSURE = "不确定合上没有"
 SECURITY = "/usr/bin/security"
-CUSTODY_CRED = {"dt-sandbox": ("dt-merge-executor", "dt-sandbox")}  # 托管合并凭据（#132）：仓库名 → 钥匙串 (service, account)
+CUSTODY_CRED = {"Natsukashii1997/dt-sandbox": ("dt-merge-executor", "dt-sandbox")}  # 托管合并凭据（#132）：完整仓库名 → 钥匙串 (service, account)
+CUSTODY_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+CUSTODY_PASS = ("HOME", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",  # 托管合并子进程只继承这些
+                "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "all_proxy", "no_proxy")
 
 
 def at(step):
@@ -342,13 +347,11 @@ def sync_main(path, main):
     return f"主目录已拉齐到 {git(path, 'rev-parse', '--short', 'HEAD')}"
 
 
-def custody_merge_env(repo):
-    """托管合并用的子进程环境：GH_TOKEN 换成合并执行器的专用令牌（#132）。令牌只进环境，不打印、不落盘。
-    仓库没登记、钥匙串读不到都停下，不退回常浩本人的 gh 登录。"""
-    name = repo.split("/")[-1]
-    if name not in CUSTODY_CRED:
-        raise Stop(f"{name} 没有托管合并凭据（只登记了 {'、'.join(CUSTODY_CRED)}）", "托管合并只做沙盒仓库，交给常浩决定")
-    service, account = CUSTODY_CRED[name]
+def custody_token(repo):
+    """托管合并凭据（#132）：按完整仓库名从钥匙串取合并执行器的专用令牌。没登记的仓库不读钥匙串；读不到、为空都停。"""
+    if repo not in CUSTODY_CRED:
+        raise Stop(f"{repo} 没有托管合并凭据（只登记了 {'、'.join(CUSTODY_CRED)}）", "托管合并只做登记过的沙盒仓库，交给常浩决定")
+    service, account = CUSTODY_CRED[repo]
     try:
         r = subprocess.run([SECURITY, "find-generic-password", "-s", service, "-a", account, "-w"],
                            capture_output=True, text=True, timeout=30)
@@ -358,21 +361,66 @@ def custody_merge_env(repo):
     if r.returncode != 0 or not token:
         raise Stop(f"钥匙串里没有合并执行器令牌（{service} / {account}）",
                    "常浩按 docs/DT-ORC/migration/2026-11-10-合并隔离实测.md 重新生成并存入钥匙串")
-    env = strip_env()
-    env.pop("GITHUB_TOKEN", None)
-    env["GH_TOKEN"] = token
+    return token
+
+
+def custody_env(token, config_dir):
+    """托管合并子进程的最小环境：不继承宿主的 GH_* / GITHUB_* 等变量，只带网络要用的代理与证书设置；
+    主机固定 github.com，凭据只有 GH_TOKEN，配置目录是空的临时目录（读不到本机 gh 登录），不交互、不调试输出。"""
+    env = {k: os.environ[k] for k in CUSTODY_PASS if k in os.environ}
+    env.update(PATH=CUSTODY_PATH, GH_HOST="github.com", GH_TOKEN=token, GH_CONFIG_DIR=str(config_dir),
+               GH_PROMPT_DISABLED="1", GH_NO_UPDATE_NOTIFIER="1", NO_COLOR="1")
     return env
 
 
-def run_merge(card, env=None):
-    """发合并命令，返回人话原因（输出最后一行）。env 为空用本机 gh 登录（卡片合并）；托管合并传 custody_merge_env 的结果。
-    合并命令不重试：没收到回应也可能已经合上，以回读为准。"""
+def _gh_merge(card, env, secret=None):
+    """发一次合并命令（不重试：没收到回应也可能已经合上，以回读为准），返回结构化结果；输出里出现令牌就打码。"""
+    res = {"returncode": None, "timed_out": False, "why": ""}
     try:
         mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
                              "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
-        return ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
+        res["returncode"] = mr.returncode
+        res["why"] = ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
     except subprocess.TimeoutExpired:
-        return f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
+        res["timed_out"] = True
+        res["why"] = f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
+    if secret:
+        res["why"] = res["why"].replace(secret, "***")
+    return res
+
+
+def run_owner_merge(card):
+    """卡片合并（B 档，常浩本人点的）：用本机 gh 登录。托管合并不能走这里，用 run_custody_merge。"""
+    return {**_gh_merge(card, None), "identity": "owner"}
+
+
+def run_custody_merge(card):
+    """托管合并（#136 调用）：凭据在函数里强制取，调用方选不了身份；取不到就停，不发任何写命令、不退回本机 gh 登录。
+    写和回读用同一个受控环境。status：merged（命令成功且回读已合并、HEAD 对得上）、failed（命令失败且回读仍开着）、
+    unsure（超时、命令失败但已合并、命令成功但没合并、HEAD 对不上、回读失败）——unsure 只做只读对账，不重发合并。"""
+    token = custody_token(card["repo"])
+    out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"]}
+    with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg:
+        env = custody_env(token, cfg)
+        res = _gh_merge(card, env, token)
+        try:
+            r = subprocess.run([mo.GH, "pr", "view", str(card["pr"]), "--repo", card["repo"], "--json",
+                                "state,mergeCommit,headRefOid"], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
+            after = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            after = None
+    out.update(res)
+    state = (after or {}).get("state")
+    if after and after.get("headRefOid") != card["head"]:
+        out["status"] = "unsure"
+    elif res["returncode"] == 0 and state == "MERGED":
+        out["status"] = "merged"
+    elif res["returncode"] not in (None, 0) and state == "OPEN":
+        out["status"] = "failed"
+    else:
+        out["status"] = "unsure"
+    out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
+    return out
 
 
 def cmd_merge(ref):
@@ -398,7 +446,7 @@ def cmd_merge(ref):
         tested = f"测试通过，日志在 {run / 'test.log'}"
         check_pr(card, rules, main)                   # 测试要几分钟，合并前再读一次
     at("执行合并")
-    why = run_merge(card)
+    why = run_owner_merge(card)["why"]
     at("合并后回读")
     try:
         after = gh_read(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,mergeCommit"], "合并后回读")
