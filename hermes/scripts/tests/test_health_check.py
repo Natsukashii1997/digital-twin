@@ -58,7 +58,7 @@ class HealthCheckTest(unittest.TestCase):
     def test_main_fallback_keeps_original_wording(self):
         self.usage("a", "feishu", "deepseek", "", 8)
         self.assertEqual(hc.check_fallback(DAY),
-                         ["昨天有 8 次主对话调用走了回退模型 deepseek-flash（Codex 额度或登录可能有问题）"])
+                         ["昨天有 8 次主对话调用走了回退模型 deepseek-flash（主模型额度、登录或网络可能有问题）"])
 
     def test_aux_fallback_listed_by_task(self):
         self.usage("a", "feishu", "deepseek", "title_generation", 2)

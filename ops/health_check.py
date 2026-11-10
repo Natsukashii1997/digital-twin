@@ -72,7 +72,7 @@ def check_fallback(day=None):
         return [f"读不了 Hermes 会话库（{e}）"]
     n = sum(c for t, c in rows if not t)
     aux = [f"{t} {c} 次" for t, c in rows if t and c]
-    issues = [f"昨天有 {n} 次主对话调用走了回退模型 deepseek-flash（Codex 额度或登录可能有问题）"] if n else []
+    issues = [f"昨天有 {n} 次主对话调用走了回退模型 deepseek-flash（主模型额度、登录或网络可能有问题）"] if n else []
     if aux:
         issues.append(f"昨天辅助任务走了回退模型 deepseek-flash：{'、'.join(aux)}")
     return issues
