@@ -7,7 +7,8 @@
     周报读本周各篇新日报、上一篇新周报的「六、下周焦点」。
 输出：Markdown 到 stdout，第一行是「# 日报材料」「# 周报材料」，或「SKIP：原因」（已写过、周末没动静）。
 飞书读不了时输出「取数失败：原因」，退出码 1。
-开跑前先等主模型网络通道（#140）：经进程环境里的代理请求 chatgpt.com，每 15 秒试一次，最多等
+开跑前先等主模型网络通道（#140）：经进程环境里的代理请求主模型的上游地址（按 Hermes 配置的 model.provider：
+Claude 走 api.anthropic.com，Codex 走 chatgpt.com；认不出的提供方不等），每 15 秒试一次，最多等
 DT_MODEL_WAIT_SECONDS 秒（默认 300，0 关闭）；到时间仍不通照常继续，交给 Hermes 的回退。
 每次等待记一行到证据目录的 model-route-wait.jsonl，不写 stdout（stdout 是给模型的材料）。
 """
@@ -37,7 +38,9 @@ CLIP = 300          # 每条消息最多保留多少字
 WEEKDAYS = "一二三四五六日"
 DAILY_HEAD = re.compile(r"^## 📅 (\d{4}-\d{2}-\d{2})", re.M)
 WEEKLY_HEAD = re.compile(r"^## 第(\d+)周 (\d{4})\.\d+（(\d{4})\.(\d{2})\.(\d{2})", re.M)
-MODEL_URL = os.environ.get("DT_MODEL_PROBE_URL", "https://chatgpt.com/")   # 主模型 openai-codex 的地址
+HERMES_CONFIG = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser() / "config.yaml"
+PROBE_BY_PROVIDER = (("claude", "https://api.anthropic.com/"), ("anthropic", "https://api.anthropic.com/"),
+                     ("openai-codex", "https://chatgpt.com/"))   # 提供方名里含这些字就用对应地址；换执行方不用改代码
 WAIT_LOG = Path(os.environ.get("DT_REPORT_EVIDENCE", "~/Library/Application Support/DigitalTwin/evidence/reports")
                 ).expanduser() / "model-route-wait.jsonl"
 WAIT_INTERVAL = 15  # 秒
@@ -47,10 +50,25 @@ class Fail(Exception):
     pass
 
 
-def model_reachable(url=None, timeout=10):
-    """主模型地址能不能连上：收到任何 HTTP 响应（含 403 等）都算通。返回 (通不通, 错误)。"""
+def model_probe_url():
+    """要探测的地址：DT_MODEL_PROBE_URL 优先，否则按 Hermes 配置 model.provider 查表；认不出返回 None。"""
+    if os.environ.get("DT_MODEL_PROBE_URL"):
+        return os.environ["DT_MODEL_PROBE_URL"]
     try:
-        urllib.request.urlopen(urllib.request.Request(url or MODEL_URL, method="HEAD"), timeout=timeout).close()
+        m = re.search(r"^model:[ \t]*\n(?:[ \t]+.*\n)*?[ \t]+provider:[ \t]*['\"]?([\w.-]+)", HERMES_CONFIG.read_text(encoding="utf-8"), re.M)
+    except OSError:
+        return None
+    provider = m.group(1).lower() if m else ""
+    return next((url for key, url in PROBE_BY_PROVIDER if key in provider), None) if provider else None
+
+
+def model_reachable(url=None, timeout=10):
+    """主模型地址能不能连上：收到任何 HTTP 响应（含 403 等）都算通。返回 (通不通, 错误)；没有可探测的地址就不等。"""
+    url = url or model_probe_url()
+    if not url:
+        return True, "不等：主模型提供方没有对应的探测地址"
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=timeout).close()
     except urllib.error.HTTPError:
         return True, ""
     except Exception as e:   # URLError、超时、连接被拒、代理回坏响应：一律算不通，探测本身不能让取数失败

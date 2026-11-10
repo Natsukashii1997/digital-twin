@@ -335,14 +335,45 @@ class ModelRouteWait(unittest.TestCase):
     def test_probe_classifies_responses(self):
         err = urllib.error.HTTPError("https://chatgpt.com/", 403, "Forbidden", {}, None)
         with mock.patch("urllib.request.urlopen", side_effect=err):
-            self.assertEqual(report_data.model_reachable(), (True, ""))   # 有 HTTP 响应就是通
+            self.assertEqual(report_data.model_reachable("https://x.test/"), (True, ""))   # 有 HTTP 响应就是通
         for exc in (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")), TimeoutError("timed out"),
                     OSError("Tunnel connection failed: 502 Bad Gateway"), RuntimeError("怪响应")):
             with mock.patch("urllib.request.urlopen", side_effect=exc):
-                ok, why = report_data.model_reachable()
+                ok, why = report_data.model_reachable("https://x.test/")
                 self.assertFalse(ok)
                 self.assertIn(type(exc).__name__, why)
 
+    def config(self, text):
+        cfg = Path(self.tmp.name) / "config.yaml"
+        cfg.write_text(text, encoding="utf-8")
+        return mock.patch.object(report_data, "HERMES_CONFIG", cfg)
+
+    def test_probe_url_follows_main_provider(self):
+        cases = {
+            "model:\n  default: claude-opus-5-5[1m]\n  provider: claude-subscription-directsdk-experimental\n": "https://api.anthropic.com/",
+            "model:\n  default: gpt-6.1-sol\n  provider: openai-codex\n  base_url: https://chatgpt.com/backend-api/codex\n": "https://chatgpt.com/",
+            "model:\n  provider: 'anthropic'\n": "https://api.anthropic.com/",
+            "model:\n  provider: deepseek\nfallback_model:\n  provider: openai-codex\n": None,   # 只看 model 段
+            "fallback_model:\n  provider: openai-codex\n": None,
+        }
+        with mock.patch.dict(os.environ, {"DT_MODEL_PROBE_URL": ""}):
+            for text, want in cases.items():
+                with self.config(text):
+                    self.assertEqual(report_data.model_probe_url(), want, text)
+            with mock.patch.object(report_data, "HERMES_CONFIG", Path(self.tmp.name) / "missing.yaml"):
+                self.assertIsNone(report_data.model_probe_url())
+        with mock.patch.dict(os.environ, {"DT_MODEL_PROBE_URL": "http://127.0.0.1:9/"}), self.config("model:\n  provider: openai-codex\n"):
+            self.assertEqual(report_data.model_probe_url(), "http://127.0.0.1:9/")   # 显式指定优先
+
+    def test_unknown_provider_does_not_wait(self):
+        with mock.patch.dict(os.environ, {"DT_MODEL_PROBE_URL": ""}), self.config("model:\n  provider: deepseek\n"), \
+                mock.patch("urllib.request.urlopen") as urlopen:
+            report_data.wait_model_route("daily", limit=300, sleep=self.fc.sleep, clock=self.fc.clock)
+        urlopen.assert_not_called()
+        self.assertEqual(self.fc.sleeps, [])
+        r, = self.records()
+        self.assertTrue(r["ok"])
+        self.assertIn("没有对应的探测地址", r["error"])
 
 class Status403(BaseHTTPRequestHandler):
     def do_HEAD(self):
