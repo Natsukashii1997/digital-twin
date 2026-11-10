@@ -8,9 +8,10 @@
 
 ---
 
-## 2026-11-10 晚 · 亚古兽核查与修正（niuma-home#53、#54；#147、#148）
+## 2026-11-10 晚 · 亚古兽核查与修正（niuma-home#53、#54；#147、#148，均已合并）
 
-- **唯一的下一步**：常浩说「合并」后合并 niuma-home#54 和 #148，再把 `ops/health_check.py` 装到 `~/Library/Application Support/DigitalTwin/bin/`、`cmp` 核对（常浩定：全部修完再一起合并）。
+- **已合并并安装**（常浩说「合并」）：niuma-home#54 `f859bc9`（#53 关闭，规程安装副本与 main `cmp` 一致）；#148 `4c33acb`（#147 关闭），`ops/health_check.py` 已装到 `DigitalTwin/bin/`，`cmp` 一致，旧版备份在 `evidence/agumon-hardening-20261110/health_check.py.before`；用 launchd 同款 `/usr/bin/python3` 在安装位置 `--dry-run` 正常（只报猛鬼兽昨天回退 16 次、1 条定时任务失败）。没有 kickstart 巡检任务，免得真发一条飞书；第一次正式运行是 11-11 09:45。两边 worktree 和分支已清理，主目录已拉齐（niuma-home 主目录另有他人未提交的 `docs/策略规则/README.md`，没动）。
+- **唯一的下一步**：11-11 09:45 巡检后看 `evidence/health/2026-11.log` 当天一行，确认新版在 launchd 下跑通。
 - **已改并生效**（常浩「按建议先做」「都按方案做」；改前改后在 `evidence/agumon-hardening-20261110/`；`config.yaml`、`profile.yaml` 是直接改的 YAML，没走 `hermes config set`，已自备份）：
   - `command_allowlist` 删掉 `recursive delete`、`delete in root path`。这两项是 14:51、15:39 常浩在飞书审批卡点「总是允许」写进去的，猛鬼兽没有；现在两只的放行清单一致。
   - `profile.yaml` 描述去掉过期的「不接触常浩个人记忆、Obsidian、ORCA」，改成记忆分开、本机能力与猛鬼兽一致。
