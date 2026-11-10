@@ -25,6 +25,9 @@
                                              卡片按钮（#78）：Hermes 的 /card 插件在后台调用；进度和结果直接发到常浩私聊
 环境变量同 merge_officer.py，另有 DT_MERGE_RUNS（测试运行目录，默认 DigitalTwin/merge-runs）、
 DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）。
+
+托管合并（#136）的凭据（#132）：custody_merge_env 从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
+内容、拉取请求读写），只放进合并子进程的 GH_TOKEN；取不到就停，不退回常浩本人的 gh 登录。卡片合并（B 档）照旧用本机 gh 登录。
 """
 import argparse
 import contextlib
@@ -59,6 +62,8 @@ GONE_ERR = re.compile(r"no pull requests found|could not resolve to a pullreques
 UNCHANGED = "PR 没有任何改动"
 STEP = ["核对版本"]                                    # 现在做到哪一步，失败提示开头说卡在这里
 UNSURE = "不确定合上没有"
+SECURITY = "/usr/bin/security"
+CUSTODY_CRED = {"dt-sandbox": ("dt-merge-executor", "dt-sandbox")}  # 托管合并凭据（#132）：仓库名 → 钥匙串 (service, account)
 
 
 def at(step):
@@ -337,6 +342,39 @@ def sync_main(path, main):
     return f"主目录已拉齐到 {git(path, 'rev-parse', '--short', 'HEAD')}"
 
 
+def custody_merge_env(repo):
+    """托管合并用的子进程环境：GH_TOKEN 换成合并执行器的专用令牌（#132）。令牌只进环境，不打印、不落盘。
+    仓库没登记、钥匙串读不到都停下，不退回常浩本人的 gh 登录。"""
+    name = repo.split("/")[-1]
+    if name not in CUSTODY_CRED:
+        raise Stop(f"{name} 没有托管合并凭据（只登记了 {'、'.join(CUSTODY_CRED)}）", "托管合并只做沙盒仓库，交给常浩决定")
+    service, account = CUSTODY_CRED[name]
+    try:
+        r = subprocess.run([SECURITY, "find-generic-password", "-s", service, "-a", account, "-w"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Stop(f"读不了钥匙串（{type(e).__name__}）", "在电脑上检查钥匙串")
+    token = (r.stdout or "").strip()
+    if r.returncode != 0 or not token:
+        raise Stop(f"钥匙串里没有合并执行器令牌（{service} / {account}）",
+                   "常浩按 docs/DT-ORC/migration/2026-11-10-合并隔离实测.md 重新生成并存入钥匙串")
+    env = strip_env()
+    env.pop("GITHUB_TOKEN", None)
+    env["GH_TOKEN"] = token
+    return env
+
+
+def run_merge(card, env=None):
+    """发合并命令，返回人话原因（输出最后一行）。env 为空用本机 gh 登录（卡片合并）；托管合并传 custody_merge_env 的结果。
+    合并命令不重试：没收到回应也可能已经合上，以回读为准。"""
+    try:
+        mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
+                             "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
+        return ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
+    except subprocess.TimeoutExpired:
+        return f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
+
+
 def cmd_merge(ref):
     card = find_card(ref)
     rules = mo.load_rules()
@@ -360,12 +398,7 @@ def cmd_merge(ref):
         tested = f"测试通过，日志在 {run / 'test.log'}"
         check_pr(card, rules, main)                   # 测试要几分钟，合并前再读一次
     at("执行合并")
-    try:                                              # 合并命令不重试：没收到回应也可能已经合上，以回读为准
-        mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
-                             "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT)
-        why = ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
-    except subprocess.TimeoutExpired:
-        why = f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
+    why = run_merge(card)
     at("合并后回读")
     try:
         after = gh_read(["pr", "view", str(card["pr"]), "--repo", card["repo"], "--json", "state,mergeCommit"], "合并后回读")

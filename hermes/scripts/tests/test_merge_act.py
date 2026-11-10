@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -549,6 +550,64 @@ class MergeAct(unittest.TestCase):
         self.assertIn("【等你说退回原因】", self.cli(ACT, "cards").stdout)
         self.assertNotIn(["pr", "comment"], [c[:2] for c in self.calls()])    # 没原因不留言
         self.assertEqual(self.ledger()[0]["owner"], "")
+
+
+class CustodyCredential(unittest.TestCase):
+    """托管合并凭据（#132）：从钥匙串取合并执行器令牌，只放进合并子进程；取不到就停，不退回本机 gh 登录。"""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(HERE.parent))
+        import merge_act
+        cls.ma = merge_act
+
+    def fake_security(self, code=0, out="github_pat_TEST\n"):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return subprocess.CompletedProcess(cmd, code, stdout=out, stderr="")
+        return run, seen
+
+    def test_reads_keychain_and_sets_only_gh_token(self):
+        run, seen = self.fake_security()
+        env_before = {"GITHUB_TOKEN": "other", "HERMES_HOME": "/h", "PATH": "/bin"}
+        with unittest.mock.patch.dict(os.environ, env_before, clear=True), \
+                unittest.mock.patch.object(self.ma.subprocess, "run", run):
+            env = self.ma.custody_merge_env("Natsukashii1997/dt-sandbox")
+        self.assertEqual(seen, [["/usr/bin/security", "find-generic-password", "-s", "dt-merge-executor",
+                                 "-a", "dt-sandbox", "-w"]])
+        self.assertEqual(env["GH_TOKEN"], "github_pat_TEST")
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertNotIn("HERMES_HOME", env)
+        self.assertEqual(env["PATH"], "/bin")
+
+    def test_missing_keychain_item_stops(self):
+        run, _ = self.fake_security(code=44, out="")
+        with unittest.mock.patch.object(self.ma.subprocess, "run", run):
+            with self.assertRaises(self.ma.Stop) as c:
+                self.ma.custody_merge_env("Natsukashii1997/dt-sandbox")
+        self.assertIn("钥匙串里没有合并执行器令牌", c.exception.why)
+
+    def test_unregistered_repo_stops_without_reading_keychain(self):
+        run, seen = self.fake_security()
+        with unittest.mock.patch.object(self.ma.subprocess, "run", run):
+            with self.assertRaises(self.ma.Stop) as c:
+                self.ma.custody_merge_env("Natsukashii1997/digital-twin")
+        self.assertEqual(seen, [])
+        self.assertIn("没有托管合并凭据", c.exception.why)
+
+    def test_run_merge_passes_env_and_default_is_local_login(self):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(kw.get("env"))
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        card = {"pr": 5, "repo": "o/dt-sandbox", "head": "a" * 40}
+        with unittest.mock.patch.object(self.ma.subprocess, "run", run):
+            self.ma.run_merge(card)
+            self.ma.run_merge(card, env={"GH_TOKEN": "x"})
+        self.assertEqual(seen, [None, {"GH_TOKEN": "x"}])
 
 
 if __name__ == "__main__":
