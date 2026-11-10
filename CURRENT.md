@@ -11,7 +11,13 @@
 ## 2026-11-11 凌晨 · 影子合并官暂停；猛鬼兽只读核查
 
 - **已暂停**（常浩要求「把猛鬼兽的影子合并官的 cron 关闭」）：`hermes cron pause 8994fb76d03e`，回读为 `[paused]`；任务没删，`hermes cron resume 8994fb76d03e` 可恢复。任务表改前改后在 `evidence/mengguishou-review-20261111/`。影响：飞书不再有新的 PR 卡片，「引用卡片回合并」暂时没有新卡可用；已发卡片的按钮（merge-buttons 插件）仍可用；一致率统计停在暂停前。工程流程.md 第 5 节、AGENTS 里对合并官的描述未改。
-- **猛鬼兽核查结论**（只读，未改）：用户画像记忆 USER.md 已用 1360 / 1375 字，含重复条目；人设三处口径不一致（SOUL、`personalities.work-worn`、USER.md）；`obsidian` 技能开着，可直接改 Vault；MEMORY.md 停在 10-22 的配置；`web_extract` 后端只能搜不能抓正文。待常浩选做哪几项。
+- **猛鬼兽优化（常浩「按建议先做」，备份和改后都在 `evidence/mengguishou-review-20261111/`）**：
+  - USER.md 删掉一条重复条目，P-08～P-15 长清单压成 Vault 指针（只留每轮都用的 P-11、P-14）：1360 → 943 字（上限 1375）。
+  - MEMORY.md 第一条（10-22 的配置快照，含已过期的「审批 smart」）改成「配置以 `hermes config` / config.yaml 现查为准」：685 → 551 字。
+  - 规程 HERMES.md 第 1 节加「网页」：`web_extract` 抓不了正文，用浏览器工具或 agent-reach（#149，PR #150 未合并，已先装、`cmp` 一致）。
+  - **更正**：核查时说 `obsidian` 技能开着是误判，它本来就禁用（读配置时过滤掉了列表行）。中途 `hermes config set skills.disabled` 把列表覆盖成只剩 obsidian，00:24:58～00:25:30 之间 claude-code、codex 两个技能处于启用，期间无对话、无任务；已恢复，`config.yaml` 与改前逐字一致。教训：`hermes config set` 设列表是整份替换，先读全列表。
+  - 重启两次（`launchctl kickstart -k`）：PID 75093 → 63206 → 63399，00:25:30 `✓ feishu connected`，三个技能回读均为 disabled。
+  - 没改：人设三处口径（SOUL、`personalities.work-worn`、USER.md）不一致，等常浩单独定。
 - **待观察**：11-11 07:30 日报是第一次用 Claude 跑（11-10 失败是旧模型 gpt 单次调用约 300 秒、会话租约失效被中断）。
 
 ## 2026-11-10 晚 · 亚古兽核查与修正（niuma-home#53、#54；#147、#148，均已合并）
