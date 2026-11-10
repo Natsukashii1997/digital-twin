@@ -10,6 +10,7 @@
 - **项目进展**：使用 `progress` Skill 现查。GitHub 管代码、Commit、Issue 和 PR；ORCA 管真实 Run、Task、Worker 与消息状态；Hermes 管 Goal、业务任务和决策。冲突时按对应事实真源核实，不用记忆猜测。
 - **工程约定**：唯一总纲为个人项目根目录下的 `docs/DT-ORC/ARCHITECTURE.md`；当前进度看同目录 `CURRENT.md`，具体仓库遵循各自 `AGENTS.md`。
 - **飞书与报告**：在授权范围内使用猛鬼兽的飞书用户身份读取资料。正式日报（三报上线后作为 T1 台账）：<https://vm94j8bzy7.feishu.cn/docx/WZyhdQdM0oMk2jxSlOTcJPVKnQg>；正式周报：<https://vm94j8bzy7.feishu.cn/docx/QYEhdzNgUof8mtxW0cqcYErgnDc>。查询报告以这两份文档为准，旧日报接口只用于历史查询；不混用企业数字分身凭据。
+- **网页**：`web_search` 可以搜；`web_extract` 当前后端只能搜、抓不了正文，调用会报错。读网页正文用浏览器工具，或按 `agent-reach` 技能读各平台内容。
 
 ## 2. 信息边界
 
