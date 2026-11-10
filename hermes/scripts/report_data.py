@@ -7,6 +7,9 @@
     周报读本周各篇新日报、上一篇新周报的「六、下周焦点」。
 输出：Markdown 到 stdout，第一行是「# 日报材料」「# 周报材料」，或「SKIP：原因」（已写过、周末没动静）。
 飞书读不了时输出「取数失败：原因」，退出码 1。
+开跑前先等主模型网络通道（#140）：经进程环境里的代理请求 chatgpt.com，每 15 秒试一次，最多等
+DT_MODEL_WAIT_SECONDS 秒（默认 300，0 关闭）；到时间仍不通照常继续，交给 Hermes 的回退。
+每次等待记一行到证据目录的 model-route-wait.jsonl，不写 stdout（stdout 是给模型的材料）。
 """
 import argparse
 import datetime as dt
@@ -15,6 +18,9 @@ import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
@@ -31,10 +37,52 @@ CLIP = 300          # 每条消息最多保留多少字
 WEEKDAYS = "一二三四五六日"
 DAILY_HEAD = re.compile(r"^## 📅 (\d{4}-\d{2}-\d{2})", re.M)
 WEEKLY_HEAD = re.compile(r"^## 第(\d+)周 (\d{4})\.\d+（(\d{4})\.(\d{2})\.(\d{2})", re.M)
+MODEL_URL = os.environ.get("DT_MODEL_PROBE_URL", "https://chatgpt.com/")   # 主模型 openai-codex 的地址
+WAIT_LOG = Path(os.environ.get("DT_REPORT_EVIDENCE", "~/Library/Application Support/DigitalTwin/evidence/reports")
+                ).expanduser() / "model-route-wait.jsonl"
+WAIT_INTERVAL = 15  # 秒
 
 
 class Fail(Exception):
     pass
+
+
+def model_reachable(url=None, timeout=10):
+    """主模型地址能不能连上：收到任何 HTTP 响应（含 403 等）都算通。返回 (通不通, 错误)。"""
+    try:
+        urllib.request.urlopen(urllib.request.Request(url or MODEL_URL, method="HEAD"), timeout=timeout).close()
+    except urllib.error.HTTPError:
+        return True, ""
+    except Exception as e:   # URLError、超时、连接被拒、代理回坏响应：一律算不通，探测本身不能让取数失败
+        return False, f"{type(e).__name__}: {e}"[:200]
+    return True, ""
+
+
+def wait_model_route(kind, limit=None, probe=model_reachable, sleep=time.sleep, clock=time.monotonic):
+    """开机 / 唤醒后代理可能还没起来：等主模型通道连通再取数，最多等 limit 秒，到时间照常放行。"""
+    if limit is None:
+        try:
+            limit = int(os.environ.get("DT_MODEL_WAIT_SECONDS", "300"))
+        except ValueError:
+            limit = 300
+    if limit <= 0:
+        return
+    start, attempts = clock(), 0
+    while True:
+        attempts += 1
+        ok, err = probe()
+        waited = clock() - start
+        if ok or waited + WAIT_INTERVAL > limit:
+            break
+        sleep(WAIT_INTERVAL)
+    rec = {"at": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "kind": kind, "ok": ok,
+           "waited_s": round(waited, 1), "attempts": attempts, "error": err}
+    try:
+        WAIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with WAIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass   # 记录写不了不影响取数
 
 
 def lark(*args):
@@ -270,6 +318,7 @@ def main():
     ap.add_argument("--date", help="日报写哪一天，默认昨天")
     ap.add_argument("--week-start", help="周报从哪个周一开始，默认上周一")
     a = ap.parse_args()
+    wait_model_route(a.kind)
     today = dt.date.today()
     try:
         if a.kind == "daily":
