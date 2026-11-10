@@ -20,7 +20,7 @@ hermes/
     actions.py         代理行动记录（#110 1b，V2 5.4）：actions.jsonl 的结构（定稿不再改）和 record() 记录函数；--date 按统计日列出行动：actions.jsonl 加六个来源现读现转（合并官、merge-runs、派单台账、定时任务库、夜跑 run-log、裁决文件），每条带授权档位、来源，低于应有档位的标 auth_gap；裁决文件只摘原文不判批准拒绝；安装只认 record() 写的；只读，未安装，暂无脚本调用 record()
     pdaily_publish.py  个人项目日报写稿与核对（#111 批 2a）：读 facts.json，经 hermes chat 单次让 Hermes 写卡片要素和完整报告（提示词 prompts/pdaily_report.md），脚本核对编号、百分比、PR 数、「已安装 / 已验收」说法、三个数和七段，写法问题自动修并记提醒，编造类不通过就出「分析降级」事实版，再坏出最小卡片；按甲版样例生成卡片 JSON；只生成不发送，未安装
     pdaily_facts.py    个人项目日报事实快照（#110 1c）：把 pdaily_data 的项目记录和 actions 的行动合成 DigitalTwin/daily/<统计日>.facts.json，给 Hermes 写日报用；含拍板候选、风险四类、跨项目明文引用（查被引用方关没关）、观察池（每次现算）、覆盖与可信度；只给候选和出处，不定级、不排序、不推荐；取不到写 null 不当 0；--dry-run 只打印；未安装
-    report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口
+    report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口；开跑前先等主模型通道连通，最多 300 秒，到时间照常放行交给回退（#140，记录在 evidence/reports/model-route-wait.jsonl）
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
