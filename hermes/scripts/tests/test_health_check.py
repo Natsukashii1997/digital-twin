@@ -6,6 +6,8 @@
 import datetime as dt
 import importlib.util
 import io
+import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -99,6 +101,91 @@ class HealthCheckTest(unittest.TestCase):
         self.assertTrue(issues[0].startswith("读不了 Hermes 日志"))
 
 
+class BotsTest(unittest.TestCase):
+    """#147：猛鬼兽、亚古兽各查一遍；24 小时内异常退出；飞书技能源头比副本新时提醒。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.hermes = self.root / "hermes"
+        self.agumon = self.hermes / "profiles/agumon"
+        for home in (self.hermes, self.agumon):
+            (home / "logs").mkdir(parents=True)
+        for target, name, value in ((hc, "HERMES", self.hermes), (hc, "AGENT_SKILLS", self.root / "agents")):
+            p = patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def errors(self, home, *lines):
+        (home / "logs/errors.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def unclean(at, hb="2026-11-08T20:33:53.713463+00:00"):
+        return (f"{at},807 WARNING gateway.lifecycle_ledger: Previous gateway life (pid=1, started_at=x) "
+                f"exited UNCLEANLY (no exit path ran) last_heartbeat_at={hb} last_mem=None suspected_oom=False")
+
+    def test_unclean_exit_within_24h_reported_with_gap(self):
+        self.errors(self.agumon, self.unclean("2026-11-07 07:00:00"), self.unclean("2026-11-09 07:59:58"),
+                    "2026-11-09 08:00:00,1 WARNING gateway.run: something else")
+        hb = dt.datetime.fromisoformat("2026-11-08T20:33:53+00:00").astimezone()
+        self.assertEqual(hc.check_unclean_exits(self.agumon, dt.datetime(2026, 11, 9, 9, 45)),
+                         [f"过去 24 小时网关异常退出 1 次（最近一次心跳停在 {hb:%m-%d %H:%M}，11-09 07:59 重新拉起）"])
+
+    def test_unclean_exit_older_or_missing_log_is_quiet(self):
+        self.assertEqual(hc.check_unclean_exits(self.agumon, dt.datetime(2026, 11, 9, 9, 45)), [])
+        self.errors(self.agumon, self.unclean("2026-11-07 07:00:00"))
+        self.assertEqual(hc.check_unclean_exits(self.agumon, dt.datetime(2026, 11, 9, 9, 45)), [])
+
+    def skill(self, base, name, mtime):
+        f = base / name / "SKILL.md"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x")
+        os.utime(f, (mtime, mtime))
+
+    def test_skill_source_newer_than_copy_reported_per_bot(self):
+        src = self.root / "agents"
+        self.skill(src, "lark-base", 2000)
+        self.skill(src, "lark-doc", 1000)
+        self.skill(self.hermes / "skills/lark", "lark-base", 1000)     # 源头更新过：报
+        self.skill(self.agumon / "skills/lark", "lark-base", 3000)     # 机器人自己改过、比源头新：不报
+        self.skill(self.agumon / "skills/lark", "lark-doc", 500)       # 报
+        self.skill(self.agumon / "skills/lark", "lark-only-copy", 500)  # 源头没有：不报
+        self.assertEqual(hc.check_skill_sync(), [
+            "飞书技能源头（~/.agents/skills）比机器人副本新，核对后同步（副本里机器人自己加的内容先留存）："
+            "猛鬼兽 lark-base；亚古兽 lark-doc"])
+
+    def test_skill_sync_quiet_when_in_step(self):
+        self.skill(self.root / "agents", "lark-base", 1000)
+        self.skill(self.agumon / "skills/lark", "lark-base", 1000)
+        self.assertEqual(hc.check_skill_sync(), [])
+
+    def test_gateway_checked_by_label_and_home(self):
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        (self.agumon / "gateway_state.json").write_text(json.dumps(
+            {"gateway_state": "running", "updated_at": now, "platforms": {"feishu": {"state": "disconnected"}}}))
+        listing = "PID\tStatus\tLabel\n123\t0\tai.hermes.gateway\n-\t75\tai.hermes.gateway-agumon\n"
+        with patch.object(hc, "run", return_value=subprocess.CompletedProcess([], 0, listing, "")):
+            self.assertEqual(hc.check_gateway("ai.hermes.gateway-agumon", self.agumon), [
+                "Hermes 网关进程没在运行（上次退出码 75）", "飞书连接状态是 disconnected（无错误信息）"])
+        with patch.object(hc, "run", return_value=subprocess.CompletedProcess([], 0, "PID\tStatus\tLabel\n", "")):
+            self.assertEqual(hc.check_gateway("ai.hermes.gateway-agumon", self.agumon),
+                             ["Hermes 网关常驻任务没有加载（ai.hermes.gateway-agumon）"])
+
+    def test_check_bots_runs_each_bot_with_its_home_and_prefix(self):
+        seen = []
+
+        def gateway(label, home):
+            seen.append((label, home))
+            return ["网关离线"] if home == self.agumon else []
+        with patch.object(hc, "check_gateway", side_effect=gateway), \
+                patch.object(hc, "check_unclean_exits", return_value=[]), \
+                patch.object(hc, "check_fallback", return_value=[]), \
+                patch.object(hc, "check_aux_errors", side_effect=lambda home: ["压缩失败"] if home == self.hermes else []):
+            self.assertEqual(hc.check_bots(), ["猛鬼兽：压缩失败", "亚古兽：网关离线"])
+        self.assertEqual(seen, [("ai.hermes.gateway", self.hermes), ("ai.hermes.gateway-agumon", self.agumon)])
+
+
 class CronIncidentTest(unittest.TestCase):
     """只算 detected、alerted；已 ack（closed）的不再告警。"""
 
@@ -136,7 +223,7 @@ class DailySendTest(unittest.TestCase):
         self.logs = Path(tmp.name) / "health"
         self.patch(hc, "LOG_DIR", self.logs)
         self.gateway = self.patch(hc, "check_gateway", return_value=[])
-        for name in ("check_fallback", "check_aux_errors", "check_cron"):
+        for name in ("check_fallback", "check_aux_errors", "check_cron", "check_unclean_exits", "check_skill_sync"):
             self.patch(hc, name, return_value=[])
         self.sent = []
         # 保留真实 run()/send()，在最底层拦住所有子进程；意外命令立即让测试失败。
