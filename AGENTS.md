@@ -50,7 +50,7 @@ docs/托管模式-设计.md          托管模式（PRD D24，ADR-014 及修订 
 orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
-  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、回退模型、定时任务；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
+  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
   self_check.py        工程自检（Hermes 无模型定时任务 09:50，stdout 直接发、空输出不发）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
