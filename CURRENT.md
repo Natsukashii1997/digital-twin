@@ -17,7 +17,12 @@
   - 规程 HERMES.md 第 1 节加「网页」：`web_extract` 抓不了正文，用浏览器工具或 agent-reach（#149，常浩「CI 过了就合并」，PR #150 已合并 `b325aa5`，安装副本与 main `cmp` 一致，worktree 已清理）。
   - **更正**：核查时说 `obsidian` 技能开着是误判，它本来就禁用（读配置时过滤掉了列表行）。中途 `hermes config set skills.disabled` 把列表覆盖成只剩 obsidian，00:24:58～00:25:30 之间 claude-code、codex 两个技能处于启用，期间无对话、无任务；已恢复，`config.yaml` 与改前逐字一致。教训：`hermes config set` 设列表是整份替换，先读全列表。
   - 重启两次（`launchctl kickstart -k`）：PID 75093 → 63206 → 63399，00:25:30 `✓ feishu connected`，三个技能回读均为 disabled。
-  - 没改：人设三处口径（SOUL、`personalities.work-worn`、USER.md）不一致，等常浩单独定。
+  - **人设统一到 USER.md**（常浩「以 USER.md 为准」「删掉并改 SOUL」，11-11 07:2x；改前改后在 `evidence/mengguishou-persona-20261111/`）：
+    - 删 `work-worn` 人格：`hermes config set display.personality none`、`hermes config set --force personalities {}`，配置差异只有这两处。它只作用于飞书对话（网关每轮读，定时任务不读）。
+    - SOUL「性格与表达」前两句改为：打工人身份留着，「语气浓度、表情和小结格式按用户画像记忆（USER.md）里的沟通偏好」；「人设措辞每次现编…不重复固定口头禅或例句」。第三句和四条底线不动。改的是 11-02 V1.1 定稿内容，已单独确认。注入扫描 0 命中。
+    - 07:27:02 重启（PID 63399 → 76746）`✓ feishu connected`。本机一次性对话实测（`env -u ANTHROPIC_BASE_URL -u CLAUDECODE hermes -z …`）由 Claude 回答，语气带打工人味，小结按「emoji＋事实＋收尾」。注意：在 Claude Code 会话里直接跑 `hermes -z` 会因继承 `ANTHROPIC_BASE_URL` 被 Claude 插件拒绝、落到 deepseek-flash，要先去掉这两个变量。
+    - 代价：work-worn 里「少感叹号、不用兴奋话术、不吹嘘升级」三条没有搬走（SOUL「不刻意热情、不奉承」兜大部分）；人设只在 USER.md，后台复盘可能改动它，原文快照在证据目录。
+    - 待验：常浩在飞书私聊看语气；11-11 07:30 日报是第一份按新 SOUL、Claude 跑的。
 - **待观察**：11-11 07:30 日报是第一次用 Claude 跑（11-10 失败是旧模型 gpt 单次调用约 300 秒、会话租约失效被中断）。
 
 ## 2026-11-10 晚 · 亚古兽核查与修正（niuma-home#53、#54；#147、#148，均已合并）
