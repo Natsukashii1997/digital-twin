@@ -14,7 +14,7 @@
 - **猛鬼兽优化（常浩「按建议先做」，备份和改后都在 `evidence/mengguishou-review-20261111/`）**：
   - USER.md 删掉一条重复条目，P-08～P-15 长清单压成 Vault 指针（只留每轮都用的 P-11、P-14）：1360 → 943 字（上限 1375）。
   - MEMORY.md 第一条（10-22 的配置快照，含已过期的「审批 smart」）改成「配置以 `hermes config` / config.yaml 现查为准」：685 → 551 字。
-  - 规程 HERMES.md 第 1 节加「网页」：`web_extract` 抓不了正文，用浏览器工具或 agent-reach（#149，PR #150 未合并，已先装、`cmp` 一致）。
+  - 规程 HERMES.md 第 1 节加「网页」：`web_extract` 抓不了正文，用浏览器工具或 agent-reach（#149，常浩「CI 过了就合并」，PR #150 已合并 `b325aa5`，安装副本与 main `cmp` 一致，worktree 已清理）。
   - **更正**：核查时说 `obsidian` 技能开着是误判，它本来就禁用（读配置时过滤掉了列表行）。中途 `hermes config set skills.disabled` 把列表覆盖成只剩 obsidian，00:24:58～00:25:30 之间 claude-code、codex 两个技能处于启用，期间无对话、无任务；已恢复，`config.yaml` 与改前逐字一致。教训：`hermes config set` 设列表是整份替换，先读全列表。
   - 重启两次（`launchctl kickstart -k`）：PID 75093 → 63206 → 63399，00:25:30 `✓ feishu connected`，三个技能回读均为 disabled。
   - 没改：人设三处口径（SOUL、`personalities.work-worn`、USER.md）不一致，等常浩单独定。
