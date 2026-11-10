@@ -8,6 +8,17 @@
 
 ---
 
+## 2026-11-10 · 猛鬼兽、亚古兽主模型改 Claude 会员，取消 D19（#140、#142、#144；niuma-home#45）
+
+- **常浩定**：猛鬼兽和亚古兽都保留 Claude；亚古兽取消 D19，整个设置和猛鬼兽一致，企业 / 个人区分由常浩自己把握，「不是对于机器人的强行限制」；亚古兽的开放群直接关掉；评论区其他人拦住。PRD F10.1、F10.3、D11、D19 已加修订。
+- **本机已生效**（证据 `evidence/agumon-align-20261110/`、`evidence/agumon-allowlist-20261110/`、`evidence/model-route-wait-20261110/`）：
+  - 两只机器人主模型 `claude-opus-5-5[1m]`（插件 `claude-subscription-directsdk-experimental` 调本机 `claude` 命令行），思考强度 high，回退 deepseek-flash，辅助任务 openai-codex gpt-6-luna。猛鬼兽是常浩 11:43 让它自己改的，亚古兽 12:02 按猛鬼兽逐项对齐（27 项，复核零差异），并装同版插件（`a4e311e`）。
+  - 飞书从 11-10 起推送带常浩企业 user_id `e9cgcf77`，Hermes 优先用它核对，两只机器人的允许名单已加上（原 open_id 保留）；亚古兽曾因此拒收常浩消息（11:40），11:51 恢复。
+  - 亚古兽：开放群 `oc_08a3…` 已删、群聊关闭；飞书工具集和猛鬼兽一致，另保留牛马之家；加 Vault 读取；`workdesk-gate` 扩为他人只能用安全工具（#143，合并前已安装）。
+- **待合并**：PR #141（日报 / 周报开跑前等主模型通道，探测地址按主模型提供方自动选）、#143（拦截插件）、#144（本文档同步）、niuma-home#46（亚古兽规程，L1 补改未复审）。合并后：#141 同步 `~/.hermes/scripts/report_data.py`；niuma-home#46 同步亚古兽 SOUL / HERMES 并重启。
+- **未验证**：两只机器人在飞书里由 Claude 实际回复（常浩还没发测试消息）；他人在文档评论里被拦的真实端到端。
+- **范围外**：11-10 07:30 日报 08:06 失败（`Operation interrupted: waiting for model response`）未查；亚古兽启动安全审计提示本机 SSH 允许密码登录。
+
 ## 2026-11-09 · 托管规格 V5.1 已合并：通道改走 Multica issue（#130、#138；PR #139 `6bffc49`）
 
 - **#130 探路**（记录 `docs/DT-ORC/migration/2026-11-09-托管受限会话探路.md`，`9802170`）：驿窗四条通道全被隔离容器切断；受限 agent 不在会话里停下，而是子单 blocked + 评论（24 次 run 里 5 次）；**受限令牌能自行合并 PR**（dt-sandbox 必需审批数为 0；探针 dt-sandbox#13 已由 #14 回退）。期间按常浩授权启动过 Colima `multica`，测完已停并回读，Multica issue 状态前后一致。

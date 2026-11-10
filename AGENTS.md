@@ -63,6 +63,7 @@ ops/
 - 配置：仓库根目录 [ai_access.json](ai_access.json)（功能清单、出厂默认值，改了要和本节一起改）；常浩切换后的选择存在 `~/Library/Application Support/DigitalTwin/ai-access.json`，只由 `ai_access.py set` 写，下一次调用生效，不用改代码、不用重启。
 - 自检命令：`python3 ~/.hermes/scripts/ai_access.py status`（`--json` 给机器读）。每天 09:50 的工程自检会跑它，车间默认执行方不能用时才在飞书说。
 - 切换车间默认执行方：`python3 ~/.hermes/scripts/ai_access.py set default claude|codex`。Hermes 自己的模型用 `hermes config set model.default …` 切换，要重启网关。
+- Hermes 自己的模型（2026-11-10 起，PRD F10.1、F10.3 修订）：主对话和带模型的定时任务用 Claude `claude-opus-5-5[1m]`，经插件 `claude-subscription-directsdk-experimental` 调本机官方 `claude` 命令行（本机 CLI，Claude 会员额度）；辅助任务用 openai-codex `gpt-6-luna`；回退 deepseek-flash。猛鬼兽、亚古兽一致。
 
 功能清单（id 和 ai_access.json 一致）：
 
@@ -80,7 +81,7 @@ ops/
 不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、三个自检脚本、晨报取数（挂起）。
 
 - **不可用就报错，不换家**：派单开跑前 run_worker 按配置查执行方（`claude auth status`、`codex login status`）；不能用就写 `refused: executor_unavailable` 回执、退出码 4，派单返回「没开跑」和原因，不改用另一家。额度用尽没法提前查，开跑时车间报错写进回执。AI 接入配置读不了时，没点名的派单直接拒绝开单，不猜默认值。
-- **已登记的例外**：Hermes 主模型失败或额度不够时自动回退到 deepseek-flash（PRD F10.2；常浩 2026-11-07 定保留）。回复里注明，每日巡检报前一天的回退次数，自检命令显示近 7 天的回退次数。
+- **已登记的例外**：Hermes 主模型（现为 Claude）失败或额度不够时自动回退到 deepseek-flash（PRD F10.2；常浩 2026-11-07 定保留）。回复里注明，每日巡检报前一天的回退次数，自检命令显示近 7 天的回退次数。
 - **留痕**：派单回执有 `executor`、`access`、`model`（Claude 取实际用的模型；Codex 取 ~/.codex/config.toml 的配置）、`chosen_by`，飞书回报第二行照抄；日报 / 周报标题下一行写「生成：Hermes（实际用的模型，含回退）｜接入：Hermes 派单｜时间」；Hermes 对话和定时任务的模型用量在 ~/.hermes/state.db、~/.hermes/cron/usage_audit.jsonl。
 - **对外开放**：无。vault-read 是 Hermes 作为客户端读 Vault，不算本项目对外开放。
 - **数据对象**：Hermes 模型用量（state.db 的 session_model_usage，巡检统计回退）；Hermes 定时任务用量（usage_audit.jsonl）。
