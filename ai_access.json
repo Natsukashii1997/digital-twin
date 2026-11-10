@@ -102,6 +102,7 @@
     "影子合并官 merge_officer.py、飞书一句话合并 merge_act.py、PR 卡片按钮插件 merge-buttons：按规则判断，不调用 AI",
     "Tidings 周报推送 tidings_weekly.py：只转发 github-center 写好的周报卡片",
     "工程自检 self_check.py、每日巡检 health_check.py、仓库自检 check_repos.py：纯脚本",
+    "skill 月度体检推送 skill_health.py：纯脚本，转发 my-skills 的 monthly-health.mjs 统计",
     "晨报取数 brief_data.py：挂起中，不在运行"
   ],
   "exceptions": [
@@ -115,6 +116,7 @@
   "open_note": "本项目不对外开放 MCP 或其他接口。vault-read 是 Hermes 作为客户端去读 Vault，不算对外开放。",
   "data_objects": [
     {"name": "Hermes 模型用量", "source": "~/.hermes/state.db 的 session_model_usage", "used_by": "health_check.py 统计前一天的回退次数；ai_access.py status 显示最近实际用的模型和近 7 天回退次数"},
-    {"name": "Hermes 定时任务用量", "source": "~/.hermes/cron/usage_audit.jsonl", "used_by": "ai_access.py status 显示带模型定时任务最近一次用的模型"}
+    {"name": "Hermes 定时任务用量", "source": "~/.hermes/cron/usage_audit.jsonl", "used_by": "ai_access.py status 显示带模型定时任务最近一次用的模型"},
+    {"name": "Claude / Codex 的 skill 调用记录", "source": "~/Library/Application Support/agent-kit/skill-usage.jsonl（Claude）、~/.codex/sessions（Codex），由 my-skills 的 monthly-health.mjs 统计", "used_by": "skill_health.py 每月 1 号把统计发到常浩私聊"}
   ]
 }
