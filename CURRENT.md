@@ -15,7 +15,7 @@
   - `profile.yaml` 描述去掉过期的「不接触常浩个人记忆、Obsidian、ORCA」，改成记忆分开、本机能力与猛鬼兽一致。
   - 规程 HERMES.md §0：私聊和定时任务读文档改走 `lark-cli docs +fetch`（`--as bot` / `--as user` 23:0x 实测都能读管培生日志）；`feishu_doc_read` 只在评论里可用（14:31 私聊调用报错）。PR niuma-home#54 未合并，已先装安装副本（同 #46 做法）。
   - 23:06 `launchctl kickstart -k` 重启亚古兽，第一次被「已有网关占着」拦（EX_TEMPFAIL），launchd 自动重试，PID 75200 → 27555，23:07:20 `✓ feishu connected`，启动无报错；重启时给常浩私聊发了一条停机通知。
-- **待常浩定**：Claude 不可用时回退 deepseek-flash，企业数据（管培生日志、业务表）会静默发给 DeepSeek，和全局规则「不悄悄换一家」冲突；选项：保留 / 亚古兽去掉回退改报错（推荐） / 保留但回复标注模型。
+- **常浩定（23:1x）：亚古兽保留 deepseek-flash 回退**，不改。已知代价：Claude 不可用时企业数据（管培生日志、业务表）会发给 DeepSeek，且不在回复里标注；这和全局规则「不悄悄换一家」不一致，按常浩此次决定作为例外保留。
 - **待常浩实测**：文档评论通道 11-02 起日志里没有一次 `Feishu-Comment` 事件（含常浩本人），疑似飞书事件或文件订阅没接通。另外 Hermes 评论处理用 `skip_context_files=True`、没开 `load_soul_identity`，评论里不加载 SOUL / 规程 / 记忆，只有文档和评论工具、最多 15 步（`plugins/platforms/feishu/feishu_comment.py` `_run_comment_agent`）。先由常浩在两篇已开放文档里各 @ 一次。
 - **范围外，未处理**：亚古兽 `lark-base` 技能复制件 15:32 被后台复盘改过，已和 `~/.agents/skills` 源头不一致；87 个技能里 apple、social-media、media、creative、email 等和企业无关；11-09 04:33～07:59 网关心跳中断约 3.5 小时无告警（多半是电脑睡眠）。
 
