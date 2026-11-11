@@ -19,7 +19,7 @@
   上传失败照发不带图，并打印一句提醒。
 - 同一统计日只发一次：本机状态文件记已发的统计日，发送时还带飞书幂等键。
 
-环境变量：TIDINGS_REPO github-center 目录；FEISHU_HOME_CHANNEL 私聊 chat_id（Hermes 的 .env 里有，无模型任务会加载）；
+环境变量：TIDINGS_REPO github-center 目录；FEISHU_HOME_CHANNEL 私聊 chat_id（无模型定时任务的环境里没有，这时从 ~/.hermes/.env 读，#165，见 feishu_home.py）；
 DT_TIDINGS_STATE 状态文件；DT_TIDINGS_BANNER 横幅；DT_LARK_CLI 换 lark-cli（自测用）；DT_NOW（ISO 时间）指定现在，自测用。
 """
 import argparse
@@ -31,6 +31,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from feishu_home import home_chat  # noqa: E402
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
 PROFILE = "cli_a96f5f9ac63adcd4"               # 猛鬼兽应用（PRD D12：飞书只保留这一个机器人）
@@ -238,9 +241,9 @@ def main(argv=None):
     if a.dry_run:
         print(json.dumps({"msg_type": "interactive" if kind == "card" else "text", "content": payload}, ensure_ascii=False, indent=2))
         return 0
-    chat = os.environ.get("FEISHU_HOME_CHANNEL", "")
+    chat = home_chat()
     if not chat.startswith("oc_"):
-        print("Tidings 周报没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL）。")
+        print("Tidings 周报没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）。")
         return 1
     warnings = []
     # 飞书幂等键挡住同一期重复发；--force 换一个键才能真的再发。

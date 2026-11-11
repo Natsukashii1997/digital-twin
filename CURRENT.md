@@ -21,6 +21,15 @@
 - **实测**：测试文档 `BdqPdZscLoWwkQx7AzMcAXeDnsb` 上 `block_insert_after --block-id 0` 能插到顶部、`<col width>` 生效（接口读回 `[55, 411, 107, 190, 168, 207]`，与 7/15 原文 8 张表逐张一致）。11-10 真实数据样稿：取数 27 秒（私聊 16、机器人私聊 3 个排除、群 3、消息 419 条），写稿 gpt-6.1-sol xhigh 一次过核对、440 秒，会话 `20261111_210718_c6c48a`；写入测试文档回读通过；浏览器里六模块都正常，抽查 8 条原话都能在材料里找到。决策表 ID 列 55 宽会把编号折成 4 行，7/15 原文也是 55，没改。
 - **唯一的下一步**：常浩看测试文档样稿；认可后合并 PR，装到亚古兽 profile（`~/.hermes/profiles/agumon/scripts/`、`prompts/`），建 07:30 定时任务，11-12 07:30 首次正式写 11-11。
 
+## 2026-11-11 下午 · AI HOT 热点榜上线（#163 PR #164 `9165232`；chat_id 修复 #165 PR #166 `ad12512`；均已合并并安装）
+
+- **样式定稿**（常浩 11-11「选三」，之后又定「去掉表头，同 GitHub 周榜」）：名次栏——前三灰底、奖牌 + 红色大号名次，4–10 灰色名次；每条标题（只链 aihot.news）+ 话题标签 + 浅灰概括（整句，不出省略号）；不放来源 / 参与者 / 时间 / 原文；没有表头，横幅即标题，预览文字在 `config.summary`。样稿和定稿卡片在 `evidence/aihot-card-design-20261111/samples/`（chosen-card-5c.json），之后改样式先单独问。
+- **数据**：`hot-topics` + 每条 `stories/{publicId}` 的 digest 第一段；接口写明不返回热度和涨跌，不显示。纯脚本，不调用模型（AGENTS、ai_access.json 的 no_ai 已登记）。
+- **安装**：`aihot_hot.py`、`assets/aihot-banner.png`、`feishu_home.py`，以及改用 `feishu_home` 的 `tidings_weekly.py`、`proposal_digest.py`、`merge_act.py`，都从 `origin/main` 装到 `~/.hermes/scripts/`，逐个 `cmp` 一致。定时任务 `198ea1ea68df`：无模型，`45 9 * * 1-5`（周一到周五，不跟调休），发常浩私聊，下次 11-12 09:45。记录在 `DigitalTwin/aihot/`（runs.jsonl、<日期>.card.json、state.json）。
+- **试跑发现并修好的坑**（#165）：无模型定时任务给脚本的环境里没有 `FEISHU_HOME_CHANNEL`，第一次试跑报「没有私聊 chat_id」；**Tidings 周报 11-09 那期也因此没发出**。改为共用 `feishu_home.home_chat()`：环境变量没有就从 `~/.hermes/.env` 只读这一项。修好后经 `hermes cron run` 试跑成功（`om_x100b6074f131b8b0c0f0c43dcc1c4d0`，回读通过）；两条失败记录 `198ea1_91541f35aed5`、`18a21b_939e2b1819f2` 已 ack 关闭。全量测试 747 项通过。
+- **Tidings 11-09 不补发**（常浩 11-11 定）：下周一 14:00 照常发新一期。
+- **唯一的下一步**：11-12 09:45 看 AI HOT 是否自动到达（`DigitalTwin/aihot/runs.jsonl` 有当天 ok 行）；10:00 看日报卡片是否带工程自检那一行。
+
 ## 2026-11-11 下午 · 猛鬼兽定时任务按新清单整理（#159 PR #160 `967bbb4` 已合并并安装；AI HOT 三版待选；github-center#88）
 
 - **常浩定的猛鬼兽清单**（「按推荐开工」）：日报每天 10:00（09:15 写稿，给工作日 09:45 的 AI HOT 让位）；周报卡片每周一 10:30（结构待梳理）；工程自检并进日报（正常一句、有问题一块）；Tidings 排行榜每周一 14:00（卡片格式不变）；Multica 夜跑 + 影子合并官合成「夜间托管」（待设计，两者保持停用）；skill 月度体检保留；AI HOT 日报每个工作日 09:45（新增）；其余删掉。数字分身＝猛鬼兽（个人）+ 亚古兽（企业），任务隔离；亚古兽清单常浩稍后说。
