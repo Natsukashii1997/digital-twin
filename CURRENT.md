@@ -8,7 +8,7 @@
 
 ---
 
-## 2026-11-11 · 亚古兽改用 Codex 6.1 sol xhigh；记忆日报改由亚古兽写并推送（批 1 代码完成、样稿待常浩看）
+## 2026-11-11 · 亚古兽改用 Codex 6.1 sol xhigh；记忆日报改由亚古兽写并推送（PR #168 `5c44dae` 已合并并安装，07:30 定时任务已建）
 
 - **模型已切换**（常浩「把 codex 的 6.1 sol 极高接进来，不用 claude 的额度」）：`hermes -p agumon config set` 改 `model.default=gpt-6.1-sol`、`model.provider=openai-codex`（`base_url` 随之清掉）、`agent.reasoning_effort=xhigh`；辅助任务 luna、回退 deepseek-flash 不变。改前配置在 `evidence/agumon-codex-20261111/config.before.yaml`。14:03 重启 `ai.hermes.gateway-agumon`，14:04 起来，日志 `Model context warmed: gpt-6.1-sol`、飞书已连。不带参数 oneshot 实测：会话 `20261111_140439_8688b0`，模型 gpt-6.1-sol、`openai-codex`、`subscription_included`、有思考 token。飞书私聊里还没实测。猛鬼兽不动，仍是 Claude。「极高」按 Codex 的 `xhigh` 理解。
 - **文档**：PRD F10.1、F10.2、D20，AGENTS「AI 接入」，ai_access.json 同步（分支 `claude/agumon-codex`，worktree `.claude/worktrees/agumon-memdaily`）。
@@ -19,7 +19,10 @@
 - **常浩定（「按推荐开工」）**：每天 07:30 写前一天、写完推送，周末没有工作往来就跳过；周报《记忆周报汇总》也接（批 3）；10-28～11-10 空档不补，从 11-11 开始；Aily 的 09:30 / 18:00 会议确认不沿用（用实际参会记录和妙记）。
 - **批 1 代码（分支 `claude/agumon-codex`）**：`memdaily_data.py`（亚古兽应用、常浩用户身份取数：私聊排除机器人——联系人查不到名字的就是机器人，白名单 6 群全读，其他群只收常浩发言或被 @ 的，实际参会的会议和妙记，日程标永久不去，任务，前一篇行动 & 阻塞）、`memdaily_publish.py`（`hermes -p agumon` 单次写六模块 JSON → 核对 → 按 7/15 模板排 XML → `block_insert_after --block-id 0` 插顶部，写前整份快照、同一天不重写、回读标题 / 表格数 / 空单元格 / 列宽 → 机器人私聊三段式推送，同一天只发一次）、`memdaily_job.py`、提示词 `memdaily_report.md`、测试 `test_memdaily.py` 18 项（7 处反向改坏全抓到）。本机配置 `DigitalTwin/memdaily/config.json`（白名单群 chat_id、永久不去的会议、重点人、不追踪话题）和模板样例 `template-0715.md` 不进仓库。
 - **实测**：测试文档 `BdqPdZscLoWwkQx7AzMcAXeDnsb` 上 `block_insert_after --block-id 0` 能插到顶部、`<col width>` 生效（接口读回 `[55, 411, 107, 190, 168, 207]`，与 7/15 原文 8 张表逐张一致）。11-10 真实数据样稿：取数 27 秒（私聊 16、机器人私聊 3 个排除、群 3、消息 419 条），写稿 gpt-6.1-sol xhigh 一次过核对、440 秒，会话 `20261111_210718_c6c48a`；写入测试文档回读通过；浏览器里六模块都正常，抽查 8 条原话都能在材料里找到。决策表 ID 列 55 宽会把编号折成 4 行，7/15 原文也是 55，没改。
-- **唯一的下一步**：常浩看测试文档样稿；认可后合并 PR，装到亚古兽 profile（`~/.hermes/profiles/agumon/scripts/`、`prompts/`），建 07:30 定时任务，11-12 07:30 首次正式写 11-11。
+- **已合并并安装**（常浩「认可，合并并安装」）：CI 通过后带 `--match-head-commit 24abf24` squash 合并为 `5c44dae`。装到亚古兽 profile：`~/.hermes/profiles/agumon/scripts/` 下 `memdaily_data.py`、`memdaily_publish.py`、`memdaily_job.py`、`report_data.py`（取数复用它的消息清洗），`prompts/` 下 `memdaily_report.md`、`project_vocab.md`，逐个 `cmp` 一致（原来没有同名文件）。用 Hermes 自带 Python 3.14.7、`HERMES_HOME=agumon` 实跑安装副本取数，结果与仓库版一致。
+- **定时任务**：亚古兽 profile `45590a963269`「记忆日报」，`30 7 * * *`，无模型，脚本 `memdaily_job.py`（写前一天），没写成的原因发到 `feishu:oc_aa36…`（常浩与亚古兽私聊）；下次 11-12 07:30。任务表前后在 `evidence/agumon-codex-20261111/agumon-jobs.{before,after}.txt`。正式文档还没写过任何一篇；测试文档 `BdqPdZscLoWwkQx7AzMcAXeDnsb` 留着，待常浩同意再删。
+- **还没做**：批 3 周报《记忆周报汇总》；批 4 亚古兽人设改造（niuma-home）；飞书私聊里实测亚古兽新模型。
+- **唯一的下一步**：11-12 07:40 后看三处：《常浩-记忆日报汇总》顶部有「📅 2026-11-11（周三）」、亚古兽私聊收到三段式推送、`DigitalTwin/memdaily/2026-11-11.delivery.json` 的 `read_back` 为 true、`pushed_at` 有值。
 
 ## 2026-11-11 下午 · AI HOT 热点榜上线（#163 PR #164 `9165232`；chat_id 修复 #165 PR #166 `ad12512`；均已合并并安装）
 
