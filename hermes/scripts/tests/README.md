@@ -16,7 +16,7 @@ python3 -B -m unittest discover -s hermes/scripts/tests -v
 python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 28 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 18 项 + Tidings 周报推送 19 项 + AI HOT 热点榜推送 13 项 + 影子合并官 21 项 + 每周提案收口 16 项 + 飞书一句话合并 16 项，等，2026-11-11 实测全目录共 745 项；分项只列了一部分），末尾显示 `Ran 745 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 28 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 18 项 + Tidings 周报推送 19 项 + AI HOT 热点榜推送 13 项 + 影子合并官 21 项 + 每周提案收口 16 项 + 飞书一句话合并 16 项，等，2026-11-11 实测全目录共 747 项；分项只列了一部分），末尾显示 `Ran 747 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -71,11 +71,11 @@ python3 -B hermes/scripts/tests/test_dispatch_followup.py
 
 ## AI HOT 热点榜推送（test_aihot_hot.py）
 
-测的是 `hermes/scripts/aihot_hot.py`，跑真实入口。接口用 `file://` 假数据（`DT_AIHOT_BASE`），假 `lark-cli` 按预设回话应答并记下每次调用的参数、工作目录和环境；记录目录、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时没有表头（横幅即标题，预览文字在 config.summary）、横幅在最前、名次栏样式（前三灰底奖牌红字、4–10 灰色名次、话题标签、标题只链 aihot.news、不出来源 / 参与者 / 省略号）、bot 身份、去掉 `HERMES_*`、成功不输出、记下当天卡片 / 状态 / 运行记录；概括按整句截取、首句超长按分句收成一句；同一天只发一次、`--force` 换幂等键、横幅按内容缓存、换图才重传；接口取不到、格式不对、不到 10 条、榜单超过 48 小时没更新都输出一句原因、退出码 1、不发卡片；坏链接（javascript、ftp、别的域名、带括号）和注入文字（`<at>`、`<font>`、markdown 链接）被拦或转义；单条详情取不到那条只有标题；横幅上传失败照发不带图并提醒；发送失败、回读（核对底部固定一行字）对不上报原因，已发出不重发；没有私聊 chat_id 报错；`--dry-run` 只打印。不联网、不碰真实记录和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_aihot_hot.py -v`。
+测的是 `hermes/scripts/aihot_hot.py`，跑真实入口。接口用 `file://` 假数据（`DT_AIHOT_BASE`），假 `lark-cli` 按预设回话应答并记下每次调用的参数、工作目录和环境；记录目录、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时没有表头（横幅即标题，预览文字在 config.summary）、横幅在最前、名次栏样式（前三灰底奖牌红字、4–10 灰色名次、话题标签、标题只链 aihot.news、不出来源 / 参与者 / 省略号）、bot 身份、去掉 `HERMES_*`、成功不输出、记下当天卡片 / 状态 / 运行记录；概括按整句截取、首句超长按分句收成一句；同一天只发一次、`--force` 换幂等键、横幅按内容缓存、换图才重传；接口取不到、格式不对、不到 10 条、榜单超过 48 小时没更新都输出一句原因、退出码 1、不发卡片；坏链接（javascript、ftp、别的域名、带括号）和注入文字（`<at>`、`<font>`、markdown 链接）被拦或转义；单条详情取不到那条只有标题；横幅上传失败照发不带图并提醒；发送失败、回读（核对底部固定一行字）对不上报原因，已发出不重发；没有私聊 chat_id 报错、环境变量里没有时从 `~/.hermes/.env`（`DT_HERMES_ENV`）读（#165）；`--dry-run` 只打印。不联网、不碰真实记录和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_aihot_hot.py -v`。
 
 ## Tidings 周报推送（test_tidings_weekly.py）
 
-测的是 `hermes/scripts/tidings_weekly.py`，跑真实入口。假 `lark-cli`（`DT_LARK_CLI`）按预设回话应答并记下每次调用的参数、工作目录和环境；周报目录、状态文件、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时横幅插在最前面、bot 身份、去掉 `HERMES_*` 再调、成功不输出；同一期只发一次、横幅按内容缓存、换图才重传、`--force` 换幂等键再发；没有周报或数据过期只发一句说明且同天不重复；卡片为空、不是卡片、缺失都发说明；横幅上传失败照发不带图并提醒；发送失败退出码 1、下次再发、已上传的横幅缓存留着；发出后状态写不进不报失败只提醒；没有私聊 chat_id 报错不发；周报时间不早于每日更新、旧的 11:30 按和 github-center `readSettings` 同一条规则迁到每日更新后 1.5 小时（github-center #83）；`--dry-run` 只打印。不联网、不碰真实周报、状态文件和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_tidings_weekly.py -v`。
+测的是 `hermes/scripts/tidings_weekly.py`，跑真实入口。假 `lark-cli`（`DT_LARK_CLI`）按预设回话应答并记下每次调用的参数、工作目录和环境；周报目录、状态文件、横幅都在临时目录，`DT_NOW` 固定时间。覆盖：正常发送时横幅插在最前面、bot 身份、去掉 `HERMES_*` 再调、成功不输出；同一期只发一次、横幅按内容缓存、换图才重传、`--force` 换幂等键再发；没有周报或数据过期只发一句说明且同天不重复；卡片为空、不是卡片、缺失都发说明；横幅上传失败照发不带图并提醒；发送失败退出码 1、下次再发、已上传的横幅缓存留着；发出后状态写不进不报失败只提醒；没有私聊 chat_id 报错不发、环境变量里没有时从 `~/.hermes/.env` 读（#165）；周报时间不早于每日更新、旧的 11:30 按和 github-center `readSettings` 同一条规则迁到每日更新后 1.5 小时（github-center #83）；`--dry-run` 只打印。不联网、不碰真实周报、状态文件和 `~/.hermes`。单跑：`python3 -B -m unittest discover -s hermes/scripts/tests -p test_tidings_weekly.py -v`。
 
 ## 仓库自检（test_check_repos.py）
 

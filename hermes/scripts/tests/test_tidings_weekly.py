@@ -16,7 +16,7 @@ from pathlib import Path
 root = Path(os.environ["FAKE_DIR"])
 args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
-    f.write(json.dumps({"args": args, "cwd": os.getcwd(), "hermes_env": sorted(k for k in os.environ if "HERMES" in k)}, ensure_ascii=False) + "\n")
+    f.write(json.dumps({"args": args, "cwd": os.getcwd(), "hermes_env": sorted(k for k in os.environ if k.lstrip("_").startswith(("HERMES", "OPENCLAW", "LARK_CHANNEL")))}, ensure_ascii=False) + "\n")
 replies = json.loads((root / "replies.json").read_text(encoding="utf-8"))
 cmd = args[3] if args[2] == "im" and args[3].startswith("+") else " ".join(args[2:5])
 print(json.dumps(replies.get(cmd, {"ok": False, "error": {"message": "fake: 没有这条回话 " + cmd}}), ensure_ascii=False))
@@ -59,7 +59,8 @@ class TidingsWeekly(unittest.TestCase):
     def run_script(self, *args, now="2026-11-09T19:30:00+08:00", chat=CHAT):
         env = {k: v for k, v in os.environ.items() if k != "FEISHU_HOME_CHANNEL"}
         env.update(TIDINGS_REPO=str(self.repo), DT_TIDINGS_STATE=str(self.state), DT_TIDINGS_BANNER=str(self.banner),
-                   DT_LARK_CLI=str(self.fake / "lark-cli"), FAKE_DIR=str(self.fake), DT_NOW=now, HERMES_HOME="/x")
+                   DT_LARK_CLI=str(self.fake / "lark-cli"), FAKE_DIR=str(self.fake), DT_NOW=now, HERMES_HOME="/x",
+                   DT_HERMES_ENV=str(self.tmp / "hermes.env"))
         if chat:
             env["FEISHU_HOME_CHANNEL"] = chat
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
@@ -169,8 +170,17 @@ class TidingsWeekly(unittest.TestCase):
     def test_没有私聊_chat_id_报错不发(self):
         self.week("2026-11-08")
         r = self.run_script(chat="")
-        self.assertEqual((r.returncode, r.stdout.strip()), (1, "Tidings 周报没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL）。"))
+        self.assertEqual((r.returncode, r.stdout.strip()), (1, "Tidings 周报没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）。"))
         self.assertEqual(self.calls(), [])
+
+    def test_环境里没有chat_id时从hermes_env读(self):
+        """#165：无模型定时任务的环境里没有 FEISHU_HOME_CHANNEL（11-09 那期因此没发出），从 ~/.hermes/.env 读。"""
+        self.week("2026-11-08")
+        (self.tmp / "hermes.env").write_text(f"OTHER=1\nFEISHU_HOME_CHANNEL='{CHAT}'\n", encoding="utf-8")
+        r = self.run_script(chat="")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        (msg,) = self.sent()
+        self.assertEqual(msg["--chat-id"], CHAT)
 
     def test_没存过设置_按默认周一1930(self):
         self.week("2026-11-08")

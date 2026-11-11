@@ -35,6 +35,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from feishu_home import home_chat
 from tidings_weekly import SendError, send
 
 HOME = Path.home()
@@ -47,7 +48,6 @@ STATE_DIR = Path(os.environ.get("DT_PROPOSAL_DIR", "~/Library/Application Suppor
 SHADOW = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/DigitalTwin/shadow")).expanduser()
 STATE = STATE_DIR / "digest.json"
 LESSONS_LEDGER = SHADOW / "lessons-decisions.md"
-HERMES_ENV = Path(os.environ.get("DT_HERMES_ENV", "~/.hermes/.env")).expanduser()
 MIN_PROJECTS = int(os.environ.get("DT_LESSONS_MIN_PROJECTS", "0"))   # 0 = 不列
 BJ = dt.timezone(dt.timedelta(hours=8))
 OVERDUE_DAYS = 7
@@ -434,17 +434,6 @@ def write_item(item, verdict, day, note):
 
 
 # ---------- 命令 ----------
-
-def home_chat():
-    """私聊 chat_id：先看环境变量；Hermes 带模型任务的终端里没有它，再从 ~/.hermes/.env 只读这一项。"""
-    chat = os.environ.get("FEISHU_HOME_CHANNEL", "")
-    if not chat and HERMES_ENV.exists():
-        for line in HERMES_ENV.read_text(encoding="utf-8").splitlines():
-            k, _, v = line.partition("=")
-            if k.strip() == "FEISHU_HOME_CHANNEL":
-                chat = v.strip().strip("'\"")
-    return chat
-
 
 def cmd_draft():
     """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）的 JSON；没有待决提案时不输出。"""
