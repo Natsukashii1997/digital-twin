@@ -101,6 +101,7 @@
   "no_ai": [
     "影子合并官 merge_officer.py、飞书一句话合并 merge_act.py、PR 卡片按钮插件 merge-buttons：按规则判断，不调用 AI",
     "Tidings 周报推送 tidings_weekly.py：只转发 github-center 写好的周报卡片",
+    "AI HOT 热点榜推送 aihot_hot.py：取 aihot.news 热点榜排版，概括按整句截取、话题标签按标题关键词，不经模型改写",
     "工程自检 self_check.py、每日巡检 health_check.py、仓库自检 check_repos.py：纯脚本",
     "skill 月度体检推送 skill_health.py：纯脚本，转发 my-skills 的 monthly-health.mjs 统计",
     "晨报取数 brief_data.py：挂起中，不在运行"
