@@ -20,7 +20,8 @@
 - **定时任务**（无模型）：`945534cd43e1` 个人项目日报·写稿 每天 09:00，deliver local；`3a712f6cdf54` 个人项目日报·发送 每天 09:45，deliver 常浩私聊（成功无输出，没发成发一句原因）。脚本超时上限 3600 秒、写稿预算 1200 秒。任务表改前在同一证据目录。
 - **网关**：09:58 `launchctl kickstart -k`，PID 76680 → 96683，09:58:06 `✓ feishu connected`。
 - **已知边界**：09:45 时 09:00 的写稿还没出结果（如电脑睡眠错过 09:00），会发一张「没出成」卡片并记已发，当天不再自动补发；补发用 `pdaily_publish.py send --date <统计日> --force`。
-- **唯一的下一步**：11-12 09:45 后看私聊是否收到 11-11 统计日的甲版卡片，并对照 11-10 定稿（`daily/2026-11-11.delivery.json` 的 sent、read_back 为 true，写稿 build.json 的 model 是 Claude 而非回退）。
+- **写稿模型（#157，PR #158 `832049b` 已合并并安装）**：常浩问能否省额度，同一份 11-10 材料实测三版（`evidence/pdaily-model-compare-20261111/`）：Opus high 8 分 16 秒、2.8 万输出、拍板 / 成果 / 风险 8/5/13；Sonnet 5.5 high 2 分 38 秒、2.1 万、5/3/10（漏 #102、5178 终验、日报超时等）；Opus medium 3 分 01 秒、1.8 万、7/5/12、0 条截断。常浩定继续用 Opus、思考降一档：`pdaily_publish.generate()` 加 `--reasoning medium`（`DT_PDAILY_REASONING` 可改），安装副本 `cmp` 一致，`/usr/bin/python3` 读到 REASONING=medium；无模型定时任务每次现读脚本，没重启网关。全量测试 729 项通过。
+- **唯一的下一步**：11-12 09:45 后看私聊是否收到 11-11 统计日的甲版卡片，并对照 11-10 定稿（`daily/2026-11-11.delivery.json` 的 sent、read_back 为 true；会话库里这次写稿的模型是 `claude-opus-5-5[1m]` 而非回退，耗时约 3 分钟）。
 
 ## 2026-11-11 · skill 月度体检排成 Hermes 定时任务（#151；PR #152 `66be6cb`）
 
