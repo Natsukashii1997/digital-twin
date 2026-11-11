@@ -35,6 +35,9 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 HERMES = os.environ.get("DT_HERMES_CLI", "hermes")
 PROMPT = Path(os.environ.get("DT_PDAILY_PROMPT", Path(__file__).resolve().parent.parent / "prompts" / "pdaily_report.md"))
 BUDGET = int(os.environ.get("DT_PDAILY_BUDGET", "1200"))   # 写稿最多等多少秒
+# 写稿的思考强度（常浩 11-11 定 medium，#157）：同一份材料实测 high 要 8 分钟、medium 3 分钟，拍板、风险、成果几乎不少；
+# 模型跟随 Hermes 主模型（Opus 5.5），这里只降思考。要改就设这个变量，不用改代码。
+REASONING = os.environ.get("DT_PDAILY_REASONING", "medium")
 CARD_MAX = None       # 卡片各板块不折叠、全部放卡片上（常浩 2026-11-10 定稿：「卡片上的信息不要折叠，放全」）
 TODAY_MAX = 3         # 今日推进卡片最多 3 条（4.0）
 REPORT_TODAY_MAX = 5  # 完整报告今日计划最多 5 项（4.7）
@@ -145,7 +148,7 @@ def generate(facts, workdir):
     q = Path(workdir) / f"{facts['stat_day']}.query.md"
     q.write_text(query(facts), encoding="utf-8")
     cmd = [HERMES, "chat", "-Q", "--query-file", str(q), "-t", "todo", "--source", "tool",
-           "--max-turns", "3", "--run-budget", str(BUDGET)]
+           "--max-turns", "3", "--run-budget", str(BUDGET), "--reasoning", REASONING]
     # Claude 一次写完整稿要几分钟；Hermes 对非流式调用默认 240 秒没回就掐断并落回退模型（11-11 两次）。
     # 显式给足写稿预算；去掉 Claude Code 会话里继承的变量，免得插件拒绝调用（CURRENT 11-11）。
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_BASE_URL", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}

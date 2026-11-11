@@ -79,7 +79,7 @@
       "executor": "hermes",
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
       "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；09:45 以猛鬼兽机器人发常浩私聊卡片（#155）",
-      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 medium（#157，DT_PDAILY_REASONING 可改）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
     },
     {
       "id": "proposal-digest",

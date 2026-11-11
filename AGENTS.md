@@ -76,7 +76,7 @@ ops/
 | `chat` | 飞书对话（含 progress、vault、merge-officer、proposal-digest 技能） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、Vault（MCP vault-read 只读）、名册、仓库 | 飞书回复、Hermes 记忆 |
 | `hermes-aux` | Hermes 辅助任务（压缩、审批判断、后台复盘） | Hermes | Hermes 派单 | 当前会话 | Hermes 记忆和技能 |
 | `report` | 工作日报 / 周报并跑（**已暂停**：2026-11-11 从猛鬼兽撤下，PRD D20） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、群、会议妙记、日程、任务、项目进展 | 飞书并跑文档、evidence/reports |
-| `pdaily` | 个人项目日报 V2（#111、#155：09:00 写稿、09:45 发私聊） | Hermes，仅支持 Hermes；失败出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 事实快照 facts.json、提示词 pdaily_report.md | DigitalTwin/daily/ 的卡片、完整报告、模型原稿、build.json、delivery.json；飞书完整报告云文档；常浩私聊卡片 |
+| `pdaily` | 个人项目日报 V2（#111、#155：09:00 写稿、09:45 发私聊） | Hermes（主模型 Opus 5.5，思考 medium，#157），仅支持 Hermes；失败出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 事实快照 facts.json、提示词 pdaily_report.md | DigitalTwin/daily/ 的卡片、完整报告、模型原稿、build.json、delivery.json；飞书完整报告云文档；常浩私聊卡片 |
 | `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
 | `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
 
