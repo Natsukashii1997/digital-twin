@@ -8,6 +8,14 @@
 
 ---
 
+## 2026-11-11 · skill 月度体检排成 Hermes 定时任务（#151；PR #152 `66be6cb`）
+
+- 常浩选方案 A（不并进工程自检）：新增 `hermes/scripts/skill_health.py`，在 my-skills 下跑 `monthly-health.mjs --days 30`，标题改粗体、表格改逐条列表，末尾加「抽查 <名字>」提示；失败退出码 1，由 Hermes 发失败通知。为 matt-flow 2.0.0 观测期配的（my-skills#86）。
+- 已安装：`~/.hermes/scripts/skill_health.py` 与 main `cmp` 一致。
+- 已建任务：`5aff82a706ed`「skill 月度体检（每月 1 号 10:30）」，无模型，发到和工程自检同一个飞书私聊；下次 2026-12-01 10:30。
+- 08:11 手动触发一次：`last_status ok`，无投递错误，输出在 `~/.hermes/cron/output/5aff82a706ed/2026-11-11_08-11-25.md`。待常浩在飞书私聊看一眼样子。
+- 遗留：`hermes/scripts/tests/README.md` 写「共 356 项」，实际 719 项，未改；`monthly-health.mjs` 会把刚上线的 skill 也列进「0 调用，可以考虑退役」，要改在 my-skills。
+
 ## 2026-11-11 凌晨 · 影子合并官暂停；猛鬼兽只读核查
 
 - **已暂停**（常浩要求「把猛鬼兽的影子合并官的 cron 关闭」）：`hermes cron pause 8994fb76d03e`，回读为 `[paused]`；任务没删，`hermes cron resume 8994fb76d03e` 可恢复。任务表改前改后在 `evidence/mengguishou-review-20261111/`。影响：飞书不再有新的 PR 卡片，「引用卡片回合并」暂时没有新卡可用；已发卡片的按钮（merge-buttons 插件）仍可用；一致率统计停在暂停前。工程流程.md 第 5 节、AGENTS 里对合并官的描述未改。
