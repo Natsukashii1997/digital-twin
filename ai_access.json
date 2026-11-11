@@ -20,7 +20,7 @@
     "hermes": {
       "name": "Hermes（猛鬼兽）",
       "access": "Hermes 派单",
-      "how": "飞书对话和带模型的定时任务由 Hermes 自己的模型做（2026-11-10 起是 Claude claude-opus-5-5[1m]，经插件 claude-subscription-directsdk-experimental 调本机 claude 命令行、用 Claude 会员额度；辅助任务用 openai-codex gpt-6-luna）；底层模型在 ~/.hermes/config.yaml 的 model 段，用 `hermes config set model.default …` 切换，改完要重启网关",
+      "how": "飞书对话和带模型的定时任务由 Hermes 自己的模型做（2026-11-10 起是 Claude claude-opus-5-5[1m]，经插件 claude-subscription-directsdk-experimental 调本机 claude 命令行、用 Claude 会员额度；辅助任务用 openai-codex gpt-6-luna；亚古兽 2026-11-11 起主模型改为 openai-codex gpt-6.1-sol、思考 xhigh，配置在 ~/.hermes/profiles/agumon/config.yaml）；底层模型在 ~/.hermes/config.yaml 的 model 段，用 `hermes config set model.default …` 切换，改完要重启网关",
       "switchable": false
     },
     "chatgpt-web": {
@@ -71,7 +71,7 @@
       "executor": "hermes",
       "reads": "用 lark-cli 读常浩的飞书私聊、群聊、会议和妙记、日程、任务；项目进展（progress_data.py）；并跑文档里的上一篇",
       "writes": "飞书并跑日报 / 周报文档；~/Library/Application Support/DigitalTwin/evidence/reports/",
-      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。2026-11-11 常浩定从猛鬼兽撤下（PRD D20），定时任务 33df73dffd17、6a976baa2632 已暂停，不搬到亚古兽。"
+      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。2026-11-11 常浩定从猛鬼兽撤下（PRD D20），定时任务 33df73dffd17、6a976baa2632 已暂停。2026-11-11 下午常浩修订：牛马之家工作日报改由亚古兽写并推送：接着写 Aily 的《常浩-记忆日报汇总》，按它的六模块结构；实施方案待常浩确认。"
     },
     {
       "id": "pdaily",
@@ -80,6 +80,14 @@
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
       "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；10:00 以猛鬼兽机器人发常浩私聊卡片（#155、#159；原 09:45）",
       "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 medium（#157，DT_PDAILY_REASONING 可改）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+    },
+    {
+      "id": "memdaily",
+      "name": "记忆日报（亚古兽，PRD D20 2026-11-11 修订；memdaily_publish.py 调 hermes -p agumon chat 单次写六模块内容，脚本核对后按 7/15 模板排版写入）",
+      "executor": "hermes",
+      "reads": "常浩的飞书私聊、白名单群和常浩参与的群、视频会议与妙记、日程、飞书任务（亚古兽应用、常浩的用户身份，memdaily_data.py）；《常浩-记忆日报汇总》前一篇的行动 & 阻塞；提示词 hermes/prompts/memdaily_report.md；本机配置和模板样例 DigitalTwin/memdaily/config.json、template-0715.md",
+      "writes": "《常浩-记忆日报汇总》TCG9dy7Uco… 最顶部插入一篇（写前快照 DigitalTwin/memdaily/backup/）；DigitalTwin/memdaily/<日期>.draft.json、.xml、.build.json、.delivery.json；亚古兽机器人私聊常浩三段式推送",
+      "note": "仅支持 Hermes（亚古兽 profile 的主模型，2026-11-11 起 openai-codex gpt-6.1-sol、思考 xhigh；DT_MEMDAILY_REASONING 可改）。核对不过重写一次，再不过就不写，定时任务把原因发到亚古兽私聊，不换执行方。每篇标题下一行写「生成：亚古兽（实际模型）｜接入：Hermes 派单｜时间」。"
     },
     {
       "id": "proposal-digest",
