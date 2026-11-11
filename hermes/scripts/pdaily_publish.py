@@ -10,7 +10,7 @@
   python3 pdaily_publish.py material [--date 统计日] [--facts 快照]   只打印交给模型的压缩材料
   python3 pdaily_publish.py send [--date 统计日] [--out 目录] [--force]
       建完整报告云文档，按甲版现做卡片，拦工作内容（PRD D22：猛鬼兽只报个人项目），以猛鬼兽机器人发到常浩私聊并回读，
-      记 <统计日>.delivery.json；同一统计日只发一次。成功不输出，失败打印一句原因（#155，定时任务 09:45）。
+      记 <统计日>.delivery.json；同一统计日只发一次。卡片里带工程自检结果（#159）。成功不输出，失败打印一句原因（#155，定时任务 10:00）。
 分工：能从快照算出来的（核心数据五行、成果为空时是没进展还是没数据、留痕）由脚本算；判断（什么算实质推进、拍板类型、
 风险等级、推荐、今日计划）由模型写。脚本核对：编号、百分比、PR 数、「已安装 / 已验收」这类说法要有快照出处，
 七段齐全、三个数和卡片一致；编造类问题判不通过（出事实版），写法问题（最晚时间格式、超长）自动修正并记提醒。
@@ -655,8 +655,10 @@ def dline(d):
     return line + ("。" + "，".join(tail) if tail else "")
 
 
-def build_card(facts, card, trace, doc_url=None, doc_error=None):
-    """甲版卡片 JSON 2.0（4.0），排版和样例 hermes/samples/pdaily-card-2026-11-08.json 一致；默认宽度。"""
+def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None):
+    """甲版卡片 JSON 2.0（4.0），排版和样例 hermes/samples/pdaily-card-2026-11-08.json 一致；默认宽度。
+    selfcheck：工程自检结果（#159）。None 不显示（预览）；"" 表示正常，只在底部灰字写一句；有内容就在
+    「风险与阻塞」后面加一块「🔧 工程自检」。"""
     sub = [f"统计日 {window_text(facts)}"]
     if unread(facts):
         sub.append(f"{len(unread(facts))} 个项目未读到")
@@ -680,6 +682,8 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None):
     risks = sort_risks([r for r in card.get("risks") or [] if isinstance(r, dict)])
     els += section("⚠️ 风险与阻塞", [f"{LEVELS.get(r.get('level'), '⚪')} **{r.get('category') or '待分类'}｜{r.get('project')}**：{r.get('text')}"
                                    for r in risks[:CARD_MAX]], "没有风险和阻塞", len(risks))
+    if selfcheck:
+        els += section("🔧 工程自检", [selfcheck], "", 1)
     today = sorted([t for t in card.get("today") or [] if isinstance(t, dict)],
                    key=lambda t: PRIORITIES.index(t["priority"]) if t.get("priority") in PRIORITIES else 9)
     els += section("💡 今日推进", [f"{i}. **{t.get('priority')} {t.get('item')}**：{t.get('owner_action')}"
@@ -693,6 +697,8 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None):
                                    "ios_url": doc_url, "android_url": doc_url}]})
     else:
         trace += f"｜完整报告未生成：{doc_error or '未知原因'}"
+    if selfcheck == "":
+        trace += "｜工程自检：正常"
     els.append({"tag": "markdown", "content": f"<font color='grey'>{trace}</font>", "text_size": "notation"})
     return {"schema": "2.0", "config": {"update_multi": True},
             "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(facts['stat_day'])}"},
@@ -794,7 +800,7 @@ def build(facts, out, reply=None, force_fallback=False):
     return meta
 
 
-# ---------- 发送（#155：每天 09:45 发常浩私聊） ----------
+# ---------- 发送（#155、#159：每天 10:00 发常浩私聊，带工程自检） ----------
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
 PROFILE = "cli_a96f5f9ac63adcd4"                     # 猛鬼兽应用（PRD D12）
@@ -833,6 +839,24 @@ def lark(args, what, identity, cwd=None):
     if not d.get("ok", True):
         raise SendError(f"{what}失败：{clip((d.get('error') or {}).get('message', '未知错误'), 200)}")
     return d.get("data") or {}
+
+
+SELF_CHECK = Path(os.environ.get("DT_SELF_CHECK", Path(__file__).with_name("self_check.py")))
+SELF_CHECK_TIMEOUT = 900   # 每月 1 号要查名册各仓库，self_check 里这一项最多 600 秒
+
+
+def run_self_check():
+    """跑工程自检（原 09:50 单独发，#159 起并进日报）。返回 ""＝正常；有问题返回要显示的正文；没跑成也返回一句说明。"""
+    try:
+        r = subprocess.run([sys.executable, str(SELF_CHECK)], capture_output=True, text=True, timeout=SELF_CHECK_TIMEOUT,
+                           cwd=str(SELF_CHECK.parent))
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"⚠️ 自检没跑成（{type(e).__name__}），今天没有自检结果"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        return f"⚠️ 自检没跑成（退出码 {r.returncode}：{clip(tail[-1] if tail else '', 120)}），今天没有自检结果"
+    out = r.stdout.strip()
+    return re.sub(r"^🔧 工程自检\s*", "", out).strip()
 
 
 def work_content(text):
@@ -891,7 +915,7 @@ def send(day, out, force=False):
         except SendError as e:
             doc_error = str(e)
         card = build_card(facts, fields, meta.get("trace") or trace_line(facts, meta.get("model"), meta.get("degraded")),
-                          doc_url=doc_url, doc_error=doc_error)
+                          doc_url=doc_url, doc_error=doc_error, selfcheck=run_self_check())
     text = json.dumps(card, ensure_ascii=False)
     bad = work_content(text)
     if bad or not card["header"]["title"]["content"].startswith("📅 猛鬼兽日报 · "):

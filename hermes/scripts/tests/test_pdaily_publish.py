@@ -514,11 +514,45 @@ class SendTests(unittest.TestCase):
         self.cli.chmod(0o755)
         self.patch = mock.patch.object(pp, "LARK", str(self.cli))
         self.patch.start()
+        self.check = self.tmp / "self_check.py"           # 假工程自检：FAKE_CHECK_OUT 是输出，FAKE_CHECK_RC 是退出码
+        self.check.write_text("import os, sys\nsys.stdout.write(os.environ.get('FAKE_CHECK_OUT', ''))\n"
+                              "sys.exit(int(os.environ.get('FAKE_CHECK_RC', '0')))\n", encoding="utf-8")
+        self.patch_check = mock.patch.object(pp, "SELF_CHECK", self.check)
+        self.patch_check.start()
         (self.out / f"{DAY}.facts.json").write_text(json.dumps(facts(), ensure_ascii=False), encoding="utf-8")
         pp.build(facts(), self.out, reply=reply_text())
 
     def tearDown(self):
         self.patch.stop()
+        self.patch_check.stop()
+
+    def sent(self):
+        return json.loads((self.tmp / "sent.json").read_text())
+
+    def heads(self):
+        return [e["content"] for e in self.sent()["body"]["elements"]
+                if e.get("tag") == "markdown" and e["content"].startswith("**") and e["content"].endswith("**")]
+
+    def test_self_check_ok_one_grey_line(self):
+        """#159：自检正常，只在底部灰字写一句，不加板块。"""
+        pp.send(DAY, self.out)
+        self.assertNotIn("**🔧 工程自检**", self.heads())
+        self.assertIn("工程自检：正常", self.sent()["body"]["elements"][-1]["content"])
+
+    def test_self_check_problems_after_risks(self):
+        with mock.patch.dict(os.environ, {"FAKE_CHECK_OUT": "🔧 工程自检\n\n🔁 安装副本不一致：1 项和仓库 main 对不上\n- hermes/x.py"}):
+            pp.send(DAY, self.out)
+        h = self.heads()
+        self.assertEqual(h.index("**🔧 工程自检**"), h.index("**⚠️ 风险与阻塞**") + 1)
+        self.assertEqual(h[-1], "**💡 今日推进**")
+        t = json.dumps(self.sent(), ensure_ascii=False)
+        self.assertIn("安装副本不一致", t)
+        self.assertNotIn("工程自检：正常", t)
+
+    def test_self_check_failed_said_in_card(self):
+        with mock.patch.dict(os.environ, {"FAKE_CHECK_RC": "2"}):
+            self.assertIsNone(pp.send(DAY, self.out))
+        self.assertIn("自检没跑成（退出码 2", json.dumps(self.sent(), ensure_ascii=False))
 
     def cmds(self):
         if not self.calls.exists():
