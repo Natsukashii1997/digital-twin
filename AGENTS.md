@@ -25,6 +25,7 @@ hermes/
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
+    aihot_hot.py       AI HOT 热点榜推送（#163）：Hermes 无模型定时任务每个工作日 09:45（周一到周五，不跟节假日调休）调用，取 aihot.news 热点榜 TOP10 和每条事件摘要，按常浩 11-11 定稿的「名次栏」样式排成卡片（不要表头，横幅 assets/aihot-banner.png 就是标题，同 GitHub 周榜卡片；标题只链到 aihot.news，不放来源 / 参与者 / 时间），以猛鬼兽机器人发常浩私聊并回读；同一天只发一次；成功不输出，取不到数据或没发成输出一句原因（退出码 1）；记录在 DigitalTwin/aihot/（runs.jsonl、<日期>.card.json、state.json）
     tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 19:30，不早于每日更新时间，github-center #83）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
     skill_health.py    skill 月度体检推送（#151）：Hermes 无模型定时任务每月 1 号 10:30 调用，在 my-skills 下跑 node scripts/monthly-health.mjs --days 30，标题改粗体、表格改成逐条列表、末尾加「抽查 <名字>」提示，stdout 发到常浩私聊；失败退出码 1，由 Hermes 发失败通知；只读
     multica_night.py   Multica 夜跑主控（#92，DT-ORC M5 / 5.3a）：Hermes 无模型定时任务每 5 分钟经 multica_night_tick.py 调 tick（approve 记下的开跑时刻到了就先 start）；按计划文件在 DT 沙盒建父单和分 stage 子单，子单交付（in_review）后推进下一 stage，边跑边导 run-log 和消息到 DigitalTwin/runs/<夜跑>/，到上限按 5.3a 停机（禁用 Wakeup、暂停 Autopilot、取消非终态 run、回读），回读不过就冻结执行器容器；开跑前核对名册 sandbox: true；不合并、不送审；计划样例 hermes/samples/multica-night-2026-11-08.json，执行单 docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md
@@ -80,7 +81,7 @@ ops/
 | `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
 | `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
 
-不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、三个自检脚本、skill 月度体检推送、晨报取数（挂起）。
+不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、AI HOT 热点榜推送（概括按句截取、话题标签按关键词，不经模型）、三个自检脚本、skill 月度体检推送、晨报取数（挂起）。
 
 - **不可用就报错，不换家**：派单开跑前 run_worker 按配置查执行方（`claude auth status`、`codex login status`）；不能用就写 `refused: executor_unavailable` 回执、退出码 4，派单返回「没开跑」和原因，不改用另一家。额度用尽没法提前查，开跑时车间报错写进回执。AI 接入配置读不了时，没点名的派单直接拒绝开单，不猜默认值。
 - **已登记的例外**：Hermes 主模型（现为 Claude）失败或额度不够时自动回退到 deepseek-flash（PRD F10.2；常浩 2026-11-07 定保留）。回复里注明，每日巡检报前一天的回退次数，自检命令显示近 7 天的回退次数。
