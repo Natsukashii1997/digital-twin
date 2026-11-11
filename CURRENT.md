@@ -8,6 +8,20 @@
 
 ---
 
+## 2026-11-11 · 猛鬼兽只报个人项目；个人项目日报按定稿甲版每天 09:45 发（#155，PR #156 `dee0e71` 已合并并安装）
+
+- **事故**：08:12 Claude 把 07:30 的工作日报（中台、双11、A 编号台账）套「📅 猛鬼兽日报」标题、以猛鬼兽机器人发到常浩私聊（`om_x100b600f636fb4b0dd34d3cbe1dc649`，未撤回）。常浩：猛鬼兽是个人分身，只报项目级内容，「绝对不允许再出现」。
+- **排查出的设置问题**：①工作日报 33df73dffd17、周报 6a976baa2632 一直是猛鬼兽的定时任务，用猛鬼兽应用读工作私聊 / 群（与 D1、D19、D22 冲突，D22 写「和 D20 关系另定」一直没定）；②规程 §1 把工作台账文档当「正式日报」、§5 三报是工作报告；③两份都叫「日报」；④个人项目日报从未上线，11-10 定稿格式只在一张手工卡片上，代码还是每块 5 条、列宽自动；⑤Claude 写整份稿超过 240 秒被 Hermes 非流式超时掐断、落 deepseek（变量是 `HERMES_API_CALL_STALE_TIMEOUT`，不是 `HERMES_STREAM_STALE_TIMEOUT`）。
+- **常浩定「只撤下不搬」**：33df73dffd17、6a976baa2632 已 `hermes cron pause`，回读 `[paused]`（任务表前后在 `evidence/mengguishou-work-off-20261111/`）；不搬到亚古兽，牛马之家日报页读的并跑文档不再更新。
+- **常浩定规则**：日报每天 09:45 发私聊，格式同 11-10 定稿。PRD D20、D22、D23 已改（分支上）。
+- **PR #156 已合并**（常浩「合并并安装」，`dee0e71`）：定稿格式进代码、写稿超时、`send`（云文档 + 工作内容拦截 + 发送 + 回读 + delivery.json）、`pdaily_build_job.py` / `pdaily_send_job.py`、规程 §1 §5、AGENTS、ai_access.json。全量测试 728 项通过（`evidence/daily-card-20261111/full-tests-155.txt`）。
+- **已发 11-10 个人日报**：分支代码写稿（Claude，核对全过）、`send` 09:33 发出 `om_x100b600811ea5cacde34aeec47ff593`，回读通过，结构与定稿逐项一致；完整报告 `OmVrdmhX1o2TaaxKVuqcioS4nzc`。两次回退版稿子在 `evidence/daily-card-20261111/deepseek-degraded*`。客户端显示未目视核验。
+- **已安装**（备份在 `evidence/mengguishou-work-off-20261111/install-before/`）：`pdaily_publish.py`、`pdaily_facts.py`、`pdaily_data.py`、`actions.py`、`pdaily_build_job.py`、`pdaily_send_job.py`、`progress_data.py`（换成 main 上 #110 版，个人日报取数依赖；progress 技能的「下一步」抽取随之更新）到 `~/.hermes/scripts/`，提示词 `pdaily_report.md`、规程 HERMES.md，逐个 `cmp` 一致。安装位置用 `/usr/bin/python3` 和 python3.14 自检：material 正常；11-10 已发过，`pdaily_send_job.py` 不重发、无输出。
+- **定时任务**（无模型）：`945534cd43e1` 个人项目日报·写稿 每天 09:00，deliver local；`3a712f6cdf54` 个人项目日报·发送 每天 09:45，deliver 常浩私聊（成功无输出，没发成发一句原因）。脚本超时上限 3600 秒、写稿预算 1200 秒。任务表改前在同一证据目录。
+- **网关**：09:58 `launchctl kickstart -k`，PID 76680 → 96683，09:58:06 `✓ feishu connected`。
+- **已知边界**：09:45 时 09:00 的写稿还没出结果（如电脑睡眠错过 09:00），会发一张「没出成」卡片并记已发，当天不再自动补发；补发用 `pdaily_publish.py send --date <统计日> --force`。
+- **唯一的下一步**：11-12 09:45 后看私聊是否收到 11-11 统计日的甲版卡片，并对照 11-10 定稿（`daily/2026-11-11.delivery.json` 的 sent、read_back 为 true，写稿 build.json 的 model 是 Claude 而非回退）。
+
 ## 2026-11-11 · skill 月度体检排成 Hermes 定时任务（#151；PR #152 `66be6cb`）
 
 - 常浩选方案 A（不并进工程自检）：新增 `hermes/scripts/skill_health.py`，在 my-skills 下跑 `monthly-health.mjs --days 30`，标题改粗体、表格改逐条列表，末尾加「抽查 <名字>」提示；失败退出码 1，由 Hermes 发失败通知。为 matt-flow 2.0.0 观测期配的（my-skills#86）。
