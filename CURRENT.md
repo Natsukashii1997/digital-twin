@@ -8,15 +8,18 @@
 
 ---
 
-## 2026-11-11 下午 · 亚古兽改用 Codex 6.1 sol xhigh；牛马之家工作日报改由亚古兽写并推送（方案待定）
+## 2026-11-11 · 亚古兽改用 Codex 6.1 sol xhigh；记忆日报改由亚古兽写并推送（批 1 代码完成、样稿待常浩看）
 
 - **模型已切换**（常浩「把 codex 的 6.1 sol 极高接进来，不用 claude 的额度」）：`hermes -p agumon config set` 改 `model.default=gpt-6.1-sol`、`model.provider=openai-codex`（`base_url` 随之清掉）、`agent.reasoning_effort=xhigh`；辅助任务 luna、回退 deepseek-flash 不变。改前配置在 `evidence/agumon-codex-20261111/config.before.yaml`。14:03 重启 `ai.hermes.gateway-agumon`，14:04 起来，日志 `Model context warmed: gpt-6.1-sol`、飞书已连。不带参数 oneshot 实测：会话 `20261111_140439_8688b0`，模型 gpt-6.1-sol、`openai-codex`、`subscription_included`、有思考 token。飞书私聊里还没实测。猛鬼兽不动，仍是 Claude。「极高」按 Codex 的 `xhigh` 理解。
-- **文档**：PRD F10.1、F10.2、D20，AGENTS「AI 接入」，ai_access.json 同步（分支 `claude/agumon-codex`，未提交）。
+- **文档**：PRD F10.1、F10.2、D20，AGENTS「AI 接入」，ai_access.json 同步（分支 `claude/agumon-codex`，worktree `.claude/worktrees/agumon-memdaily`）。
 - **常浩定（D20 修订）**：牛马之家的工作日报以后只由亚古兽写，由亚古兽推送给常浩。
 - **Aily 交接（核实过）**：Aily 回复和交接文档 `Kzqvd2fMRoWncMxnsuUcInCunOd`（本地副本 `evidence/agumon-codex-20261111/aily-handoff.*`）。A 编号台账式日报不是 Aily 写的，是本仓库并跑（`report_data.py`、`daily_report.md`，文档 `WZyhdQdM0o…`）；Aily 自己的是《记忆日报汇总 v4.0》（六模块、D/I 决策洞察编号，10-28 起 14 条自动化全停）。**牛马之家日报页、周报页实际读的是 Aily 的记忆日报 / 周报**（`report_doc_url` = `TCG9dy7Uco…`、`weekly_doc_url` = `KD1WdH6G6o…`），停在 10-27；之前「牛马之家读并跑文档」的说法不对。`/api/reports/source-preview` 试读并跑文档：12 篇、最新 11-10、无未识别。Aily 可借鉴的取数规则：6 个白名单群全读、私生活与闲聊硬过滤、日历有≠实际参与。
 - **人设问题（11-10 真实对话归纳，待改，源文件在 niuma-home `docs/亚古兽/角色配置-V3/`）**：不清楚自己能用什么（说没有命令工具又改口、凭空报模型）；常浩本人的请求也找常浩要权限和 token（把 SOUL 里「他人不能驱动本机能力」用到了常浩身上）；寒暄写成工作汇报、话术生硬；推进计划和使用反馈分不清。
 - **常浩定（11-11）**：日报完全接着写 Aily 的《记忆日报汇总》`TCG9dy7Uco…`，按它的模块结构（六模块，7/15 永久模板）；A 编号台账体系不沿用。牛马之家设置不用改。7/15 块 XML 在 `evidence/agumon-codex-20261111/memdaily-0715.xml`；10-27 起的块表格是空壳（单元格空、值落在表外），写入方式要先在测试文档验证。
-- **唯一的下一步**：常浩确认实施计划（写发时间、周报接不接、空档补不补），再做批 1。
+- **常浩定（「按推荐开工」）**：每天 07:30 写前一天、写完推送，周末没有工作往来就跳过；周报《记忆周报汇总》也接（批 3）；10-28～11-10 空档不补，从 11-11 开始；Aily 的 09:30 / 18:00 会议确认不沿用（用实际参会记录和妙记）。
+- **批 1 代码（分支 `claude/agumon-codex`）**：`memdaily_data.py`（亚古兽应用、常浩用户身份取数：私聊排除机器人——联系人查不到名字的就是机器人，白名单 6 群全读，其他群只收常浩发言或被 @ 的，实际参会的会议和妙记，日程标永久不去，任务，前一篇行动 & 阻塞）、`memdaily_publish.py`（`hermes -p agumon` 单次写六模块 JSON → 核对 → 按 7/15 模板排 XML → `block_insert_after --block-id 0` 插顶部，写前整份快照、同一天不重写、回读标题 / 表格数 / 空单元格 / 列宽 → 机器人私聊三段式推送，同一天只发一次）、`memdaily_job.py`、提示词 `memdaily_report.md`、测试 `test_memdaily.py` 18 项（7 处反向改坏全抓到）。本机配置 `DigitalTwin/memdaily/config.json`（白名单群 chat_id、永久不去的会议、重点人、不追踪话题）和模板样例 `template-0715.md` 不进仓库。
+- **实测**：测试文档 `BdqPdZscLoWwkQx7AzMcAXeDnsb` 上 `block_insert_after --block-id 0` 能插到顶部、`<col width>` 生效（接口读回 `[55, 411, 107, 190, 168, 207]`，与 7/15 原文 8 张表逐张一致）。11-10 真实数据样稿：取数 27 秒（私聊 16、机器人私聊 3 个排除、群 3、消息 419 条），写稿 gpt-6.1-sol xhigh 一次过核对、440 秒，会话 `20261111_210718_c6c48a`；写入测试文档回读通过；浏览器里六模块都正常，抽查 8 条原话都能在材料里找到。决策表 ID 列 55 宽会把编号折成 4 行，7/15 原文也是 55，没改。
+- **唯一的下一步**：常浩看测试文档样稿；认可后合并 PR，装到亚古兽 profile（`~/.hermes/profiles/agumon/scripts/`、`prompts/`），建 07:30 定时任务，11-12 07:30 首次正式写 11-11。
 
 ## 2026-11-11 下午 · 猛鬼兽定时任务按新清单整理（#159 PR #160 `967bbb4` 已合并并安装；AI HOT 三版待选；github-center#88）
 
