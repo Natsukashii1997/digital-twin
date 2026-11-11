@@ -66,7 +66,7 @@ ops/
 - 配置：仓库根目录 [ai_access.json](ai_access.json)（功能清单、出厂默认值，改了要和本节一起改）；常浩切换后的选择存在 `~/Library/Application Support/DigitalTwin/ai-access.json`，只由 `ai_access.py set` 写，下一次调用生效，不用改代码、不用重启。
 - 自检命令：`python3 ~/.hermes/scripts/ai_access.py status`（`--json` 给机器读）。工程自检（并进每天 10:00 的个人项目日报）会跑它，车间默认执行方不能用时才在日报里说。
 - 切换车间默认执行方：`python3 ~/.hermes/scripts/ai_access.py set default claude|codex`。Hermes 自己的模型用 `hermes config set model.default …` 切换，要重启网关。
-- Hermes 自己的模型（2026-11-10 起，PRD F10.1、F10.3 修订）：主对话和带模型的定时任务用 Claude `claude-opus-5-5[1m]`，经插件 `claude-subscription-directsdk-experimental` 调本机官方 `claude` 命令行（本机 CLI，Claude 会员额度）；辅助任务用 openai-codex `gpt-6-luna`；回退 deepseek-flash。猛鬼兽、亚古兽一致。
+- Hermes 自己的模型（2026-11-10 起，PRD F10.1、F10.3 修订）：主对话和带模型的定时任务用 Claude `claude-opus-5-5[1m]`，经插件 `claude-subscription-directsdk-experimental` 调本机官方 `claude` 命令行（本机 CLI，Claude 会员额度）；辅助任务用 openai-codex `gpt-6-luna`；回退 deepseek-flash。亚古兽 2026-11-11 起主模型改为 openai-codex `gpt-6.1-sol`、思考 xhigh（Codex 会员额度），其余同猛鬼兽；配置在 `~/.hermes/profiles/agumon/config.yaml`，用 `hermes -p agumon config set …` 改，改完重启 `ai.hermes.gateway-agumon`。
 
 功能清单（id 和 ai_access.json 一致）：
 

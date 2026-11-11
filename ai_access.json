@@ -20,7 +20,7 @@
     "hermes": {
       "name": "Hermes（猛鬼兽）",
       "access": "Hermes 派单",
-      "how": "飞书对话和带模型的定时任务由 Hermes 自己的模型做（2026-11-10 起是 Claude claude-opus-5-5[1m]，经插件 claude-subscription-directsdk-experimental 调本机 claude 命令行、用 Claude 会员额度；辅助任务用 openai-codex gpt-6-luna）；底层模型在 ~/.hermes/config.yaml 的 model 段，用 `hermes config set model.default …` 切换，改完要重启网关",
+      "how": "飞书对话和带模型的定时任务由 Hermes 自己的模型做（2026-11-10 起是 Claude claude-opus-5-5[1m]，经插件 claude-subscription-directsdk-experimental 调本机 claude 命令行、用 Claude 会员额度；辅助任务用 openai-codex gpt-6-luna；亚古兽 2026-11-11 起主模型改为 openai-codex gpt-6.1-sol、思考 xhigh，配置在 ~/.hermes/profiles/agumon/config.yaml）；底层模型在 ~/.hermes/config.yaml 的 model 段，用 `hermes config set model.default …` 切换，改完要重启网关",
       "switchable": false
     },
     "chatgpt-web": {
@@ -71,7 +71,7 @@
       "executor": "hermes",
       "reads": "用 lark-cli 读常浩的飞书私聊、群聊、会议和妙记、日程、任务；项目进展（progress_data.py）；并跑文档里的上一篇",
       "writes": "飞书并跑日报 / 周报文档；~/Library/Application Support/DigitalTwin/evidence/reports/",
-      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。2026-11-11 常浩定从猛鬼兽撤下（PRD D20），定时任务 33df73dffd17、6a976baa2632 已暂停，不搬到亚古兽。"
+      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。2026-11-11 常浩定从猛鬼兽撤下（PRD D20），定时任务 33df73dffd17、6a976baa2632 已暂停。2026-11-11 下午常浩修订：牛马之家工作日报改由亚古兽写并推送：接着写 Aily 的《常浩-记忆日报汇总》，按它的六模块结构；实施方案待常浩确认。"
     },
     {
       "id": "pdaily",

@@ -8,6 +8,16 @@
 
 ---
 
+## 2026-11-11 下午 · 亚古兽改用 Codex 6.1 sol xhigh；牛马之家工作日报改由亚古兽写并推送（方案待定）
+
+- **模型已切换**（常浩「把 codex 的 6.1 sol 极高接进来，不用 claude 的额度」）：`hermes -p agumon config set` 改 `model.default=gpt-6.1-sol`、`model.provider=openai-codex`（`base_url` 随之清掉）、`agent.reasoning_effort=xhigh`；辅助任务 luna、回退 deepseek-flash 不变。改前配置在 `evidence/agumon-codex-20261111/config.before.yaml`。14:03 重启 `ai.hermes.gateway-agumon`，14:04 起来，日志 `Model context warmed: gpt-6.1-sol`、飞书已连。不带参数 oneshot 实测：会话 `20261111_140439_8688b0`，模型 gpt-6.1-sol、`openai-codex`、`subscription_included`、有思考 token。飞书私聊里还没实测。猛鬼兽不动，仍是 Claude。「极高」按 Codex 的 `xhigh` 理解。
+- **文档**：PRD F10.1、F10.2、D20，AGENTS「AI 接入」，ai_access.json 同步（分支 `claude/agumon-codex`，未提交）。
+- **常浩定（D20 修订）**：牛马之家的工作日报以后只由亚古兽写，由亚古兽推送给常浩。
+- **Aily 交接（核实过）**：Aily 回复和交接文档 `Kzqvd2fMRoWncMxnsuUcInCunOd`（本地副本 `evidence/agumon-codex-20261111/aily-handoff.*`）。A 编号台账式日报不是 Aily 写的，是本仓库并跑（`report_data.py`、`daily_report.md`，文档 `WZyhdQdM0o…`）；Aily 自己的是《记忆日报汇总 v4.0》（六模块、D/I 决策洞察编号，10-28 起 14 条自动化全停）。**牛马之家日报页、周报页实际读的是 Aily 的记忆日报 / 周报**（`report_doc_url` = `TCG9dy7Uco…`、`weekly_doc_url` = `KD1WdH6G6o…`），停在 10-27；之前「牛马之家读并跑文档」的说法不对。`/api/reports/source-preview` 试读并跑文档：12 篇、最新 11-10、无未识别。Aily 可借鉴的取数规则：6 个白名单群全读、私生活与闲聊硬过滤、日历有≠实际参与。
+- **人设问题（11-10 真实对话归纳，待改，源文件在 niuma-home `docs/亚古兽/角色配置-V3/`）**：不清楚自己能用什么（说没有命令工具又改口、凭空报模型）；常浩本人的请求也找常浩要权限和 token（把 SOUL 里「他人不能驱动本机能力」用到了常浩身上）；寒暄写成工作汇报、话术生硬；推进计划和使用反馈分不清。
+- **常浩定（11-11）**：日报完全接着写 Aily 的《记忆日报汇总》`TCG9dy7Uco…`，按它的模块结构（六模块，7/15 永久模板）；A 编号台账体系不沿用。牛马之家设置不用改。7/15 块 XML 在 `evidence/agumon-codex-20261111/memdaily-0715.xml`；10-27 起的块表格是空壳（单元格空、值落在表外），写入方式要先在测试文档验证。
+- **唯一的下一步**：常浩确认实施计划（写发时间、周报接不接、空档补不补），再做批 1。
+
 ## 2026-11-11 下午 · 猛鬼兽定时任务按新清单整理（#159 PR #160 `967bbb4` 已合并并安装；AI HOT 三版待选；github-center#88）
 
 - **常浩定的猛鬼兽清单**（「按推荐开工」）：日报每天 10:00（09:15 写稿，给工作日 09:45 的 AI HOT 让位）；周报卡片每周一 10:30（结构待梳理）；工程自检并进日报（正常一句、有问题一块）；Tidings 排行榜每周一 14:00（卡片格式不变）；Multica 夜跑 + 影子合并官合成「夜间托管」（待设计，两者保持停用）；skill 月度体检保留；AI HOT 日报每个工作日 09:45（新增）；其余删掉。数字分身＝猛鬼兽（个人）+ 亚古兽（企业），任务隔离；亚古兽清单常浩稍后说。
