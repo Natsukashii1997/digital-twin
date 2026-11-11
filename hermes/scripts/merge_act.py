@@ -156,7 +156,7 @@ def button(label, style, verb, ref):
 
 
 def home_chat():
-    from proposal_digest import home_chat as hc       # 同一套：环境变量，没有再从 ~/.hermes/.env 只读这一项
+    from feishu_home import home_chat as hc           # 同一套：环境变量，没有再从 ~/.hermes/.env 只读这一项（#165）
     return hc()
 
 

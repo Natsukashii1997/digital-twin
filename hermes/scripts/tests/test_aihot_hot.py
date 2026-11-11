@@ -19,7 +19,7 @@ from pathlib import Path
 root = Path(os.environ["FAKE_DIR"])
 args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
-    f.write(json.dumps({"args": args, "cwd": os.getcwd(), "hermes_env": sorted(k for k in os.environ if "HERMES" in k)}, ensure_ascii=False) + "\n")
+    f.write(json.dumps({"args": args, "cwd": os.getcwd(), "hermes_env": sorted(k for k in os.environ if k.lstrip("_").startswith(("HERMES", "OPENCLAW", "LARK_CHANNEL")))}, ensure_ascii=False) + "\n")
 replies = json.loads((root / "replies.json").read_text(encoding="utf-8"))
 cmd = args[3] if args[2] == "im" and args[3].startswith("+") else " ".join(args[2:5])
 print(json.dumps(replies.get(cmd, {"ok": False, "error": {"message": "fake: 没有这条回话 " + cmd}}), ensure_ascii=False))
@@ -82,7 +82,7 @@ class AihotHot(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "FEISHU_HOME_CHANNEL"}
         env.update(DT_AIHOT_BASE=self.api.as_uri() + "/", DT_AIHOT_DIR=str(self.dir), DT_AIHOT_BANNER=str(self.banner),
                    DT_LARK_CLI=str(self.fake / "lark-cli"), FAKE_DIR=str(self.fake), DT_NOW=now,
-                   DT_AIHOT_RETRY_WAIT="0", HERMES_HOME="/x")
+                   DT_AIHOT_RETRY_WAIT="0", HERMES_HOME="/x", DT_HERMES_ENV=str(self.tmp / "hermes.env"))
         if chat:
             env["FEISHU_HOME_CHANNEL"] = chat
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
@@ -272,7 +272,15 @@ class AihotHot(unittest.TestCase):
 
     def test_没有私聊chat_id_报原因(self):
         r = self.run_script(chat="")
-        self.assertEqual((r.returncode, r.stdout), (1, "AI 热点榜今天没发成：没有私聊 chat_id（FEISHU_HOME_CHANNEL）。\n"))
+        self.assertEqual((r.returncode, r.stdout), (1, "AI 热点榜今天没发成：没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）。\n"))
+
+    def test_环境里没有chat_id时从hermes_env读(self):
+        """#165：无模型定时任务的环境里没有 FEISHU_HOME_CHANNEL，从 ~/.hermes/.env 读。"""
+        (self.tmp / "hermes.env").write_text(f"FEISHU_HOME_CHANNEL={CHAT}\n", encoding="utf-8")
+        r = self.run_script(chat="")
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        (_, _, chat), = self.sent_cards()
+        self.assertEqual(chat, CHAT)
 
 
 if __name__ == "__main__":

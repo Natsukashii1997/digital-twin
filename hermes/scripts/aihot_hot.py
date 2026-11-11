@@ -15,7 +15,7 @@
 
 记录（证据随机制出生）：每次运行在 DigitalTwin/aihot/runs.jsonl 记一行；当天发出的卡片存 <日期>.card.json；状态（已发日期、横幅 image_key）在 state.json。
 
-环境变量：FEISHU_HOME_CHANNEL 私聊 chat_id（Hermes 的 .env 里有）；DT_AIHOT_DIR 记录目录；DT_AIHOT_BASE 接口地址（自测用 file://）；
+环境变量：FEISHU_HOME_CHANNEL 私聊 chat_id（无模型定时任务的环境里没有，这时从 ~/.hermes/.env 读，#165）；DT_AIHOT_DIR 记录目录；DT_AIHOT_BASE 接口地址（自测用 file://）；
 DT_AIHOT_BANNER 横幅；DT_LARK_CLI 换 lark-cli；DT_NOW（ISO 时间）指定现在。
 """
 import argparse
@@ -30,6 +30,9 @@ import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+
+sys.path.insert(0, str(Path(__file__).parent))
+from feishu_home import home_chat  # noqa: E402
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
 PROFILE = "cli_a96f5f9ac63adcd4"                       # 猛鬼兽应用（PRD D12）
@@ -300,9 +303,9 @@ def main(argv=None):
         if a.dry_run:
             print(json.dumps(build_card(items, now, "img_DRY_RUN"), ensure_ascii=False, indent=1))
             return 0
-        chat = os.environ.get("FEISHU_HOME_CHANNEL", "")
+        chat = home_chat()
         if not chat.startswith("oc_"):
-            raise Fail("没有私聊 chat_id（FEISHU_HOME_CHANNEL）")
+            raise Fail("没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）")
         card = build_card(items, now, banner_key(state, warnings))
         idem = f"aihot-hot-{day}" + (f"-{int(now.timestamp())}" if a.force else "")
         mid = lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "interactive",
