@@ -14,7 +14,7 @@
 - **数据**：`hot-topics` + 每条 `stories/{publicId}` 的 digest 第一段；接口写明不返回热度和涨跌，不显示。纯脚本，不调用模型（AGENTS、ai_access.json 的 no_ai 已登记）。
 - **安装**：`aihot_hot.py`、`assets/aihot-banner.png`、`feishu_home.py`，以及改用 `feishu_home` 的 `tidings_weekly.py`、`proposal_digest.py`、`merge_act.py`，都从 `origin/main` 装到 `~/.hermes/scripts/`，逐个 `cmp` 一致。定时任务 `198ea1ea68df`：无模型，`45 9 * * 1-5`（周一到周五，不跟调休），发常浩私聊，下次 11-12 09:45。记录在 `DigitalTwin/aihot/`（runs.jsonl、<日期>.card.json、state.json）。
 - **试跑发现并修好的坑**（#165）：无模型定时任务给脚本的环境里没有 `FEISHU_HOME_CHANNEL`，第一次试跑报「没有私聊 chat_id」；**Tidings 周报 11-09 那期也因此没发出**。改为共用 `feishu_home.home_chat()`：环境变量没有就从 `~/.hermes/.env` 只读这一项。修好后经 `hermes cron run` 试跑成功（`om_x100b6074f131b8b0c0f0c43dcc1c4d0`，回读通过）；两条失败记录 `198ea1_91541f35aed5`、`18a21b_939e2b1819f2` 已 ack 关闭。全量测试 747 项通过。
-- **待常浩定**：Tidings 11-09 那期要不要补发（`tidings_weekly.py --force`）。
+- **Tidings 11-09 不补发**（常浩 11-11 定）：下周一 14:00 照常发新一期。
 - **唯一的下一步**：11-12 09:45 看 AI HOT 是否自动到达（`DigitalTwin/aihot/runs.jsonl` 有当天 ok 行）；10:00 看日报卡片是否带工程自检那一行。
 
 ## 2026-11-11 下午 · 猛鬼兽定时任务按新清单整理（#159 PR #160 `967bbb4` 已合并并安装；AI HOT 三版待选；github-center#88）
