@@ -81,8 +81,9 @@ def _lark_json(args, timeout, what):
     return d
 
 
-def lark_fetch(message_id, timeout=60):
-    """用 bot 身份回读一条消息。查不到返回 None；跑不起来、输出不对、飞书报错、回读不止一条 / 不是这条 / 字段不全抛 IdentityError。"""
+def lark_fetch(message_id, timeout=60, with_text=False):
+    """用 bot 身份回读一条消息。查不到返回 None；跑不起来、输出不对、飞书报错、回读不止一条 / 不是这条 / 字段不全抛 IdentityError。
+    with_text=True 时多带 text：文本消息的正文（别的类型给 None），只给要核对口令的调用方（custody.py 核对「托管」「签托管策略 …」）。"""
     if not MESSAGE_ID.match(message_id or ""):
         raise IdentityError("message_id 不是飞书消息 id（om_ 开头）")
     d = _lark_json(["im", "+messages-mget", "--message-ids", message_id, "--no-reactions"], timeout, "回读")
@@ -97,7 +98,21 @@ def lark_fetch(message_id, timeout=60):
         raise IdentityError("回读到的不是这条消息（message_id 不一致）")
     if not all(m.get(k) for k in ("message_id", "sender_open_id", "sender_type", "chat_id", "create_time")):
         raise IdentityError("回读结果字段不全（发送者 / 会话 / 时间缺一不可）")
+    if with_text:
+        m["text"] = message_text(msgs[0])
     return m
+
+
+def message_text(raw):
+    """文本消息的正文：lark-cli 给渲染后的文本（官方说明：不是原始 JSON）；万一给的是原始接口的 {"text": …} 也认。别的类型给 None。"""
+    content = raw.get("content")
+    if raw.get("msg_type") != "text" or not isinstance(content, str):
+        return None
+    try:
+        d = json.loads(content)
+    except ValueError:
+        return content
+    return d["text"] if isinstance(d, dict) and isinstance(d.get("text"), str) else content
 
 
 def lark_chat_mode(chat_id, timeout=60):

@@ -7,6 +7,8 @@
 每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
 每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
+每天：跑同目录 custody.py status --json（托管状态，#131，只读），托管没关（开着、排空中、冻结）、状态读不了、已签策略失效或
+  3 天内到期才说；关着且策略正常（或还没签过）不说；没装 custody.py 就跳过。
 每月 1 号（或 --monthly）：另查沙盒超过 30 天没动的目录，和名册仓库自检（同目录 check_repos.py，只报失败项）。
 只读：不改文件、不发飞书、不写日志。安装时和 check_repos.py 同放 ~/.hermes/scripts/。
 环境变量：DT_REPO 仓库路径；HERMES_HOME、DT_BIN 两个安装根目录；DT_TODAY（YYYY-MM-DD）指定今天，自测用；
@@ -34,6 +36,9 @@ TIDINGS_NODE = os.environ.get("TIDINGS_NODE", str(HOME / ".nvm/versions/node/v24
 TIDINGS_TIMEOUT = 120
 AI_ACCESS_SCRIPT = Path(os.environ.get("DT_AI_ACCESS_SCRIPT", HERMES / "scripts/ai_access.py")).expanduser()
 AI_ACCESS_TIMEOUT = 120
+CUSTODY_SCRIPT = Path(os.environ.get("DT_CUSTODY_SCRIPT", HERMES / "scripts/custody.py")).expanduser()
+CUSTODY_TIMEOUT = 60
+CUSTODY_RENEW_DAYS = 3      # 托管策略模板：到期前 3 天日报提醒续签
 LIST_LIMIT = 10
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
@@ -174,6 +179,43 @@ def check_ai_access():
             "处理：在终端登录它，或改默认：python3 ~/.hermes/scripts/ai_access.py set default 另一家"]
 
 
+def check_custody():
+    """托管状态（只读）：有要常浩知道的才返回行。"""
+    if not CUSTODY_SCRIPT.exists():
+        return []
+    try:
+        r = run([sys.executable, "-B", str(CUSTODY_SCRIPT), "status", "--json"], timeout=CUSTODY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return [f"托管状态没读出来（超过 {CUSTODY_TIMEOUT} 秒）"]
+    except OSError as e:
+        return [f"托管状态没读出来（无法启动：{e.strerror or e}）"]
+    try:
+        st = json.loads(r.stdout)
+        state, pol, s = st["state"], st["policy"], st["session"]
+    except (ValueError, KeyError, TypeError):
+        return [f"托管状态没读出来（输出不是预期的 JSON，退出码 {r.returncode}）"]
+    if st.get("error"):
+        return [f"托管状态文件读不了：{st['error']}。读不了时托管一律当作不可用；要人工核对"]
+    t = lambda v: dt.datetime.fromisoformat(v).strftime("%m-%d %H:%M") if v else "—"
+    lines = []
+    if state == "on":
+        lines.append(f"托管开着（{s['id']}，{t(s['started_at'])} 起，到 {t(s['until'])} 自动转排空）")
+    elif state == "draining":
+        lines.append(f"托管排空中，截止 {t(s['drain']['deadline'])}；截止前没收完会自动冻结")
+    elif state == "frozen":
+        f = s["frozen"]
+        lines += [f"托管已冻结（{t(f['at'])}：{f['reason']}），禁止新决定、新合并和重新开启",
+                  *[f"未解决：{i}" for i in f.get("items", [])],
+                  "处理：核对后在猛鬼兽私聊说「解除冻结」"]
+    if pol and pol.get("code") in ("changed", "missing", "expired", "invalid"):
+        lines.append(f"托管策略失效：{pol['reason']}")
+    elif pol and pol.get("ok"):
+        left = dt.datetime.fromisoformat(pol["expires_at"]) - dt.datetime.fromisoformat(st["checked_at"])
+        if left <= dt.timedelta(days=CUSTODY_RENEW_DAYS):
+            lines.append(f"托管策略 v{pol['version']} 将于 {t(pol['expires_at'])} 到期，要续签（换版本重签，不自动续）")
+    return lines
+
+
 def bullets(items):
     lines = [f"- {i}" for i in items[:LIST_LIMIT]]
     return lines + ([f"- ……另有 {len(items) - LIST_LIMIT} 项"] if len(items) > LIST_LIMIT else [])
@@ -192,6 +234,9 @@ def main():
     ai = check_ai_access()
     if ai:
         sections.append(["🤖 AI 接入提醒", *bullets(ai)])
+    custody = check_custody()
+    if custody:
+        sections.append(["🛡️ 托管", *bullets(custody)])
     tidings = check_tidings()
     if tidings:
         sections.append([tidings])

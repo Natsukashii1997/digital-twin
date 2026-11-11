@@ -178,6 +178,17 @@ class LarkFetchTests(unittest.TestCase):
         self.assertIn("KEEP_ME", kw["env"])
         self.assertEqual(out, msg())
 
+    def test_with_text_only_when_asked(self):
+        body = json.dumps({"ok": True, "data": {"messages": [raw(content="托管", msg_type="text")], "total": 1}})
+        with mock.patch.object(ti.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, body, "")):
+            self.assertNotIn("text", ti.lark_fetch(MID))                      # 默认不带正文
+            self.assertEqual(ti.lark_fetch(MID, with_text=True)["text"], "托管")
+        self.assertEqual(ti.message_text(raw()), "合并")                        # 原始接口的 {"text": …} 也认
+        self.assertEqual(ti.message_text(raw(content="[1, 2]")), "[1, 2]")
+        body = json.dumps({"ok": True, "data": {"messages": [raw(content="[图片]", msg_type="image")], "total": 1}})
+        with mock.patch.object(ti.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, body, "")):
+            self.assertIsNone(ti.lark_fetch(MID, with_text=True)["text"])      # 非文本消息不给正文
+
     def test_error_and_garbage_outputs(self):
         with self.assertRaisesRegex(ti.IdentityError, "回读失败：perm"):
             self.run_fake(stderr=json.dumps({"ok": False, "error": {"message": "perm denied"}}), code=1)

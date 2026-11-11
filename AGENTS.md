@@ -28,6 +28,7 @@ hermes/
     memdaily_job.py    记忆日报定时任务入口（亚古兽 profile，无模型，每天 07:30 写前一天）；成功或跳过不输出，没写成输出一句原因
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
+    custody.py         托管状态底座（#131，托管模式规格 §3.7、§3.8）：custody_state = off | on | draining | frozen 的唯一真源，只有它写 DigitalTwin/custody.json（原子替换 + 排他锁）；status / verify 只读，on 只认飞书私聊（twin_identity 回读核验 + 口令原文 + 防重放）和已签策略的默认时段，off 任何来源都可以，到 until 自动排空、到排空截止没收完自动冻结，frozen 只能 unfreeze（私聊「解除冻结」）；sign 按私聊口令「签托管策略 v<版本> <SHA-256 前 12 位>」签 DigitalTwin/custody/policy.md（不许未填项、版本单调、全文哈希），verify 每次重算；工程自检只读显示；不发飞书、不装定时任务，托管在常浩签策略、落地工单验收前不生效；未安装
     aihot_hot.py       AI HOT 热点榜推送（#163）：Hermes 无模型定时任务每个工作日 09:45（周一到周五，不跟节假日调休）调用，取 aihot.news 热点榜 TOP10 和每条事件摘要，按常浩 11-11 定稿的「名次栏」样式排成卡片（不要表头，横幅 assets/aihot-banner.png 就是标题，同 GitHub 周榜卡片；标题只链到 aihot.news，不放来源 / 参与者 / 时间），以猛鬼兽机器人发常浩私聊并回读；同一天只发一次；成功不输出，取不到数据或没发成输出一句原因（退出码 1）；记录在 DigitalTwin/aihot/（runs.jsonl、<日期>.card.json、state.json）
     feishu_home.py     私聊 chat_id（#165）：先看环境变量 FEISHU_HOME_CHANNEL，没有再从 ~/.hermes/.env 只读这一项；无模型定时任务的环境里没有这个变量，往私聊发消息的脚本（aihot_hot、tidings_weekly、proposal_digest、merge_act）都用它
     tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 19:30，不早于每日更新时间，github-center #83）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
@@ -58,7 +59,7 @@ orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
-  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
+  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
