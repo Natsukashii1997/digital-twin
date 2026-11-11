@@ -1,5 +1,5 @@
 """个人项目日报写稿与核对（#111 批 2a）：读 1c 的事实快照，让 Hermes 写卡片要素和完整报告，脚本核对后
-按甲版生成飞书卡片 JSON；模型失败或核对不过就出事实版（标「分析降级」）。本批只生成，不发送。
+按甲版生成飞书卡片 JSON；模型失败或核对不过就出事实版（标「分析降级」）。send 子命令负责发送（#155）。
 
 规格：docs/个人项目日报-V2-设计.md 第 3 节（篇幅、留痕）、4.0（卡片）、4.1–4.9（完整报告）、第 6 节（证据）、7.1。
 用法：
@@ -8,6 +8,9 @@
       调 Hermes 单次写稿，写出 <统计日>.card.json、.report.md、.card-fields.json、.build.json，最后打印一行 JSON 摘要。
       --reply 用现成的模型回复（回放、测试用），--fallback 直接出事实版。取数本身失败时出一张「取数失败」的最小卡片。
   python3 pdaily_publish.py material [--date 统计日] [--facts 快照]   只打印交给模型的压缩材料
+  python3 pdaily_publish.py send [--date 统计日] [--out 目录] [--force]
+      建完整报告云文档，按甲版现做卡片，拦工作内容（PRD D22：猛鬼兽只报个人项目），以猛鬼兽机器人发到常浩私聊并回读，
+      记 <统计日>.delivery.json；同一统计日只发一次。成功不输出，失败打印一句原因（#155，定时任务 09:45）。
 分工：能从快照算出来的（核心数据五行、成果为空时是没进展还是没数据、留痕）由脚本算；判断（什么算实质推进、拍板类型、
 风险等级、推荐、今日计划）由模型写。脚本核对：编号、百分比、PR 数、「已安装 / 已验收」这类说法要有快照出处，
 七段齐全、三个数和卡片一致；编造类问题判不通过（出事实版），写法问题（最晚时间格式、超长）自动修正并记提醒。
@@ -32,7 +35,7 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 HERMES = os.environ.get("DT_HERMES_CLI", "hermes")
 PROMPT = Path(os.environ.get("DT_PDAILY_PROMPT", Path(__file__).resolve().parent.parent / "prompts" / "pdaily_report.md"))
 BUDGET = int(os.environ.get("DT_PDAILY_BUDGET", "1200"))   # 写稿最多等多少秒
-CARD_MAX = 5          # 卡片每块最多几条（第 3 节「篇幅」）
+CARD_MAX = None       # 卡片各板块不折叠、全部放卡片上（常浩 2026-11-10 定稿：「卡片上的信息不要折叠，放全」）
 TODAY_MAX = 3         # 今日推进卡片最多 3 条（4.0）
 REPORT_TODAY_MAX = 5  # 完整报告今日计划最多 5 项（4.7）
 CLIP = 300            # 材料里每段原文最多保留多少字
@@ -143,8 +146,12 @@ def generate(facts, workdir):
     q.write_text(query(facts), encoding="utf-8")
     cmd = [HERMES, "chat", "-Q", "--query-file", str(q), "-t", "todo", "--source", "tool",
            "--max-turns", "3", "--run-budget", str(BUDGET)]
+    # Claude 一次写完整稿要几分钟；Hermes 对非流式调用默认 240 秒没回就掐断并落回退模型（11-11 两次）。
+    # 显式给足写稿预算；去掉 Claude Code 会话里继承的变量，免得插件拒绝调用（CURRENT 11-11）。
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_BASE_URL", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+    env.setdefault("HERMES_API_CALL_STALE_TIMEOUT", str(BUDGET))
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=BUDGET + 120, cwd=str(workdir))
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=BUDGET + 120, cwd=str(workdir), env=env)
     except (OSError, subprocess.SubprocessError) as e:
         raise GenError(f"Hermes 跑不起来（{type(e).__name__}）")
     sid = (re.findall(r"session_id:\s*(\S+)", r.stderr) or [None])[-1]   # -Q 模式把会话号打在 stderr
@@ -653,11 +660,12 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None):
     if card.get("degraded"):
         sub.append("分析降级")
     rows = [{"k": k, "v": v, "n": n} for k, v, n in metrics(facts, card)]
+    # 常浩 2026-11-10 定稿（DigitalTwin/daily/2026-11-09.card.restored.json）：「昨日」列收窄、「说明」列加宽，自动行高、换行不溢出
     els = [md("**📈 核心数据速览**"), {
-        "tag": "table", "page_size": 10, "row_height": "low",
+        "tag": "table", "page_size": 10, "row_height": "auto", "row_max_height": "999px",
         "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey", "bold": True, "lines": 1},
-        "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": "auto"}
-                    for k, n in (("k", "指标"), ("v", "昨日"), ("n", "说明"))],
+        "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": w, "vertical_align": "top"}
+                    for k, n, w in (("k", "指标", "25%"), ("v", "昨日", "15%"), ("n", "说明", "60%"))],
         "rows": rows}]
     decs = sort_decisions([d for d in card.get("decisions") or [] if isinstance(d, dict)])
     els += section("🎯 需要你拍板", [dline(d) for d in decs[:CARD_MAX]], "今天没有要你拍板的事", len(decs))
@@ -783,23 +791,157 @@ def build(facts, out, reply=None, force_fallback=False):
     return meta
 
 
+# ---------- 发送（#155：每天 09:45 发常浩私聊） ----------
+
+LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
+PROFILE = "cli_a96f5f9ac63adcd4"                     # 猛鬼兽应用（PRD D12）
+AGENT_ENV = ("HERMES", "OPENCLAW", "LARK_CHANNEL")    # lark-cli 看到这些变量会改读另一套配置，调用前去掉（同 tidings_weekly.py）
+CHAT = os.environ.get("DT_PDAILY_CHAT", "oc_ce2cbf195f8de9f80bc505a00cb4456d")   # 常浩和猛鬼兽的私聊
+FOLDER = os.environ.get("DT_PDAILY_FOLDER", "MKmvfAZSvlby0sdDzwIcrXVZn2g")       # 完整报告云文档放这个文件夹（11-09 同）
+LARK_TIMEOUT = 120
+# 猛鬼兽只报个人项目（PRD D1、D19、D22；常浩 11-11「绝对不允许再出现」）。工作日报 / 周报的痕迹一律拒发：
+# 台账编号、决定编号、工作台账文档、工作日报的段落标题。
+WORK_MARKS = [(re.compile(r"\[A\d{4}-\d+\]"), "工作台账编号"), (re.compile(r"\[D-\d{8}-\d+\]"), "工作决定编号"),
+              (re.compile(r"WZyhdQdM0oMk2jxSlOTcJPVKnQg|QYEhdzNgUof8mtxW0cqcYErgnDc"), "工作日报 / 周报文档"),
+              (re.compile(r"还开着的事（\d+ 件）|今天的变化|下个工作日先推"), "工作日报的段落")]
+
+
+class SendError(Exception):
+    """建文档、发卡片、回读出错。原因不含凭据。"""
+
+
+def lark(args, what, identity, cwd=None):
+    """跑一条 lark-cli 命令，返回 data；出错抛 SendError。"""
+    env = {k: v for k, v in os.environ.items() if not k.lstrip("_").startswith(AGENT_ENV)}
+    cmd = [LARK, "--profile", PROFILE, *args, "--as", identity, "--format", "json"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=LARK_TIMEOUT, env=env, cwd=cwd)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise SendError(f"{what}：lark-cli 跑不起来（{type(e).__name__}）")
+    d = None
+    for raw in (r.stdout, r.stderr):      # lark-cli 的错误 JSON 走 stderr
+        try:
+            d = json.loads(raw)
+            break
+        except ValueError:
+            continue
+    if not isinstance(d, dict):
+        raise SendError(f"{what}：lark-cli 输出不是 JSON（退出码 {r.returncode}）")
+    if not d.get("ok", True):
+        raise SendError(f"{what}失败：{clip((d.get('error') or {}).get('message', '未知错误'), 200)}")
+    return d.get("data") or {}
+
+
+def work_content(text):
+    """返回卡片 / 报告里出现的工作内容痕迹（说明列表），空表示干净。"""
+    return [why for pat, why in WORK_MARKS if pat.search(text)]
+
+
+def create_doc(day, doc_text, out):
+    """完整报告建成云文档（用常浩的用户身份，放在 FOLDER），返回 URL。"""
+    f = Path(out) / f"{day}.report.md"
+    f.write_text(doc_text, encoding="utf-8")
+    d = dt.date.fromisoformat(day)
+    data = lark(["docs", "+create", "--parent-token", FOLDER, "--doc-format", "markdown",
+                 "--title", f"猛鬼兽个人项目日报 · {day}（周{WEEK[d.weekday()]}）", "--content", f"@{f.name}"],
+                "建完整报告文档", "user", cwd=str(out))
+    url = (data.get("document") or {}).get("url")
+    if not url:
+        raise SendError("建完整报告文档：返回里没有文档地址")
+    return url
+
+
+def send(day, out, force=False):
+    """把这一天的日报发到常浩私聊：建完整报告文档 → 按甲版出卡片 → 拦工作内容 → 发 → 回读 → 记 delivery.json。
+    卡片只从本地事实快照和 build 产物现做，不接受外来卡片。成功返回 None，失败返回原因（一句话）。"""
+    out = Path(out)
+    deliv = out / f"{day}.delivery.json"
+    if deliv.exists() and not force:
+        try:
+            if json.loads(deliv.read_text(encoding="utf-8")).get("sent"):
+                return None                      # 同一统计日只发一次（定时任务重跑、补跑都不重复发）
+        except ValueError:
+            pass
+    rec = {"stat_day": day, "channel": CHAT, "sent": False, "at": None, "doc_url": None, "message_id": None,
+           "read_back": False, "error": None}
+    try:
+        meta = json.loads((out / f"{day}.build.json").read_text(encoding="utf-8"))
+        ff = out / f"{day}.facts.json"
+        facts = json.loads((ff if ff.exists() else DAILY / f"{day}.facts.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta, facts = None, None
+    if meta is None or facts is None or not (out / f"{day}.card-fields.json").exists():
+        card, doc_text = failure_card(day, "09:00 的写稿没跑成，没有可发的日报"), None
+    else:
+        fields = json.loads((out / f"{day}.card-fields.json").read_text(encoding="utf-8"))
+        doc_text = (out / f"{day}.report.md").read_text(encoding="utf-8")
+        card = None
+    doc_url = doc_error = None
+    if doc_text is not None:
+        bad = work_content(doc_text)
+        if bad:
+            rec["error"] = f"完整报告里有工作内容（{'、'.join(bad)}），拒发"
+            deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+            return rec["error"]
+        try:
+            doc_url = create_doc(day, doc_text, out)
+        except SendError as e:
+            doc_error = str(e)
+        card = build_card(facts, fields, meta.get("trace") or trace_line(facts, meta.get("model"), meta.get("degraded")),
+                          doc_url=doc_url, doc_error=doc_error)
+    text = json.dumps(card, ensure_ascii=False)
+    bad = work_content(text)
+    if bad or not card["header"]["title"]["content"].startswith("📅 猛鬼兽日报 · "):
+        rec["error"] = f"卡片里有工作内容（{'、'.join(bad) or '标题不对'}），拒发"
+        deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+        return rec["error"]
+    (out / f"{day}.card.sent.json").write_text(text, encoding="utf-8")
+    rec["doc_url"], rec["doc_error"] = doc_url, doc_error
+    try:
+        data = lark(["im", "+messages-send", "--chat-id", CHAT, "--msg-type", "interactive", "--content", text,
+                     "--idempotency-key", f"pdaily-{day}" + ("-r" if force else "")], "发卡片", "bot")
+        rec["message_id"], rec["sent"] = data.get("message_id"), bool(data.get("message_id"))
+        rec["at"] = dt.datetime.now(pdaily_data.TZ).isoformat(timespec="seconds")
+        if rec["sent"]:
+            got = lark(["im", "+messages-mget", "--message-ids", rec["message_id"]], "回读", "bot")
+            m = (got.get("messages") or [{}])[0]
+            rec["read_back"] = m.get("msg_type") == "interactive" and card["header"]["title"]["content"] in str(m.get("content"))
+    except SendError as e:
+        rec["error"] = str(e)
+    deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    if not rec["sent"]:
+        return rec["error"] or "发卡片没拿到消息号"
+    if not rec["read_back"]:
+        return f"卡片已发（{rec['message_id']}），但回读对不上标题"
+    return None
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(description="个人项目日报写稿与核对（不发送）")
+    p = argparse.ArgumentParser(description="个人项目日报写稿、核对与发送")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("build", "material"):
+    for name in ("build", "material", "send"):
         sp = sub.add_parser(name)
         sp.add_argument("--date", help="统计日 YYYY-MM-DD，默认最近一个已经结束的统计日")
-        sp.add_argument("--facts", help="事实快照文件，默认 DigitalTwin/daily/<统计日>.facts.json")
+        if name != "send":
+            sp.add_argument("--facts", help="事实快照文件，默认 DigitalTwin/daily/<统计日>.facts.json")
     b = sub.choices["build"]
     b.add_argument("--reply", help="用现成的模型回复文件（回放、测试用）")
     b.add_argument("--fallback", action="store_true", help="直接出事实版")
-    b.add_argument("--out", help="输出目录，默认 DigitalTwin/daily/")
+    b.add_argument("--quiet", action="store_true", help="成功不输出（定时任务用）")
+    for name in ("build", "send"):
+        sub.choices[name].add_argument("--out", help="输出目录，默认 DigitalTwin/daily/")
+    sub.choices["send"].add_argument("--force", action="store_true", help="这一天已经发过也再发一次")
     a = p.parse_args(argv)
     try:
         day = dt.date.fromisoformat(a.date) if a.date else pdaily_data.default_day()
     except ValueError:
         print(json.dumps({"ok": False, "error": f"日期写法不对：{a.date}"}, ensure_ascii=False))
         return 1
+    if a.cmd == "send":   # 定时任务直接把输出发到私聊：成功不输出，失败说一句原因
+        err = send(day.isoformat(), a.out or DAILY, force=a.force)
+        if err:
+            print(f"⚠️ 今天的个人项目日报没发成：{err}。详情在 DigitalTwin/daily/{day.isoformat()}.delivery.json")
+        return 0
     try:
         facts = load_facts(a.facts, day)
     except Exception as e:  # noqa: BLE001  取数失败也要留一张卡片和原因（7.3）
@@ -816,7 +958,8 @@ def main(argv=None):
         return 0
     reply = Path(a.reply).read_text(encoding="utf-8") if a.reply else None
     meta = build(facts, a.out or DAILY, reply=reply, force_fallback=a.fallback)
-    print(json.dumps({"ok": True, **meta}, ensure_ascii=False))
+    if not a.quiet:
+        print(json.dumps({"ok": True, **meta}, ensure_ascii=False))
     return 0
 
 

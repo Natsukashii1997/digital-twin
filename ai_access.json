@@ -71,14 +71,14 @@
       "executor": "hermes",
       "reads": "用 lark-cli 读常浩的飞书私聊、群聊、会议和妙记、日程、任务；项目进展（progress_data.py）；并跑文档里的上一篇",
       "writes": "飞书并跑日报 / 周报文档；~/Library/Application Support/DigitalTwin/evidence/reports/",
-      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。"
+      "note": "仅支持 Hermes（Hermes 定时任务）。每篇标题下一行写「生成：」留痕。2026-11-11 常浩定从猛鬼兽撤下（PRD D20），定时任务 33df73dffd17、6a976baa2632 已暂停，不搬到亚古兽。"
     },
     {
       "id": "pdaily",
       "name": "个人项目日报 V2 写稿（pdaily_publish.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后出甲版卡片；#111）",
       "executor": "hermes",
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
-      "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json（2a 只生成不发送；发送和云文档在 2b）",
+      "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；09:45 以猛鬼兽机器人发常浩私聊卡片（#155）",
       "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
     },
     {
