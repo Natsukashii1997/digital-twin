@@ -8,14 +8,16 @@
 
 ---
 
-## 2026-11-11 下午 · 猛鬼兽定时任务按新清单整理（#159 PR #160 待合并；AI HOT 三版待选；github-center#88）
+## 2026-11-11 下午 · 猛鬼兽定时任务按新清单整理（#159 PR #160 `967bbb4` 已合并并安装；AI HOT 三版待选；github-center#88）
 
 - **常浩定的猛鬼兽清单**（「按推荐开工」）：日报每天 10:00（09:15 写稿，给工作日 09:45 的 AI HOT 让位）；周报卡片每周一 10:30（结构待梳理）；工程自检并进日报（正常一句、有问题一块）；Tidings 排行榜每周一 14:00（卡片格式不变）；Multica 夜跑 + 影子合并官合成「夜间托管」（待设计，两者保持停用）；skill 月度体检保留；AI HOT 日报每个工作日 09:45（新增）；其余删掉。数字分身＝猛鬼兽（个人）+ 亚古兽（企业），任务隔离；亚古兽清单常浩稍后说。
 - **已删除**（任务表前后在 `evidence/mengguishou-cron-reset-20261111/`）：日报（并跑）`33df73dffd17`、周报（并跑）`6a976baa2632`、待决提案 `81464e7ea4e3`。脚本仍在仓库。剩 7 个：工程自检 `f3388d53ce97`（#160 安装后停）、Tidings `18a21b2eb87a`、影子合并官 `8994fb76d03e`（停用）、multica `6fafbfe09d8d`（停用）、skill 体检 `5aff82a706ed`、日报写稿 `945534cd43e1`、日报发送 `3a712f6cdf54`。
-- **PR #160（#159，未合并）**：日报发送时跑 self_check.py 并进卡片；时间文档改 09:15 / 10:00。全量 732 项通过。合并后要：装 `pdaily_publish.py`、`pdaily_build_job.py`、`pdaily_send_job.py`、`self_check.py`，规程 HERMES.md；`hermes cron edit` 两个日报任务到 `15 9 * * *` / `0 10 * * *`；停 `f3388d53ce97`。
+- **PR #160 已合并并安装**（常浩「合并并安装」，`967bbb4`）：日报发送时跑 self_check.py 并进卡片；时间文档改 09:15 / 10:00。全量 732 项通过。合并后要：装 `pdaily_publish.py`、`pdaily_build_job.py`、`pdaily_send_job.py`、`self_check.py`，规程 HERMES.md；`hermes cron edit` 两个日报任务到 `15 9 * * *` / `0 10 * * *`；停 `f3388d53ce97`。
 - **AI HOT**：接口 `https://aihot.news/api/v1/dailies?limit=1` → `dailies/<日期>`，公开、每天北京时间 08:00 生成（实测 11-11）。三版卡片样稿（头条导读 / 分区目录 / 与你相关）用 11-11 真实数据：https://claude.ai/artifact/DuPJ36EeiT2wqapDPiHPCF ，数据在 `evidence/aihot-card-design-20261111/`。等常浩挑。
 - **Tidings 14:00**：github-center 规定周报不早于每日更新（默认 18:00），早了自动挪到 19:30，只改设置不生效；已开 github-center#88 让周榜周一 14:00 前生成好。
-- **唯一的下一步**：常浩回「合并」PR #160，并在 AI HOT 三版里挑一版。
+- **安装**（备份 `evidence/mengguishou-cron-reset-20261111/install-before/`）：`pdaily_publish.py`、`pdaily_build_job.py`、`pdaily_send_job.py`、`self_check.py`、规程 HERMES.md，逐个 `cmp` 一致；安装位置 `run_self_check()` 跑通。定时任务：`945534cd43e1` 改 `15 9 * * *`、`3a712f6cdf54` 改 `0 10 * * *`（回读下次 11-12 09:15 / 10:00），`f3388d53ce97` 单独自检已暂停（未删）。任务表前后 `jobs.before-160.json` / `jobs.after-160.json`。没重启网关（规程每个会话现读；无模型任务每次现读脚本）。
+- **自检查出的旧漂移（没动）**：`merge-officer`、`workshop` 两个技能的安装副本 11-08 10:02 被猛鬼兽自己加了规则（合并授权核对、委托审批），仓库 main 没有；11-12 的日报「🔧 工程自检」会列出来。待常浩定：把这两段收回仓库，还是用仓库版覆盖。
+- **唯一的下一步**：常浩在 AI HOT 三版里挑一版；11-12 10:00 看日报卡片是否带工程自检那一块。
 
 ## 2026-11-11 · 猛鬼兽只报个人项目；个人项目日报按定稿甲版每天 09:45 发（#155，PR #156 `dee0e71` 已合并并安装）
 
