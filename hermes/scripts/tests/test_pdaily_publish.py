@@ -471,14 +471,18 @@ class GenerateEnvTests(unittest.TestCase):
         cli.write_text(textwrap.dedent(f"""\
             #!{sys.executable}
             import json, os
-            print(json.dumps({{k: os.environ.get(k) for k in ("HERMES_API_CALL_STALE_TIMEOUT", "ANTHROPIC_BASE_URL", "CLAUDECODE")}}))
+            import sys
+            env = {{k: os.environ.get(k) for k in ("HERMES_API_CALL_STALE_TIMEOUT", "ANTHROPIC_BASE_URL", "CLAUDECODE")}}
+            env["reasoning"] = sys.argv[sys.argv.index("--reasoning") + 1]
+            print(json.dumps(env))
             """), encoding="utf-8")
         cli.chmod(0o755)
         with mock.patch.object(pp, "HERMES", str(cli)), mock.patch.object(pp, "BUDGET", 900), \
                 mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "http://x", "CLAUDECODE": "1"}):
             os.environ.pop("HERMES_API_CALL_STALE_TIMEOUT", None)
             out, _, _ = pp.generate(facts(), tmp)
-        self.assertEqual(json.loads(out), {"HERMES_API_CALL_STALE_TIMEOUT": "900", "ANTHROPIC_BASE_URL": None, "CLAUDECODE": None})
+        self.assertEqual(json.loads(out), {"HERMES_API_CALL_STALE_TIMEOUT": "900", "ANTHROPIC_BASE_URL": None, "CLAUDECODE": None,
+                                           "reasoning": "medium"})       # 常浩 11-11：Opus 思考降一档（#157）
 
 
 class SendTests(unittest.TestCase):
