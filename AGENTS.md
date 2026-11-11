@@ -18,9 +18,10 @@ hermes/
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
     pdaily_data.py     个人项目日报取数（#110，PRD D22）：按统计日（04:00→04:00，Asia/Shanghai）给名册每个项目出一条记录（阶段目标、里程碑、昨日增量、工程 / 交付 / 验收三项、当前状态、新鲜度），JSON 输出；交付、验收一律记「未核实」，只附自述摘录（当天 CURRENT 节、PR 标题），等 #110 1b 的行动记录再判；目标、CURRENT、新鲜度读主分支在统计日结束时的快照，不读工作区；取不到记 null 不当 0；只读，未安装
     actions.py         代理行动记录（#110 1b，V2 5.4）：actions.jsonl 的结构（定稿不再改）和 record() 记录函数；--date 按统计日列出行动：actions.jsonl 加六个来源现读现转（合并官、merge-runs、派单台账、定时任务库、夜跑 run-log、裁决文件），每条带授权档位、来源，低于应有档位的标 auth_gap；裁决文件只摘原文不判批准拒绝；安装只认 record() 写的；只读，未安装，暂无脚本调用 record()
-    pdaily_publish.py  个人项目日报写稿与核对（#111 批 2a）：读 facts.json，经 hermes chat 单次让 Hermes 写卡片要素和完整报告（提示词 prompts/pdaily_report.md），脚本核对编号、百分比、PR 数、「已安装 / 已验收」说法、三个数和七段，写法问题自动修并记提醒，编造类不通过就出「分析降级」事实版，再坏出最小卡片；按甲版样例生成卡片 JSON；只生成不发送，未安装
+    pdaily_publish.py  个人项目日报写稿与核对（#111 批 2a）：读 facts.json，经 hermes chat 单次让 Hermes 写卡片要素和完整报告（提示词 prompts/pdaily_report.md），脚本核对编号、百分比、PR 数、「已安装 / 已验收」说法、三个数和七段，写法问题自动修并记提醒，编造类不通过就出「分析降级」事实版，再坏出最小卡片；按甲版定稿（11-10，五板块全放卡片不折叠、速览表列宽 25/15/60）生成卡片 JSON；send 建完整报告云文档、拦工作内容（台账编号、工作日报文档等一律拒发）、以猛鬼兽机器人发常浩私聊并回读，记 delivery.json，同一统计日只发一次（#155）
+    pdaily_build_job.py / pdaily_send_job.py  个人项目日报定时任务入口（#155）：Hermes 无模型定时任务 09:00 写稿、09:45 发送；发送成功不输出，没发成输出一句原因发到私聊
     pdaily_facts.py    个人项目日报事实快照（#110 1c）：把 pdaily_data 的项目记录和 actions 的行动合成 DigitalTwin/daily/<统计日>.facts.json，给 Hermes 写日报用；含拍板候选、风险四类、跨项目明文引用（查被引用方关没关）、观察池（每次现算）、覆盖与可信度；只给候选和出处，不定级、不排序、不推荐；取不到写 null 不当 0；--dry-run 只打印；未安装
-    report_data.py     日报 / 周报取数（T7，新结构并跑）；report_daily.py、report_weekly.py 是定时任务入口；开跑前先等主模型通道连通，最多 300 秒，到时间照常放行交给回退（#140，记录在 evidence/reports/model-route-wait.jsonl）
+    report_data.py     工作日报 / 周报取数（T7，新结构并跑；2026-11-11 常浩定从猛鬼兽撤下，定时任务已暂停，PRD D20）；report_daily.py、report_weekly.py 是定时任务入口；开跑前先等主模型通道连通，最多 300 秒，到时间照常放行交给回退（#140，记录在 evidence/reports/model-route-wait.jsonl）
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
@@ -39,7 +40,7 @@ hermes/
   plugins/merge-buttons/ PR 卡片按钮（#78）：注册 /card，把「合并 / 退回」点击转给 merge_act.py button（不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
   plugins/workdesk-gate/ 亚古兽工具拦截（#142）：飞书里发起人不是常浩（open_id 或企业 user_id `e9cgcf77`）时只放行安全工具（提问、读文档、文档评论、网页、技能查看、生图、语音、待办），本机命令行和定时任务不受限；牛马之家只在常浩本人私聊可用并写入真实提问人；安装在 ~/.hermes/profiles/agumon/plugins/，测试 hermes/scripts/tests/test_workdesk_gate_plugin.py
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
-  workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是三报规则
+  workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是个人项目日报规则（猛鬼兽只报个人项目）
   samples/             样稿
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
@@ -74,8 +75,8 @@ ops/
 | `scheduler` | 持久调度自动开单（默认关闭） | 每个任务的负责方 claude / codex | 本机 CLI（经派单脚本） | 状态库 | 同车间派单 |
 | `chat` | 飞书对话（含 progress、vault、merge-officer、proposal-digest 技能） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、Vault（MCP vault-read 只读）、名册、仓库 | 飞书回复、Hermes 记忆 |
 | `hermes-aux` | Hermes 辅助任务（压缩、审批判断、后台复盘） | Hermes | Hermes 派单 | 当前会话 | Hermes 记忆和技能 |
-| `report` | 日报 / 周报并跑 | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、群、会议妙记、日程、任务、项目进展 | 飞书并跑文档、evidence/reports |
-| `pdaily` | 个人项目日报 V2 写稿（#111） | Hermes，仅支持 Hermes；失败出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 事实快照 facts.json、提示词 pdaily_report.md | DigitalTwin/daily/ 的卡片、完整报告、模型原稿、build.json |
+| `report` | 工作日报 / 周报并跑（**已暂停**：2026-11-11 从猛鬼兽撤下，PRD D20） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、群、会议妙记、日程、任务、项目进展 | 飞书并跑文档、evidence/reports |
+| `pdaily` | 个人项目日报 V2（#111、#155：09:00 写稿、09:45 发私聊） | Hermes，仅支持 Hermes；失败出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 事实快照 facts.json、提示词 pdaily_report.md | DigitalTwin/daily/ 的卡片、完整报告、模型原稿、build.json、delivery.json；飞书完整报告云文档；常浩私聊卡片 |
 | `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
 | `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
 

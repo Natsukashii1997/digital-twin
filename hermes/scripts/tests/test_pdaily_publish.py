@@ -331,12 +331,22 @@ class CardTests(unittest.TestCase):
         self.assertFalse([e for e in c["body"]["elements"] if e["tag"] == "button"])
         self.assertIn("完整报告未生成：云文档接口超时", c["body"]["elements"][-1]["content"])
 
-    def test_more_than_five_decisions(self):
+    def test_more_than_five_decisions_all_on_card(self):
+        """常浩 11-10 定稿：各板块不折叠，全部放在卡片上。"""
         d = card_fields()["decisions"][0]
         c = self.card(card_fields(decisions=[dict(d, item=f"事{i}", type="普通") for i in range(7)] + [d]))
         t = self.text(c)
-        self.assertIn("另 3 条见完整报告", t)
+        self.assertNotIn("见完整报告", t)
+        for i in range(7):
+            self.assertIn(f"事{i}", t)
         self.assertLess(t.index("限时"), t.index("事0"))      # 限时排在普通前
+
+    def test_table_like_restored_card(self):
+        """速览表照 11-10 定稿：「昨日」窄、「说明」宽，自动行高、换行。"""
+        tab = [e for e in self.card()["body"]["elements"] if e.get("tag") == "table"][0]
+        self.assertEqual([c["width"] for c in tab["columns"]], ["25%", "15%", "60%"])
+        self.assertEqual({c["vertical_align"] for c in tab["columns"]}, {"top"})
+        self.assertEqual((tab["row_height"], tab["row_max_height"]), ("auto", "999px"))
 
     def test_subtitle_unread_projects(self):
         f = facts()
@@ -454,6 +464,123 @@ class BuildTests(unittest.TestCase):
         self.assertIsNone(meta["session_id"])
 
 
+class GenerateEnvTests(unittest.TestCase):
+    def test_gives_model_time_and_drops_claude_code_vars(self):
+        tmp = Path(tempfile.mkdtemp())
+        cli = tmp / "fake_hermes.py"
+        cli.write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json, os
+            print(json.dumps({{k: os.environ.get(k) for k in ("HERMES_API_CALL_STALE_TIMEOUT", "ANTHROPIC_BASE_URL", "CLAUDECODE")}}))
+            """), encoding="utf-8")
+        cli.chmod(0o755)
+        with mock.patch.object(pp, "HERMES", str(cli)), mock.patch.object(pp, "BUDGET", 900), \
+                mock.patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "http://x", "CLAUDECODE": "1"}):
+            os.environ.pop("HERMES_API_CALL_STALE_TIMEOUT", None)
+            out, _, _ = pp.generate(facts(), tmp)
+        self.assertEqual(json.loads(out), {"HERMES_API_CALL_STALE_TIMEOUT": "900", "ANTHROPIC_BASE_URL": None, "CLAUDECODE": None})
+
+
+class SendTests(unittest.TestCase):
+    """send()：建文档 → 现做卡片 → 拦工作内容 → 发 → 回读；假 lark-cli 记下每次调用。"""
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.out = self.tmp / "daily"
+        self.out.mkdir()
+        self.calls = self.tmp / "calls.jsonl"
+        self.cli = self.tmp / "fake_lark.py"
+        self.cli.write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json, os, sys
+            a = sys.argv[1:]
+            open({str(self.calls)!r}, "a").write(json.dumps(a, ensure_ascii=False) + "\\n")
+            cmd = " ".join(a[2:4])
+            if cmd == "docs +create":
+                if os.environ.get("FAKE_DOC_FAIL"):
+                    sys.stderr.write(json.dumps({{"ok": False, "error": {{"message": "没权限"}}}})); sys.exit(1)
+                print(json.dumps({{"ok": True, "data": {{"document": {{"document_id": "d1", "url": "https://x.feishu.cn/docx/d1"}}}}}}))
+            elif cmd == "im +messages-send":
+                content = a[a.index("--content") + 1]
+                open({str(self.tmp / "sent.json")!r}, "w").write(content)
+                print(json.dumps({{"ok": True, "data": {{"message_id": "om_1"}}}}))
+            elif cmd == "im +messages-mget":
+                title = json.loads(open({str(self.tmp / "sent.json")!r}).read())["header"]["title"]["content"]
+                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">'}}]}}}}))
+            """), encoding="utf-8")
+        self.cli.chmod(0o755)
+        self.patch = mock.patch.object(pp, "LARK", str(self.cli))
+        self.patch.start()
+        (self.out / f"{DAY}.facts.json").write_text(json.dumps(facts(), ensure_ascii=False), encoding="utf-8")
+        pp.build(facts(), self.out, reply=reply_text())
+
+    def tearDown(self):
+        self.patch.stop()
+
+    def cmds(self):
+        if not self.calls.exists():
+            return []
+        return [" ".join(json.loads(l)[2:4]) for l in self.calls.read_text().splitlines()]
+
+    def deliv(self):
+        return json.loads((self.out / f"{DAY}.delivery.json").read_text())
+
+    def test_sends_card_with_report_link_and_reads_back(self):
+        self.assertIsNone(pp.send(DAY, self.out))
+        self.assertEqual(self.cmds(), ["docs +create", "im +messages-send", "im +messages-mget"])
+        sent = json.loads((self.tmp / "sent.json").read_text())
+        self.assertEqual(sent["header"]["title"]["content"], "📅 猛鬼兽日报 · 11-08（周日）")
+        btn = [e for e in sent["body"]["elements"] if e["tag"] == "button"][0]
+        self.assertEqual(btn["behaviors"][0]["default_url"], "https://x.feishu.cn/docx/d1")
+        d = self.deliv()
+        self.assertTrue(d["sent"] and d["read_back"])
+        self.assertEqual(d["message_id"], "om_1")
+        send_args = json.loads(self.calls.read_text().splitlines()[1])
+        self.assertEqual(send_args[send_args.index("--as") + 1], "bot")
+        self.assertEqual(send_args[send_args.index("--chat-id") + 1], pp.CHAT)
+
+    def test_same_day_not_sent_twice(self):
+        pp.send(DAY, self.out)
+        n = len(self.cmds())
+        self.assertIsNone(pp.send(DAY, self.out))
+        self.assertEqual(len(self.cmds()), n)
+
+    def test_work_content_refused(self):
+        """猛鬼兽只报个人项目：报告里混进工作台账编号就整份拒发，不建文档、不发卡片。"""
+        rep = self.out / f"{DAY}.report.md"
+        rep.write_text(rep.read_text() + "\n- 🆕 [A1110-1] 看板数据核对\n", encoding="utf-8")
+        err = pp.send(DAY, self.out)
+        self.assertIn("工作内容", err)
+        self.assertEqual(self.cmds(), [])
+        self.assertFalse(self.deliv()["sent"])
+
+    def test_work_marks(self):
+        for t in ("[A1027-1] 侧边栏", "[D-20261110-1] 选了", "### 二、还开着的事（35 件）", "docx/WZyhdQdM0oMk2jxSlOTcJPVKnQg"):
+            self.assertTrue(pp.work_content(t), t)
+        self.assertEqual(pp.work_content("牛马之家 #54 合并；驿窗 PR #12"), [])
+
+    def test_doc_fails_card_still_sent(self):
+        with mock.patch.dict(os.environ, {"FAKE_DOC_FAIL": "1"}):
+            self.assertIsNone(pp.send(DAY, self.out))
+        sent = json.loads((self.tmp / "sent.json").read_text())
+        self.assertFalse([e for e in sent["body"]["elements"] if e["tag"] == "button"])
+        self.assertIn("完整报告未生成", json.dumps(sent, ensure_ascii=False))
+
+    def test_no_build_sends_failure_card(self):
+        for f in self.out.glob(f"{DAY}.*"):
+            if not f.name.endswith("facts.json"):
+                f.unlink()
+        self.assertIsNone(pp.send(DAY, self.out))
+        self.assertIn("没出成", (self.tmp / "sent.json").read_text())
+        self.assertNotIn("docs +create", self.cmds())
+
+    def test_cli_send_quiet_on_success(self):
+        from io import StringIO
+        buf = StringIO()
+        with mock.patch("sys.stdout", buf):
+            rc = pp.main(["send", "--date", DAY, "--out", str(self.out)])
+        self.assertEqual((rc, buf.getvalue()), (0, ""))
+
+
 class SampleLayoutTests(unittest.TestCase):
     """逐行对齐甲版样例 hermes/samples/pdaily-card-2026-11-08.json 的写法（常浩 11-09 定稿）。"""
     def lines(self, fields):
@@ -480,10 +607,12 @@ class SampleLayoutTests(unittest.TestCase):
         self.assertEqual(ls[6], "⚪ **管理失真｜牛马之家**：主目录 15 处未提交")
         self.assertEqual(ls[8], "1. **P0 夜跑收尾**：你回拍板 1\n2. **P1 牛马之家盲测**：Hermes 协调")   # P0 在前
 
-    def test_more_shows_total(self):
+    def test_more_all_shown(self):
+        """常浩 11-10：风险与阻塞等板块不折叠到完整报告，8 条全在卡片上。"""
         r = card_fields()["risks"][0]
         body = self.lines(card_fields(risks=[r] * 8))[6]
-        self.assertIn("共 8 条，另 3 条见完整报告", body)
+        self.assertEqual(body.count("管理失真｜牛马之家"), 8)
+        self.assertNotIn("见完整报告", body)
 
     def test_overlong_clipped(self):
         f, c = facts(), card_fields(achievements=[{"project": "牛马之家", "text": "很长" * 40}])
