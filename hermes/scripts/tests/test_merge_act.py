@@ -568,7 +568,7 @@ class CustodyCredential(unittest.TestCase):
         return {"pr": 5, "repo": repo or self.REPO, "head": "a" * 40}
 
     def fake(self, sec_code=0, sec_out=None, sec_exc=None, merge_code=0, merge_err="", merge_timeout=False,
-             view=None, view_code=0):
+             view=None, view_code=0, gh_exc=None):
         """按命令分派：security 读钥匙串、gh pr merge、gh pr view。记下每次调用的命令和 env。"""
         calls = []
         view = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "m" * 40}} if view is None else view
@@ -579,6 +579,8 @@ class CustodyCredential(unittest.TestCase):
                 if sec_exc:
                     raise sec_exc
                 return subprocess.CompletedProcess(cmd, sec_code, stdout=self.TOKEN + "\n" if sec_out is None else sec_out, stderr="")
+            if gh_exc:
+                raise gh_exc
             if cmd[1:3] == ["pr", "merge"]:
                 if merge_timeout:
                     raise subprocess.TimeoutExpired(cmd, 1)
@@ -654,12 +656,26 @@ class CustodyCredential(unittest.TestCase):
             (dict(merge_timeout=True, view=open_), "unsure"),
             (dict(merge_code=0, view_code=1), "unsure"),                     # 回读失败
             (dict(merge_code=0, view={**merged, "headRefOid": "b" * 40}), "unsure"),
+            (dict(merge_code=1, merge_err='Post "https://api.github.com/graphql": EOF', view=open_), "unsure"),
+            (dict(merge_code=1, merge_err="read: connection reset by peer", view=open_), "unsure"),
+            (dict(merge_code=1, merge_err="something unclassified", view=open_), "unsure"),
+            (dict(merge_code=1, merge_err="X Pull request #5 is not mergeable: the base branch policy prohibits the merge.",
+                  view=open_), "failed"),
+            (dict(merge_code=1, merge_err="Head branch was modified. Review and try the merge again.", view=open_), "failed"),
         ]
         for kw, want in cases:
             run, calls = self.fake(**kw)
             out = self.go(run)
             self.assertEqual(out["status"], want, kw)
             self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)].count(["pr", "merge"]), 1, kw)  # 不重发
+
+    def test_gh_launch_failure_returns_failed_not_exception(self):
+        for exc in (FileNotFoundError(), PermissionError()):
+            run, calls = self.fake(gh_exc=exc)
+            out = self.go(run)
+            self.assertEqual(out["status"], "failed", exc)
+            self.assertFalse(out["launched"])
+            self.assertIn(type(exc).__name__, out["why"])
 
     def test_token_in_gh_output_is_redacted(self):
         run, _ = self.fake(merge_code=1, merge_err=f"bad credentials for {self.TOKEN}",

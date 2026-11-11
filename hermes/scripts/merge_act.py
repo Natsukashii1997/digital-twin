@@ -64,6 +64,8 @@ GONE_ERR = re.compile(r"no pull requests found|could not resolve to a pullreques
 UNCHANGED = "PR 没有任何改动"
 STEP = ["核对版本"]                                    # 现在做到哪一步，失败提示开头说卡在这里
 UNSURE = "不确定合上没有"
+REJECTED = re.compile(r"protected ref|rule violations|not mergeable|base branch policy|Head branch was modified|"
+                      r"\b40[1359]\b|\b422\b|bad credentials|not accessible|permission", re.I)  # GitHub 明确拒绝合并
 SECURITY = "/usr/bin/security"
 CUSTODY_CRED = {"Natsukashii1997/dt-sandbox": ("dt-merge-executor", "dt-sandbox")}  # 托管合并凭据（#132）：完整仓库名 → 钥匙串 (service, account)
 CUSTODY_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -375,7 +377,7 @@ def custody_env(token, config_dir):
 
 def _gh_merge(card, env, secret=None):
     """发一次合并命令（不重试：没收到回应也可能已经合上，以回读为准），返回结构化结果；输出里出现令牌就打码。"""
-    res = {"returncode": None, "timed_out": False, "why": ""}
+    res = {"returncode": None, "timed_out": False, "launched": True, "why": ""}
     try:
         mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
                              "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
@@ -384,6 +386,9 @@ def _gh_merge(card, env, secret=None):
     except subprocess.TimeoutExpired:
         res["timed_out"] = True
         res["why"] = f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
+    except OSError as e:                              # gh 没起来（卸载、链接失效、没执行权限）：一个请求都没发出去
+        res["launched"] = False
+        res["why"] = f"gh 跑不起来（{type(e).__name__}）"
     if secret:
         res["why"] = res["why"].replace(secret, "***")
     return res
@@ -396,10 +401,11 @@ def run_owner_merge(card):
 
 def run_custody_merge(card):
     """托管合并（#136 调用）：凭据在函数里强制取，调用方选不了身份；取不到就停，不发任何写命令、不退回本机 gh 登录。
-    写和回读用同一个受控环境。status：merged（命令成功且回读已合并、HEAD 对得上）、failed（命令失败且回读仍开着）、
-    unsure（超时、命令失败但已合并、命令成功但没合并、HEAD 对不上、回读失败）——unsure 只做只读对账，不重发合并。"""
+    写和回读用同一个受控环境。status：merged（命令成功且回读已合并、HEAD 对得上）、failed（GitHub 明确拒绝且回读仍开着）、
+    failed 还包括 gh 没起来（请求没发出去）；unsure（超时、网络中断等没法确认的报错、命令失败但已合并、命令成功但没合并、
+    HEAD 对不上、回读失败）——unsure 只做只读对账，不重发合并。"""
     token = custody_token(card["repo"])
-    out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"]}
+    out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"], "merge_commit": None}
     with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg:
         env = custody_env(token, cfg)
         res = _gh_merge(card, env, token)
@@ -410,14 +416,18 @@ def run_custody_merge(card):
         except (OSError, subprocess.SubprocessError, ValueError):
             after = None
     out.update(res)
+    if not res["launched"]:
+        out["status"] = "failed"                      # 合并请求没发出去，确定没合
+        return out
     state = (after or {}).get("state")
+    rejected = res["returncode"] not in (None, 0) and REJECTED.search(res["why"]) and not NET_ERR.search(res["why"])
     if after and after.get("headRefOid") != card["head"]:
         out["status"] = "unsure"
     elif res["returncode"] == 0 and state == "MERGED":
         out["status"] = "merged"
-    elif res["returncode"] not in (None, 0) and state == "OPEN":
+    elif rejected and state == "OPEN":                # 只有 GitHub 明确拒绝、PR 仍开着才算确定没合
         out["status"] = "failed"
-    else:
+    else:                                             # 网络中断、没归类的报错、超时等：请求可能已送达，只读对账
         out["status"] = "unsure"
     out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
     return out
