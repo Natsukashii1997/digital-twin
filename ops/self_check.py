@@ -1,7 +1,8 @@
 """工程自检：纯脚本、不调用模型。有问题才打印一段中文，没问题什么都不打印。
 
 用法：python3 self_check.py [--monthly]
-由 Hermes 无模型定时任务每天 09:50 调用：stdout 原样发给常浩，空输出不发消息，退出码非 0 算任务失败。
+每天 10:00 由个人项目日报发送（pdaily_publish.py send，#159）调用，输出并进日报卡片：空输出算正常，退出码非 0 卡片里写「自检没跑成」。
+也可以手动跑看结果。
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
 每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
