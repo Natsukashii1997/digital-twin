@@ -181,6 +181,23 @@ def roster_paths():
     return sorted(((str(Path(p["path"]).expanduser()), p["id"]) for p in projects if p.get("path")), key=lambda x: -len(x[0]))
 
 
+UPGRADE_STATUSES = ("未升级", "不升级", "部分升级")
+
+
+def parse_upgrade(text):
+    """解析「- 升级：」后面的内容，返回 (层级, 状态)。
+
+    开头可能带层级标签，如「〔提醒〕未升级」（agent-kit#57），没有标签时层级为 None。
+    状态是「未升级 / 不升级 / 部分升级 / 已升级」之一：以前三个词开头的照词取，其余（「已升级：…」「机器拦截…」）算已升级。
+    """
+    text = text.strip()
+    m = re.match(r"〔([^〕]*)〕", text)
+    level = m.group(1) if m else None
+    rest = text[m.end():] if m else text
+    status = next((s for s in UPGRADE_STATUSES if rest.startswith(s)), "已升级")
+    return level, status
+
+
 def collect_lessons(now):
     if MIN_PROJECTS <= 0 or not LESSONS.exists():
         return []
@@ -189,11 +206,13 @@ def collect_lessons(now):
         m = LESSON_HEAD.match(line)
         if m:
             cur = m.group(1)
-            lessons[cur] = {"title": re.sub(r"（\d{4}-\d{2}-\d{2}.*?）$", "", m.group(2)), "upgraded": True}
+            lessons[cur] = {"title": re.sub(r"（\d{4}-\d{2}-\d{2}.*?）$", "", m.group(2)), "level": None, "status": "已升级", "upgraded": True}
         elif line.startswith("## "):
             cur = None
         elif cur and line.startswith("- 升级："):
-            lessons[cur]["upgraded"] = not line[len("- 升级："):].strip().startswith("未升级")
+            level, status = parse_upgrade(line[len("- 升级："):])
+            # 只有「未升级」进候选；「不升级」是常浩定过的，按 LESSONS 等新的跨项目再犯再评估，不凭命中重提
+            lessons[cur].update(level=level, status=status, upgraded=status != "未升级")
     hits_file = KIT_STATE / "lessons-hits.jsonl"
     if not hits_file.exists():
         return []

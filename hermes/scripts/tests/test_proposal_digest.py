@@ -79,14 +79,38 @@ DECISIONS = """# 每周整理提案的决定
 LESSONS = """# 全局 LESSONS
 
 ## G-01 验证证据放 /tmp（2026-10-24 提升）
-- 升级：未升级。
+- 升级：〔提醒〕未升级。
 
 ## G-02 已经升级过的（2026-10-24 提升）
-- 升级：写进 check-rules。
+- 升级：〔机检〕写进 check-rules。
 
 ## G-03 只在一个项目碰到（2026-10-24 提升）
 - 升级：未升级。
+
+## G-04 常浩确认不升级的（2026-10-24 提升）
+- 升级：〔提醒〕不升级（常浩确认）。
 """
+
+
+class ParseUpgrade(unittest.TestCase):
+    """LESSONS「- 升级：」行：新旧写法、五种层级、四种状态（agent-kit#57，#153）。"""
+
+    def test_cases(self):
+        cases = [
+            ("未升级。", (None, "未升级")),
+            ("不升级（2026-11-07，#15，常浩确认）：个例", (None, "不升级")),
+            ("写进 check-rules。", (None, "已升级")),
+            ("〔提醒〕未升级。可选去处：体检", ("提醒", "未升级")),
+            ("〔提醒〕不升级（2026-11-07，#15，常浩确认）", ("提醒", "不升级")),
+            ("〔体检〕部分升级（2026-11-07，#15）：缺一项", ("体检", "部分升级")),
+            ("〔机检〕已升级：起步骨架", ("机检", "已升级")),
+            ("〔机检〕机器拦截，hook 当场拒绝", ("机检", "已升级")),
+            ("〔文字〕已升级（2026-11-07，#15）：全局指令一句", ("文字", "已升级")),
+            ("〔结构〕删掉旧接口", ("结构", "已升级")),
+        ]
+        for text, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(pd.parse_upgrade(text), want)
 
 
 class ParseReply(unittest.TestCase):
@@ -140,9 +164,9 @@ class Digest(unittest.TestCase):
         (t / "kit").mkdir()
         (t / "LESSONS.md").write_text(LESSONS, encoding="utf-8")
         work = t / "work"
-        rows = [("2026-11-06T01:00:00Z", work / "app", ["G-01", "G-02", "G-03"]),
+        rows = [("2026-11-06T01:00:00Z", work / "app", ["G-01", "G-02", "G-03", "G-04"]),
                 ("2026-11-06T02:00:00Z", work / "app/.claude/worktrees/x", ["G-01"]),
-                ("2026-11-05T02:00:00Z", work / "kit", ["G-01", "G-02"]),
+                ("2026-11-05T02:00:00Z", work / "kit", ["G-01", "G-02", "G-04"]),
                 ("2026-10-01T02:00:00Z", work / "kit", ["G-03"]),            # 超过 7 天，不算
                 ("2026-11-06T03:00:00Z", t / "scratch", ["G-03"])]            # 不在名册，不算
         (t / "kit/lessons-hits.jsonl").write_text(
@@ -186,7 +210,7 @@ class Digest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         text = self.card_text(r.stdout)
         ids = [line.split(". ", 1)[1].replace("⏰ ", "").split(" ")[0] for line in text.splitlines() if line[:1].isdigit()]
-        # 复盘：A2 已有结论、X9 在「已覆盖」里；牛马：-23-8 被取代、-30-4 已采纳、-23-6 待定照列、只读最新一期；LESSONS：只有 G-01
+        # 复盘：A2 已有结论、X9 在「已覆盖」里；牛马：-23-8 被取代、-30-4 已采纳、-23-6 待定照列、只读最新一期；LESSONS：只有 G-01（G-02 已升级、G-04 常浩定了不升级，命中够数也不进）
         self.assertEqual(ids, ["A1", "B1", "W2026-10-23-6", "W2026-10-23-9", "W2026-10-30-1", "W2026-10-30-3", "G-01"])
         self.assertIn("1. A1 给参考物时只借鉴点名的维度 · 部分已有 · 多次 / 跨会话", text)
         self.assertIn("W2026-10-30-1 记一条新坑 L-17：bash 3.2 把全角标点并进变量名\n", text)
