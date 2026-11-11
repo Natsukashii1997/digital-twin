@@ -193,7 +193,9 @@ def collect_lessons(now):
         elif line.startswith("## "):
             cur = None
         elif cur and line.startswith("- 升级："):
-            lessons[cur]["upgraded"] = not line[len("- 升级："):].strip().startswith("未升级")
+            # 开头可能带层级标签，如「〔提醒〕未升级」（agent-kit#57），先去掉再判断
+            rest = re.sub(r"^〔[^〕]*〕", "", line[len("- 升级："):].strip())
+            lessons[cur]["upgraded"] = not rest.startswith("未升级")
     hits_file = KIT_STATE / "lessons-hits.jsonl"
     if not hits_file.exists():
         return []
