@@ -25,6 +25,7 @@ hermes/
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
     tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 19:30，不早于每日更新时间，github-center #83）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
+    skill_health.py    skill 月度体检推送（#151）：Hermes 无模型定时任务每月 1 号 10:30 调用，在 my-skills 下跑 node scripts/monthly-health.mjs --days 30，标题改粗体、表格改成逐条列表、末尾加「抽查 <名字>」提示，stdout 发到常浩私聊；失败退出码 1，由 Hermes 发失败通知；只读
     multica_night.py   Multica 夜跑主控（#92，DT-ORC M5 / 5.3a）：Hermes 无模型定时任务每 5 分钟经 multica_night_tick.py 调 tick（approve 记下的开跑时刻到了就先 start）；按计划文件在 DT 沙盒建父单和分 stage 子单，子单交付（in_review）后推进下一 stage，边跑边导 run-log 和消息到 DigitalTwin/runs/<夜跑>/，到上限按 5.3a 停机（禁用 Wakeup、暂停 Autopilot、取消非终态 run、回读），回读不过就冻结执行器容器；开跑前核对名册 sandbox: true；不合并、不送审；计划样例 hermes/samples/multica-night-2026-11-08.json，执行单 docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
     merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列
@@ -78,13 +79,13 @@ ops/
 | `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
 | `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
 
-不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、三个自检脚本、晨报取数（挂起）。
+不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、三个自检脚本、skill 月度体检推送、晨报取数（挂起）。
 
 - **不可用就报错，不换家**：派单开跑前 run_worker 按配置查执行方（`claude auth status`、`codex login status`）；不能用就写 `refused: executor_unavailable` 回执、退出码 4，派单返回「没开跑」和原因，不改用另一家。额度用尽没法提前查，开跑时车间报错写进回执。AI 接入配置读不了时，没点名的派单直接拒绝开单，不猜默认值。
 - **已登记的例外**：Hermes 主模型（现为 Claude）失败或额度不够时自动回退到 deepseek-flash（PRD F10.2；常浩 2026-11-07 定保留）。回复里注明，每日巡检报前一天的回退次数，自检命令显示近 7 天的回退次数。
 - **留痕**：派单回执有 `executor`、`access`、`model`（Claude 取实际用的模型；Codex 取 ~/.codex/config.toml 的配置）、`chosen_by`，飞书回报第二行照抄；日报 / 周报标题下一行写「生成：Hermes（实际用的模型，含回退）｜接入：Hermes 派单｜时间」；Hermes 对话和定时任务的模型用量在 ~/.hermes/state.db、~/.hermes/cron/usage_audit.jsonl。
 - **对外开放**：无。vault-read 是 Hermes 作为客户端读 Vault，不算本项目对外开放。
-- **数据对象**：Hermes 模型用量（state.db 的 session_model_usage，巡检统计回退）；Hermes 定时任务用量（usage_audit.jsonl）。
+- **数据对象**：Hermes 模型用量（state.db 的 session_model_usage，巡检统计回退）；Hermes 定时任务用量（usage_audit.jsonl）；Claude / Codex 的 skill 调用记录（agent-kit 的 skill-usage.jsonl、~/.codex/sessions，skill 月度体检统计）。
 - **密钥**：本项目不保存 AI 密钥；Claude、Codex 用本机登录，Hermes 的凭证在 Hermes 自己那里，自检只显示可用 / 未登录。
 
 ## Agent skills
