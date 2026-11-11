@@ -16,8 +16,9 @@
 - **AI HOT**：接口 `https://aihot.news/api/v1/dailies?limit=1` → `dailies/<日期>`，公开、每天北京时间 08:00 生成（实测 11-11）。三版卡片样稿（头条导读 / 分区目录 / 与你相关）用 11-11 真实数据：https://claude.ai/artifact/DuPJ36EeiT2wqapDPiHPCF ，数据在 `evidence/aihot-card-design-20261111/`。等常浩挑。
 - **Tidings 14:00**：github-center 规定周报不早于每日更新（默认 18:00），早了自动挪到 19:30，只改设置不生效；已开 github-center#88 让周榜周一 14:00 前生成好。
 - **安装**（备份 `evidence/mengguishou-cron-reset-20261111/install-before/`）：`pdaily_publish.py`、`pdaily_build_job.py`、`pdaily_send_job.py`、`self_check.py`、规程 HERMES.md，逐个 `cmp` 一致；安装位置 `run_self_check()` 跑通。定时任务：`945534cd43e1` 改 `15 9 * * *`、`3a712f6cdf54` 改 `0 10 * * *`（回读下次 11-12 09:15 / 10:00），`f3388d53ce97` 单独自检已暂停（未删）。任务表前后 `jobs.before-160.json` / `jobs.after-160.json`。没重启网关（规程每个会话现读；无模型任务每次现读脚本）。
-- **自检查出的旧漂移（没动）**：`merge-officer`、`workshop` 两个技能的安装副本 11-08 10:02 被猛鬼兽自己加了规则（合并授权核对、委托审批），仓库 main 没有；11-12 的日报「🔧 工程自检」会列出来。待常浩定：把这两段收回仓库，还是用仓库版覆盖。
-- **唯一的下一步**：常浩在 AI HOT 三版里挑一版；11-12 10:00 看日报卡片是否带工程自检那一块。
+- **技能漂移已收拾**（常浩「收回仓库保留」+「合并并按推荐」）：11-08 10:02 猛鬼兽在安装位置自改 `merge-officer`、`workshop`。确认过的两段（合并授权核对、「委托审批与授权变更」一节）收回仓库，PR #162 `3d1b76c` 已合并；`workshop` 另两处改写已定规则（未点名派单改成自选执行方、合并前提放宽到委托）按推荐丢弃，用仓库版覆盖安装副本，`cmp` 一致，原安装版备份在 `evidence/mengguishou-cron-reset-20261111/skills-before-162/`。12:10 重启网关（PID 96683 → 12480），飞书首连超时，12:14:24 自动重连成功；`self_check.py` 复跑无输出（干净）。合并委托权限留到「夜间托管」方案再定。
+- **AI HOT 改方向（常浩 11-11 中午）**：内容改为 aihot.news「AI 热点榜」TOP10（接口 `GET https://aihot.news/api/v1/hot-topics`，10 条，字段 rank、title、links、sourceCount、signalCount、participantCount、sourceNames、latestAt；接口里没看到网页上的热度指数和涨跌，待核实）；卡片顶上放常浩给的「当日 AI HOT 热门榜」插画作横幅，参照 Tidings 横幅尺寸 1901×487 裁剪；出 3 版不同卡片格式，直接发飞书私聊给常浩确认。早上那个三版网页样稿作废。热点榜原始数据在 `evidence/aihot-card-design-20261111/hot-topics.json`。
+- **唯一的下一步**：交接到新会话做 AI HOT 三版飞书卡片并发私聊；11-12 10:00 看日报卡片是否带工程自检那一行（应为「工程自检：正常」）。
 
 ## 2026-11-11 · 猛鬼兽只报个人项目；个人项目日报按定稿甲版每天 09:45 发（#155，PR #156 `dee0e71` 已合并并安装）
 
