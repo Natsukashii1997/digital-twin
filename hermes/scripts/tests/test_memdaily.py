@@ -141,6 +141,46 @@ class Collect(unittest.TestCase):
             md.subprocess.run = orig
 
 
+    def test_lark_retries_network_errors_but_not_others(self):
+        msgs = ['API call failed: Post "https://open.feishu.cn/...": read tcp 1.2.3.4:5->6.7.8.9:443: read: operation timed out',
+                "permission denied",
+                "The document engine could not export the document as DocxXML. Retry the export; if it keeps failing, contact support"]
+        for msg, want_calls in ((msgs[0], 2), (msgs[1], 1), (msgs[2], 2)):
+            calls, waits = [], []
+
+            def fake(cmd, **kw):
+                calls.append(cmd)
+                body = {"ok": False, "error": {"retryable": False, "message": msg}} if len(calls) == 1 else {"ok": True, "data": {}}
+                return type("R", (), {"stdout": json.dumps(body), "stderr": ""})()
+            orig = md.subprocess.run
+            md.subprocess.run = fake
+            try:
+                if want_calls == 2:
+                    self.assertEqual(md.lark("docs", "+fetch", sleep=waits.append), {})
+                    self.assertEqual(waits, [10])
+                else:
+                    with self.assertRaises(md.Fail):
+                        md.lark("docs", "+fetch", sleep=waits.append)
+                self.assertEqual(len(calls), want_calls)
+            finally:
+                md.subprocess.run = orig
+
+    def test_write_call_is_not_retried(self):
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            return type("R", (), {"stdout": json.dumps({"ok": False, "error": {"message": "read: operation timed out"}}), "stderr": ""})()
+        orig = md.subprocess.run
+        md.subprocess.run = fake
+        try:
+            with self.assertRaises(md.Fail):
+                md.lark("docs", "+update", tries=1, sleep=lambda s: None)
+            self.assertEqual(len(calls), 1)
+        finally:
+            md.subprocess.run = orig
+
+
 class Validate(unittest.TestCase):
     def setUp(self):
         self.f = facts()
