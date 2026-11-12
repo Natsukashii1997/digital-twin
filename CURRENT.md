@@ -8,6 +8,14 @@
 
 ---
 
+## 2026-11-12 · 记忆日报重试修复（#170 `a6c1912`）和亚古兽人设 V4（niuma-home#57 `c201ad0`）已合并并安装
+
+- **合并**（常浩「合并」）：两个 PR 的 CI 都通过，带 `--match-head-commit` squash 合并。
+- **安装**：先备份到 `evidence/agumon-persona-20261112/install-before/`（SOUL.md、HERMES.md、memdaily_data.py）。装到 `~/.hermes/profiles/agumon/`：`SOUL.md`、`workspace/HERMES.md`、`locales/zh.yaml`（新建目录）、`scripts/memdaily_data.py`；与两边 main 逐个 `cmp` 一致，`memdaily_publish.py`、`memdaily_job.py`、`prompts/memdaily_report.md` 也核过一致。人设三份 SHA-256 与送审说明一致。
+- **重启**：10:56 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-agumon`，10:57:11 `✓ feishu connected`。定时任务 `45590a963269` 仍 active，下次 11-13 07:30。
+- **回滚**：`install-before/` 里的三个文件拷回，删 `~/.hermes/profiles/agumon/locales/`，重启亚古兽网关。
+- **唯一的下一步**：常浩在飞书私聊给亚古兽发一句，看是否结论先行、约 300 字内；11-13 07:30 后看《记忆日报汇总》顶部有 11-12、私聊收到推送、`DigitalTwin/memdaily/2026-11-12.delivery.json` 的 `read_back` 为 true 且 `pushed_at` 有值。之后接周报《记忆周报汇总》（`KD1WdH6G6o…`），删测试文档 `BdqPdZsc…` 前先问常浩。
+
 ## 2026-11-12 · 记忆日报首跑失败已补写；网络重试修复待合并；亚古兽人设 V4 待确认（niuma-home#57）
 
 - **首跑**：定时任务 `45590a963269` 11-12 09:12 才跑（07:30 电脑在睡眠），读《记忆日报汇总》网络超时，没写成，原因发到亚古兽私聊。手动重跑又遇飞书「could not export … Retry the export」。两种都是一过性错误，原重试只认飞书标的 retryable。
