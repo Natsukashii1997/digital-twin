@@ -85,7 +85,10 @@ def gh_err(r):
 
 def secret_hits(cwd, rng):
     """要推的提交里新增的行有没有像密钥的；只报文件和开头几个字符，不把密钥本身转出去。"""
-    log = git(cwd, "log", "-p", "--no-color", "--format=commit %h", rng).stdout
+    r = git(cwd, "log", "-p", "--no-color", "--format=commit %h", rng)
+    if r.returncode != 0:
+        done(False, f"凭据扫描读取 git log 失败（退出码 {r.returncode}），没有推送；请排查后重试")
+    log = r.stdout
     hits, file = [], None
     for line in log.splitlines():
         if line.startswith("+++ b/"):

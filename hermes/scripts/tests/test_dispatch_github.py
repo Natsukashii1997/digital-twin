@@ -158,6 +158,54 @@ class DispatchGitHubTests(unittest.TestCase):
         self.assertEqual(sh(self.bare, "for-each-ref", "refs/heads/hermes"), "")
         self.assertEqual(self.gh_calls("pr", "create"), [])
 
+    def test_pr_stops_when_secret_scan_fails(self):
+        for output in ("", "commit abc123\n+++ b/README.md\n+部分输出\n"):
+            with self.subTest(stdout=output):
+                no, _ = self.new_done()
+                before = dispatch.load(no)
+                real_git = dispatch.git
+
+                def fail_scan(cwd, *args, **kwargs):
+                    if args[:2] == ("log", "-p"):
+                        return subprocess.CompletedProcess(args, 128, output, "synthetic-private-diagnostic")
+                    return real_git(cwd, *args, **kwargs)
+
+                with patch.object(dispatch, "git", side_effect=fail_scan) as calls:
+                    r = self.invoke("pr", no)
+                self.assertFalse(r["ok"])
+                self.assertIn("扫描", r["msg"])
+                self.assertNotIn("synthetic-private-diagnostic", json.dumps(r))
+                self.assertNotIn("部分输出", json.dumps(r, ensure_ascii=False))
+                self.assertFalse(any(c.args[1] == "push" for c in calls.call_args_list))
+                self.assertEqual(sh(self.bare, "for-each-ref", "refs/heads/hermes"), "")
+                self.assertEqual(self.gh_calls("pr", "create"), [])
+                self.assertEqual(dispatch.load(no), before)
+
+    def test_push_main_stops_when_secret_scan_fails(self):
+        no, wt = self.new_done()
+        self.invoke("pr", no)
+        tip = self.local_unpushed()
+        before_main = self.remote_main()
+        before_branch = sh(wt, "rev-parse", "HEAD")
+        before = dispatch.load(no)
+        real_git = dispatch.git
+
+        def fail_scan(cwd, *args, **kwargs):
+            if args[:2] == ("log", "-p"):
+                return subprocess.CompletedProcess(args, 128, "", "synthetic-private-diagnostic")
+            return real_git(cwd, *args, **kwargs)
+
+        with patch.object(dispatch, "git", side_effect=fail_scan) as calls:
+            r = self.invoke("merge", no, "--push-main", tip[:12])
+        self.assertFalse(r["ok"])
+        self.assertIn("扫描", r["msg"])
+        self.assertNotIn("synthetic-private-diagnostic", json.dumps(r))
+        self.assertFalse(any(c.args[1] in ("push", "rebase") for c in calls.call_args_list))
+        self.assertEqual(self.remote_main(), before_main)
+        self.assertEqual(sh(wt, "rev-parse", "HEAD"), before_branch)
+        self.assertEqual(self.gh_calls("pr", "merge"), [])
+        self.assertEqual(dispatch.load(no), before)
+
     def test_merge_lists_unpushed_commits_then_pushes_after_confirm(self):
         no, wt = self.new_done()
         self.invoke("pr", no)
