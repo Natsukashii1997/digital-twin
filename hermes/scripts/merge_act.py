@@ -377,11 +377,12 @@ def custody_env(token, config_dir):
 
 def _gh_write(cmd, env, secret=None):
     """发一次 gh 写命令（不重试：没收到回应也可能已经执行，以回读为准），返回结构化结果；输出里出现令牌就打码。"""
-    res = {"returncode": None, "timed_out": False, "launched": True, "why": "", "stdout": ""}
+    res = {"returncode": None, "timed_out": False, "launched": True, "why": "", "detail": "", "stdout": ""}
     try:
         mr = subprocess.run(cmd, capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
         res["returncode"], res["stdout"] = mr.returncode, mr.stdout or ""
-        res["why"] = ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
+        res["detail"] = (mr.stderr or mr.stdout or "").strip()      # 完整报错，分类用；why 只给人看
+        res["why"] = (res["detail"].splitlines() or ["没有输出"])[-1]
     except subprocess.TimeoutExpired:
         res["timed_out"] = True
         res["why"] = f"超过 {mo.TIMEOUT} 秒没回应（timeout）"
@@ -389,8 +390,8 @@ def _gh_write(cmd, env, secret=None):
         res["launched"] = False
         res["why"] = f"gh 跑不起来（{type(e).__name__}）"
     if secret:
-        res["why"] = res["why"].replace(secret, "***")
-        res["stdout"] = res["stdout"].replace(secret, "***")
+        for k in ("why", "detail", "stdout"):
+            res[k] = res[k].replace(secret, "***")
     return res
 
 
@@ -398,7 +399,7 @@ def run_owner_merge(card):
     """卡片合并（B 档，常浩本人点的）：用本机 gh 登录。托管合并不能走这里，用 run_custody_merge。"""
     cmd = [mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash", "--match-head-commit", card["head"]]
     res = _gh_write(cmd, None)
-    res.pop("stdout")
+    res.pop("stdout"), res.pop("detail")
     return {**res, "identity": "owner"}
 
 
@@ -431,13 +432,14 @@ def run_custody_merge(card):
         except (OSError, subprocess.SubprocessError):
             after = None
     reply = _json_dict(res.pop("stdout")) or {}
+    detail = res.pop("detail")
     out.update(res)
     if not res["launched"]:
         out["status"] = "failed"                      # 合并请求没发出去，确定没合
         return out
     state = (after or {}).get("state")
     out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
-    rejected = res["returncode"] not in (None, 0) and REJECTED.search(res["why"]) and not NET_ERR.search(res["why"])
+    rejected = res["returncode"] not in (None, 0) and REJECTED.search(detail) and not NET_ERR.search(detail)  # 网络错误优先
     if after is None or after.get("headRefOid") != card["head"]:
         out["status"] = "unsure"
     elif (res["returncode"] == 0 and reply.get("merged") is True and reply.get("sha")

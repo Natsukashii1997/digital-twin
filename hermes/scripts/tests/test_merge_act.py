@@ -674,6 +674,9 @@ class CustodyCredential(unittest.TestCase):
             (dict(merge_code=0, reply={"merged": False, "message": "x"}, view=merged), "unsure"),
             (dict(merge_code=0, reply={"merged": True}, view=merged), "unsure"),                    # 没有合并提交号
             (dict(merge_code=0, reply={**self.MERGED_REPLY, "sha": "z" * 40}, view=merged), "unsure"),  # 提交号对不上
+            # 多行报错：最后一行像拒绝，前面有网络中断 → 网络优先，判 unsure
+            (dict(merge_code=1, merge_err='Post "https://api.github.com/...": EOF\ngh: Pull Request is not mergeable (HTTP 405)',
+                  view=open_), "unsure"),
             (dict(merge_code=0, view_raw="null"), "unsure"),                                        # 回读不是对象
             (dict(merge_code=0, view_raw="[]"), "unsure"),
             (dict(merge_code=0, view_raw="not json"), "unsure"),
