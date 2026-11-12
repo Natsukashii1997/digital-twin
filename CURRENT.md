@@ -8,6 +8,14 @@
 
 ---
 
+## 2026-11-12 · 记忆日报首跑失败已补写；网络重试修复待合并；亚古兽人设 V4 待确认（niuma-home#57）
+
+- **首跑**：定时任务 `45590a963269` 11-12 09:12 才跑（07:30 电脑在睡眠），读《记忆日报汇总》网络超时，没写成，原因发到亚古兽私聊。手动重跑又遇飞书「could not export … Retry the export」。两种都是一过性错误，原重试只认飞书标的 retryable。
+- **修复（分支 `claude/memdaily-retry`，待合并）**：`memdaily_data.lark()` 对网络超时、连接断开、「Retry the export」也重试，间隔 10、30、60 秒；写文档的调用仍 `tries=1` 不重试。新增 2 项测试（共 20 项）；全量 hermes 767、orca OK。
+- **11-11 已补写**：用修复后的分支代码手动跑 `run --date 2026-11-11`：gpt-6.1-sol 一次过核对，8 张表，10:15 写入正式文档、回读通过、已推送（`DigitalTwin/memdaily/2026-11-11.delivery.json`）；牛马之家试读最新一篇为 11-11，共 136 篇。
+- **人设 V4（niuma-home PR #57，待常浩确认）**：SOUL 加「思维内核」（五个核心模型，第一性原理为主轴、可显性外化），对话默认精简版（≤300 字）、常浩本人请求不要凭证、自我认知以实查为准、「沉淀」；HERMES 加 §6 工作动态与记忆日报；新增亚古兽专属 locales（截图里「工间记一笔」是猛鬼兽的覆盖文件）。临时 profile 试答：新版 957 / 778 字 vs 现版 3060 / 2589 字。底线逐字未改。临时 profile `agupreview` 已删。
+- **唯一的下一步**：常浩确认人设 V4 和重试修复 → 合并 niuma-home#57、本仓库重试修复 PR，安装（亚古兽 SOUL、workspace/HERMES.md、locales/zh.yaml；scripts/memdaily_data.py），重启亚古兽网关，飞书私聊实测一句；明早 07:30 后看 11-12 日报。
+
 ## 2026-11-11 · 亚古兽改用 Codex 6.1 sol xhigh；记忆日报改由亚古兽写并推送（PR #168 `5c44dae` 已合并并安装，07:30 定时任务已建）
 
 - **模型已切换**（常浩「把 codex 的 6.1 sol 极高接进来，不用 claude 的额度」）：`hermes -p agumon config set` 改 `model.default=gpt-6.1-sol`、`model.provider=openai-codex`（`base_url` 随之清掉）、`agent.reasoning_effort=xhigh`；辅助任务 luna、回退 deepseek-flash 不变。改前配置在 `evidence/agumon-codex-20261111/config.before.yaml`。14:03 重启 `ai.hermes.gateway-agumon`，14:04 起来，日志 `Model context warmed: gpt-6.1-sol`、飞书已连。不带参数 oneshot 实测：会话 `20261111_140439_8688b0`，模型 gpt-6.1-sol、`openai-codex`、`subscription_included`、有思考 token。飞书私聊里还没实测。猛鬼兽不动，仍是 Claude。「极高」按 Codex 的 `xhigh` 理解。

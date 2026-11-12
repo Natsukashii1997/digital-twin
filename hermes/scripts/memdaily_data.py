@@ -37,8 +37,15 @@ class Fail(Exception):
     pass
 
 
-def lark(*args, identity="user", cwd=None, tries=3, sleep=time.sleep):
-    """以亚古兽应用调 lark-cli（默认常浩的用户身份；推送用 identity="bot"），返回 data。飞书报「可重试」时最多试 3 次。"""
+NETWORK = re.compile(r"timed out|timeout|connection reset|connection refused|EOF|no such host|network is unreachable|TLS handshake"
+                     r"|retry the export|could not export", re.I)
+DELAYS = (10, 30, 60)   # 秒；11-12 首跑两次失败：睡眠醒来读文档超时、飞书「could not export … Retry the export」，各自过一会儿都好了
+
+
+def lark(*args, identity="user", cwd=None, tries=4, sleep=time.sleep):
+    """以亚古兽应用调 lark-cli（默认常浩的用户身份；推送用 identity="bot"），返回 data。
+
+    飞书报「可重试」或网络错误（超时、连接断开）时重试，间隔 10、30、60 秒；写文档的调用传 tries=1，不重试，免得写两遍。"""
     # lark-cli 看到 Hermes 的环境变量会改读另一套配置，这里去掉（同 report_data.lark）
     env = {k: v for k, v in os.environ.items() if not k.lstrip("_").startswith(AGENT_ENV)}
     for i in range(tries):
@@ -51,9 +58,10 @@ def lark(*args, identity="user", cwd=None, tries=3, sleep=time.sleep):
         if d.get("ok", True):
             return d.get("data")
         err = d.get("error") or {}
-        if not err.get("retryable") or i == tries - 1:
-            raise Fail(f"{args[0]} {args[1]}：{str(err.get('message', '未知错误'))[:200]}")
-        sleep(5 * (i + 1))
+        msg = str(err.get("message", "未知错误"))
+        if not (err.get("retryable") or NETWORK.search(msg)) or i == tries - 1:
+            raise Fail(f"{args[0]} {args[1]}：{msg[:200]}")
+        sleep(DELAYS[min(i, len(DELAYS) - 1)])
 
 
 def load_config(path=CONFIG):
