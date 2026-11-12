@@ -5,7 +5,7 @@
 用法：
   multica_night.py plan PLAN.json                     建父单和子单（子单停在 backlog），记为当前夜跑
   multica_night.py start --approved-by 常浩 [--hours 4] [--max-runs 20]
-                                                      开跑前核对，记下授权，把第 1 个 stage 移出 backlog
+                                                      开跑前核对（含执行器 GitHub 身份闸，#172），记下授权，把第 1 个 stage 移出 backlog
   multica_night.py approve --by Hermes --start-at 2026-11-08T22:00 [--hours 4] [--max-runs 20]
                                                       记下“几点开跑”的批准，到点由 tick 执行 start（过了 30 分钟还没开就不开）
   multica_night.py tick                               Hermes 无模型定时任务每 5 分钟调一次（经 multica_night_tick.py，定时任务不能带参数）：
@@ -226,6 +226,10 @@ def validate(plan):
     if not (isinstance(ex, dict) and isinstance(ex.get("docker"), list) and ex["docker"] and isinstance(ex.get("container"), str)
             and ex["container"]):
         errs.append("缺 executor（docker 命令前缀、container 容器名）：停机要到执行器里独立核对进程（M5 #25）")
+    elif not (isinstance(ex.get("github_login"), str) and ex["github_login"]):
+        errs.append("缺 executor.github_login（执行器里应登录的 GitHub 机器账号）：开跑前要核对身份（#172）")
+    if not (isinstance(plan.get("repo"), str) and "/" in plan["repo"]):
+        errs.append("缺 repo（owner/name）")
     if errs:
         return errs
     keys, stages = [], set()
@@ -891,6 +895,93 @@ def alarm_once(night, kind, text):
 
 # ---------- 命令 ----------
 
+# 运行前身份闸（#172，#135 文档第五节 3）：开跑前到执行器里收集 GitHub 身份事实，由 identity_problems 判；
+# 任何一项不符或看不清都不开跑（fail-closed）。只收集事实，不打印令牌。
+IDENT_SCRIPT = r"""
+python3 - "$1" <<'PY'
+import json, os, re, subprocess, sys
+repo = sys.argv[1]
+def gh(*a):
+    r = subprocess.run(["gh", *a], capture_output=True, text=True, timeout=40)
+    if r.returncode != 0:
+        sys.exit("gh " + " ".join(a[:2]) + " 失败：" + (r.stderr or r.stdout).strip()[:160])
+    return r.stdout.strip()
+f = {"login": gh("api", "user", "-q", ".login"),
+     "permissions": json.loads(gh("api", "repos/" + repo, "-q", ".permissions") or "{}"),
+     "bypass": {}}
+for rid in gh("api", "repos/" + repo + "/rulesets", "-q", ".[].id").split():
+    f["bypass"][rid] = gh("api", "repos/" + repo + "/rulesets/" + rid, "-q", ".current_user_can_bypass")
+f["repos"] = sorted(set(gh("api", "user/repos", "--paginate", "-q", ".[].full_name").split()))
+p = os.path.expanduser("~/.config/gh/hosts.yml")
+txt = open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+f["gh_hosts"] = re.findall(r"^([^\s#][^:]*):", txt, re.M)
+f["gh_users"] = re.findall(r"^\s+user:\s*(\S+)", txt, re.M) + re.findall(r"^\s{8}([^\s:]+):\s*$", txt, re.M)
+f["token_env"] = sorted(k for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN") if os.environ.get(k))
+f["cred_files"] = [x for x in ("~/.git-credentials", "~/.netrc", "~/.config/git/credentials") if os.path.exists(os.path.expanduser(x))]
+r = subprocess.run(["git", "config", "--global", "--get-regexp", r"^credential\..*helper$"], capture_output=True, text=True)
+f["git_helpers"] = sorted({(l.split(" ", 1) + [""])[1] for l in r.stdout.splitlines()})
+print(json.dumps(f))
+PY
+"""
+GH_HELPER_OK = {"", "!/usr/bin/gh auth git-credential"}
+
+
+def executor_identity(plan):
+    """在执行器里收集 GitHub 身份事实。命令失败、超时、输出读不懂都抛 Unclear：看不清就不开跑。"""
+    ex = plan.get("executor") or {}
+    cmd = list(ex.get("docker") or []) + ["exec", str(ex.get("container")), "bash", "-c", IDENT_SCRIPT, "ident", str(plan.get("repo"))]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT * 3)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Unclear(f"核对执行器 GitHub 身份失败：{type(e).__name__}") from e
+    if r.returncode != 0:
+        raise Unclear(f"核对执行器 GitHub 身份失败（退出码 {r.returncode}）：{(r.stderr or r.stdout).strip()[:200]}")
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError) as e:
+        raise Unclear("核对执行器 GitHub 身份失败：输出读不懂") from e
+
+
+def identity_problems(f, repo, login):
+    """按 #135 文档第五节 3 的四项判身份事实，返回不符合的说明（空列表 = 通过）。"""
+    why = []
+    if f.get("login") != login:
+        why.append(f"执行器 GitHub 身份是 {f.get('login')}，应为 {login}")
+    p = f.get("permissions") or {}
+    if p.get("admin") or p.get("maintain"):
+        why.append(f"执行器账号对 {repo} 有 admin / maintain 权限")
+    if not p.get("push"):
+        why.append(f"执行器账号对 {repo} 没有写权限（权限读不到或被改）")
+    if not f.get("bypass"):
+        why.append(f"读不到 {repo} 的规则集，核对不了绕过名单")
+    bad = sorted(f"{k}={v}" for k, v in (f.get("bypass") or {}).items() if v != "never")
+    if bad:
+        why.append("执行器账号能绕过规则集：" + "、".join(bad))
+    repos = sorted(x.lower() for x in f.get("repos") or [])
+    if repos != [repo.lower()]:
+        why.append(f"执行器账号能访问的仓库不止 {repo}：" + "、".join(repos[:5]))
+    if f.get("gh_hosts") != ["github.com"] or f.get("gh_users") != [login]:
+        why.append(f"执行器 gh 登录里有其他主机或账号：{f.get('gh_hosts')} / {f.get('gh_users')}")
+    if f.get("token_env"):
+        why.append("执行器环境里有令牌变量：" + "、".join(f["token_env"]))
+    if f.get("cred_files"):
+        why.append("执行器里有其他凭据文件：" + "、".join(f["cred_files"]))
+    extra = sorted(set(f.get("git_helpers") or []) - GH_HELPER_OK)
+    if extra:
+        why.append("执行器 git 配了其他凭据助手：" + "、".join(extra))
+    return why
+
+
+def identity_gate(plan):
+    login = (plan.get("executor") or {}).get("github_login")
+    if not login:
+        return ["计划里没写 executor.github_login，核对不了执行器 GitHub 身份"]
+    try:
+        return identity_problems(executor_identity(plan), str(plan.get("repo")), login)
+    except Unclear as e:
+        return [str(e)]
+
+
 def roster_gate(plan):
     """5.3：无人值守只在名册里标了 sandbox: true、且登记了同一个 Multica 工作区的项目里跑。"""
     try:
@@ -931,6 +1022,7 @@ def preflight(night):
             why.append(f"执行器里已有 {len(left)} 个非守护进程：" + "；".join(left[:3]))
     except Unclear as e:
         why.append(str(e))
+    why += identity_gate(night.plan)      # 运行前身份闸（#172）
     return why
 
 

@@ -4,6 +4,7 @@
   exit_after  再被 list 几次后它们自己退出（模拟 agent 进程收尾慢），缺省不自己退
   stubborn    true 时 kill 也杀不掉
   fail        true 时命令失败（容器不在、docker 不通）
+  ident       身份闸（#172）要的 GitHub 身份事实；ident_fail 为 true 时身份查询失败
 每次调用记进 calls。"""
 import json
 import os
@@ -21,6 +22,14 @@ if w.get("fail"):
     p.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
     print("Error response from daemon: container is not running", file=sys.stderr)
     sys.exit(1)
+if args[:1] == ["exec"] and args[2:4] == ["bash", "-c"] and args[5:6] == ["ident"]:   # 运行前身份闸（#172）
+    w["calls"][-1]["action"] = "ident"
+    p.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
+    if w.get("ident_fail"):
+        print("gh api user 失败：HTTP 401: Bad credentials", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(w.get("ident", {})))
+    sys.exit(0)
 if args[:1] != ["exec"] or args[2:4] != ["bash", "-c"] or action not in ("list", "kill", "orphans", "kill-orphans"):
     print(f"假 docker 不认识：{args[:4]}", file=sys.stderr)
     sys.exit(2)

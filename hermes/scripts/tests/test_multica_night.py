@@ -41,6 +41,11 @@ PLAN = {
 }
 
 
+GOOD_IDENT = {"login": "bot", "permissions": {"admin": False, "maintain": False, "push": True, "triage": True, "pull": True},
+              "bypass": {"1": "never", "2": "never"}, "repos": ["owner/dt-sandbox"], "gh_hosts": ["github.com"], "gh_users": ["bot"],
+              "token_env": [], "cred_files": [], "git_helpers": ["", "!/usr/bin/gh auth git-credential"]}
+
+
 class MulticaNight(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="dt-night-"))
@@ -56,9 +61,11 @@ class MulticaNight(unittest.TestCase):
         docker.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{FAKE_DOCKER}' \"$@\"\n", encoding="utf-8")
         docker.chmod(0o755)
         self.procs = self.tmp / "procs.json"
-        plan["executor"] = {"docker": [str(docker), "--context", "colima-multica"], "container": "agent-1", "kill": True}
+        plan["executor"] = {"docker": [str(docker), "--context", "colima-multica"], "container": "agent-1", "kill": True,
+                            "github_login": "bot"}
         self.plan_obj = plan
         self.write_plan()
+        self.set_procs(ident=dict(GOOD_IDENT))
         wrapper = self.tmp / "multica"
         wrapper.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{FAKE}' \"$@\"\n", encoding="utf-8")
         wrapper.chmod(0o755)
@@ -206,6 +213,63 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("sandbox: true", out)
         self.assertEqual(self.issue("A")["status"], "backlog")
+
+    # ---- 运行前身份闸（#172）----
+    def test_identity_gate_checked_before_start(self):
+        self.run_cli("plan", str(self.plan_file))
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ident", self.docker_calls())
+
+    def test_identity_gate_refuses_each_problem_and_changes_nothing(self):
+        cases = [
+            ("login", "someone-else", "身份是 someone-else"),
+            ("permissions", {"admin": True, "maintain": False, "push": True}, "admin / maintain"),
+            ("permissions", {"admin": False, "maintain": True, "push": True}, "admin / maintain"),
+            ("permissions", {}, "没有写权限"),
+            ("bypass", {"1": "never", "2": "always"}, "能绕过规则集：2=always"),
+            ("bypass", {"1": "pull_requests_only"}, "能绕过规则集"),
+            ("bypass", {}, "读不到 owner/dt-sandbox 的规则集"),
+            ("repos", ["owner/dt-sandbox", "owner/digital-twin"], "能访问的仓库不止"),
+            ("repos", [], "能访问的仓库不止"),
+            ("gh_users", ["bot", "Natsukashii1997"], "其他主机或账号"),
+            ("gh_hosts", ["github.com", "ghe.example.com"], "其他主机或账号"),
+            ("token_env", ["GH_TOKEN"], "令牌变量：GH_TOKEN"),
+            ("cred_files", ["~/.git-credentials"], "其他凭据文件"),
+            ("git_helpers", ["", "store"], "其他凭据助手：store"),
+        ]
+        self.run_cli("plan", str(self.plan_file))
+        for field, value, expect in cases:
+            with self.subTest(field=field, value=value):
+                self.set_procs(ident={**GOOD_IDENT, field: value})
+                code, out = self.run_cli("start", "--approved-by", "Hermes")
+                self.assertEqual(code, 1, out)
+                self.assertIn("开跑前核对没通过", out)
+                self.assertIn(expect, out)
+                self.assertNotIn("auth", self.state())
+                self.assertEqual(self.issue("A")["status"], "backlog")
+
+    def test_identity_gate_fails_closed_when_query_fails(self):
+        self.run_cli("plan", str(self.plan_file))
+        self.set_procs(ident_fail=True)
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 1)
+        self.assertIn("核对执行器 GitHub 身份失败", out)
+        self.assertNotIn("auth", self.state())
+
+    def test_plan_requires_github_login(self):
+        del self.plan_obj["executor"]["github_login"]
+        self.write_plan()
+        code, out = self.run_cli("plan", str(self.plan_file))
+        self.assertNotEqual(code, 0)
+        self.assertIn("github_login", out)
+
+    def test_identity_problems_accepts_good_facts_case_insensitively(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mn", SCRIPT)
+        mn = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mn)
+        self.assertEqual(mn.identity_problems(dict(GOOD_IDENT), "Owner/DT-Sandbox", "bot"), [])
 
     def test_real_roster_marks_dt_sandbox(self):
         real = json.loads((HERE.parents[2] / "projects.json").read_text(encoding="utf-8"))
