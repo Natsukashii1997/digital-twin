@@ -113,6 +113,12 @@ class Base(unittest.TestCase):
     def status(self, now):
         return C.read_status(now=now)
 
+    def allow_drain(self):
+        """账本（#133）还没有：要走完 draining → off 的用例在这里假装账本已经证明排空完成。"""
+        p = mock.patch.object(C, "drain_proof", return_value=(True, ""))
+        p.start()
+        self.addCleanup(p.stop)
+
 
 class PolicyTemplateTests(Base):
     def test_real_template_is_unfilled_and_filled_template_parses(self):
@@ -247,10 +253,16 @@ class OnSourceTests(Base):
 
     def test_feishu_on_until_parsing(self):
         cases = {"托管到 7 点": at(7, day=1), "托管到下午3点半": at(15, 30, day=1), "托管到23:30": at(23, 30),
-                 "托管到晚上 11 点": at(23), "托管到明天早上8点": at(8, day=1)}
+                 "托管到晚上 11 点": at(23), "托管到明天早上8点": at(8, day=1), "托管到明早 8 点": at(8, day=1),
+                 "托管到 0 点": at(0, day=1), "托管到24点": at(0, day=1), "托管到中午12点": at(12, day=1),
+                 "托管到12:00": at(12, day=1), "托管到 23:59": at(23, 59), "托管到今晚11点半": at(23, 30),
+                 "托管到中午1点": at(13, day=1)}
         for text, want in cases.items():
             self.assertEqual(C.parse_on_text(text, at(22, 10), {"start": "23:30", "end": "08:00"}), want, text)
-        for text in ("今晚不托管", "停止托管", "托管吧", "托管到很晚", "不托管", "我回来了"):
+        # 第 1 轮审查 P1-04：午夜 / 中午分不清、时段词和钟点对不上、今天已过、超过 24 小时，一律拒绝，不猜
+        for text in ("今晚不托管", "停止托管", "托管吧", "托管到很晚", "不托管", "我回来了", "托管到今晚12点", "托管到凌晨12点",
+                     "托管到晚上12点", "托管到12点", "托管到早上3点", "托管到下午12点", "托管到今天下午3点", "托管到25点",
+                     "托管到明天晚上11点"):
             with self.assertRaises(C.Rejected, msg=text):
                 C.parse_on_text(text, at(22), {"start": "23:30", "end": "08:00"})
 
@@ -284,6 +296,7 @@ class OnSourceTests(Base):
         self.rejects("PolicyInvalid", C.do_on, "window", now=at(23, 40, day=30))                   # 过期
 
     def test_window_on(self):
+        self.allow_drain()
         self.sign(when=at(20))
         self.rejects("NotAuthorized", C.do_on, "window", now=at(22))                    # 时段外
         self.rejects("BadCommand", C.do_on, "window", "om_fixturemsg0001", now=at(23, 40))
@@ -347,6 +360,9 @@ class TransitionTests(Base):
         self.open()
         self.rejects("BadTransition", C.do_off, "ledger", drained=True, now=at(22, 5))       # on：不能跳过排空
         C.do_off("feishu", now=at(22, 10))
+        self.assertIn("#133", self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 20)))  # 默认证明不了
+        self.assertEqual(self.doc()["state"], "draining")
+        self.allow_drain()
         doc, r = C.do_off("ledger", drained=True, now=at(22, 30))
         self.assertEqual((doc["state"], doc["session"]), ("off", None))
         last = doc["history"][-1]
@@ -367,6 +383,7 @@ class TransitionTests(Base):
         self.assertEqual(self.doc()["state"], "frozen")                    # 拒绝也把时钟推进落了盘
 
     def test_drained_before_deadline_reaches_off(self):
+        self.allow_drain()
         self.open()
         C.do_off("ledger", drained=True, now=at(8, day=1))                # 07:00 自动排空，08:00 收完
         self.assertEqual(self.doc()["state"], "off")
@@ -421,6 +438,7 @@ class TransitionTests(Base):
 
 class ReplayTests(Base):
     def test_message_used_once_across_commands(self):
+        self.allow_drain()
         self.sign(when=at(20))
         sign_mid = "om_fixturemsg0001"
         self.msgs[sign_mid]["content"] = "托管"          # 同一条消息改口令再用：仍然拒绝（以 id 为准）
@@ -453,7 +471,7 @@ class FileTests(Base):
     def test_no_temp_files_left_and_lock_timeout(self):
         self.sign(when=at(20))
         self.assertEqual(sorted(p.name for p in self.state.parent.iterdir()),
-                         ["custody", "custody.json", "custody.json.lock"])
+                         ["custody", "custody.json", "custody.json.initialized", "custody.json.lock"])
         import fcntl
         fd = os.open(str(self.state.with_name("custody.json.lock")), os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -481,6 +499,224 @@ class FileTests(Base):
         self.assertEqual(results.count("ok"), 1, outs)
         self.assertEqual(results.count("BadTransition") + results.count("NotAuthorized"), 7, outs)
         self.assertEqual(self.doc()["state"], "on")
+
+
+class ReviewRound1Tests(Base):
+    """第 1 轮 L3 审查（ChatGPT High，2026-11-12）逐条的回归测试。"""
+
+    def open(self, text="托管到 7 点", when=None):
+        when = when or at(22)
+        return C.do_on("feishu", self.say(text, when), now=when)
+
+    def write_doc(self, doc):
+        self.state.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+    def assert_broken(self, doc, now=None):
+        """结构坏了：只读接口 state=None、不准入；写接口一律 Corrupt。"""
+        now = now or at(22, 30)
+        self.write_doc(doc)
+        st = self.status(now)
+        self.assertIsNone(st["state"], st)
+        self.assertTrue(st["error"])
+        self.assertFalse(st["admission"]["eligible"])
+        self.rejects("Corrupt", C.do_off, "feishu", now=now)
+        self.rejects("Corrupt", C.do_freeze, "ledger", "x", now=now)
+
+    # ---- P1-01 状态文件完整校验 ----
+    def test_p1_01_partial_structures_are_corrupt_not_on(self):
+        self.sign(when=at(20))
+        self.open()
+        good = self.doc()
+        self.assertTrue(C.check_doc(json.loads(json.dumps(good))))
+        cases = {
+            "审查原例：on 只有 until=null": {**C.empty_doc(), "state": "on", "session": {"until": None}},
+            "until 为空": ("session", "until", None),
+            "until 不带时区": ("session", "until", "2026-11-12T07:00:00"),
+            "until 早于开始": ("session", "until", C.iso(at(21))),
+            "until 超过 24 小时": ("session", "until", C.iso(at(23, day=1))),
+            "来源不认识": ("session", "source", {"kind": "yichuang"}),
+            "on 却带排空记录": ("session", "drain", {"started_at": C.iso(at(22)), "deadline": C.iso(at(23)), "source": "x"}),
+            "排空时长不是整数": ("session", "drain_minutes", "120"),
+            "策略哈希不对": ("session", "policy", {"version": 3, "sha256": "zz"}),
+            "多出字段": ("session", "extra", 1),
+            "签署缺字段": ("signature", None, {"version": 3}),
+            "签署到期和天数对不上": ("signature", "expires_at", C.iso(at(20, day=31))),
+            "签过的版本不递增": (None, "signed_versions", [3, 3]),
+            "签署不是最大版本": (None, "signed_versions", [3, 5]),
+            "消息占用格式不对": (None, "used_messages", {"om_x": "now"}),
+        }
+        for name, change in cases.items():
+            with self.subTest(name):
+                if isinstance(change, dict):
+                    doc = change
+                else:
+                    doc = json.loads(json.dumps(good))
+                    part, key, value = change
+                    target = doc[part] if part else doc
+                    if key is None:
+                        doc[part] = value
+                    else:
+                        target[key] = value
+                self.assert_broken(doc)
+        bad_sig = json.loads(json.dumps(good))
+        bad_sig["signature"] = {"version": 3}
+        self.write_doc(bad_sig)
+        self.assertIsNone(self.status(at(22, 30))["state"])          # 不再在 verify_policy 里 KeyError
+
+    def test_p1_01_draining_without_drain_record_is_corrupt(self):
+        self.sign(when=at(20))
+        self.open()
+        doc = self.doc()
+        doc["state"] = "draining"
+        self.assert_broken(doc)
+
+    # ---- P1-02 状态文件丢失 ----
+    def test_p1_02_missing_state_after_use_is_not_first_use(self):
+        self.sign(when=at(20))
+        self.open()
+        C.do_freeze("ledger", "合并对账不清", ["dt-sandbox#7"], now=at(22, 5))
+        self.state.unlink()                                             # 误删
+        st = self.status(at(22, 10))
+        self.assertIsNone(st["state"])
+        self.assertIn("备份", st["error"])
+        self.rejects("Corrupt", C.do_on, "feishu", self.say("托管", at(22, 10)), now=at(22, 10))
+        self.rejects("Corrupt", C.do_unfreeze, self.say("解除冻结", at(22, 11)), now=at(22, 11))
+        self.assertFalse(self.state.exists())                         # 不会自动建一份空的
+
+    def test_p1_02_first_use_without_marker_is_off(self):
+        st = self.status(at(20))
+        self.assertEqual((st["state"], st["error"]), ("off", None))
+        self.assertFalse(C.marker_path().exists())
+        self.sign(when=at(20))
+        self.assertTrue(C.marker_path().exists())
+
+    # ---- P1-03 撤销 ----
+    def test_p1_03_revoke_is_persistent_and_restoring_file_does_not_revive(self):
+        self.sign(when=at(20))
+        original = self.policy.read_bytes()
+        self.policy.unlink()
+        self.assertEqual(C.verify_policy(self.doc(), at(20, 5))["code"], "missing")
+        self.policy.write_bytes(original)                               # 恢复原文件：没撤销时又有效（临时失效）
+        self.assertTrue(C.verify_policy(self.doc(), at(20, 6))["ok"])
+        doc, r = C.do_revoke("feishu", "先停用", now=at(20, 10))
+        self.assertEqual(doc["signature"]["revoked"]["source"], "feishu")
+        self.policy.write_bytes(original)
+        self.assertEqual(C.verify_policy(self.doc(), at(20, 11))["code"], "revoked")
+        self.rejects("PolicyInvalid", C.do_on, "feishu", self.say("托管", at(20, 12)), now=at(20, 12))
+        self.assertTrue(C.do_revoke("x", now=at(20, 13))[1]["unchanged"])
+        sha = hashlib.sha256(original).hexdigest()                      # 同版本重签不行
+        self.rejects("VersionReuse", C.do_sign, self.say(f"签托管策略 v3 {sha[:12]}", at(20, 14)), now=at(20, 14))
+        self.sign(version=4, when=at(20, 15))                           # 只能换更高版本
+        self.assertTrue(C.verify_policy(self.doc(), at(20, 16))["ok"])
+
+    def test_p1_03_revoke_while_on_starts_draining_and_unsigned_rejected(self):
+        self.rejects("BadTransition", C.do_revoke, "feishu", now=at(20))
+        self.sign(when=at(20))
+        self.open()
+        doc, r = C.do_revoke("yichuang", now=at(22, 5))
+        self.assertEqual((doc["state"], r["deadline"]), ("draining", C.iso(at(0, 5, day=1))))
+        self.assertFalse(self.status(at(22, 6))["admission"]["eligible"])
+
+    # ---- P1-04 时刻 ----
+    def test_p1_04_tomorrow_before_dawn_is_ambiguous_and_24h_cap(self):
+        w = {"start": "23:30", "end": "08:00"}
+        with self.assertRaises(C.Rejected):
+            C.parse_on_text("托管到明早8点", at(1, day=1), w)
+        with self.assertRaisesRegex(C.Rejected, "凌晨说「明天」"):
+            C.parse_on_text("托管到明天凌晨1点", at(2, day=1), w)        # 23 小时内，只能靠歧义规则拦
+        self.assertEqual(C.parse_on_text("托管到8点", at(1, day=1), w), at(8, day=1))
+        with self.assertRaises(C.Rejected):
+            C.parse_on_text("托管到明天晚上9点", at(7), w)                 # 38 小时
+        self.assertEqual(C.parse_on_text("托管", at(9), w), at(8, day=1))   # 不带时刻：到下一个时段结束，23 小时
+
+    # ---- P1-05 默认时段 ----
+    def test_p1_05_drained_inside_window_consumes_it(self):
+        self.allow_drain()
+        self.sign(when=at(20))
+        self.open("托管到 23 点", at(21))
+        C.do_off("feishu", now=at(22))                                  # 时段外关闭，排空到 00:00
+        C.do_off("ledger", drained=True, now=at(23, 40))                # 时段内排空完成
+        self.rejects("NotAuthorized", C.do_on, "window", now=at(23, 41))
+        C.do_on("feishu", self.say("托管", at(23, 42)), now=at(23, 42))   # 常浩亲口开不受影响
+
+    def test_p1_05_unfreeze_inside_window_does_not_reopen(self):
+        self.sign(when=at(20))
+        self.open("托管到 7 点", at(22))                                 # 07:00 排空，09:00 自动冻结
+        self.assertEqual(self.status(at(9, day=1))["state"], "frozen")
+        C.do_unfreeze(self.say("解除冻结", at(23, 40, day=1)), now=at(23, 40, day=1))   # 下一晚才解除
+        self.rejects("NotAuthorized", C.do_on, "window", now=at(23, 41, day=1))
+        C.do_on("window", now=at(23, 31, day=2))                        # 再下一晚照常
+
+    def test_p1_05_auto_freeze_inside_window_consumes_it(self):
+        self.sign(when=at(20))
+        self.open("托管到 22 点", at(21, 50))                            # 22:00 排空，00:00 冻结（落在 11-11 的时段里）
+        C.do_unfreeze(self.say("解除冻结", at(15, day=1)), now=at(15, day=1))
+        self.assertIn("2026-11-11", self.doc()["consumed_windows"])
+
+    # ---- P1-06 未填项豁免 ----
+    def test_p1_06_placeholder_in_quote_or_sign_section_is_unfilled(self):
+        base = fill(self.template)
+        for extra in ("> 注：L0 白名单〔填〕", "2. 另加一条：〔填，例：x〕"):
+            with self.subTest(extra):
+                text = base.replace("## 6. 签署\n", "## 6. 签署\n\n" + extra + "\n") if extra.startswith("2.") \
+                    else base.replace("## 1. 默认托管时段", extra + "\n\n## 1. 默认托管时段")
+                self.assertTrue(C.unfilled(text), extra)
+
+    # ---- P1-07 字段位置唯一 ----
+    def test_p1_07_policy_fields_fixed_location_and_unique(self):
+        base = fill(self.template)
+        quoted = base.replace("## 1. 默认托管时段", "> 示例：每晚 00:00 到次日 23:00；排空截止：9 小时\n\n## 1. 默认托管时段")
+        f, errors = C.parse_policy(quoted)
+        self.assertEqual((errors, f["window"], f["drain_minutes"]), ([], {"start": "23:30", "end": "08:00"}, 120))
+        dup = base.replace("- 每晚 23:30 到次日 08:00", "- 每晚 23:30 到次日 08:00\n- 每晚 22:00 到次日 09:00")
+        self.assertTrue(any("2 处" in e for e in C.parse_policy(dup)[1]))
+        same_day = base.replace("每晚 23:30 到次日 08:00", "每晚 01:00 到次日 05:00")
+        self.assertTrue(any("早于开始" in e for e in C.parse_policy(same_day)[1]))
+        moved = base.replace("- 每晚 23:30 到次日 08:00（Asia/Shanghai），周末照常。\n", "")
+        moved = moved.replace("## 5. 汇报", "## 5. 汇报\n\n- 每晚 23:30 到次日 08:00")
+        self.assertTrue(any("没写" in e for e in C.parse_policy(moved)[1]))   # 别的章节里写的不算
+        two_versions = base.replace("| 签署人 | 常浩 |", "| 签署人 | 常浩 |\n| 版本 | 9 |")
+        self.assertTrue(C.parse_policy(two_versions)[1])
+
+    # ---- P1-08 排空证明 ----
+    def test_p1_08_drained_needs_proof(self):
+        self.sign(when=at(20))
+        self.open()
+        C.do_off("feishu", now=at(22, 1))
+        self.rejects("DrainUnverified", C.do_off, "hermes", drained=True, now=at(22, 2))
+        self.assertEqual(self.status(at(0, 1, day=1))["state"], "frozen")   # 没人能证明 → 到截止冻结
+
+    # ---- P2 ----
+    def test_p2_01_freeze_appends_items_when_already_frozen(self):
+        self.sign(when=at(20))
+        self.open()
+        C.do_freeze("ledger", "排空截止到", now=at(22, 1))
+        doc, r = C.do_freeze("ledger", "补充", ["dt-sandbox#7 对账不清", "dt-sandbox#7 对账不清", "dt-sandbox#8"], now=at(22, 2))
+        self.assertEqual((doc["state"], doc["session"]["frozen"]["items"]), ("frozen", ["dt-sandbox#7 对账不清", "dt-sandbox#8"]))
+        self.assertEqual(doc["session"]["frozen"]["reason"], "排空截止到")
+        self.assertTrue(C.do_freeze("ledger", "再补", ["dt-sandbox#8"], now=at(22, 3))[1]["unchanged"])
+
+    def test_p2_02_drained_and_skip_tonight_conflict(self):
+        self.sign(when=at(20))
+        self.open()
+        C.do_off("feishu", now=at(22, 1))
+        self.rejects("BadCommand", C.do_off, "ledger", drained=True, skip_tonight=True, now=at(22, 2))
+
+    # ---- 统一准入判定 ----
+    def test_admission(self):
+        self.sign(when=at(20))
+        self.assertEqual(self.status(at(21))["admission"]["eligible"], False)          # 关着
+        self.open()
+        self.assertEqual(self.status(at(22, 1))["admission"], {"eligible": True, "reasons": []})
+        good = self.doc()
+        doc = json.loads(json.dumps(good))                                               # 手改：会话策略和当前签署不是同一份
+        doc["session"]["policy"]["sha256"] = "0" * 64
+        self.write_doc(doc)
+        self.assertIn("不是同一份", self.status(at(22, 2))["admission"]["reasons"][0])
+        self.write_doc(good)
+        self.policy.write_text(self.policy.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        self.assertFalse(self.status(at(22, 3))["admission"]["eligible"])                # 策略被改
+        self.assertFalse(self.status(at(9, day=1))["admission"]["eligible"])             # 到点自动冻结
 
 
 class CliTests(Base):

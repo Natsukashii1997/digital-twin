@@ -121,15 +121,17 @@ class ScriptTest(unittest.TestCase):
     @staticmethod
     def custody_doc(state="off", session=None, signature=None):
         return {"schema": "dt-custody/1", "state": state, "updated_at": None, "session": session, "signature": signature,
-                "signed_versions": [], "used_messages": {}, "consumed_windows": {}, "history": []}
+                "signed_versions": [signature["version"]] if signature else [], "used_messages": {}, "consumed_windows": {},
+                "history": []}
 
     @staticmethod
     def custody_session(**kw):
         import datetime as dt
         now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-        s = {"id": "c-20000101-233000", "started_at": now.isoformat(), "until": (now + dt.timedelta(days=1)).isoformat(),
-             "source": {"kind": "feishu", "message_id": "om_x", "open_id": "ou_secret_fixture"},
-             "policy": {"version": 3, "sha256": "0" * 64}, "drain_minutes": 120, "drain": None, "frozen": None, "events": []}
+        s = {"id": "c-20000101-233000", "started_at": now.isoformat(), "until": (now + dt.timedelta(hours=10)).isoformat(),
+             "source": {"kind": "feishu", "message_id": "om_fixture0001", "open_id": "ou_secret_fixture"},
+             "policy": {"version": 3, "sha256": "0" * 64}, "drain_minutes": 120, "window_def": {"start": "23:30", "end": "08:00"},
+             "drain": None, "frozen": None, "events": []}
         s.update(kw)
         return s
 
@@ -163,14 +165,15 @@ class ScriptTest(unittest.TestCase):
     def test_custody_policy_invalid_or_expiring_is_reported(self):
         import datetime as dt
         import hashlib
-        policy = "| 版本 | 3 |\n| 有效期 | 签署日起 30 天 |\n- 每晚 23:30 到次日 08:00\n- 排空截止：2 小时\n"
+        policy = "| 版本 | 3 |\n| 有效期 | 签署日起 30 天 |\n\n## 1. 默认托管时段\n\n- 每晚 23:30 到次日 08:00\n- 排空截止：2 小时\n"
         now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-        sig = {"version": 3, "sha256": hashlib.sha256(policy.encode()).hexdigest(), "message_id": "om_x", "open_id": "ou_x",
+        sig = {"version": 3, "sha256": hashlib.sha256(policy.encode()).hexdigest(), "message_id": "om_fixture0002", "open_id": "ou_x",
                "signed_at": (now - dt.timedelta(days=28)).isoformat(), "expires_at": (now + dt.timedelta(days=2)).isoformat(),
                "valid_days": 30}
         self.install_custody(self.custody_doc(signature=sig), policy)
         self.assertIn("托管策略 v3 将于", self.run_script())
-        self.install_custody(self.custody_doc(signature={**sig, "expires_at": (now + dt.timedelta(days=10)).isoformat()}))
+        self.install_custody(self.custody_doc(signature={**sig, "signed_at": (now - dt.timedelta(days=20)).isoformat(),
+                                                         "expires_at": (now + dt.timedelta(days=10)).isoformat()}))
         self.assertEqual(self.run_script(), "")
         self.install_custody(policy=policy + "改了一个字")
         self.assertIn("托管策略失效：策略文件内容和签署 v3 时不一样", self.run_script())
