@@ -65,6 +65,7 @@ ops/
   self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
+  multica-egress/      Multica 隔离执行器出网（#172）：执行器只接内部网络，出网只经 squid 白名单代理（上游只许宿主 8086），Colima 虚拟机防火墙与停 dnsmasq；源文件，安装副本在 ~/Documents/Codex/Multica-local/ 和 ~/.colima/multica/colima.yaml，安装、回滚、白名单维护见其中 README；加白名单域名要常浩同意
 ```
 
 ## AI 接入

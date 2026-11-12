@@ -1,0 +1,17 @@
+# 出口白名单（#172）：每行一个完整域名，不用通配。加域名要常浩同意，并同步 README。
+# GitHub（gh、git）
+github.com
+api.github.com
+codeload.github.com
+objects.githubusercontent.com
+raw.githubusercontent.com
+# Claude Code
+api.anthropic.com
+claude.ai
+console.anthropic.com
+platform.claude.com
+statsig.anthropic.com
+# Codex
+chatgpt.com
+api.openai.com
+auth.openai.com
