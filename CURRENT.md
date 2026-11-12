@@ -14,7 +14,8 @@
 - **安装**：先备份到 `evidence/agumon-persona-20261112/install-before/`（SOUL.md、HERMES.md、memdaily_data.py）。装到 `~/.hermes/profiles/agumon/`：`SOUL.md`、`workspace/HERMES.md`、`locales/zh.yaml`（新建目录）、`scripts/memdaily_data.py`；与两边 main 逐个 `cmp` 一致，`memdaily_publish.py`、`memdaily_job.py`、`prompts/memdaily_report.md` 也核过一致。人设三份 SHA-256 与送审说明一致。
 - **重启**：10:56 `launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway-agumon`，10:57:11 `✓ feishu connected`。定时任务 `45590a963269` 仍 active，下次 11-13 07:30。
 - **回滚**：`install-before/` 里的三个文件拷回，删 `~/.hermes/profiles/agumon/locales/`，重启亚古兽网关。
-- **唯一的下一步**：常浩在飞书私聊给亚古兽发一句，看是否结论先行、约 300 字内；11-13 07:30 后看《记忆日报汇总》顶部有 11-12、私聊收到推送、`DigitalTwin/memdaily/2026-11-12.delivery.json` 的 `read_back` 为 true 且 `pushed_at` 有值。之后接周报《记忆周报汇总》（`KD1WdH6G6o…`），删测试文档 `BdqPdZsc…` 前先问常浩。
+- **飞书实测**：11:09 常浩发「你好啊」走的是 11-02 开的老会话 `20261102_180956_56cddf01`，Hermes 对继续中的会话沿用存下的系统提示（`agent/conversation_loop.py` `_restore_or_build_system_prompt`），查到仍是旧人设，不算数。常浩发 `/new` 后新会话 `20261112_112402_fd35aaa1` 的系统提示含「思维内核」「工作动态与记忆日报」、无旧「性格与表达」；问「调研的方法论是什么」，首句加粗给结论（「调研的本质，是用证据减少关键不确定性……」），正文约 350 字（去掉空白和标记），模型 gpt-6.1-sol。新沉淀提示「📌 方法沉淀｜…」要等下次沉淀才看得到。
+- **唯一的下一步**：11-13 07:30 后看《记忆日报汇总》顶部有 11-12、私聊收到推送、`DigitalTwin/memdaily/2026-11-12.delivery.json` 的 `read_back` 为 true 且 `pushed_at` 有值。之后接周报《记忆周报汇总》（`KD1WdH6G6o…`），删测试文档 `BdqPdZsc…` 前先问常浩。
 
 ## 2026-11-12 · 记忆日报首跑失败已补写；网络重试修复待合并；亚古兽人设 V4 待确认（niuma-home#57）
 
