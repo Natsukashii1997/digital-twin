@@ -474,6 +474,9 @@ def merge_github(a, o, p):
         (ROOT / a.no / "merge-test.log").write_text(t.stdout + t.stderr)
         if t.returncode != 0:
             done(False, f"{a.no} 合并前测试没过（{p['test']}），没有合并。日志：{ROOT / a.no / 'merge-test.log'}")
+    # 续跑、变基后 HEAD 可能已变，不能沿用开 PR 时的扫描结果。
+    if hits := secret_hits(wt, f"{remote}..HEAD"):
+        done(False, f"{a.no} 的提交里像有密钥或 Token，没有推送：{'；'.join(hits)}", secret_hits=hits)
     r = git(wt, "push", "--force-with-lease", "origin", f"HEAD:refs/heads/{o['branch']}")
     if r.returncode != 0:
         done(False, f"{a.no} 变基后推分支失败，没有合并：{(r.stderr or r.stdout).strip()[:300]}")
