@@ -567,8 +567,10 @@ class CustodyCredential(unittest.TestCase):
     def card(self, repo=None):
         return {"pr": 5, "repo": repo or self.REPO, "head": "a" * 40}
 
+    MERGED_REPLY = {"sha": "m" * 40, "merged": True, "message": "Pull Request successfully merged"}
+
     def fake(self, sec_code=0, sec_out=None, sec_exc=None, merge_code=0, merge_err="", merge_timeout=False,
-             view=None, view_code=0, gh_exc=None):
+             view=None, view_code=0, gh_exc=None, reply=None, view_raw=None):
         """按命令分派：security 读钥匙串、gh pr merge、gh pr view。记下每次调用的命令和 env。"""
         calls = []
         view = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "m" * 40}} if view is None else view
@@ -581,12 +583,14 @@ class CustodyCredential(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, sec_code, stdout=self.TOKEN + "\n" if sec_out is None else sec_out, stderr="")
             if gh_exc:
                 raise gh_exc
-            if cmd[1:3] == ["pr", "merge"]:
+            if cmd[1:3] in (["pr", "merge"], ["api", "-X"]):
                 if merge_timeout:
                     raise subprocess.TimeoutExpired(cmd, 1)
-                return subprocess.CompletedProcess(cmd, merge_code, stdout="", stderr=merge_err)
+                body = reply if reply is not None else (self.MERGED_REPLY if merge_code == 0 else None)
+                return subprocess.CompletedProcess(cmd, merge_code, stdout=json.dumps(body) if body else "", stderr=merge_err)
             if cmd[1:3] == ["pr", "view"]:
-                return subprocess.CompletedProcess(cmd, view_code, stdout=json.dumps(view), stderr="")
+                raw = view_raw if view_raw is not None else json.dumps(view)
+                return subprocess.CompletedProcess(cmd, view_code, stdout=raw, stderr="")
             raise AssertionError(cmd)
         return run, calls
 
@@ -605,7 +609,10 @@ class CustodyCredential(unittest.TestCase):
                                        "-a", "dt-sandbox", "-w"])
         self.assertEqual(out["status"], "merged")
         self.assertEqual(out["identity"], "custody")
-        self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)], [["pr", "merge"], ["pr", "view"]])
+        self.assertEqual([c[0][1:5] for c in self.gh_calls(calls)],
+                         [["api", "-X", "PUT", f"repos/{self.REPO}/pulls/5/merge"], ["pr", "view", "5", "--repo"]])
+        self.assertIn(f"sha={'a' * 40}", calls[1][0])          # 合并请求绑定卡片上的 HEAD
+        self.assertEqual(out["merge_commit"], "m" * 40)
 
     def test_unregistered_or_other_owner_repo_stops_before_keychain(self):
         for repo in ("Natsukashii1997/digital-twin", "someone-else/dt-sandbox"):
@@ -662,12 +669,20 @@ class CustodyCredential(unittest.TestCase):
             (dict(merge_code=1, merge_err="X Pull request #5 is not mergeable: the base branch policy prohibits the merge.",
                   view=open_), "failed"),
             (dict(merge_code=1, merge_err="Head branch was modified. Review and try the merge again.", view=open_), "failed"),
+            # PR 已被别人合上：接口拒绝、回读 MERGED 且 HEAD 对得上，不能记成本次合并
+            (dict(merge_code=1, merge_err="gh: Pull Request is not mergeable (HTTP 405)", view=merged), "unsure"),
+            (dict(merge_code=0, reply={"merged": False, "message": "x"}, view=merged), "unsure"),
+            (dict(merge_code=0, reply={"merged": True}, view=merged), "unsure"),                    # 没有合并提交号
+            (dict(merge_code=0, reply={**self.MERGED_REPLY, "sha": "z" * 40}, view=merged), "unsure"),  # 提交号对不上
+            (dict(merge_code=0, view_raw="null"), "unsure"),                                        # 回读不是对象
+            (dict(merge_code=0, view_raw="[]"), "unsure"),
+            (dict(merge_code=0, view_raw="not json"), "unsure"),
         ]
         for kw, want in cases:
             run, calls = self.fake(**kw)
             out = self.go(run)
             self.assertEqual(out["status"], want, kw)
-            self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)].count(["pr", "merge"]), 1, kw)  # 不重发
+            self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)].count(["api", "-X"]), 1, kw)  # 不重发
 
     def test_gh_launch_failure_returns_failed_not_exception(self):
         for exc in (FileNotFoundError(), PermissionError()):

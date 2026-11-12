@@ -28,7 +28,7 @@ DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号
 
 托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
 内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
-不退回常浩本人的 gh 登录；返回 merged / failed / unsure，unsure 只做只读对账、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
+不退回常浩本人的 gh 登录；走 REST 合并接口，以接口返回的本次合并提交为成功证据；返回 merged / failed / unsure，unsure 只做只读对账、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
 """
 import argparse
 import contextlib
@@ -375,13 +375,12 @@ def custody_env(token, config_dir):
     return env
 
 
-def _gh_merge(card, env, secret=None):
-    """发一次合并命令（不重试：没收到回应也可能已经合上，以回读为准），返回结构化结果；输出里出现令牌就打码。"""
-    res = {"returncode": None, "timed_out": False, "launched": True, "why": ""}
+def _gh_write(cmd, env, secret=None):
+    """发一次 gh 写命令（不重试：没收到回应也可能已经执行，以回读为准），返回结构化结果；输出里出现令牌就打码。"""
+    res = {"returncode": None, "timed_out": False, "launched": True, "why": "", "stdout": ""}
     try:
-        mr = subprocess.run([mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash",
-                             "--match-head-commit", card["head"]], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
-        res["returncode"] = mr.returncode
+        mr = subprocess.run(cmd, capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
+        res["returncode"], res["stdout"] = mr.returncode, mr.stdout or ""
         res["why"] = ((mr.stderr or mr.stdout or "").strip().splitlines() or ["没有输出"])[-1]
     except subprocess.TimeoutExpired:
         res["timed_out"] = True
@@ -391,45 +390,63 @@ def _gh_merge(card, env, secret=None):
         res["why"] = f"gh 跑不起来（{type(e).__name__}）"
     if secret:
         res["why"] = res["why"].replace(secret, "***")
+        res["stdout"] = res["stdout"].replace(secret, "***")
     return res
 
 
 def run_owner_merge(card):
     """卡片合并（B 档，常浩本人点的）：用本机 gh 登录。托管合并不能走这里，用 run_custody_merge。"""
-    return {**_gh_merge(card, None), "identity": "owner"}
+    cmd = [mo.GH, "pr", "merge", str(card["pr"]), "--repo", card["repo"], "--squash", "--match-head-commit", card["head"]]
+    res = _gh_write(cmd, None)
+    res.pop("stdout")
+    return {**res, "identity": "owner"}
+
+
+def _json_dict(text):
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
 
 
 def run_custody_merge(card):
     """托管合并（#136 调用）：凭据在函数里强制取，调用方选不了身份；取不到就停，不发任何写命令、不退回本机 gh 登录。
-    写和回读用同一个受控环境。status：merged（命令成功且回读已合并、HEAD 对得上）、failed（GitHub 明确拒绝且回读仍开着）、
-    failed 还包括 gh 没起来（请求没发出去）；unsure（超时、网络中断等没法确认的报错、命令失败但已合并、命令成功但没合并、
-    HEAD 对不上、回读失败）——unsure 只做只读对账，不重发合并。"""
+    走 REST 合并接口（PUT pulls/{n}/merge，sha 绑定 HEAD），以接口返回的「本次已合并 + 合并提交号」为成功证据——
+    gh pr merge 对已经被别人合上的 PR 也返回 0，不能当本次合并的证据。写和回读用同一个受控环境。status：
+    merged（接口说本次合上了、回读已合并、HEAD 对得上、合并提交号一致）；
+    failed（GitHub 明确拒绝且回读仍开着，或 gh 没起来、请求没发出去）；
+    unsure（其余一切：超时、网络中断、没归类的报错、已被别人合上、HEAD 对不上、回读失败或不是对象）——只做只读对账，不重发合并。"""
     token = custody_token(card["repo"])
     out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"], "merge_commit": None}
+    cmd = [mo.GH, "api", "-X", "PUT", f"repos/{card['repo']}/pulls/{card['pr']}/merge",
+           "-f", "merge_method=squash", "-f", f"sha={card['head']}"]
     with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg:
         env = custody_env(token, cfg)
-        res = _gh_merge(card, env, token)
+        res = _gh_write(cmd, env, token)
         try:
             r = subprocess.run([mo.GH, "pr", "view", str(card["pr"]), "--repo", card["repo"], "--json",
                                 "state,mergeCommit,headRefOid"], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
-            after = json.loads(r.stdout) if r.returncode == 0 else None
-        except (OSError, subprocess.SubprocessError, ValueError):
+            after = _json_dict(r.stdout) if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
             after = None
+    reply = _json_dict(res.pop("stdout")) or {}
     out.update(res)
     if not res["launched"]:
         out["status"] = "failed"                      # 合并请求没发出去，确定没合
         return out
     state = (after or {}).get("state")
+    out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
     rejected = res["returncode"] not in (None, 0) and REJECTED.search(res["why"]) and not NET_ERR.search(res["why"])
-    if after and after.get("headRefOid") != card["head"]:
+    if after is None or after.get("headRefOid") != card["head"]:
         out["status"] = "unsure"
-    elif res["returncode"] == 0 and state == "MERGED":
+    elif (res["returncode"] == 0 and reply.get("merged") is True and reply.get("sha")
+          and state == "MERGED" and out["merge_commit"] == reply["sha"]):
         out["status"] = "merged"
     elif rejected and state == "OPEN":                # 只有 GitHub 明确拒绝、PR 仍开着才算确定没合
         out["status"] = "failed"
-    else:                                             # 网络中断、没归类的报错、超时等：请求可能已送达，只读对账
+    else:
         out["status"] = "unsure"
-    out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
     return out
 
 
