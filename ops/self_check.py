@@ -5,6 +5,7 @@
 也可以手动跑看结果。
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
 每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
+  hermes/ 下的文件默认装在猛鬼兽 HERMES_HOME；装在亚古兽 profile（HERMES_HOME/profiles/agumon）或两边都装的登记在 PROFILE_TARGETS。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
 每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、Hermes 主模型走本机 Claude 而 Claude 没登录（#180，G-27）、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
 每天：跑同目录 custody.py status --json（托管状态，#131，只读），托管没关（开着、排空中、冻结）、状态读不了、已签策略失效或
@@ -27,6 +28,13 @@ HERMES = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 BIN = Path(os.environ.get("DT_BIN", "~/Library/Application Support/DigitalTwin/bin")).expanduser()
 OPS_TARGETS = {"ops/health_check.py": [BIN], "ops/check_repos.py": [BIN, HERMES / "scripts"],
                "ops/self_check.py": [HERMES / "scripts"]}
+AGUMON = HERMES / "profiles/agumon"
+PROFILE_TARGETS = {   # hermes/ 下没登记的只装猛鬼兽 HERMES；记忆日报（#168、#170）只装亚古兽
+    "hermes/scripts/memdaily_data.py": [AGUMON], "hermes/scripts/memdaily_job.py": [AGUMON],
+    "hermes/scripts/memdaily_publish.py": [AGUMON], "hermes/prompts/memdaily_report.md": [AGUMON],
+    "hermes/scripts/report_data.py": [HERMES, AGUMON],     # 记忆日报取数复用它的消息清洗
+    "hermes/prompts/project_vocab.md": [HERMES, AGUMON],
+}
 SANDBOX_DIRS = [HOME / "Sandbox", HOME / "Documents/Codex"]   # M3-Q3：沙盒和 Codex 按日期建的旧目录
 SANDBOX_STALE_DAYS = 30
 CHECK_REPOS_SCRIPT = Path(__file__).with_name("check_repos.py")
@@ -71,14 +79,17 @@ def install_pairs(files):
     pairs = []
     for f in files:
         p = PurePosixPath(f)
+        rel = None   # 相对 Hermes profile 根目录
         if p.parent == PurePosixPath("hermes/scripts") and p.suffix in (".py", ".json"):   # .json：脚本读的规则（如 merge_rules.json，#65）
-            pairs.append((f, HERMES / "scripts" / p.name))
+            rel = PurePosixPath("scripts", p.name)
         elif f.startswith("hermes/scripts/assets/"):      # 脚本用的固定素材（如 Tidings 周报横幅，#55）
-            pairs.append((f, HERMES / "scripts" / p.relative_to("hermes/scripts")))
+            rel = p.relative_to("hermes")
         elif f.startswith("hermes/skills/"):
-            pairs.append((f, HERMES / "skills/autonomous-ai-agents" / p.relative_to("hermes/skills")))
+            rel = "skills/autonomous-ai-agents" / p.relative_to("hermes/skills")
         elif f.startswith("hermes/prompts/"):
-            pairs.append((f, HERMES / "prompts" / p.relative_to("hermes/prompts")))
+            rel = p.relative_to("hermes")
+        if rel:
+            pairs += [(f, root / rel) for root in PROFILE_TARGETS.get(f, [HERMES])]
         pairs += [(f, root / p.name) for root in OPS_TARGETS.get(f, [])]
     return pairs
 

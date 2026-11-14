@@ -31,6 +31,9 @@ SOURCES = {
     "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
     "hermes/skills/workshop/references/r.md": "hermes/skills/autonomous-ai-agents/workshop/references/r.md",
     "hermes/prompts/p.md": "hermes/prompts/p.md",
+    "hermes/scripts/memdaily_data.py": "hermes/profiles/agumon/scripts/memdaily_data.py",   # 只装亚古兽
+    "hermes/prompts/memdaily_report.md": "hermes/profiles/agumon/prompts/memdaily_report.md",
+    "hermes/scripts/report_data.py": "hermes/scripts/report_data.py",                        # 两边都装
     "ops/health_check.py": "bin/health_check.py",
     "ops/check_repos.py": "bin/check_repos.py",
     "ops/self_check.py": "hermes/scripts/self_check.py",
@@ -70,6 +73,7 @@ class ScriptTest(unittest.TestCase):
         sh(self.repo, "add", "-A")
         sh(self.repo, "commit", "-q", "-m", "起步")
         self.write(self.home / "hermes/scripts/check_repos.py", "源 ops/check_repos.py\n")   # check_repos.py 装两处
+        self.write(self.home / "hermes/profiles/agumon/scripts/report_data.py", "源 hermes/scripts/report_data.py\n")
         self.write(self.home / "hermes/scripts/安装处多出的.py", "不管\n")
         self.write(self.home / "tidings/bin/health.js", "")   # 健康：什么都不打印
 
@@ -235,6 +239,23 @@ class ScriptTest(unittest.TestCase):
         (self.home / "hermes/scripts/check_repos.py").unlink()
         self.assertIn("- ~/hermes/scripts/check_repos.py 缺失（源：ops/check_repos.py）", self.run_script())
 
+    def test_agumon_only_files_checked_at_agumon_profile(self):
+        (self.home / "hermes/profiles/agumon/scripts/memdaily_data.py").unlink()
+        self.write(self.home / "hermes/profiles/agumon/prompts/memdaily_report.md", "旧提示词\n")
+        out = self.run_script()
+        self.assertIn("- ~/hermes/profiles/agumon/scripts/memdaily_data.py 缺失（源：hermes/scripts/memdaily_data.py）", out)
+        self.assertIn("- ~/hermes/profiles/agumon/prompts/memdaily_report.md 和 hermes/prompts/memdaily_report.md 内容不同", out)
+        self.assertNotIn("~/hermes/scripts/memdaily", out)          # 猛鬼兽那边本来就不装，不算缺失
+        self.assertNotIn("~/hermes/prompts/memdaily", out)
+
+    def test_files_installed_in_both_profiles_checked_separately(self):
+        self.write(self.home / "hermes/profiles/agumon/scripts/report_data.py", "亚古兽装的是旧版\n")
+        out = self.run_script()
+        self.assertIn("- ~/hermes/profiles/agumon/scripts/report_data.py 和 hermes/scripts/report_data.py 内容不同", out)
+        self.assertNotIn("- ~/hermes/scripts/report_data.py", out)
+        (self.home / "hermes/scripts/report_data.py").unlink()
+        self.assertIn("- ~/hermes/scripts/report_data.py 缺失（源：hermes/scripts/report_data.py）", self.run_script())
+
     def test_changed_content_reports_path_not_content(self):
         self.write(self.home / "hermes/prompts/p.md", "改过的秘密内容\n")
         self.write(self.home / "hermes/scripts/a.py", "源 hermes/scripts/a.py\n\n")
@@ -289,6 +310,14 @@ class ScriptTest(unittest.TestCase):
     def test_monthly_reports_broken_roster(self):
         out = self.run_script("--monthly")
         self.assertIn("📦 仓库自检提醒（每月 1 号）\n- 读不了名册（", out)
+
+
+class ProfileTargetsTest(unittest.TestCase):
+    def test_registered_files_exist_in_repo(self):
+        """登记的文件改名或删掉时这里会失败，免得登记悄悄失效、又回到按猛鬼兽位置比对。"""
+        repo = SCRIPT.parents[1]
+        for f in sc.PROFILE_TARGETS:
+            self.assertTrue((repo / f).is_file(), f)
 
 
 class SandboxTest(unittest.TestCase):

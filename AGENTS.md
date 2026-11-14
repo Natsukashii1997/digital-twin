@@ -59,7 +59,7 @@ orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
-  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
+  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本（亚古兽 profile 的文件按它的实际位置比，登记在 PROFILE_TARGETS），并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
