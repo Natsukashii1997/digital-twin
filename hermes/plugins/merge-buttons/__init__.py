@@ -2,7 +2,8 @@
 
 飞书适配器把卡片按钮点击转成一条 `/card button {...}`。本插件注册 /card，认出两类按钮，在后台起脚本，立刻返回 None：
   - 合并官 PR 卡片：{"merge_officer": "merge"|"return", "ref": "仓库#PR@版本"} → `merge_act.py button`；
-  - 托管汇报卡：{"custody": "overturn"|"merge_revert", "ref": "d-YYMMDD-六位十六进制"} → `custody_report.py button`。
+  - 托管汇报卡：{"custody": "overturn"|"merge_revert", "ref": "d-YYMMDD-六位十六进制", "card": "16 位十六进制"}
+    → `custody_report.py button … --card <令牌>`（card 是发卡时的随机令牌，脚本核对是不是核实过的那张卡；格式不对就不转）。
 不回复，是因为网关回复按钮点击会失败（拿回调 token 当消息号）；进度和结果由脚本直接发到私聊。
 核对规则全在脚本里（只认常浩私聊、只认发过的卡片），这里只做转交。
 """
@@ -19,6 +20,7 @@ CUSTODY_SCRIPT = Path(os.environ.get("DT_CUSTODY_REPORT", "~/.hermes/scripts/cus
 LOG = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/DigitalTwin/shadow")).expanduser() / "buttons.log"
 REF = re.compile(r"^[\w.-]+#\d+@[0-9a-f]{7,40}$")
 DECISION = re.compile(r"^d-\d{6}-[0-9a-f]{6}$")
+CARD = re.compile(r"^[0-9a-f]{16}$")
 
 
 def _chat_id():
@@ -30,7 +32,7 @@ def _chat_id():
 
 
 def parse(raw_args):
-    """`button {...}` → (脚本, verb, ref)；不认识的按钮返回 None。"""
+    """`button {...}` → (脚本, verb, ref, 额外参数)；不认识的按钮返回 None。"""
     tag, _, payload = (raw_args or "").strip().partition(" ")
     if tag != "button":
         return None
@@ -43,11 +45,12 @@ def parse(raw_args):
     if "merge_officer" in value:
         verb, ref = value.get("merge_officer"), str(value.get("ref") or "")
         if verb in ("merge", "return") and REF.match(ref):
-            return SCRIPT, verb, ref
+            return SCRIPT, verb, ref, []
         return None
     verb, ref = value.get("custody"), str(value.get("ref") or "")
-    if verb in ("overturn", "merge_revert") and DECISION.match(ref):
-        return CUSTODY_SCRIPT, verb, ref
+    card = value.get("card")
+    if verb in ("overturn", "merge_revert") and DECISION.match(ref) and (card is None or CARD.match(str(card))):
+        return CUSTODY_SCRIPT, verb, ref, (["--card", str(card)] if card is not None else [])
     return None
 
 
@@ -55,13 +58,13 @@ def handle(raw_args):
     picked = parse(raw_args)
     if picked is None:
         return None
-    script, verb, ref = picked
+    script, verb, ref, extra = picked
     LOG.parent.mkdir(parents=True, exist_ok=True)
     log = open(LOG, "a", encoding="utf-8")
     try:
         log.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {verb} {ref}\n")
         log.flush()
-        subprocess.Popen([PYTHON, str(script), "button", verb, ref, "--chat", _chat_id()],
+        subprocess.Popen([PYTHON, str(script), "button", verb, ref, "--chat", _chat_id(), *extra],
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     finally:
         log.close()

@@ -10,9 +10,12 @@
   custody.py verify                               重算策略全文 SHA-256，和签署记录比对（只读）
   custody.py on --source feishu --message-id om_x 常浩私聊说「托管」或「托管到 X 点」开启
   custody.py on --source window                   已签策略的默认时段内开启（时段内只开一次）
+                                                  开启时在托管账本登记这次托管（custody_ledger.register_session），账本身份记进
+                                                  session.ledger.id；账本所在的库不在、打不开就不开启（LedgerUnavailable，#133 P0-02）
   custody.py off --source <标签> [--skip-tonight]  关闭：on → draining；任何来源都可以（标签只是记录，自报、不核验）
   custody.py off --source <标签> --drained        排空完成：draining → off；要本脚本自己读账本证明排空完成（drain_proof：
-                                                  先作废已出未送达的决定，再核对没有在途、结果不明、UNRECONCILED），证明不了拒绝（DrainUnverified）
+                                                  先核对账本身份和开启登记，再作废已出未送达的决定，再核对没有在途、结果不明、UNRECONCILED、
+                                                  有原文没账本的），证明不了拒绝（DrainUnverified）
   custody.py freeze --source <标签> --reason 原因 [--item 未解决事项 ...]   转 frozen（on / draining）；已冻结时只补充事项
   custody.py unfreeze --message-id om_x          常浩私聊说「解除冻结」：frozen → off（只有这一条路；解除不等于重新开启）
   custody.py sign --message-id om_x              常浩私聊说「签托管策略 v<版本> <SHA-256 前 12 位>」签 policy.md
@@ -36,6 +39,7 @@ Hermes 会话里 --message-id 可以省略，读 HERMES_SESSION_MESSAGE_ID（只
 状态文件 custody.json（DT_CUSTODY_FILE，默认 ~/Library/Application Support/DigitalTwin/custody.json，600）：
   schema "dt-custody/1"；state；updated_at；
   session（当前这次托管，off 时为 null）：id（c-YYYYMMDD-HHMMSS-12 位随机十六进制，和历史不重复，#133 账本按它建账）、started_at、until、source{kind feishu|window, message_id, open_id | window}、
+          ledger{id}（托管账本身份 L-16 位十六进制，开启时写入；库被换成新建的或旧备份就对不上，#133）、
           policy{version, sha256}、drain_minutes、window_def{start, end}、drain{started_at, deadline, source}、
           frozen{at, reason, items, source}、events[]；
   signature（当前签署）：version、sha256（全文）、message_id、open_id、signed_at、expires_at、valid_days、revoked{at, source, reason}（没撤销就没有这个字段，不许是 null）；
@@ -59,6 +63,9 @@ verify 每次重算：没签、撤销、文件不见、内容和签署时不同�
   要看 admission；它只管托管这一层，夜跑授权、额度、合并条件各闸自己核；每次执行前现读，不缓存。
   命令行：custody.py status --json（同一份结构）。
   排空：drain_proof 读 custody_ledger 的账本（#133）；到截止还有对账不清的合并调 freeze --item …（已冻结也能补）。
+  清账：每次进入 draining / frozen（关闭、到点、撤销、冻结），transaction 在释放状态锁之后调 ledger_cleanup，尽力把这次托管里
+  已出未送达的决定作废、释放额度（#133 P1-07）；账本出错不挡关闭（关闭是安全方向），汇报卡发送前和排空证明时还会再清一次。
+  #134 接夜跑主控时，「每次进入排空都清账」是阻断性的集成测试。
 威胁模型同 twin_identity：防模型自报、文本冒充、重放；不防同一 macOS 用户下的恶意本地进程。
 """
 import argparse
@@ -482,7 +489,11 @@ def check_signature(sig):
 
 
 def check_session(s, state):
-    _keys(s, "session", ("id", "started_at", "until", "source", "policy", "drain_minutes", "window_def", "drain", "frozen", "events"))
+    _keys(s, "session", ("id", "started_at", "until", "source", "policy", "drain_minutes", "window_def", "drain", "frozen", "events"),
+          ("ledger",))
+    if "ledger" in s:                                   # 托管开启时账本的身份（#133 第 1 轮审查 P0-02）
+        _keys(s["ledger"], "session.ledger", ("id",))
+        _str(s["ledger"]["id"], "session.ledger.id", r"L-[0-9a-f]{16}")
     _str(s["id"], "session.id", SESSION_ID)
     started, until = _time(s["started_at"], "session.started_at"), _time(s["until"], "session.until")
     _need(started < until <= started + MAX_UNTIL + dt.timedelta(minutes=1), "session.until 要晚于开始、不超过 24 小时")
@@ -687,6 +698,7 @@ def transaction(fn, now=None, path=None):
             doc = load(path)
         except ValueError as e:
             raise Rejected(f"托管状态文件有问题，拒绝一切改动：{e}", "Corrupt")
+        before = doc["state"]
         advanced = advance(doc, now)
         try:
             result = fn(doc)
@@ -701,7 +713,10 @@ def transaction(fn, now=None, path=None):
         prune(doc, now)
         doc["updated_at"] = iso(now)
         save(doc, path)
-        return doc, result
+    s = doc.get("session")
+    if s and doc["state"] in ("draining", "frozen") and before != doc["state"]:
+        ledger_cleanup(s["id"], now)             # 锁外做：账本有自己的写锁，关闭不等账本
+    return doc, result
 
 
 def new_session_id(now, doc):
@@ -754,8 +769,10 @@ def do_on(source, message_id=None, now=None, path=None, policy=None):
             doc["consumed_windows"][key] = "默认时段开启"
             until = end
             src = {"kind": "window", "window": key}
+        sid = new_session_id(now, doc)
+        lid = register_ledger(sid, now)
         doc["state"] = "on"
-        doc["session"] = {"id": new_session_id(now, doc), "started_at": iso(now),
+        doc["session"] = {"id": sid, "started_at": iso(now), "ledger": {"id": lid},
                           "until": iso(until), "source": src,
                           "policy": {"version": pol["version"], "sha256": pol["sha256"]},
                           "drain_minutes": pol["drain_minutes"], "window_def": pol["window"],
@@ -766,16 +783,43 @@ def do_on(source, message_id=None, now=None, path=None, policy=None):
     return transaction(fn, now, path)
 
 
+def register_ledger(session_id, now):
+    """开启时在托管账本登记这次托管（#133 第 1 轮审查 P0-02）：账本不在、打不开就不开启（没有账本就没法记账和证明排空）。
+    返回账本身份，记进 session.ledger.id；排空证明时核对库还是这一份、登记还在。"""
+    import custody_ledger as L               # 账本反过来要 import 本脚本，所以在这里才导入
+    try:
+        with L.open_store() as st:
+            return L.register_session(st, session_id, now)
+    except Exception as e:                   # noqa: BLE001  任何账本失败都不开启
+        raise Rejected(f"托管账本不可用，不开启（{type(e).__name__}：{e}）", "LedgerUnavailable")
+
+
+def ledger_cleanup(session_id, now):
+    """进入排空 / 冻结后，尽力把这次托管里已出未送达的决定作废、释放额度（#133 第 1 轮审查 P1-07，规格 §3.8 第 2 步）。
+    关闭是安全方向，账本出错也不挡关闭；送达闸本来就要求托管开着才发，汇报前还会再清一次。返回 (成功, 说明)。"""
+    import custody_ledger as L
+    try:
+        with L.open_store() as st:
+            n = sum(1 for d in L.decisions(st, session_id) if d["status"] == "issued")
+            L.drain(st, session_id, now=now)
+        return True, f"作废 {n} 个已出未送达的决定"
+    except Exception as e:                   # noqa: BLE001
+        return False, f"{type(e).__name__}：{e}"
+
+
 def drain_proof(doc, now):
     """排空完成的证明（第 1 轮审查 P1-08，#133 接账本）：本脚本自己读托管账本（custody_ledger.drain），先作废这次托管里
     已出未送达的决定、释放额度（规格 §3.8 第 2 步），再核对没有进行中、结果不明、UNRECONCILED 的决定和没释放的预占。
     一项都没有才算排空完成；账本读不了也算证明不了（fail closed，到截止自动冻结）。返回 (能否证明, 原因)。"""
     import custody_ledger as L               # 账本反过来要 import 本脚本，所以在这里才导入
+    s = doc["session"]
+    if not (s.get("ledger") or {}).get("id"):
+        return False, "这次托管开启时没有登记账本，证明不了排空完成"
     try:
         with L.open_store() as st:
-            blockers = L.drain(st, doc["session"]["id"], now)
-    except Exception as e:                   # noqa: BLE001  任何读账本的失败都当成证明不了
-        return False, f"读不了托管账本，证明不了排空完成（{type(e).__name__}：{e}）"
+            blockers = L.drain(st, s["id"], s["ledger"]["id"], now)
+    except Exception as e:                   # noqa: BLE001  账本不见、身份对不上、读不了都当成证明不了（P0-02）
+        return False, f"托管账本证明不了排空完成（{type(e).__name__}：{e}）"
     if blockers:
         return False, "排空还没收完：" + "；".join(blockers)
     return True, ""

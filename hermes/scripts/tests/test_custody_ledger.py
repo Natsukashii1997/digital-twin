@@ -24,22 +24,27 @@ TZ = C.TZ
 T0 = dt.datetime(2026, 11, 14, 23, 40, tzinfo=TZ)
 SID = "c-20261114-233000-0123456789ab"
 SID2 = "c-20261115-233000-ba9876543210"
+REPO = "Natsukashii1997/dt-sandbox"
+SANDBOX = {"dt-sandbox": REPO}
+LEDGER = {}                 # 测试库的账本身份（setUp 里登记托管后填）
 LIMITS = {"reply": {"allowed": True, "per_issue": 2, "per_session": 10}, "merge": {"allowed": True, "per_session": 5}}
 
 
 def status(state="on", session=SID, limits=None, eligible=None):
     """custody.read_status 的形状（只取账本用到的字段）。"""
     ok = state == "on" if eligible is None else eligible
-    return {"state": state, "session": {"id": session} if session else None,
+    return {"state": state, "session": {"id": session, "ledger": {"id": LEDGER.get("id")}} if session else None,
             "policy": {"ok": True, "limits": limits or LIMITS},
             "admission": {"eligible": ok, "reasons": [] if ok else [f"托管不是开着（{state}）"]}}
 
 
-def race_worker(db, raw, start, out, n):
+def race_worker(db, raw, start, out, n, lid):
     """子进程：所有进程到齐后一起出发，抢预占这次托管的最后一个合并额度。
     数完额度后故意停 0.3 秒再写（拉长「数」和「写」之间的空档）：没有写锁保护时几个进程都会数到「还剩一个」。"""
     import time
     os.environ["DT_CUSTODY_DIR"] = raw
+    LEDGER["id"] = lid                          # 子进程重新导入了本模块：账本身份和沙盒名册要重新给
+    L.sandbox_projects = lambda: SANDBOX
     lim = {"reply": LIMITS["reply"], "merge": {"allowed": True, "per_session": 3}}
     real_used = L.used
 
@@ -53,7 +58,7 @@ def race_worker(db, raw, start, out, n):
     try:
         with L.TS.Store(db) as st:
             d = L.issue(st, session_id=SID, project="dt-sandbox", action="merge", basis="测试全过、审查通过", context="合并 PR「重试可配置」", summary="合并",
-                        target={"repo": "o/dt-sandbox", "pr": 100 + n, "head": "b" * 40}, revocability="revertible",
+                        target={"repo": REPO, "pr": 100 + n, "head": "b" * 40}, revocability="revertible",
                         expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=lambda t: status(limits=lim))
         out.put(("ok", d["id"]))
     except L.LedgerError as e:
@@ -74,6 +79,11 @@ class Base(unittest.TestCase):
         self.addCleanup(p.stop)
         self.st = L.TS.Store(self.db, clock=lambda: T0).open()
         self.addCleanup(self.st.close)
+        p = mock.patch.object(L, "sandbox_projects", return_value=SANDBOX)
+        p.start()
+        self.addCleanup(p.stop)
+        LEDGER["id"] = L.register_session(self.st, SID, T0)
+        L.register_session(self.st, SID2, T0)
         self.reader = lambda t: status()
 
     def reply(self, issue="DTS-7", session=SID, now=T0, **kw):
@@ -81,7 +91,7 @@ class Base(unittest.TestCase):
         text = dict(context="给示例服务加超时", question="超时设 30 秒还是 60 秒", summary="超时 30 秒",
                     basis="只影响沙盒里的示例服务，30 秒和现有配置一致")
         text.update({k: kw.pop(k) for k in list(kw) if k in text})
-        return L.issue(self.st, session_id=session, project="dt-sandbox", action="reply", target={"issue": issue, "repo": "o/dt-sandbox"},
+        return L.issue(self.st, session_id=session, project="dt-sandbox", action="reply", target={"issue": issue, "repo": REPO},
                        **text,
                        revocability="correctable", expires_at=now + dt.timedelta(minutes=30), now=now,
                        received={"issue": issue, "comment": "agent 问：超时调多少？"}, reply="调到 30 秒〔托管·猛鬼兽代发〕", **kw)
@@ -89,7 +99,7 @@ class Base(unittest.TestCase):
     def merge(self, pr=7, **kw):
         kw.setdefault("status_reader", self.reader)
         return L.issue(self.st, session_id=SID, project="dt-sandbox", action="merge",
-                       target={"repo": "o/dt-sandbox", "pr": pr, "head": "a" * 40}, summary=f"合并 PR #{pr}", context=f"合并 PR #{pr}「重试可配置」",
+                       target={"repo": REPO, "pr": pr, "head": "a" * 40}, summary=f"合并 PR #{pr}", context=f"合并 PR #{pr}「重试可配置」",
                        basis="测试全过、审查通过", revocability="revertible", expires_at=T0 + dt.timedelta(hours=1),
                        now=T0, **kw)
 
@@ -161,7 +171,7 @@ class IssueTests(Base):
         for why, kw in cases.items():
             with self.subTest(why):
                 self.rejects("BadText", self.reply, **kw)
-        self.rejects("BadText", L.issue, self.st, session_id=SID, project="p", action="suspend", target={"issue": "x"},
+        self.rejects("BadText", L.issue, self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": "DTS-1"},
                      context="c", question="q", basis="拿不准", revocability="irrevocable", now=T0)      # 挂起要写常浩要做什么
         self.assertEqual(L.decisions(self.st), [])
 
@@ -219,7 +229,7 @@ class QuotaTests(Base):
         self.st.close()
         ctx = mp.get_context("spawn")
         start, out = ctx.Barrier(6), ctx.Queue()
-        procs = [ctx.Process(target=race_worker, args=(str(self.db), str(self.raw), start, out, n)) for n in range(6)]
+        procs = [ctx.Process(target=race_worker, args=(str(self.db), str(self.raw), start, out, n, LEDGER["id"])) for n in range(6)]
         for p in procs:
             p.start()
         results = [out.get(timeout=60) for _ in procs]
@@ -238,18 +248,20 @@ class QuotaTests(Base):
         L.finish(self.st, d["id"], "unknown", now=T0)
         self.assertEqual(self.quota_states(d["id"]), [("merge", "frozen")])
         self.assertEqual(L.used(self.st, "merge", SID), 1)                    # 冻结的照样占着
-        L.reconcile(self.st, d["id"], "unreconciled", "PR 状态查不到", now=T0)
+        L.reconcile(self.st, d["id"], "unreconciled", {"checked": "gh pr view：PR 状态查不到"}, now=T0)
         self.assertEqual(self.quota_states(d["id"]), [("merge", "frozen")])
-        L.reconcile(self.st, d["id"], "unreconciled", "又查了一次，还是查不到", now=T0)   # 再核一次，留痕
-        L.reconcile(self.st, d["id"], "done", "gh pr view：merged，合并提交 abc", now=T0)
+        L.reconcile(self.st, d["id"], "unreconciled", {"checked": "又查了一次，还是查不到"}, now=T0)   # 再核一次，留痕
+        ev = {"checked": "gh pr view", "pr_state": "MERGED", "merge_commit": "c" * 40}
+        L.reconcile(self.st, d["id"], "done", ev, now=T0)
         self.assertEqual(self.quota_states(d["id"]), [("merge", "used")])
-        self.assertEqual(L.get(self.st, d["id"])["outcome"]["reconcile"], "gh pr view：merged，合并提交 abc")
+        got = L.get(self.st, d["id"])["outcome"]
+        self.assertEqual((got["reconcile"], got["merge_commit"]), (ev, "c" * 40))     # 核实做成把合并提交号写进结果，推翻要用
 
     def test_unknown_reconciled_not_done_releases(self):
         d = self.merge()
         L.begin(self.st, d["id"], now=T0, status_reader=self.reader)
         L.finish(self.st, d["id"], "unknown", now=T0)
-        L.reconcile(self.st, d["id"], "failed", "PR 仍是 open，HEAD 没变", now=T0)
+        L.reconcile(self.st, d["id"], "failed", {"checked": "gh pr view", "pr_state": "OPEN"}, now=T0)
         self.assertEqual(self.quota_states(d["id"]), [("merge", "released")])
         self.assertEqual(L.used(self.st, "merge", SID), 0)
 
@@ -276,14 +288,13 @@ class TransitionTests(Base):
     def test_status_moves(self):
         d = self.reply()
         self.rejects("BadTransition", L.finish, self.st, d["id"], "done", now=T0)        # 没 begin 不能记结果
-        self.rejects("BadTransition", L.reconcile, self.st, d["id"], "done", "x", now=T0)
+        self.rejects("BadTransition", L.reconcile, self.st, d["id"], "done", {"checked": "x"}, now=T0)
         L.begin(self.st, d["id"], now=T0, status_reader=self.reader)
         self.rejects("BadTransition", L.begin, self.st, d["id"], now=T0, status_reader=self.reader)   # 不重发
         self.rejects("BadTransition", L.void, self.st, d["id"], "排空", now=T0)          # 在途的不能作废
         L.finish(self.st, d["id"], "done", now=T0)
-        for fn, a in ((L.finish, ("failed",)), (L.reconcile, ("failed", "x")), (L.void, ("x",))):
+        for fn, a in ((L.finish, ("failed",)), (L.reconcile, ("failed", {"checked": "x"})), (L.void, ("x",))):
             self.rejects("BadTransition", fn, self.st, d["id"], *a, now=T0)
-        self.rejects("BadInput", L.reconcile, self.st, d["id"], "done", " ", now=T0)
         self.assertEqual(self.events(d["id"]), ["custody.decision.issue", "custody.decision.executing", "custody.decision.done"])
 
     def test_begin_rechecks_admission(self):
@@ -302,7 +313,7 @@ class TransitionTests(Base):
     def test_executing_crash_reconciles(self):
         d = self.merge()
         L.begin(self.st, d["id"], now=T0, status_reader=self.reader)
-        L.reconcile(self.st, d["id"], "failed", "进程没了；PR 仍 open", now=T0)
+        L.reconcile(self.st, d["id"], "failed", {"checked": "进程没了；gh pr view", "pr_state": "OPEN"}, now=T0)
         self.assertEqual(self.events(d["id"])[-2:], ["custody.decision.unknown", "custody.decision.failed"])
 
     def test_disposition_moves(self):
@@ -310,7 +321,7 @@ class TransitionTests(Base):
         self.rejects("InFlight", L.set_disposition, self.st, r["id"], "overturned", "不同意", now=T0)
         for d in (r, m):
             L.begin(self.st, d["id"], now=T0, status_reader=self.reader)
-            L.finish(self.st, d["id"], "done", now=T0)
+            L.finish(self.st, d["id"], "done", outcome={"merge_commit": "c" * 40} if d is m else None, now=T0)
         self.rejects("NotOwner", L.set_disposition, self.st, r["id"], "overturned", "x", by="hermes", now=T0)
         self.rejects("BadTransition", L.set_disposition, self.st, r["id"], "corrected", "x", now=T0)   # 要先推翻
         self.rejects("BadInput", L.set_disposition, self.st, r["id"], "overturned", "", now=T0)
@@ -329,7 +340,7 @@ class TransitionTests(Base):
                                                      "custody.decision.disposition.reverted"])
 
     def test_suspended_can_be_overturned(self):
-        d = L.issue(self.st, session_id=SID, project="p", action="suspend", target={"issue": "DTS-1"}, basis="拿不准", context="c", question="q", ask_owner="回复我怎么定",
+        d = L.issue(self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": "DTS-1"}, basis="拿不准", context="c", question="q", ask_owner="回复我怎么定",
                     revocability="irrevocable", now=T0)
         L.set_disposition(self.st, d["id"], "overturned", "这个其实可以答", now=T0)
 
@@ -349,7 +360,7 @@ class DrainTests(Base):
         self.assertEqual(L.get(self.st, issued["id"])["status"], "void")
         self.assertEqual(L.get(self.st, issued["id"])["void_reason"], "托管排空")
         self.assertEqual(L.get(self.st, other["id"])["status"], "issued")         # 别的托管不动
-        L.reconcile(self.st, unknown["id"], "done", "已合并", now=T0)
+        L.reconcile(self.st, unknown["id"], "done", {"checked": "gh pr view", "pr_state": "MERGED", "merge_commit": "c" * 40}, now=T0)
         self.assertEqual(L.drain(self.st, SID, now=T0), [])
         self.assertEqual(L.drain(self.st, SID, now=T0), [])                      # 幂等
 
@@ -387,6 +398,85 @@ class RawRetentionTests(Base):
         self.assertTrue(Path(d["raw_path"]).exists() and keep.exists() and odd.exists())
         self.assertEqual(L.prune_raw(T0 + dt.timedelta(days=91)), [SID])
         self.assertIsNone(L.read_raw(L.get(self.st, d["id"])))
+
+
+class ReviewRound1Tests(Base):
+    """#133 第 1 轮 L3 审查（2026-11-14）的故障注入回归测试。"""
+
+    def test_p0_02_missing_db_not_recreated(self):
+        self.st.close()
+        missing = self.root / "nowhere" / "twin-state.db"
+        self.rejects("LedgerMissing", L.open_store, path=missing)
+        self.assertFalse(missing.exists())
+        self.st = L.TS.Store(self.db, clock=lambda: T0).open()
+
+    def test_p0_02_identity_and_registration(self):
+        lid = LEDGER["id"]
+        self.assertEqual(L.register_session(self.st, SID, T0), lid)          # 重复登记不变
+        L.check_session(self.st, SID, lid)
+        self.rejects("LedgerMismatch", L.check_session, self.st, SID, "L-" + "0" * 16)
+        self.rejects("LedgerMismatch", L.check_session, self.st, SID, None)
+        self.rejects("LedgerMismatch", L.check_session, self.st, "c-20261116-233000-aaaaaaaaaaaa", lid)
+        self.rejects("LedgerMismatch", L.drain, self.st, SID, "L-" + "0" * 16, T0)
+        self.rejects("LedgerMismatch", self.reply, status_reader=lambda t: {**status(), "session": {"id": SID, "ledger": {"id": "L-" + "1" * 16}}})
+
+    def test_p0_02_old_backup_restore(self):
+        """开启后记了决定，库被开启前的备份覆盖：身份 / 登记对不上，原文成了孤儿，排空证明不了。"""
+        import shutil
+        self.st.close()
+        old = self.root / "old.db"
+        fresh = L.TS.Store(old, clock=lambda: T0).open()                     # 开启之前的库：没有账本身份、没有登记
+        fresh.close()
+        self.st = L.TS.Store(self.db, clock=lambda: T0).open()
+        d = self.reply()
+        self.st.close()
+        shutil.copy(old, self.db)
+        for f in self.root.glob("twin-state.db-*"):
+            f.unlink()
+        self.st = L.TS.Store(self.db, clock=lambda: T0).open()
+        self.rejects("LedgerMismatch", L.drain, self.st, SID, LEDGER["id"], T0)
+        self.rejects("LedgerMismatch", self.reply, issue="DTS-8")
+        self.assertEqual(L.raw_orphans(self.st, SID), [d["id"]])
+        self.assertTrue(any("有原文、账本里却没有" in b for b in L.drain_blockers(self.st, SID)))
+
+    def test_p1_01_quota_aliases_and_targets(self):
+        """名册外的项目、带空格的项目名、小写子单号、短 HEAD、非整数 PR、别的仓库：一律拒，额度键只有一种写法。"""
+        for project in ("dt-sandbox ", "DT-sandbox", "other"):
+            with self.subTest(project=project):
+                self.rejects("BadInput", L.issue, self.st, session_id=SID, project=project, action="reply",
+                             target={"issue": "DTS-7", "repo": REPO}, context="c", question="q", summary="s", basis="b",
+                             revocability="correctable", expires_at=T0 + dt.timedelta(minutes=30), now=T0, status_reader=self.reader)
+        for issue in ("dts-7", "DTS-07", " DTS-7", "DTS-0", "7"):
+            with self.subTest(issue=issue):
+                self.rejects("BadInput", self.reply, issue=issue)
+        for target in ({"repo": "o/dt-sandbox", "pr": 7, "head": "a" * 40}, {"repo": REPO, "pr": "7", "head": "a" * 40},
+                       {"repo": REPO, "pr": 7, "head": "a" * 7}, {"repo": REPO, "pr": 7, "head": "A" * 40}):
+            with self.subTest(target=target):
+                self.rejects("BadInput", L.issue, self.st, session_id=SID, project="dt-sandbox", action="merge", target=target,
+                             context="c", summary="s", basis="b", revocability="revertible", expires_at=T0 + dt.timedelta(hours=1),
+                             now=T0, status_reader=self.reader)
+        self.reply()
+        self.reply()
+        self.rejects("QuotaExhausted", self.reply)                            # 规范写法下同一张子单只有一个额度键
+        self.assertEqual(L.decisions(self.st)[0]["issue_key"], "dt-sandbox:DTS-7")
+
+    def test_p1_02_finish_merge_needs_commit_and_structured_evidence(self):
+        d = self.merge()
+        L.begin(self.st, d["id"], now=T0, status_reader=self.reader)
+        self.rejects("BadInput", L.finish, self.st, d["id"], "done", now=T0)
+        self.rejects("BadInput", L.finish, self.st, d["id"], "done", outcome={"merge_commit": "abc"}, now=T0)
+        L.finish(self.st, d["id"], "unknown", now=T0)
+        for result, ev in (("done", "gh 说合上了"), ("done", {"checked": " "}), ("done", {"checked": "x", "pr_state": "MERGED"}),
+                           ("done", {"checked": "x", "pr_state": "OPEN", "merge_commit": "c" * 40}), ("failed", {"checked": "x", "pr_state": "MERGED"})):
+            with self.subTest(result=result, ev=ev):
+                self.rejects("BadEvidence", L.reconcile, self.st, d["id"], result, ev, now=T0)
+        r = self.reply(issue="DTS-8")
+        L.begin(self.st, r["id"], now=T0, status_reader=self.reader)
+        L.finish(self.st, r["id"], "unknown", now=T0)
+        self.rejects("BadEvidence", L.reconcile, self.st, r["id"], "done", {"checked": "x", "comment_found": True}, now=T0)
+        self.rejects("BadEvidence", L.reconcile, self.st, r["id"], "failed", {"checked": "x"}, now=T0)
+        got = L.reconcile(self.st, r["id"], "done", {"checked": "看了评论", "comment_found": True, "comment_id": "c9"}, now=T0)
+        self.assertEqual(got["outcome"]["comment_id"], "c9")
 
 
 class MigrationTests(Base):

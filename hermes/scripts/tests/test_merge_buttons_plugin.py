@@ -55,6 +55,13 @@ class MergeButtonsPlugin(unittest.TestCase):
             self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/custody_report.py", "button", verb, "d-261115-3fa2c1",
                                                      "--chat", "oc_home"])
 
+    def test_custody_card_token_passed_through(self):
+        _, popen = self.click('button {"custody": "overturn", "ref": "d-261115-3fa2c1", "card": "0123456789abcdef"}')
+        self.assertEqual(popen.call_args[0][0][-2:], ["--card", "0123456789abcdef"])
+        for bad in ('"0123"', '"0123456789ABCDEF"', '"0123456789abcdef --x"', '12', '""'):
+            out, popen = self.click('button {"custody": "overturn", "ref": "d-261115-3fa2c1", "card": %s}' % bad)
+            popen.assert_not_called()
+
     def test_ignores_bad_custody_clicks(self):
         for raw in ('button {"custody": "delete", "ref": "d-261115-3fa2c1"}', 'button {"custody": "overturn", "ref": "d-1; rm -rf /"}',
                     'button {"custody": "overturn", "ref": "trainee-hub#31@1cc8e02"}', 'button {"custody": "overturn"}'):

@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
 """托管汇报卡与推翻（#133，规格 §3.6；ARCHITECTURE 5.7 第 10 条）。
 
-汇报：托管收尾（排空完成到 off、或冻结）后，按账本给常浩私聊发一张卡片：按项目分组，挂起、结果不明、UNRECONCILED 置顶，
-  每条一行「子单 · 问了什么 · 替你定了什么 · 依据 · 结果 · 撤回能力」，每条带「推翻」按钮；这次托管冻结过，标题写「托管未能安全收尾」。
-  发出后回读核对（消息类型是卡片、内容里有托管号）；同一次托管、同一种收尾（final / frozen）只发一次（--force 才再发）。
-  发送记录在 DT_CUSTODY_DIR/<托管号>/report.json。
-推翻：卡片按钮的 value 是 {"custody": "overturn", "ref": 决定号}；merge-buttons 插件的 /card 认出它，后台调
-  `custody_report.py button overturn <决定号> --chat <chat_id>`。只认常浩私聊里的点击、只认发过的汇报卡上的决定；
-  处置状态改成「已推翻·已记录」，写一条规则补丁候选（DT_CUSTODY_DIR/rule-candidates.jsonl），列下游影响清单（custody_impact），
-  结果发到私聊、另存 DT_CUSTODY_DIR/<托管号>/<决定号>.overturn.json。合并类推翻再由合并执行器开 revert PR
-  （merge_act.run_custody_revert）：开成就记「已回退」并发一张带「合并 revert PR」按钮的卡片，revert PR 的合并仍由常浩点（B 档）；
-  没开成就记「回退失败」并写原因，转常浩处理。
-  「合并 revert PR」按钮 {"custody": "merge_revert", "ref": 决定号}：现读 PR，仍开着、HEAD 是开出来时的、base 是 main、
-  可合并（CLEAN）才用本机 gh（常浩本人）带 --match-head-commit 合并，再回读。
+汇报：托管收尾（排空完成到 off、或冻结）后，按账本给常浩私聊发一张卡片（乙版表格 + 白话，常浩 11-14 定）：
+  「等你处理」「替你定了的」各一张六列表格，表下一排「推翻：我替你定的」按钮；这次托管冻结过，标题写「托管未能安全收尾」。
+  发卡前：只发常浩私聊（home_chat）；核对账本身份（会话里记的 ledger.id），对不上不发；在账本里排空这次托管（已出未送达的作废）。
+  每次发送在 DT_CUSTODY_DIR/<托管号>/report.json 记一条：kind（final / frozen）、随机卡片令牌 card、decisions（卡上列的）、
+  actionable（卡上真有「推翻」按钮的）、message_id、status（unverified 发了还没核实 / verified 按消息号回读核实了）。
+  同一种收尾有 verified 就不再发（--force 才再发）；只有 unverified 的，先按原消息号回读，核实了就不重发，核实不了才换新令牌重发。
+推翻：按钮 value 是 {"custody": "overturn", "ref": 决定号, "card": 卡片令牌}；merge-buttons 插件的 /card 认出它，后台调
+  `custody_report.py button overturn <决定号> --chat <chat_id> --card <令牌>`。只认常浩私聊、只认 verified 的汇报卡上 actionable 里的决定。
+  分阶段、可恢复，进度记在 DT_CUSTODY_DIR/<托管号>/<决定号>.overturn.json 的 stages：
+    registered 登记推翻（处置改成「已推翻·已记录」）→ candidate 规则补丁候选（rule-candidates.jsonl，同一决定只记一次）
+    → impacts 下游影响清单（custody_impact，取不到的写「没列全」）→ revert 开撤销 PR（只限合并）
+    → revert_card 发带「合并撤销 PR」按钮的卡片并回读 → result 把结果发到私聊。
+  中断后再点一次「推翻」，或在电脑上跑 `custody_report.py resume <决定号>`（只续做常浩点过的），只补做没完成的阶段。
+  开撤销 PR（merge_act.run_custody_revert，只开不合）：合并还没核清（结果不明 / 核不清）时记「等核清再开」，不算失败；
+  确定没开成记「回退失败」，再点会重试；开没开成不确定时只按分支 custody-revert/<决定号> 只读查，提交对得上才认，不再推送。
+合并撤销 PR：按钮 {"custody": "merge_revert", "ref": 决定号, "card": 撤销卡令牌}，只认最新一张、回读核实过的撤销卡；
+  交给 merge_act.merge_revert_as_owner：和飞书卡片合并同一套检查（开着、HEAD 没变、合进 main、不是草稿、没碰敏感路径、
+  CI 全部通过、CLEAN；撤销 PR 没有 CI 也停），过了才用本机 gh（常浩本人）带 --match-head-commit 合并、回读。
 
-用法（最后一行都是一行 JSON：{"ok", "msg", ...}）：
-  custody_report.py card --session c-…        只打印卡片 JSON（不发）
+用法（card / send 最后一行是一行 JSON：{"ok", "msg", ...}）：
+  custody_report.py card --session c-…        只打印卡片 JSON（不发、不清账）
   custody_report.py send --session c-… [--force]
-  custody_report.py button overturn|merge_revert <决定号> --chat <chat_id>
+  custody_report.py button overturn|merge_revert <决定号> --chat <chat_id> [--card <令牌>]
+  custody_report.py resume <决定号>            电脑上续做中断的推翻（结果照样发私聊）
 不调用 AI；不装定时任务。谁在收尾后调 send 由 #134 接（夜跑主控 / custody 技能）。
 """
 import argparse
@@ -27,6 +34,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import secrets
 import sys
 from pathlib import Path
 
@@ -115,9 +124,11 @@ def short_ref(d):
 def later(d, night_root=None):
     """回复之后 agent 做了什么：现读夜跑记录（custody_impact.later_runs），读不到就说读不到，不编。"""
     try:
-        runs = IMP.later_runs(d, night_root)
+        runs, problems = IMP.later_runs(d, night_root)
     except IMP.Unavailable:
         return "还不知道（夜跑记录读不到）"
+    if problems:
+        return "还不知道（夜跑记录不完整）"
     if not runs:
         return "agent 还没开始处理"
     last = runs[-1]
@@ -189,26 +200,29 @@ def table(rows, waiting, night_root=None):
             "rows": [row(d) for d in rows]}
 
 
-def overturn_buttons(rows):
-    """飞书表格里放不了按钮：表下一排「推翻：我替你定的」，自动换行。没有可推翻的就不放。"""
+def overturn_buttons(rows, token=None):
+    """飞书表格里放不了按钮：表下一排「推翻：我替你定的」，自动换行。没有可推翻的就不放。
+    token 是这张卡的随机令牌（发送时才有，预览没有）：按钮带上它，点击时核对是不是发出去并核实过的那张卡（第 1 轮审查 P1-04）。"""
+    def value(d):
+        return {"custody": "overturn", "ref": d["id"], **({"card": token} if token else {})}
     btns = [{"tag": "column", "width": "auto", "elements": [
         {"tag": "button", "text": {"tag": "plain_text", "content": f"推翻：{clip(d['summary'] or d['context'], 14)}"},
-         "type": "danger", "size": "small", "behaviors": [{"type": "callback", "value": {"custody": "overturn", "ref": d["id"]}}]}]}
+         "type": "danger", "size": "small", "behaviors": [{"type": "callback", "value": value(d)}]}]}
         for d in rows if can_overturn(d)]
     return [{"tag": "column_set", "flex_mode": "flow", "horizontal_spacing": "8px", "columns": btns}] if btns else []
 
 
-def section(title, rows, waiting, night_root=None):
+def section(title, rows, waiting, night_root=None, token=None):
     """一块：标题 + 表格 + 推翻按钮；超过 MAX_ROWS 条只列前面的，写明还有几条没列（按钮只给列出来的）。"""
     shown, more = rows[:MAX_ROWS], len(rows) - MAX_ROWS
     els = [{"tag": "markdown", "content": f"**{title} · {len(rows)} 件**"}, table(shown, waiting, night_root),
-           *overturn_buttons(shown)]
+           *overturn_buttons(shown, token)]
     if more > 0:
         els.append({"tag": "markdown", "content": f"<font color='grey'>还有 {more} 件没列（卡片放不下），在电脑上用 custody_ledger.py list 看全部</font>"})
     return els
 
 
-def build_card(session, kind, rows, night_root=None):
+def build_card(session, kind, rows, night_root=None, token=None):
     """乙版（表格，常浩 11-14 选定）+ 白话改写（常浩 11-14 定「按改写后改」）：
     标题说做了几件、几件等你处理 → 开头一句说托管替你做了什么 → 冻结时说清锁住了什么、你要做什么 →
     「等你处理」一张表 → 「替你定了的」一张表 → 表下「推翻」按钮 → 页脚说没发出去的回复和推翻会发生什么。"""
@@ -239,10 +253,10 @@ def build_card(session, kind, rows, night_root=None):
                   if kind == "frozen" else "当时托管锁住了，你已经解除。")
         els.append({"tag": "markdown", "content": f"**托管结束时还有事情没核对清**（{md_escape(items)}）。{locked}"})
     if waiting:
-        els += section("等你处理", waiting, True, night_root)
+        els += section("等你处理", waiting, True, night_root, token)
     if decided:
         els.append({"tag": "hr"})
-        els += section("替你定了的", decided, False, night_root)
+        els += section("替你定了的", decided, False, night_root, token)
     foot = []
     if voids:
         foot.append(f"另有 {len(voids)} 个回复没发出去：" + "；".join(
@@ -269,58 +283,139 @@ def fit(card):
     return card
 
 
-def build(session_id, doc=None, store=None, night_root=None):
+def build(session_id, doc=None, store=None, night_root=None, token=None):
     session, kind = find_session(session_id, doc)
     with (contextlib.nullcontext(store) if store else L.open_store()) as st:
         rows = L.decisions(st, session_id)
-    return session, kind, rows, build_card(session, kind, rows, night_root)
+    return session, kind, rows, build_card(session, kind, rows, night_root, token)
 
 
-def send_report(session_id, force=False, now=None, chat=None, doc=None, store=None):
-    """发汇报卡并回读。返回发送记录；同一次托管同一种收尾已发过就返回 {"unchanged": True}。"""
-    now = now or C.now_tz()
-    session, kind, rows, card = build(session_id, doc, store)
-    rec = read_report(session_id)
-    if not force and any(x["kind"] == kind and x.get("message_id") for x in rec["sent"]):
-        return {"unchanged": True, "kind": kind}
-    chat = chat if chat is not None else home_chat()
-    if not chat.startswith("oc_"):
-        raise ReportError("没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）", "NoChat")
-    key = f"custody-{kind}-{hashlib.sha1(session_id.encode()).hexdigest()[:16]}" + (f"-{int(now.timestamp())}" if force else "")
-    entry = {"kind": kind, "at": C.iso(now), "decisions": [d["id"] for d in rows], "message_id": None, "read_back": False}
+def card_refs(card, verb):
+    """卡片里真有按钮的决定（第 1 轮审查 P2-03）：从最终的卡片 JSON 里数，截断掉的不算。"""
+    out = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            for b in x.get("behaviors") or []:
+                v = b.get("value") if isinstance(b, dict) else None
+                if isinstance(v, dict) and v.get("custody") == verb and v.get("ref") not in out:
+                    out.append(v["ref"])
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(card)
+    return out
+
+
+def read_back(message_id, marker):
+    """按消息号回读：是卡片、内容里有 marker（汇报卡是托管号，撤销卡是决定号）才算核实。返回 (核实了没有, 没核实的原因)。"""
     try:
-        entry["message_id"] = send(chat, "interactive", card, key)
+        got = lark(["im", "+messages-mget", "--message-ids", message_id], "回读")
+    except SendError as e:
+        return False, f"回读没成功（{e}）"
+    m = (got.get("messages") or [{}])[0]
+    if m.get("msg_type") == "interactive" and marker in str(m.get("content")):
+        return True, ""
+    return False, "卡片已发，但回读对不上（不是卡片或内容对不上）"
+
+
+def send_report(session_id, force=False, now=None, chat=None, doc=None, store=None, night_root=None):
+    """发汇报卡并回读（第 1 轮审查 P1-04、P1-07、P2-03、P2-04）。
+    只发常浩私聊（chat 必须等于 home_chat）。发卡前先在账本里排空这次托管：已出未送达的决定作废、释放额度，并核对账本身份。
+    每次发送记一条：kind、随机卡片令牌 card、decisions（卡上列的）、actionable（卡上真有「推翻」按钮的）、message_id、
+    status（unverified 发了还没核实 / verified 回读核实了）。同一种收尾已有 verified 就不再发（--force 才再发）；
+    只有 unverified 的，先按原消息号回读，核实了就记 verified、不重发，核实不了才换新令牌重发。"""
+    now = now or C.now_tz()
+    home = home_chat()
+    if not home.startswith("oc_"):
+        raise ReportError("没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）", "NoChat")
+    if chat is not None and chat != home:
+        raise ReportError(f"汇报卡只发常浩私聊，不发 {chat}", "WrongChat")
+    session, kind = find_session(session_id, doc)
+    lid = (session.get("ledger") or {}).get("id")
+    if not lid:
+        raise ReportError("这次托管开启时没有登记账本，汇报对不上账，不发", "LedgerMismatch")
+    rec = read_report(session_id)
+    mine = [x for x in rec["sent"] if x["kind"] == kind]
+    if not force:
+        if any(x.get("status") == "verified" for x in mine):
+            return {"unchanged": True, "kind": kind}
+        last = next((x for x in reversed(mine) if x.get("message_id")), None)
+        if last:
+            ok, why = read_back(last["message_id"], session_id)
+            if ok:
+                last.update(status="verified", verified_at=C.iso(now))
+                last.pop("error", None)
+                write_json(report_path(session_id), rec)
+                return {**last, "rechecked": True}
+            last["recheck"] = why
+    with (contextlib.nullcontext(store) if store else L.open_store()) as st:
+        try:
+            L.drain(st, session_id, lid, now)
+        except L.LedgerError as e:
+            raise ReportError(f"汇报前清账没过：{e}", e.code)
+        token = secrets.token_hex(8)
+        _, kind, rows, card = build(session_id, doc, st, night_root, token)
+    entry = {"kind": kind, "at": C.iso(now), "card": token, "decisions": [d["id"] for d in rows],
+             "actionable": card_refs(card, "overturn"), "message_id": None, "status": "unverified"}
+    rec["sent"].append(entry)
+    try:
+        entry["message_id"] = send(home, "interactive", card, f"custody-{kind}-{token}")
         if not entry["message_id"]:
             raise SendError("发卡片没拿到消息号")
-        got = lark(["im", "+messages-mget", "--message-ids", entry["message_id"]], "回读")
-        m = (got.get("messages") or [{}])[0]
-        entry["read_back"] = m.get("msg_type") == "interactive" and session_id in str(m.get("content"))
-        if not entry["read_back"]:
-            entry["error"] = "卡片已发，但回读对不上（不是卡片或没有托管号）"
     except SendError as e:
         entry["error"] = str(e)
-    rec["sent"].append(entry)
-    write_json(report_path(session_id), rec)          # 发出去了就记下（含回读失败），按钮靠它认卡片
+    write_json(report_path(session_id), rec)          # 发出去了先记下消息号，回读失败下次还能按它核实
+    if entry["message_id"]:
+        ok, why = read_back(entry["message_id"], session_id)
+        if ok:
+            entry["status"] = "verified"
+        else:
+            entry["error"] = why
+        write_json(report_path(session_id), rec)
     if entry.get("error"):
         raise ReportError(entry["error"] + ("" if entry["message_id"] else "（没发出去）"), "SendFailed")
     return entry
 
 
 # ---------- 按钮 ----------
-def reported(decision):
-    """这个决定是不是在发出去的汇报卡上（只认发过的卡片）。"""
+CARD_TOKEN = re.compile(r"^[0-9a-f]{16}$")
+
+
+def reported(decision, card):
+    """这个决定的「推翻」按钮是不是在发出去并核实过的那张汇报卡上：令牌对得上、status 是 verified、决定在 actionable 里。"""
+    if not CARD_TOKEN.match(card or ""):
+        return False
     rec = read_report(decision["session_id"])
-    return any(decision["id"] in x.get("decisions", []) and x.get("message_id") for x in rec["sent"])
+    return any(x.get("card") == card and x.get("status") == "verified" and decision["id"] in x.get("actionable", [])
+               for x in rec["sent"])
 
 
 def overturn_path(decision):
     return L.raw_dir() / decision["session_id"] / f"{decision['id']}.overturn.json"
 
 
+def read_overturn(decision):
+    try:
+        return json.loads(overturn_path(decision).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise ReportError(f"推翻进度读不了：{e}", "Corrupt")
+
+
 def append_candidate(d, now):
-    """规则补丁候选（规格 §3.6「已推翻·已记录」）：以后同类按常浩的判断；具体怎么改规则由常浩在周提案里定。"""
+    """规则补丁候选（规格 §3.6「已推翻·已记录」）：以后同类按常浩的判断；具体怎么改规则由常浩在周提案里定。
+    同一个决定只记一条（推翻中断后续做时不重复记）。"""
     p = L.raw_dir() / "rule-candidates.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if p.exists():
+        for line in p.read_text(encoding="utf-8").splitlines():
+            with contextlib.suppress(ValueError):
+                if json.loads(line).get("decision") == d["id"]:
+                    return
     fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps({"at": C.iso(now), "decision": d["id"], "session": d["session_id"], "project": d["project"],
@@ -329,109 +424,235 @@ def append_candidate(d, now):
                             "candidate": "以后同类事项按常浩的判断处理；常浩没写理由，规则怎么改待他补充"}, ensure_ascii=False) + "\n")
 
 
-def revert_card(d, rv):
+def revert_card(d, rv, token):
     lines = [f"**撤销 PR 已开：[{rv['repo'].split('/')[-1]} PR #{rv['pr']}]({rv['url']})**",
              f"它合进 main 后，「{md_escape(d['context'])}」那次合并（{short_ref(d)}）的改动就撤掉了。",
-             "点「合并撤销 PR」：我先看这个 PR 还开着、开出来后没被改过、GitHub 允许直接合，再用你的身份合并。"]
+             "点「合并撤销 PR」：我先看这个 PR 还开着、开出来后没被改过、CI 全部通过、没碰敏感文件，再用你的身份合并。"]
     btn = {"tag": "button", "text": {"tag": "plain_text", "content": "合并撤销 PR"}, "type": "primary_filled",
-           "behaviors": [{"type": "callback", "value": {"custody": "merge_revert", "ref": d["id"]}}]}
+           "behaviors": [{"type": "callback", "value": {"custody": "merge_revert", "ref": d["id"], "card": token}}]}
     return {"schema": "2.0", "header": {"title": {"tag": "plain_text", "content": f"↩️ 撤销托管合并：{clip(d['context'], 20)}"},
                                         "template": "orange"},
-            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}, btn]}}
+            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}, btn,
+                                  {"tag": "markdown", "content": f"<font color='grey'>编号 {d['id']}</font>"}]}}   # 回读用
 
 
-def do_overturn(st, d, say, now, gh=None, night_root=None, revert=None):
-    try:
-        d = L.set_disposition(st, d["id"], "overturned", "常浩在汇报卡点「推翻」", by="user", now=now)
-    except L.LedgerError as e:
-        if e.code == "BadTransition" and d["disposition"] != "open":
-            say(f"「{d['context']}」这件你已经处理过（{L.DISPOSITION[d['disposition']]}），不用再推翻。")
-            return 0
-        say(f"没推翻「{d['context']}」：{e}")
-        return 1
-    append_candidate(d, now)
-    try:
-        imp = IMP.impacts(st, d, gh=gh, night_root=night_root)
-    except Exception as e:  # noqa: BLE001  影响清单出错不能吞掉推翻本身：照样记下，说明没列全
-        imp = {"items": [], "gaps": [{"rule": r, "why": f"清单没算出来（{type(e).__name__}：{e}）"} for r in IMP.RULES]}
-    rec = {"at": C.iso(now), "decision": d["id"], "impacts": imp}
+def find_revert_pr(repo, branch):
+    """只读对账（P1-03）：按分支 custody-revert/<决定号> 查有没有撤销 PR。返回 PR 列表；查不了抛 merge_act.Stop。"""
+    import merge_act as MA
+    got = MA.gh_read(["pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json",
+                      "number,url,headRefOid,state,baseRefName"], "查撤销 PR")
+    return got if isinstance(got, list) else []
+
+
+def revert_step(st, d, rec, save, now, revert=None, lookup=None):
+    """推翻合并的「开撤销 PR」阶段。结果记在 rec["revert"]["status"]：
+    opened 开成了；not_needed 合并本来没合上；waiting 合并还没核清，等核清再开（不算失败）；
+    failed 确定没开成、GitHub 上没留东西（再点「推翻」会重试）；unsure 开没开成不确定（之后只读查，不再推送）。返回这个阶段做完没有。"""
+    import merge_act as MA
+    rv = rec.get("revert") or {}
+    if d["status"] in ("unknown", "unreconciled"):
+        rec["revert"] = {"status": "waiting", "why": "合并还没核清合上没有"}
+        return False
+    if d["status"] != "done":
+        rec["revert"] = {"status": "not_needed", "why": "这次合并没合上"}
+        return True
+    mc = (d["outcome"] or {}).get("merge_commit")
+    branch = MA.REVERT_BRANCH.format(decision=d["id"])
+    if not mc:
+        rv = {"status": "failed", "why": "账本里没有合并提交号，开不了撤销 PR"}
+    elif rv.get("status") in ("opening", "unsure"):          # 上次开到一半：只读查，不再推送
+        try:
+            found = (lookup or find_revert_pr)(d["target"]["repo"], branch)
+        except Exception as e:  # noqa: BLE001
+            found, rv = [], {**rv, "why": f"查不了 GitHub（{getattr(e, 'why', None) or e}）"}
+        hit = [p for p in found if rv.get("head") and p.get("headRefOid") == rv["head"]
+               and p.get("state") == "OPEN" and p.get("baseRefName") == "main"]
+        if hit:
+            rv = {**rv, "status": "opened", "pr": hit[0]["number"], "url": hit[0]["url"], "repo": d["target"]["repo"]}
+        else:
+            rv = {**rv, "status": "unsure", "branch": branch,
+                  "why": rv.get("why") if rv.get("status") == "unsure" else "上次开撤销 PR 时中断了，不知道开到哪一步"}
+    elif rv.get("status") != "opened":                        # 没开过，或上次确定没开成：开
+        rec["revert"] = {"status": "opening", "at": C.iso(now), "branch": branch}
+        save()
+        revert = revert or MA.run_custody_revert
+        try:
+            rv = revert(d["target"]["repo"], mc, d["id"], f"Revert：托管决定 {d['id']}（{L.describe_target(d)}）")
+        except MA.Stop as e:                                  # 没凭据等：推之前就停了
+            rv = {"status": "failed", "why": e.why}
+        except Exception as e:  # noqa: BLE001  不知道停在哪一步：按不确定处理，之后只读查
+            rv = {"status": "unsure", "branch": branch, "why": f"{type(e).__name__}：{e}"}
+    rec["revert"] = rv
+    if rv["status"] == "opened":
+        if d["disposition"] != "reverted":
+            L.set_disposition(st, d["id"], "reverted", f"revert PR {rv['repo']}#{rv['pr']} {rv['url']}", by="system", now=now)
+        return True
+    if rv["status"] == "failed" and d["disposition"] == "overturned":
+        L.set_disposition(st, d["id"], "revert_failed", rv.get("why") or "没开成", by="system", now=now)
+    return False
+
+
+def overturn_message(d, rec):
     msg = [f"已推翻：{d['context']}（{short_ref(d)}），我当时定的是「{d['summary'] or '没替你定'}」。记下了，以后同类事按你的意思办。",
-           "受影响的后续工作：", *IMP.describe(imp)]
-    code = 0
+           "受影响的后续工作：", *IMP.describe(rec["impacts"])]
     if d["action"] == "reply":
         msg.append(f"要让 agent 改过来：到任务 {d['target'].get('issue')} 上评论「撤回 {d['id']}：你要的答案」（{d['id']} 是这次决定的编号）。")
     elif d["action"] == "merge":
-        mc = (d["outcome"] or {}).get("merge_commit")
-        if d["status"] != "done" or not mc:
-            L.set_disposition(st, d["id"], "revert_failed", f"没有可回退的合并提交（{L.STATUS[d['status']]}）", by="system", now=now)
-            msg.append("这次合并没确认合上，所以不开撤销 PR；请你在电脑上核对这个 PR 合上没有。")
-            code = 1
+        rv, rc = rec.get("revert") or {}, rec.get("revert_card") or {}
+        s, why = rv.get("status"), rv.get("why") or ""
+        if s == "opened":
+            msg.append(f"已开撤销 PR：{rv['url']}；要你点上面卡片里的「合并撤销 PR」才生效。" if rc.get("status") == "verified" else
+                       f"已开撤销 PR：{rv['url']}；带「合并撤销 PR」按钮的卡片没发成，再点一次「推翻」我会重发。")
+        elif s == "waiting":
+            msg.append("这次合并还没核清合上没有，撤销 PR 等核清再开：核清确认合上后，再点一次「推翻」，"
+                       f"或在电脑上跑 custody_report.py resume {d['id']}。")
+        elif s == "not_needed":
+            msg.append("这次合并没合上，不用撤销。")
+        elif s == "unsure":
+            msg.append(f"撤销 PR 开没开成不确定（{why}）。我不会再推一次，只去 GitHub 上查分支 {rv.get('branch')}；"
+                       "你也可以到 GitHub 上看，再点一次「推翻」我会重新查。")
         else:
-            revert = revert or __import__("merge_act").run_custody_revert
+            msg.append(f"撤销 PR 没开成（{why or '原因不明'}），请你在电脑上处理；原因解决后再点一次「推翻」会重试。")
+    return "\n".join(msg)
+
+
+def finished(d, rec):
+    """推翻的每个阶段都做完了：合并类还要撤销卡核实过（或本来不用撤销）。等核清的（waiting）不算做完。"""
+    st = rec["stages"]
+    if not all(k in st for k in ("registered", "candidate", "impacts", "result")):
+        return False
+    return d["action"] != "merge" or "revert_card" in st or (rec.get("revert") or {}).get("status") == "not_needed"
+
+
+def do_overturn(st, d, say, now, chat, sender=None, gh=None, night_root=None, revert=None, lookup=None):
+    """推翻（第 1 轮审查 P1-03：分阶段、可恢复）。进度记在 <决定号>.overturn.json 的 stages：
+    registered 登记推翻 → candidate 规则补丁候选（同一决定只记一次）→ impacts 下游影响清单 → revert 开撤销 PR（只限合并）
+    → revert_card 发撤销卡并回读 → result 把结果发到私聊。中断后再点「推翻」或在电脑上 resume，只补做没完成的阶段。"""
+    rec = read_overturn(d)
+    resumed = rec is not None
+    if rec is None:
+        if d["disposition"] != "open":
+            say(f"「{d['context']}」这件你已经处理过（{L.DISPOSITION[d['disposition']]}），不用再推翻。")
+            return 0
+        rec = {"decision": d["id"], "at": C.iso(now), "stages": {}}
+    stages = rec["stages"]
+
+    def save():
+        write_json(overturn_path(d), rec)
+
+    if "registered" not in stages:
+        save()                                              # 先落进度文件，再改账本：中断后能从这里续做
+        if d["disposition"] == "open":
             try:
-                rv = revert(d["target"]["repo"], mc, d["id"], f"Revert：托管决定 {d['id']}（{L.describe_target(d)}）")
-            except Exception as e:  # noqa: BLE001  merge_act.Stop（没凭据）等：一律记回退失败
-                rv = {"status": "failed", "why": getattr(e, "why", None) or f"{type(e).__name__}：{e}"}
-            rec["revert"] = rv
-            if rv["status"] == "opened":
-                L.set_disposition(st, d["id"], "reverted", f"revert PR {rv['repo']}#{rv['pr']} {rv['url']}", by="system", now=now)
-                msg.append(f"已开撤销 PR：{rv['url']}；要你点下一张卡片上的「合并撤销 PR」才生效。")
-            else:
-                L.set_disposition(st, d["id"], "revert_failed", rv.get("why") or rv["status"], by="system", now=now)
-                msg.append(f"撤销 PR 没开成（{rv.get('why') or rv['status']}），请你在电脑上处理。")
-                code = 1
-    write_json(overturn_path(d), rec)
-    say("\n".join(msg))
-    if rec.get("revert", {}).get("status") == "opened":
-        say(revert_card(d, rec["revert"]), card=True)
-    return code
+                d = L.set_disposition(st, d["id"], "overturned", "常浩在汇报卡点「推翻」", by="user", now=now)
+            except L.LedgerError as e:
+                say(f"没推翻「{d['context']}」：{e}")
+                return 1
+        stages["registered"] = C.iso(now)
+        save()
+    elif finished(d, rec):
+        say(f"「{d['context']}」你已经推翻过了（{L.DISPOSITION[d['disposition']]}），不用再推翻。")
+        return 0
+    if "candidate" not in stages:
+        append_candidate(d, now)
+        stages["candidate"] = C.iso(now)
+        save()
+    if "impacts" not in stages:
+        try:
+            rec["impacts"] = IMP.impacts(st, d, gh=gh, night_root=night_root)
+        except Exception as e:  # noqa: BLE001  影响清单出错不能吞掉推翻本身：照样记下，说明没列全
+            rec["impacts"] = {"items": [], "gaps": [{"rule": r, "why": f"清单没算出来（{type(e).__name__}：{e}）"} for r in IMP.RULES]}
+        stages["impacts"] = C.iso(now)
+        save()
+    ok = True
+    if d["action"] == "merge":
+        if "revert" not in stages:
+            if revert_step(st, d, rec, save, now, revert, lookup):
+                stages["revert"] = C.iso(now)
+            save()
+            d = L.get(st, d["id"])
+        if (rec.get("revert") or {}).get("status") == "opened" and "revert_card" not in stages:
+            if deliver_revert_card(d, rec, save, now, chat, sender):
+                stages["revert_card"] = C.iso(now)
+            save()
+        ok = (rec.get("revert") or {}).get("status") in ("opened", "waiting", "not_needed") and \
+            ((rec.get("revert") or {}).get("status") != "opened" or "revert_card" in stages)
+    sig = [(rec.get("revert") or {}).get("status"), (rec.get("revert_card") or {}).get("status")]
+    if (stages.get("result") or {}).get("sig") != sig or resumed:      # 再点一次时照样告诉常浩现在到哪了
+        if say(overturn_message(d, rec)):
+            stages["result"] = {"at": C.iso(now), "sig": sig}
+        else:
+            ok = False
+        save()
+    return 0 if ok else 1
 
 
-def do_merge_revert(d, say, run_gh=None, owner_merge=None):
-    """常浩点「合并 revert PR」：现读 PR，核对后用本机 gh（常浩本人）合并，再回读。"""
-    import merge_act as MA
+def deliver_revert_card(d, rec, save, now, chat, sender=None):
+    """发带「合并撤销 PR」按钮的卡片并回读（P1-03、P1-04）。上次发了没核实的，先按原消息号回读；核实不了才换新令牌重发。"""
+    rv, rc = rec["revert"], rec.get("revert_card") or {}
+    if rc.get("message_id") and rc.get("status") != "verified":
+        good, why = read_back(rc["message_id"], d["id"])
+        if good:
+            rc["status"] = "verified"
+            rec["revert_card"] = rc
+            return True
+    token = secrets.token_hex(8)
+    rc = rec["revert_card"] = {"card": token, "at": C.iso(now), "message_id": None, "status": "unverified"}
+    save()
     try:
-        rec = json.loads(overturn_path(d).read_text(encoding="utf-8"))
-        rv = rec["revert"]
-        assert rv["status"] == "opened"
-    except (OSError, ValueError, KeyError, AssertionError):
+        rc["message_id"] = (sender or send)(chat, "interactive", revert_card(d, rv, token), f"custody-rvcard-{token}")
+    except SendError as e:
+        rc["error"] = str(e)
+        return False
+    save()
+    if not rc["message_id"]:
+        rc["error"] = "发卡片没拿到消息号"
+        return False
+    good, why = read_back(rc["message_id"], d["id"])
+    rc["status"] = "verified" if good else "unverified"
+    if not good:
+        rc["error"] = why
+    return good
+
+
+def do_merge_revert(d, say, card, merge=None):
+    """常浩点「合并撤销 PR」（P0-01）：先核对按钮来自最新一张、核实过的撤销卡，再交给 merge_act.merge_revert_as_owner：
+    和飞书卡片合并同一套检查（开着、HEAD 没变、合进 main、不是草稿、没碰敏感路径、CI 全部通过、CLEAN），过了才用本机 gh 合并、回读。"""
+    import merge_act as MA
+    rec = read_overturn(d) or {}
+    rv, rc = rec.get("revert") or {}, rec.get("revert_card") or {}
+    if rv.get("status") != "opened":
         say(f"没合并：「{d['context']}」没有开成的撤销 PR。")
         return 1
+    if not CARD_TOKEN.match(card or "") or card != rc.get("card") or rc.get("status") != "verified":
+        say(f"没合并：这个按钮不是最新一张撤销卡上的，请用最新那张卡片上的「合并撤销 PR」（{rv['url']}）。")
+        return 1
+    if rec.get("revert_merged"):
+        say(f"撤销 PR 已经合过了：{rv['url']}。")
+        return 0
     if d["disposition"] != "reverted":
         say(f"没合并：「{d['context']}」现在是「{L.DISPOSITION[d['disposition']]}」，没有待合并的撤销 PR。")
         return 1
-    run_gh = run_gh or (lambda args: MA.gh_read(args, "取 revert PR 状态"))
-    owner_merge = owner_merge or MA.run_owner_merge
-    fields = "state,headRefOid,baseRefName,mergeStateStatus,isDraft"
     try:
-        p = json.loads(run_gh(["pr", "view", str(rv["pr"]), "--repo", rv["repo"], "--json", fields]))
-    except Exception as e:  # noqa: BLE001
-        say(f"没合并：查不到撤销 PR 现在的状态（{getattr(e, 'why', e)}），PR 没动。")
+        res = (merge or MA.merge_revert_as_owner)(rv["repo"], rv["pr"], rv["head"])
+    except MA.Stop as e:
+        why = re.sub(r"（L[0-3]）", "", e.why)              # 写给常浩的字不出现风险档术语
+        say(f"{e.verdict or '没合并撤销 PR'}：{why}。{e.state}。{e.todo.replace('{again}', '再点一次「合并撤销 PR」')}。{rv['url']}")
         return 1
-    bad = [why for ok, why in ((p.get("state") == "OPEN", f"PR 不是开着的（{p.get('state')}）"),
-                               (p.get("headRefOid") == rv["head"], "PR 开出来后又被改过"),
-                               (p.get("baseRefName") == "main", "不是合进 main 的"),
-                               (not p.get("isDraft"), "还是草稿"),
-                               (p.get("mergeStateStatus") == "CLEAN", f"GitHub 显示现在不能直接合（{p.get('mergeStateStatus')}）")) if not ok]
-    if bad:
-        say(f"没合并撤销 PR {rv['url']}：{'；'.join(bad)}。PR 没动，请到 GitHub 上看。")
-        return 1
-    res = owner_merge({"repo": rv["repo"], "pr": rv["pr"], "head": rv["head"]})
-    try:
-        after = json.loads(run_gh(["pr", "view", str(rv["pr"]), "--repo", rv["repo"], "--json", "state"]))
-    except Exception:  # noqa: BLE001
-        after = {}
-    if after.get("state") == "MERGED":
-        rec["revert_merged"] = {"at": C.iso(C.now_tz()), "by": "常浩（卡片按钮）"}
+    if res["status"] in ("merged", "merged_unattributed"):
+        rec["revert_merged"] = {"at": C.iso(C.now_tz()), "by": "常浩（卡片按钮）" if res["status"] == "merged" else "不是这次点击合的",
+                                "merge_commit": res.get("merge_commit")}
         write_json(overturn_path(d), rec)
-        say(f"✅ 撤销 PR 已合并：{rv['url']}，那次合并的改动已经撤掉。")
+        say(f"✅ 撤销 PR 已合并：{rv['url']}，那次合并的改动已经撤掉。" if res["status"] == "merged" else
+            f"撤销 PR 已经是合上的了，但不是这次点击合的（可能有人先合了）：{rv['url']}。那次合并的改动已经撤掉。")
         return 0
-    say(f"撤销 PR 不确定合上没有（{res.get('why') or '合并后查到的状态不是已合并'}），请到 GitHub 上看：{rv['url']}")
+    say(f"撤销 PR 没合上（{res.get('why') or '合并后查到的状态不是已合并'}），请到 GitHub 上看：{rv['url']}")
     return 1
 
 
-def cmd_button(verb, ref, chat, now=None, sender=None, **kw):
-    """按钮入口（merge-buttons 插件后台调用）。网关回复按钮点击会失败，进度和结果都直接发到私聊。"""
+def cmd_button(verb, ref, chat, card=None, now=None, sender=None, resume=False, **kw):
+    """按钮入口（merge-buttons 插件后台调用）。网关回复按钮点击会失败，进度和结果都直接发到私聊。
+    resume=True 是电脑上续做推翻（custody_report.py resume）：不看卡片令牌，但只续做常浩点过「推翻」、已有进度文件的。"""
     now = now or C.now_tz()
     home = home_chat()
     if not chat or chat != home:
@@ -440,40 +661,65 @@ def cmd_button(verb, ref, chat, now=None, sender=None, **kw):
     click = hashlib.sha1(f"{verb} {ref} {now.isoformat()} {os.getpid()}".encode()).hexdigest()[:16]
     n = [0]
 
-    def say(content, card=False):
-        sender_fn = sender or send
+    def say(content):
+        if resume:
+            print(content)
         try:
-            sender_fn(chat, "interactive" if card else "text", content if card else {"text": content}, f"custody-btn-{click}-{n[0]}")
+            (sender or send)(chat, "text", {"text": content}, f"custody-btn-{click}-{n[0]}")
+            return True
         except SendError as e:
             print(f"私聊没发出去：{e}")
-        n[0] += 1
+            return False
+        finally:
+            n[0] += 1
 
     if verb not in ("overturn", "merge_revert") or not L.DECISION_ID.match(ref or ""):
         say(f"看不懂这个按钮（{verb} {ref}）。")
         return 1
-    with L.open_store(now) as st:
-        try:
-            d = L.get(st, ref)
-        except L.LedgerError as e:
-            say(f"没处理：{e}")
+    try:
+        store = L.open_store(now)
+    except L.LedgerError as e:
+        say(f"没处理：托管账本打不开（{e}）。")
+        return 1
+    try:
+        with store as st:
+            return _button(st, verb, ref, chat, card, now, sender, resume, say, kw)
+    except ReportError as e:
+        say(f"没处理：{e}")
+        return 1
+
+
+def _button(st, verb, ref, chat, card, now, sender, resume, say, kw):
+    """按钮的核对和分派（cmd_button 打开账本后调）：推翻要核实过的汇报卡令牌（resume 要已有进度）；同一个决定同时只处理一次点击。"""
+    try:
+        d = L.get(st, ref)
+    except L.LedgerError as e:
+        say(f"没处理：{e}")
+        return 1
+    if verb == "overturn":
+        if resume:
+            if read_overturn(d) is None:
+                say(f"没处理：「{d['context']}」没有进行到一半的推翻（要先在汇报卡上点「推翻」）。")
+                return 1
+        elif not reported(d, card):
+            say(f"没处理：这个按钮不在发给你、并且核对过的汇报卡上（{ref}）。")
             return 1
-        if not reported(d):
-            say(f"没处理：这个按钮对应的决定不在发给你的汇报卡上（{ref}）。")
-            return 1
-        lock_path = L.raw_dir() / d["session_id"] / f".{ref}.lock"
-        lock = open(lock_path, "w")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            say("上一次点击还在处理，等它的结果就好。")
-            lock.close()
-            return 1
-        try:
-            if verb == "overturn":
-                return do_overturn(st, d, say, now, **{k: v for k, v in kw.items() if k in ("gh", "night_root", "revert")})
-            return do_merge_revert(d, say, **{k: v for k, v in kw.items() if k in ("run_gh", "owner_merge")})
-        finally:
-            lock.close()
+    lock_path = L.raw_dir() / d["session_id"] / f".{ref}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock = open(lock_path, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        say("上一次点击还在处理，等它的结果就好。")
+        lock.close()
+        return 1
+    try:
+        if verb == "overturn":
+            return do_overturn(st, L.get(st, ref), say, now, chat, sender,
+                               **{k: v for k, v in kw.items() if k in ("gh", "night_root", "revert", "lookup")})
+        return do_merge_revert(d, say, card, kw.get("merge"))
+    finally:
+        lock.close()
 
 
 # ---------- 命令行 ----------
@@ -493,9 +739,13 @@ def main(argv=None):
     b.add_argument("verb", choices=("overturn", "merge_revert"))
     b.add_argument("ref")
     b.add_argument("--chat", default="")
+    b.add_argument("--card", default="")
+    sub.add_parser("resume").add_argument("ref")
     a = ap.parse_args(argv)
     if a.cmd == "button":
-        sys.exit(cmd_button(a.verb, a.ref, a.chat))
+        sys.exit(cmd_button(a.verb, a.ref, a.chat, card=a.card))
+    if a.cmd == "resume":
+        sys.exit(cmd_button("overturn", a.ref, home_chat(), resume=True))
     try:
         if a.cmd == "card":
             _, kind, rows, card = build(a.session)

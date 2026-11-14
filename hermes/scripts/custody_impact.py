@@ -64,8 +64,17 @@ class GitHub:
         return data
 
     def pulls(self, repo):
-        """最近 100 个 PR（各种状态）：number、url、head{ref,sha}、created_at、merged_at、merge_commit_sha。"""
-        return self._api(f"repos/{repo}/pulls?state=all&per_page=100&sort=created&direction=desc")
+        """全部 PR（各种状态，翻完所有页，#133 第 1 轮审查 P1-05）：number、html_url、head{ref,sha}、created_at、merged_at、merge_commit_sha。"""
+        return self._api(f"repos/{repo}/pulls?state=all&per_page=100&sort=created&direction=desc", paginate=True)
+
+    def pr_commits(self, repo, number):
+        """PR 里的全部提交（P1-06：拿历史提交当种子，不拿可变的当前 HEAD）。"""
+        return [c["sha"] for c in self._api(f"repos/{repo}/pulls/{number}/commits?per_page=100", paginate=True)]
+
+    def force_pushed(self, repo, number):
+        """PR 有没有被强推过（时间线 head_ref_force_pushed）：强推过的话，被冲掉的旧提交查不到。"""
+        return any((e or {}).get("event") == "head_ref_force_pushed"
+                   for e in self._api(f"repos/{repo}/issues/{number}/timeline?per_page=100", paginate=True))
 
     def pull(self, repo, number):
         return self._api(f"repos/{repo}/pulls/{number}")
@@ -89,7 +98,8 @@ class GitHub:
 
 
 def later_runs(d, night_root=None):
-    """规则 1：同一子单在决定之后的 run。"""
+    """规则 1：同一子单在决定之后的 run。返回 (runs, problems)：problems 是读到但不可信的地方（坏行、记录标了不完整、
+    缺创建时间），调用方写进 gaps，不当成没有（#133 第 1 轮审查 P1-05）。整个文件读不了抛 Unavailable。"""
     t = d["target"]
     if not (t.get("night") and t.get("issue")):
         raise Unavailable("决定里没记夜跑号或子单（target.night / target.issue）")
@@ -99,19 +109,28 @@ def later_runs(d, night_root=None):
         lines = log.read_text(encoding="utf-8").splitlines()
     except OSError as e:
         raise Unavailable(f"读不了夜跑记录 {log}（{e.strerror or e}）")
-    since, runs = parse_time(d["created_at"]), {}
-    for ln in lines:
+    since, runs, problems = parse_time(d["created_at"]), {}, []
+    for n, ln in enumerate(lines, 1):
+        if not ln.strip():
+            continue
         try:
             r = json.loads(ln)
         except ValueError:
+            problems.append(f"夜跑记录第 {n} 行读不了")
             continue
-        if r.get("event") == "run" and r.get("issue") == t["issue"] and r.get("run_id"):
+        if not isinstance(r, dict):
+            problems.append(f"夜跑记录第 {n} 行不是对象")
+            continue
+        if r.get("event") == "run" and r.get("issue") == t["issue"]:
             at = parse_time(r.get("created_at"))
-            if at is None:
-                raise Unavailable(f"run {r['run_id']} 没有可读的创建时间")
+            if not r.get("run_id") or at is None:
+                problems.append(f"夜跑记录第 {n} 行缺运行号或创建时间")
+                continue
             if at > since:
                 runs[r["run_id"]] = r
-    return sorted(runs.values(), key=lambda r: r.get("created_at") or "")
+                if r.get("incomplete"):
+                    problems.append(f"运行 {r['run_id']} 的记录标了不完整")
+    return sorted(runs.values(), key=lambda r: r.get("created_at") or ""), problems
 
 
 def descendants(store, decision_id):
@@ -141,7 +160,9 @@ def impacts(store, d, gh=None, night_root=None):
     t = d["target"]
     if d["action"] == "reply":
         try:
-            runs = later_runs(d, night_root)
+            runs, problems = later_runs(d, night_root)
+            for why in problems:
+                gaps.append({"rule": 1, "why": why})
         except Unavailable as e:
             runs = None
             gaps.append({"rule": 1, "why": str(e)})
@@ -159,9 +180,10 @@ def impacts(store, d, gh=None, night_root=None):
             try:
                 seeds = {}
                 for (repo, n), url in prs.items():
-                    p = gh.pull(repo, n)
                     add(2, f"PR #{n}（这些运行开的）", f"{repo}#{n}", url)
-                    seeds.setdefault(repo, set()).add(p["head"]["sha"])
+                    seeds.setdefault(repo, set()).update(gh.pr_commits(repo, n))
+                    if gh.force_pushed(repo, n):
+                        gaps.append({"rule": 2, "why": f"PR #{n} 被强推过，被冲掉的旧提交查不到，以它们为基础的分支可能漏列"})
                 for repo, shas in seeds.items():
                     for name, sha in gh.branches(repo).items():
                         if name != "main" and any(gh.is_ancestor(repo, s, sha) for s in shas):

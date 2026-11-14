@@ -179,7 +179,9 @@ MIGRATIONS = [
     " decision_id TEXT NOT NULL REFERENCES custody_decisions(id),"
     " state TEXT NOT NULL CHECK (state IN ('reserved','used','released','frozen')),"
     " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
-    "CREATE INDEX custody_quota_count ON custody_quota(kind, session_id, scope, state)",
+    "CREATE INDEX custody_quota_count ON custody_quota(kind, session_id, scope, state);"
+    # 托管开启时在这里登记（custody.do_on），账本丢失或被旧备份覆盖时排空证明靠它发现（#133 第 1 轮审查 P0-02）
+    "CREATE TABLE custody_sessions (session_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, registered_at TEXT NOT NULL)",
 ]   # 第 n 项把库从版本 n 升到 n+1；改表结构只追加，不改已有项
 
 

@@ -530,6 +530,31 @@ def run_custody_revert(repo, merge_commit, decision, title):
     return out
 
 
+def merge_revert_as_owner(repo, pr, head):
+    """撤销托管合并的 PR（#133 第 1 轮审查 P0-01）：常浩点「合并撤销 PR」后，走和飞书卡片合并同一套合并前检查（check_pr：
+    PR 开着、HEAD 是开出来时的、合进 main、不是草稿、风险档不是 L3、没冲突不落后、当前 HEAD 的 CI 全部通过、CLEAN），
+    任一项不过就停（Stop），不合并、转电脑上处理。撤销 PR 没有 CI 也停：沙盒没登记本机测试命令，不在宿主跑 PR 里的脚本。
+    通过后用本机 gh（常浩本人，B 档）带 --match-head-commit 合并，再回读。返回 {"status", "merge_commit", "why"}：
+    merged＝本次合并命令成功且回读已合并；merged_unattributed＝回读已合并但本次命令没成功（可能被别人合上），不归到这次按钮；
+    failed＝回读仍没合并。"""
+    card = {"repo": repo, "pr": pr, "head": head}
+    rules = mo.load_rules()
+    check_pr(card, rules, "main", ci=True)
+    at("执行合并")
+    res = run_owner_merge(card)
+    at("合并后回读")
+    try:
+        after = gh_read(["pr", "view", str(pr), "--repo", repo, "--json", "state,mergeCommit"], "合并后回读")
+    except Stop as e:
+        e.verdict, e.state = UNSURE, "合并命令已经发出，但回读没成功，不知道合上没有"
+        e.todo = "到 GitHub 上看这个 PR 合上没有，不要再点合并"
+        raise
+    sha = (after.get("mergeCommit") or {}).get("oid")
+    if after.get("state") == "MERGED":
+        return {"status": "merged" if res["returncode"] == 0 else "merged_unattributed", "merge_commit": sha, "why": res["why"]}
+    return {"status": "failed", "merge_commit": None, "why": res["why"]}
+
+
 def cmd_merge(ref):
     card = find_card(ref)
     rules = mo.load_rules()
