@@ -18,9 +18,10 @@
     → revert_card 发带「合并撤销 PR」按钮的卡片并回读 → result 把结果发到私聊。
   中断后再点一次「推翻」，或在电脑上跑 `custody_report.py resume <决定号>`（只续做常浩点过的），只补做没完成的阶段。
   开撤销 PR（merge_act.run_custody_revert，只开不合）：合并还没核清（结果不明 / 核不清）时记「等核清再开」，不算失败；
-  确定没开成记「回退失败」，再点会重试；开 PR 前先记操作凭证（决定号、仓库、分支、合并提交号），中断或不确定时
-  只按分支 custody-revert/<决定号> 只读查，revert_pr_matches 核验（开着合进 main、只有一个提交、提交说明写着回退这次合并提交、
-  PR 正文有决定号和合并提交号、记下过 HEAD 的要相等）且唯一才认领，不再推送。
+  确定没开成记「回退失败」，再点会重试；开 PR 前先记操作凭证（决定号、仓库、分支、合并提交号），执行器推送之前再经 on_head
+  把本地撤销提交号落盘。中断或不确定时：没记下提交号＝没推过，重新开；记下了就只按分支 custody-revert/<决定号> 只读查，
+  revert_pr_matches 核验（HEAD 等于记下的提交号、来源就是目标仓库；另核开着合进 main、只有一个提交、提交说明写着回退这次合并提交、
+  PR 正文有决定号和合并提交号）且唯一才认领，不再推送；对不上、不唯一、查不全都保持不确定。
 合并撤销 PR：按钮 {"custody": "merge_revert", "ref": 决定号, "card": 撤销卡令牌}，先过 check_ledger，只认最新一张、回读核实过的撤销卡；
   交给 merge_act.merge_revert_as_owner：和飞书卡片合并同一套检查（开着、HEAD 没变、合进 main、不是草稿、没碰敏感路径、
   CI 全部通过、CLEAN；撤销 PR 没有 CI 也停），并要求 merge_rules.json 的 revert_required_checks 里登记的测试检查真的 SUCCESS
@@ -477,19 +478,32 @@ def revert_card(d, rv, token):
                                   {"tag": "markdown", "content": f"<font color='grey'>编号 {d['id']} · {token}</font>"}]}}   # 回读核对用
 
 
+REVERT_LOOKUP_LIMIT = 100
+
+
 def find_revert_pr(repo, branch):
-    """只读对账（P1-03）：按分支 custody-revert/<决定号> 查有没有撤销 PR（含 PR 正文和提交）。返回 PR 列表；查不了抛 merge_act.Stop。"""
+    """只读对账（P1-03）：按分支 custody-revert/<决定号> 查有没有撤销 PR（含来源仓库、PR 正文和提交）。返回 PR 列表；
+    查不了、或条数到了上限（查不全，证明不了「恰好一个」）抛 merge_act.Stop。"""
     import merge_act as MA
-    got = MA.gh_read(["pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json",
-                      "number,url,headRefOid,state,baseRefName,body,commits"], "查撤销 PR")
-    return got if isinstance(got, list) else []
+    got = MA.gh_read(["pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--limit", str(REVERT_LOOKUP_LIMIT),
+                      "--json", f"{MA.REVERT_PR_FIELDS},body,commits"], "查撤销 PR")
+    got = got if isinstance(got, list) else []
+    if len(got) >= REVERT_LOOKUP_LIMIT:
+        raise MA.Stop(f"分支 {branch} 上的 PR 有 {len(got)} 个以上，查不全", "到 GitHub 上看")
+    return got
 
 
-def revert_pr_matches(p, d, merge_commit, head=None):
-    """只读认领撤销 PR（第 2 轮审查 P1-01）：开着、合进 main、只有一个提交且就是 PR 的 HEAD、提交说明写着回退的正是这次合并提交
-    （git revert 的「This reverts commit <提交号>」）、PR 正文写着这个决定号和合并提交号；记下过 HEAD 的还要相等。
+def revert_pr_matches(p, d, merge_commit, head, repo):
+    """只读认领撤销 PR（第 2 轮审查 P1-01、定向复核 P1-01）：身份靠 HEAD 等于推送前落盘的本地撤销提交号（完整 40 位）、
+    来源分支就在目标仓库本身；提交说明和 PR 正文是谁都能写的文字，只作附加核对：开着、合进 main、只有一个提交且就是 HEAD、
+    提交说明写着回退的正是这次合并提交（「This reverts commit <提交号>」）、PR 正文写着决定号和合并提交号。
     不靠分支名同名认领。返回没对上的原因列表（空 = 对上了）。"""
+    import merge_act as MA
     bad = []
+    if not head or p.get("headRefOid") != head:
+        bad.append("PR 的提交不是推送前记下的那个撤销提交")
+    if not MA.same_repo(p, repo):
+        bad.append("PR 不是从目标仓库本身的分支开的")
     commits = p.get("commits") or []
     if p.get("state") != "OPEN" or p.get("baseRefName") != "main":
         bad.append(f"PR 不是开着合进 main 的（{p.get('state')} → {p.get('baseRefName')}）")
@@ -499,8 +513,6 @@ def revert_pr_matches(p, d, merge_commit, head=None):
         bad.append("提交说明里没写回退的是这次合并提交")
     if d["id"] not in str(p.get("body")) or merge_commit not in str(p.get("body")):
         bad.append("PR 正文里没有这个决定和合并提交")
-    if head and p.get("headRefOid") != head:
-        bad.append("PR 的提交和开的时候记下的不一样")
     return bad
 
 
@@ -520,11 +532,11 @@ def revert_step(st, d, rec, save, now, revert=None, lookup=None):
     branch = MA.REVERT_BRANCH.format(decision=d["id"])
     if not mc:
         rv = {"status": "failed", "why": "账本里没有合并提交号，开不了撤销 PR"}
-    elif rv.get("status") in ("opening", "unsure"):          # 上次开到一半：只读查、核验后认领，不再推送
+    elif rv.get("status") in ("opening", "unsure") and rv.get("head"):   # 推送前记下了提交号：可能推过，只读查、核验后认领，不再推送
         repo = d["target"]["repo"]
         try:
             found = (lookup or find_revert_pr)(repo, branch)
-            checked = [(x, revert_pr_matches(x, d, mc, rv.get("head"))) for x in found]
+            checked = [(x, revert_pr_matches(x, d, mc, rv["head"], repo)) for x in found]
             hit = [x for x, bad in checked if not bad]
             why = ("GitHub 上没有这个分支的撤销 PR" if not found else
                    "分支上的 PR 对不上：" + "；".join(b for _, bad in checked for b in bad) if not hit else
@@ -532,21 +544,26 @@ def revert_step(st, d, rec, save, now, revert=None, lookup=None):
         except Exception as e:  # noqa: BLE001
             hit, why = [], f"查不了 GitHub（{getattr(e, 'why', None) or e}）"
         if len(hit) == 1:
-            rv = {**rv, "status": "opened", "repo": repo, "pr": hit[0]["number"], "url": hit[0]["url"], "head": hit[0]["headRefOid"],
+            rv = {**rv, "status": "opened", "repo": repo, "pr": hit[0]["number"], "url": hit[0]["url"],
                   "branch": branch, "claimed": "只读核验后认领"}
         else:
             rv = {**rv, "status": "unsure", "repo": repo, "branch": branch, "why": why or rv.get("why") or "上次开撤销 PR 时中断了"}
-    elif rv.get("status") != "opened":                        # 没开过，或上次确定没开成：开
+    elif rv.get("status") != "opened":
+        # 没开过、上次确定没开成、或上次中断在记下提交号之前（推送在落盘之后，没提交号就一定没推过）：开
         rec["revert"] = {"status": "opening", "at": C.iso(now), "decision": d["id"], "repo": d["target"]["repo"],   # 中断后只读核验的凭证
                          "branch": branch, "merge_commit": mc}
         save()
+
+        def on_head(head):                                    # 推送之前落盘本地撤销提交号；写不下就抛，执行器不推
+            rec["revert"]["head"] = head
+            save()
         revert = revert or MA.run_custody_revert
         try:
-            rv = revert(d["target"]["repo"], mc, d["id"], f"Revert：托管决定 {d['id']}（{L.describe_target(d)}）")
+            rv = revert(d["target"]["repo"], mc, d["id"], f"Revert：托管决定 {d['id']}（{L.describe_target(d)}）", on_head=on_head)
         except MA.Stop as e:                                  # 没凭据等：推之前就停了
             rv = {"status": "failed", "why": e.why}
-        except Exception as e:  # noqa: BLE001  不知道停在哪一步：按不确定处理，之后只读查
-            rv = {"status": "unsure", "branch": branch, "why": f"{type(e).__name__}：{e}"}
+        except Exception as e:  # noqa: BLE001  不知道停在哪一步：按不确定处理；记下过提交号的之后只读查
+            rv = {**rec["revert"], "status": "unsure", "why": f"{type(e).__name__}：{e}"}
     rec["revert"] = rv
     if rv["status"] == "opened":
         if d["disposition"] != "reverted":

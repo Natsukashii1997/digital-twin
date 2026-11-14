@@ -465,11 +465,25 @@ def _git_env(env, home):
             "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/false"}
 
 
-def run_custody_revert(repo, merge_commit, decision, title):
+def same_repo(p, repo):
+    """PR 的来源分支就在目标仓库本身（不是从 fork 用同名分支开过来的，#133 定向复核 P1-01）。
+    p 要带 gh 的 isCrossRepository、headRepository、headRepositoryOwner 字段。"""
+    owner, _, name = repo.partition("/")
+    return (p.get("isCrossRepository") is False
+            and str((p.get("headRepositoryOwner") or {}).get("login") or "").lower() == owner.lower()
+            and str((p.get("headRepository") or {}).get("name") or "").lower() == name.lower())
+
+
+REVERT_PR_FIELDS = "number,url,headRefOid,state,baseRefName,isCrossRepository,headRepository,headRepositoryOwner"
+
+
+def run_custody_revert(repo, merge_commit, decision, title, on_head=None):
     """托管合并被常浩推翻后开 revert PR（#133，规格 §3.6「已回退」）：只开 PR、不合并（revert PR 的合并仍由常浩点卡片，B 档）。
     凭据同 run_custody_merge：函数里从钥匙串取合并执行器令牌，最小环境，不退回本机 gh 登录。
     步骤：查令牌对应的账号（提交署名用它的 noreply 邮箱）→ 浅克隆 → 核对合并提交在 main 上 → 从 main 开分支
-    custody-revert/<决定号> → git revert（合并提交有两个父提交时 -m 1）→ 推分支 → gh pr create → 回读 PR。
+    custody-revert/<决定号> → git revert（合并提交有两个父提交时 -m 1）→ on_head(本地撤销提交号) → 推分支 → gh pr create → 回读 PR。
+    on_head 由调用方在推送之前把完整提交号落盘（#133 定向复核 P1-01）：中断后只认 HEAD 正好是这个提交号、来源就是目标仓库的 PR；
+    on_head 抛异常就停在推送之前（failed），所以「没记下提交号」一定等于「没推过」。
     返回 {"status": opened | failed | unsure, "why", "pr", "url", "head", "branch"}：
     failed＝确定没在 GitHub 上留下东西（推之前就停了）；unsure＝推了分支或建 PR 之后没拿到确定结果，要人工看；
     revert 有冲突就是 failed（转常浩处理，不自动解决冲突）。"""
@@ -516,15 +530,23 @@ def run_custody_revert(repo, merge_commit, decision, title):
             return stop(f"git revert 有冲突或失败，没推任何东西（{clip(se.strip(), 100)}）")
         code, head, _ = run([GIT, "rev-parse", "HEAD"], genv, dest)
         out["head"] = head.strip()
+        if code != 0 or not re.fullmatch(r"[0-9a-f]{40}", out["head"]):
+            return stop("取不到撤销提交号，没推任何东西")
+        if on_head:
+            try:
+                on_head(out["head"])
+            except Exception as x:  # noqa: BLE001  记不下就不推：中断后要靠它认领
+                return stop(f"记不下撤销提交号，没推任何东西（{type(x).__name__}）")
         code, _, se = run([GIT, *cred, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"], genv, dest)
         if code != 0:
             return stop(f"推分支 {branch} 没拿到确定结果，要到 GitHub 上看（{clip(se.strip(), 100)}）", "unsure")
         body = (f"托管决定 {decision} 被常浩推翻，回退合并提交 {merge_commit}。\n\n"
                 "本 PR 由合并执行器开出；合并仍由常浩在飞书卡片上点（B 档），托管不会自己合它。")
         run([mo.GH, "pr", "create", "--repo", repo, "--base", "main", "--head", branch, "--title", title, "--body", body], env)
-        code, so, _ = run([mo.GH, "pr", "view", branch, "--repo", repo, "--json", "number,url,headRefOid,state,baseRefName"], env)
+        code, so, _ = run([mo.GH, "pr", "view", branch, "--repo", repo, "--json", REVERT_PR_FIELDS], env)
         got = _json_dict(so) if code == 0 else None
-        if not got or got.get("headRefOid") != out["head"] or got.get("state") != "OPEN" or got.get("baseRefName") != "main":
+        if (not got or got.get("headRefOid") != out["head"] or got.get("state") != "OPEN" or got.get("baseRefName") != "main"
+                or not same_repo(got, repo)):
             return stop(f"分支已推（{branch}），但回读不到对得上的 revert PR，要到 GitHub 上看", "unsure")
         out.update(status="opened", pr=got["number"], url=got["url"])
     return out
