@@ -28,14 +28,16 @@ hermes/
     memdaily_job.py    记忆日报定时任务入口（亚古兽 profile，无模型，每天 07:30 写前一天）；成功或跳过不输出，没写成输出一句原因
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
-    custody.py         托管状态底座（#131，托管模式规格 §3.7、§3.8）：custody_state = off | on | draining | frozen 的唯一真源，只有它写 DigitalTwin/custody.json（逐字段校验、原子替换 + 排他锁；写过后文件丢了不当成第一次用）；status --json 带统一准入判定 admission（下游不得只看 state）；on 只认飞书私聊（twin_identity 回读核验 + 口令原文 + 防重放，时刻有歧义就拒绝）和已签策略的默认时段，off / revoke 任何来源都可以，到 until 自动排空、到排空截止没收完自动冻结，off --drained 要本脚本能证明排空完成（账本 #133 接入前一律拒绝），frozen 只能 unfreeze（私聊「解除冻结」）；sign 按私聊口令「签托管策略 v<版本> <SHA-256 前 12 位>」签 DigitalTwin/custody/policy.md（不许未填项、字段位置固定且唯一、版本单调、全文哈希），revoke 持久撤销，verify 每次重算；工程自检只读显示；不发飞书、不装定时任务，托管在常浩签策略、落地工单验收前不生效；未安装
+    custody.py         托管状态底座（#131，托管模式规格 §3.7、§3.8）：custody_state = off | on | draining | frozen 的唯一真源，只有它写 DigitalTwin/custody.json（逐字段校验、原子替换 + 排他锁；写过后文件丢了不当成第一次用）；status --json 带统一准入判定 admission（下游不得只看 state）；on 只认飞书私聊（twin_identity 回读核验 + 口令原文 + 防重放，时刻有歧义就拒绝）和已签策略的默认时段，off / revoke 任何来源都可以，到 until 自动排空、到排空截止没收完自动冻结，off --drained 要本脚本读托管账本证明排空完成（先作废已出未送达的决定，再核对没有在途、结果不明、UNRECONCILED，#133），frozen 只能 unfreeze（私聊「解除冻结」）；sign 按私聊口令「签托管策略 v<版本> <SHA-256 前 12 位>」签 DigitalTwin/custody/policy.md（不许未填项、字段位置固定且唯一、第 2 节的额度上限必填、版本单调、全文哈希），revoke 持久撤销，verify 每次重算；工程自检只读显示；不发飞书、不装定时任务，托管在常浩签策略、落地工单验收前不生效；未安装
+    custody_ledger.py  托管账本（#133，规格 §3.5、§3.6、§3.8）：twin-state v4 的 custody_decisions / custody_quota 两张表，每次变化同事务记 custody.decision.* 事件；决定号、对象、依据（可引用其他决定号）、撤回能力、送达状态、处置状态、有效期、作废原因；原文另存 DigitalTwin/custody/<托管号>/<决定号>.json（600，90 天后清）；回复、合并要托管准入（custody.admission，持写锁时现读）和策略允许，额度在同一个 BEGIN IMMEDIATE 事务里原子预占（每次托管的回复数、合并数，每张子单的托管次数跨托管累计）；确认失败或作废释放，结果不明冻结、对账后才计为已用或释放；撤不回的动作只能记成挂起；drain 给 custody.drain_proof 用；只读命令 show / list / drain-check；给 #134、#136 的接口在头注释；未安装
+    custody_report.py  托管汇报卡与推翻（#133）：收尾（排空完成或冻结）后按账本发私聊卡片（按项目分组，挂起 / 结果不明 / UNRECONCILED 置顶，冻结过标题写「托管未能安全收尾」；样式暂用甲版，待常浩定稿），回读核对，同一收尾只发一次；卡片每条带「推翻」，按钮经 merge-buttons 插件转来，只认常浩私聊、只认发过的汇报卡：记「已推翻·已记录」、写规则补丁候选（DigitalTwin/custody/rule-candidates.jsonl）、列下游影响清单（custody_impact.py，四类规则，取不到的写「没列全」）；合并类推翻由合并执行器开 revert PR（merge_act.run_custody_revert，只开不合），再发「合并 revert PR」按钮卡，常浩点了才用本机 gh 合并；谁在收尾后调 send 由 #134 接；未安装
     aihot_hot.py       AI HOT 热点榜推送（#163）：Hermes 无模型定时任务每个工作日 09:45（周一到周五，不跟节假日调休）调用，取 aihot.news 热点榜 TOP10 和每条事件摘要，按常浩 11-11 定稿的「名次栏」样式排成卡片（不要表头，横幅 assets/aihot-banner.png 就是标题，同 GitHub 周榜卡片；标题只链到 aihot.news，不放来源 / 参与者 / 时间），以猛鬼兽机器人发常浩私聊并回读；同一天只发一次；成功不输出，取不到数据或没发成输出一句原因（退出码 1）；记录在 DigitalTwin/aihot/（runs.jsonl、<日期>.card.json、state.json）
     feishu_home.py     私聊 chat_id（#165）：先看环境变量 FEISHU_HOME_CHANNEL，没有再从 ~/.hermes/.env 只读这一项；无模型定时任务的环境里没有这个变量，往私聊发消息的脚本（aihot_hot、tidings_weekly、proposal_digest、merge_act）都用它
     tidings_weekly.py  Tidings 周报推送（#55、#58）：Hermes 无模型定时任务每 15 分钟调用，按 github-center 设置页（data/settings.json 的 weekly：开关、星期、时间，默认周一 19:30，不早于每日更新时间，github-center #83）到点才发，把 github-center 写好的周报卡片插上横幅（assets/tidings-banner.png）发到常浩私聊；成功不输出
     skill_health.py    skill 月度体检推送（#151）：Hermes 无模型定时任务每月 1 号 10:30 调用，在 my-skills 下跑 node scripts/monthly-health.mjs --days 30，标题改粗体、表格改成逐条列表、末尾加「抽查 <名字>」提示，stdout 发到常浩私聊；失败退出码 1，由 Hermes 发失败通知；只读
     multica_night.py   Multica 夜跑主控（#92，DT-ORC M5 / 5.3a）：Hermes 无模型定时任务每 5 分钟经 multica_night_tick.py 调 tick（approve 记下的开跑时刻到了就先 start）；按计划文件在 DT 沙盒建父单和分 stage 子单，子单交付（in_review）后推进下一 stage，边跑边导 run-log 和消息到 DigitalTwin/runs/<夜跑>/，到上限按 5.3a 停机（禁用 Wakeup、暂停 Autopilot、取消非终态 run、回读），回读不过就冻结执行器容器；开跑前核对名册 sandbox: true；开跑和每次放 stage 前跑执行器身份闸（#174：信任基准在名册 dt-sandbox 的 executor_gate，保护基线在 hermes/baselines/，两者只读已合并的 origin/main；不通过就不放，tick 里不通过停机并冻结执行器；冻结命令只按名册生成，名册读不到就不执行任何命令、告警请人手动停）；不合并、不送审；计划样例 hermes/samples/multica-night-2026-11-08.json，执行单 docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
-    merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列；托管合并（#136）只能调 run_custody_merge，凭据在函数里从本机钥匙串取合并执行器专用令牌（#132）
+    merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列；托管合并（#136）只能调 run_custody_merge，凭据在函数里从本机钥匙串取合并执行器专用令牌（#132）；托管合并被推翻后 run_custody_revert 用同一凭据开 revert PR（#133，只开不合，本机 git 配置隔离）
     proposal_digest.py 每周提案收口（#61）：每周一把会话复盘、牛马之家每周整理的待决提案按编号发到常浩私聊（LESSONS 升级候选默认不列，DT_LESSONS_MIN_PROJECTS 打开）；每条附 Hermes 的推荐（带模型定时任务经 proposal_digest_draft.py 取草稿、写推荐后 send --recommend），常浩回「按推荐」或逐条回复后由 proposal-digest 技能调用 apply 写回各来源的结论；期号状态在 DigitalTwin/proposals/digest.json
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
     workshop/          车间派单（F5）
@@ -43,7 +45,7 @@ hermes/
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
     proposal-digest/   记下常浩对每周待决提案的选择（#61，调 proposal_digest.py apply）
-  plugins/merge-buttons/ PR 卡片按钮（#78）：注册 /card，把「合并 / 退回」点击转给 merge_act.py button（不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
+  plugins/merge-buttons/ 卡片按钮（#78、#133）：注册 /card，把 PR 卡片的「合并 / 退回」点击转给 merge_act.py button，托管汇报卡的「推翻 / 合并 revert PR」转给 custody_report.py button（都不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
   plugins/workdesk-gate/ 亚古兽工具拦截（#142）：飞书里发起人不是常浩（open_id 或企业 user_id `e9cgcf77`）时只放行安全工具（提问、读文档、文档评论、网页、技能查看、生图、语音、待办），本机命令行和定时任务不受限；牛马之家只在常浩本人私聊可用并写入真实提问人；安装在 ~/.hermes/profiles/agumon/plugins/，测试 hermes/scripts/tests/test_workdesk_gate_plugin.py
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是个人项目日报规则（猛鬼兽只报个人项目）
@@ -88,7 +90,7 @@ ops/
 | `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
 | `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
 
-不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、Tidings 周报推送（只转发 github-center 的卡片）、AI HOT 热点榜推送（概括按句截取、话题标签按关键词，不经模型）、三个自检脚本、skill 月度体检推送、晨报取数（挂起）。
+不调用 AI：合并官（merge_officer、merge_act、merge-buttons 插件）、托管账本与汇报卡（custody、custody_ledger、custody_report、custody_impact）、Tidings 周报推送（只转发 github-center 的卡片）、AI HOT 热点榜推送（概括按句截取、话题标签按关键词，不经模型）、三个自检脚本、skill 月度体检推送、晨报取数（挂起）。
 
 - **不可用就报错，不换家**：派单开跑前 run_worker 按配置查执行方（`claude auth status`、`codex login status`）；不能用就写 `refused: executor_unavailable` 回执、退出码 4，派单返回「没开跑」和原因，不改用另一家。额度用尽没法提前查，开跑时车间报错写进回执。AI 接入配置读不了时，没点名的派单直接拒绝开单，不猜默认值。
 - **已登记的例外**：Hermes 主模型（现为 Claude）失败或额度不够时自动回退到 deepseek-flash（PRD F10.2；常浩 2026-11-07 定保留）。回复里注明，每日巡检报前一天的回退次数，自检命令显示近 7 天的回退次数。
