@@ -2,6 +2,8 @@
 # #172（从 #135 拆出）：执行器只接内部网络 agent-net（internal，没有出口），
 # 只能到 backend 和 egress-proxy；出网一律经 egress-proxy 的白名单，代理的上游只有宿主 8086。
 # 网段与虚拟机防火墙（ops/multica-egress/colima-provision.sh）一一对应，改一处要同步另一处。
+# 执行器和出口代理放在 profile agent 里、restart: "no"：Multica-local 的 control.sh start（up -d）和虚拟机重启都不会拉起它们，
+# 只能经 ops/multica-egress/agent-up.sh 先核对防火墙再拉起（fail-closed，#172 返修）。
 services:
   isolated-agent:
     image: multica-local-agent:0.8.1-claude-2.1.319-codex-0.166.0
@@ -11,6 +13,7 @@ services:
         # 只在构建镜像时用，构建容器不在 agent-net 上
         HTTPS_PROXY: http://192.168.5.2:8086
         HTTP_PROXY: http://192.168.5.2:8086
+    profiles: ["agent"]
     user: "1000:1000"
     hostname: multica-isolated
     init: true
@@ -48,11 +51,12 @@ services:
       NO_PROXY: backend,localhost,127.0.0.1
       no_proxy: backend,localhost,127.0.0.1
     command: ["multica", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload", "--device-name", "Multica 本地隔离执行器", "--runtime-name", "隔离执行器"]
-    restart: unless-stopped
+    restart: "no"
 
   # 白名单出口代理：只接受 CONNECT 到 allowed_domains.txt 里域名的 443，上游只经宿主 8086
   egress-proxy:
-    image: dt-egress-proxy:squid-1
+    image: dt-egress-proxy:squid-2
+    profiles: ["agent"]
     build:
       context: ./egress
       args:
@@ -77,23 +81,32 @@ services:
         ipv4_address: 172.30.0.3
       egress-net:
         ipv4_address: 172.31.0.3
-    restart: unless-stopped
+    restart: "no"
 
-  # backend 同时接默认网络（postgres、frontend 在那里）和 agent-net（给执行器）
+  # backend 同时接默认网络（postgres、frontend 在那里）和 agent-net（给执行器，固定 .2，防火墙只放行执行器到它的 8080）
   backend:
     networks:
-      - default
-      - agent-net
+      default: {}
+      agent-net:
+        ipv4_address: 172.30.0.2
 
 networks:
+  # compose 默认网络固定网段，虚拟机防火墙按它拒绝 backend、frontend、postgres 连宿主（含 8086）
+  default:
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
   agent-net:
     internal: true
+    enable_ipv6: false
     ipam:
       config:
         - subnet: 172.30.0.0/24
-          # 动态地址只从后半段分，前半段留给固定地址（代理 .3），重启时不会被执行器抢走
+          # 动态地址只从后半段分，前半段留给固定地址（backend .2、代理 .3），重启时不会被执行器抢走
           ip_range: 172.30.0.128/25
   egress-net:
+    enable_ipv6: false
     ipam:
       config:
         - subnet: 172.31.0.0/24
