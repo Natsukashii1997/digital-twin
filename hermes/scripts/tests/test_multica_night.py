@@ -562,15 +562,48 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual([c for c in self.docker_calls() if c in ("update", "stop", "inspect-state")],
                          ["update", "stop", "inspect-state"])
 
-    def test_freeze_without_readable_roster_is_never_verified(self):
+    def test_plan_commands_never_run_even_when_roster_lookup_by_plan_fails(self):
+        """第 3 轮 P1-01：夜里计划被改成名册里没有的 repo、冻结命令换成别的宿主命令。身份闸照样拒绝放 stage，
+        冻结只按名册里唯一的沙盒执行器停，计划里的命令一条都不执行。"""
+        marker = self.tmp / "plan-cmd-ran.txt"
         self.started()
+        self.tamper_plan(repo="owner/not-in-roster", freeze_cmds=[["sh", "-c", f"echo ran >> '{marker}'"]],
+                         freeze_check={"cmd": ["sh", "-c", f"echo ran >> '{marker}'; echo false no"], "expect": "false no"})
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("名册里没有 owner/not-in-roster", out)
+        self.assertFalse(marker.exists(), "计划里的命令不能在宿主机执行")
+        self.assertEqual([c for c in self.docker_calls() if c in ("update", "stop", "inspect-state")], ["update", "stop", "inspect-state"])
+        self.assertTrue(self.state()["freeze_verified"])
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_unreadable_roster_runs_no_freeze_command_and_alarms(self):
+        marker = self.tmp / "plan-cmd-ran.txt"
+        self.started()
+        self.tamper_plan(freeze_cmds=[["sh", "-c", f"echo ran >> '{marker}'"]])
         self.write_roster(raw="{not json")
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("没执行任何停容器命令", out)
+        self.assertIn("请立刻手动停隔离执行器容器", out)
+        self.assertFalse(marker.exists(), "名册读不到也不退回计划里的命令")
+        self.assertNotIn("stop", self.docker_calls())
+        st = self.state()
+        self.assertEqual((st["frozen"], st["freeze_verified"]), (True, False))
+        code, out = self.run_cli("tick", now=at(25))                 # 之后每次检查都再试，仍不执行计划命令
+        self.assertIn("没执行任何停容器命令", out)
+        self.assertFalse(marker.exists())
+
+    def test_multiple_sandbox_gates_in_roster_run_no_freeze_command(self):
+        self.started()
+        e = {"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox", "executor_gate": self.gate}
+        self.write_roster(raw=json.dumps({"projects": [], "inventory": [e, {**e, "path": "github:owner/other"}]}))
         mn = self.load_module(at(5))
-        plan = json.loads((self.root / "night-test" / "plan.json").read_text(encoding="utf-8"))
-        results, verified, seen = mn.hard_freeze(plan)
-        self.assertIs(verified, False, "名册读不到时只能按计划尽量停，不能说已冻住")
-        self.assertIn("回读不作数", seen)
-        self.assertEqual([r["cmd"] for r in results], [["true"]])
+        self.assertEqual(mn.freeze_spec(), ([], {}, False), "不止一个沙盒执行器：不知道停哪个，就不执行")
 
     def test_distrust_survives_crash_in_stop(self):
         """P1-02：身份闸不通过的停机中途崩了，兜底重来的停机仍按执行器不可信处理：回读通过也冻结（停容器）。"""

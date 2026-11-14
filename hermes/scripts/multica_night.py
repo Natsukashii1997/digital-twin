@@ -706,26 +706,28 @@ def readback(night, errs):
     return False, left
 
 
-def freeze_spec(plan):
-    """冻结用的命令和回读（PR #175 第 2 轮 P1-01）：一律由名册 executor_gate 的 docker 前缀和容器名生成，不信计划里的
-    freeze_cmds / freeze_check（计划可能已被改过，身份闸不通过时尤其不能信）。名册读不到时退回计划里的命令尽量停，
-    但回读不作数（trusted=False，verified 一律为否）。返回 (命令列表, 回读, trusted)。"""
+def freeze_spec():
+    """冻结用的命令和回读：完全不看计划（计划可能已被改过），只按名册（origin/main）里唯一带 executor_gate 的沙盒条目生成
+    （PR #175 第 2、3 轮 P1-01）。名册读不到、没有或不止一个这样的条目时，不执行任何命令（trusted=False），由调用方告警请人手动停。
+    返回 (命令列表, 回读, trusted)。"""
     try:
-        entry, why = trusted_entry(plan)
-        if why:
-            raise Unclear(why)
-        g = trusted_gate(entry)
-    except Exception:            # noqa: BLE001 —— 名册不可用：尽量停，但不能说已冻住
-        return list(plan.get("freeze_cmds") or []), plan.get("freeze_check") or {}, False
-    d, c = list(g["docker"]), g["container"]
-    return ([d + ["update", "--restart=no", c], d + ["stop", c]],
-            {"cmd": d + ["inspect", "-f", "{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}", c], "expect": "false no"}, True)
+        d = committed_json(ROSTER_FILE)
+        cands = [e for e in d.get("projects", []) + d.get("inventory", [])
+                 if isinstance(e, dict) and e.get("sandbox") is True and isinstance(e.get("executor_gate"), dict)]
+        if len(cands) != 1:
+            raise Unclear(f"名册里带 executor_gate 的沙盒条目有 {len(cands)} 个")
+        g = trusted_gate(cands[0])
+    except Exception:            # noqa: BLE001 —— 没有可信的停容器命令：一条都不执行
+        return [], {}, False
+    dk, c = list(g["docker"]), g["container"]
+    return ([dk + ["update", "--restart=no", c], dk + ["stop", c]],
+            {"cmd": dk + ["inspect", "-f", "{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}", c], "expect": "false no"}, True)
 
 
-def hard_freeze(plan):
-    """停执行器，再独立回读：容器真的停了、也不会自动重启才算 verified。命令和回读来自名册（freeze_spec）。
-    只依赖名册、计划和本机命令，不碰夜跑状态，应急路径也用它。返回 (各命令结果, verified, 回读输出)。"""
-    cmds, chk, trusted = freeze_spec(plan)
+def hard_freeze():
+    """停执行器，再独立回读：容器真的停了、也不会自动重启才算 verified。命令和回读只来自名册（freeze_spec），不看计划。
+    不碰夜跑状态，应急路径也用它。返回 (各命令结果, verified, 回读输出)。"""
+    cmds, chk, trusted = freeze_spec()
     results = []
     for cmd in cmds:
         try:
@@ -744,7 +746,7 @@ def hard_freeze(plan):
     else:
         verified = False         # 没有独立回读手段，就不能说已经冻住
     if not trusted:
-        verified, seen = False, f"{seen}（名册读不到，冻结命令来自计划，回读不作数）"
+        verified, seen = False, "名册里的执行器配置读不到，没执行任何停容器命令"
     return results, verified, seen
 
 
@@ -754,14 +756,14 @@ def freeze_lines(night, results, verified, seen):
     bad = [" ".join(r["cmd"]) for r in results if r["code"] != 0]
     out = ["⚠️ 执行器没确认停住" + (f"，失败的命令：{'；'.join(bad)}" if bad else "") + f"（回读：{seen or '无'}）。"
            "每次检查都会再试一次；请尽快手动停容器。"]
-    if not freeze_spec(night.plan)[2]:
-        out.append("⚠️ 名册里的执行器配置读不到，只能按计划里的命令停，不能确认。")
+    if not freeze_spec()[2]:
+        out.append("⚠️ 名册里的执行器配置读不到，没执行任何停容器命令（不用计划里的命令），请立刻手动停隔离执行器容器。")
     return out
 
 
 def freeze(night, reasons, problems):
     st = night.state
-    results, verified, seen = hard_freeze(night.plan)
+    results, verified, seen = hard_freeze()
     st.update(frozen=True, freeze_verified=verified, outcome="UNRECONCILED", ended_at=iso(now()))
     st.pop("stopping", None)
     night.save()
@@ -1128,7 +1130,7 @@ def protection_problems(repo, base):
 # gh 登录状态（先试 gh auth status --json hosts；容器里 gh 2.23 不支持，再按白名单结构解析 hosts.yml，只取主机、账号和键名）、
 # 凭据相关环境变量名、凭据文件、git 有效配置（system / global，加 MULTICA_WORKSPACES_ROOT 下每个仓库的 local / worktree；
 # 只带出凭据助手、include.path 和 remote 地址的值，地址里的账号密码先去掉）。工作区不限深度遍历（上限 20000 个目录），
-# 不跟符号链接，指向仓库的符号链接、根目录不存在都记为错误。每项失败都记进 errors 接着收集，最后打印一行 JSON。
+# 不跟符号链接，进到仓库后只跳过 .git（裸仓库整个跳过），嵌套仓库照样查；指向仓库的符号链接、根目录不存在都记为错误。每项失败都记进 errors 接着收集，最后打印一行 JSON。
 IDENT_SCRIPT = r"""
 python3 - "$1" "$2" <<'PY'
 import json, os, re, subprocess, sys
@@ -1329,9 +1331,12 @@ else:
             err("列工作区", None, "目录超过 20000 个，扫不全")
             break
         if is_repo(dp, dns, fns):
-            found.append(dp)       # 仓库本身由 git config 查，不再往里走
-            dns[:] = []
-            continue
+            found.append(dp)       # 仓库本身由 git config 查；普通子目录照常往下扫，嵌套的仓库也要查（第 3 轮 P1-02）
+            if ".git" in dns or ".git" in fns:
+                dns[:] = [d for d in dns if d != ".git"]
+            else:
+                dns[:] = []        # 裸仓库里只有 git 自己的目录
+                continue
         links = [d for d in dns if os.path.islink(os.path.join(dp, d))]
         bad = [d for d in links if is_repo(os.path.join(dp, d))]
         if bad:                    # 符号链接不跟进去；直接指向仓库的，等于有仓库没扫到
@@ -1423,10 +1428,18 @@ def check_facts(f):
         bad("工作区")
 
 
+GIT_KNOWN_SECTIONS = {"credential", "include", "includeif", "url", "core", "http", "remote", "user", "author", "committer"}
+GIT_KNOWN_VARS = {"helper", "username", "usehttppath", "path", "insteadof", "pushinsteadof", "askpass", "sshcommand", "extraheader",
+                  "cookiefile", "sslcert", "sslkey", "sslcertpasswordprotected", "url", "pushurl", "name", "email"}
+
+
 def _key_class(key):
-    """git 配置键只报「节.<…>.变量」：中间的子节（URL、remote 名）可能带账号密码，不回显（第 2 轮 P1-05）。"""
-    parts = key.split(".")
-    return scrub(f"{parts[0]}.<…>.{parts[-1]}" if len(parts) > 2 else key, 60)
+    """git 配置键只报类别（第 2、3 轮 P1-05 / P2-01）：子节（URL、remote 名）一律写成 <…>；节名、变量名不在固定白名单里的
+    写成 <未知节> / <未知项>，不保留任何原始字段名。"""
+    parts = key.lower().split(".")
+    sec = parts[0] if parts[0] in GIT_KNOWN_SECTIONS else "<未知节>"
+    var = parts[-1] if len(parts) > 1 and parts[-1] in GIT_KNOWN_VARS else "<未知项>"
+    return f"{sec}.<…>.{var}" if len(parts) > 2 else f"{sec}.{var}"
 
 
 def _git_where(e):
@@ -1643,7 +1656,7 @@ def watch_after(night):
     远端和停机时的快照不一致就告警（只告警：release 前常浩本人也可能动远端）。"""
     st, out, code = night.state, [], 0
     if st.get("frozen") and not st.get("freeze_verified"):
-        results, verified, seen = hard_freeze(night.plan)
+        results, verified, seen = hard_freeze()
         st["freeze_verified"] = verified
         night.save()
         night.log("freeze_retry", commands=results, verified=verified, check=seen)
@@ -1995,11 +2008,10 @@ def emergency_freeze(nid, why):
     st = load(ROOT / nid / "state.json", {})
     if not st.get("auth") or st.get("released") or st.get("outcome") in ("STOPPED", "FINISHED"):
         return ""
-    plan = load(ROOT / nid / "plan.json")
     at = iso(now())
     # 先原子写入阻断标记，再停执行器（第 2 轮 P1-01）：卡住的主控只要看到标记就不再推进，不必等硬停做完
     dump(emergency_file(nid), {"status": "EMERGENCY_REQUESTED", "at": at, "why": why})
-    results, verified, seen = hard_freeze(plan)
+    results, verified, seen = hard_freeze()
     dump(emergency_file(nid), {"status": "EMERGENCY_FROZEN" if verified else "EMERGENCY_UNVERIFIED", "at": at, "why": why,
                                "commands": results, "verified": verified, "check": seen})
     append(ROOT / nid / "run-log.jsonl", {"ts": iso(now()), "event": "emergency_freeze", "why": why,
@@ -2010,7 +2022,7 @@ def emergency_freeze(nid, why):
 
 
 def guarded_stop(nid, why, unclear=False):
-    """停机，外加兜底：停机本身崩了就直接冻结（只依赖计划和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。
+    """停机，外加兜底：停机本身崩了就直接冻结（只依赖名册和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。
     返回 (ok, 文字)：只有回读确认的 STOPPED / FINISHED 才算 ok；冻结和“停机冻结都失败”都不算，退出码据此非零（第 2 轮 P1-02）。"""
     try:
         text = stop(Night(nid), why, unclear=unclear)

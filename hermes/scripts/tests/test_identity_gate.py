@@ -275,6 +275,29 @@ class IdentScript(unittest.TestCase):
         self.set_git(global_=HELPERS + [["global", "file:/home/node/.gitconfig", "include.path", "multica-identity.config"]])
         self.assertIn("引入了其他文件：include.path（global", "；".join(self.problems()[1]))
 
+    def test_nested_repo_inside_a_repo_is_also_checked(self):
+        """第 3 轮 P1-02：合法仓库里嵌了一个仓库，它自己配了凭据助手，要被查到并拒绝。"""
+        nested = self.repo_dir / "vendor" / "nested"
+        (nested / ".git").mkdir(parents=True)
+        (self.repo_dir / "src" / "pkg").mkdir(parents=True)
+        w = json.loads(self.git_file.read_text(encoding="utf-8"))
+        w["repos"][str(nested)] = [["local", "file:.git/config", "credential.helper", "store"]]
+        self.git_file.write_text(json.dumps(w), encoding="utf-8")
+        facts, why = self.problems()
+        self.assertEqual(facts["git_repos"], 2)
+        self.assertIn("git 凭据配置不认识：credential.helper（local", "；".join(why))
+
+    def test_unknown_two_part_or_odd_keys_are_reported_by_category_only(self):
+        for key, expect in (("credential.pin123456789", "credential.<未知项>"), ("credential.https://x.y.pin987654321", "credential.<…>.<未知项>"),
+                            ("credentialx.helper", "<未知节>.helper")):
+            with self.subTest(key=key):
+                scope = "global" if key.startswith("credential.") else "command"
+                self.set_git(global_=HELPERS + [[scope, "file:/home/node/.gitconfig", key, "1"]])
+                text = "；".join(self.problems()[1])
+                self.assertIn(expect, text)
+                self.assertNotIn("pin", text)
+                self.assertNotIn("credentialx", text)
+
     def test_bare_repo_cache_is_also_checked(self):
         bare = self.ws / ".repos" / "dt-sandbox.git"
         for d in ("objects", "refs"):
