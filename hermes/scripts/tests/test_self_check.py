@@ -107,6 +107,82 @@ class ScriptTest(unittest.TestCase):
         self.fake_ai_access('import sys\nprint("AI 接入：读不了 AI 接入配置", file=sys.stderr)\nsys.exit(2)\n')
         self.assertIn("AI 接入自检未完成：AI 接入：读不了 AI 接入配置", self.run_script())
 
+    # ---- 托管状态（#131）：装真的 custody.py，状态文件按它的格式手写 ----
+    def install_custody(self, doc=None, policy=None):
+        scripts = Path(__file__).parents[1]
+        for name in ("custody.py", "twin_identity.py", "twin_state.py"):
+            self.write(self.home / "hermes/scripts" / name, (scripts / name).read_text(encoding="utf-8"))
+        dt_dir = self.home / "Library/Application Support/DigitalTwin"
+        if doc is not None:
+            self.write(dt_dir / "custody.json", doc if isinstance(doc, str) else json.dumps(doc, ensure_ascii=False))
+        if policy is not None:
+            self.write(dt_dir / "custody/policy.md", policy)
+
+    @staticmethod
+    def custody_doc(state="off", session=None, signature=None):
+        return {"schema": "dt-custody/1", "state": state, "updated_at": None, "session": session, "signature": signature,
+                "signed_versions": [signature["version"]] if signature else [], "used_messages": {}, "consumed_windows": {},
+                "history": []}
+
+    @staticmethod
+    def custody_session(**kw):
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        s = {"id": "c-20000101-233000-0123456789ab", "started_at": now.isoformat(), "until": (now + dt.timedelta(hours=10)).isoformat(),
+             "source": {"kind": "feishu", "message_id": "om_fixture0001", "open_id": "ou_secret_fixture"},
+             "policy": {"version": 3, "sha256": "0" * 64}, "drain_minutes": 120, "window_def": {"start": "23:30", "end": "08:00"},
+             "drain": None, "frozen": None, "events": []}
+        s.update(kw)
+        return s
+
+    def test_custody_off_or_never_used_prints_nothing(self):
+        self.install_custody()
+        self.assertEqual(self.run_script(), "")
+        self.install_custody(self.custody_doc())
+        self.assertEqual(self.run_script(), "")
+
+    def test_custody_on_is_reported(self):
+        self.install_custody(self.custody_doc("on", self.custody_session()))
+        out = self.run_script()
+        self.assertIn("🛡️ 托管", out)
+        self.assertIn("托管开着（c-20000101-233000-0123456789ab", out)
+        self.assertNotIn("ou_secret_fixture", out)
+
+    def test_custody_frozen_is_reported_with_items(self):
+        frozen = {"at": "2026-11-12T09:00:00+08:00", "reason": "排空截止已过，没有收完", "items": ["dt-sandbox#7 对账不清"],
+                  "source": "到点（排空截止）"}
+        drain = {"started_at": "2026-11-12T07:00:00+08:00", "deadline": "2026-11-12T09:00:00+08:00", "source": "到点（until）"}
+        self.install_custody(self.custody_doc("frozen", self.custody_session(drain=drain, frozen=frozen)))
+        out = self.run_script()
+        self.assertIn("托管已冻结（11-12 09:00：排空截止已过，没有收完）", out)
+        self.assertIn("未解决：dt-sandbox#7 对账不清", out)
+        self.assertIn("「解除冻结」", out)
+
+    def test_custody_corrupt_file_is_reported(self):
+        self.install_custody("{bad")
+        self.assertIn("托管状态文件读不了", self.run_script())
+
+    def test_custody_policy_invalid_or_expiring_is_reported(self):
+        import datetime as dt
+        import hashlib
+        policy = "| 版本 | 3 |\n| 有效期 | 签署日起 30 天 |\n\n## 1. 默认托管时段\n\n- 每晚 23:30 到次日 08:00\n- 排空截止：2 小时\n"
+        now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        sig = {"version": 3, "sha256": hashlib.sha256(policy.encode()).hexdigest(), "message_id": "om_fixture0002", "open_id": "ou_x",
+               "signed_at": (now - dt.timedelta(days=28)).isoformat(), "expires_at": (now + dt.timedelta(days=2)).isoformat(),
+               "valid_days": 30}
+        self.install_custody(self.custody_doc(signature=sig), policy)
+        self.assertIn("托管策略 v3 将于", self.run_script())
+        self.install_custody(self.custody_doc(signature={**sig, "signed_at": (now - dt.timedelta(days=20)).isoformat(),
+                                                         "expires_at": (now + dt.timedelta(days=10)).isoformat()}))
+        self.assertEqual(self.run_script(), "")
+        self.install_custody(policy=policy + "改了一个字")
+        self.assertIn("托管策略失效：策略文件内容和签署 v3 时不一样", self.run_script())
+        revoked = {**sig, "signed_at": (now - dt.timedelta(days=20)).isoformat(),
+                   "expires_at": (now + dt.timedelta(days=10)).isoformat(),
+                   "revoked": {"at": now.isoformat(), "source": "feishu", "reason": "先停用"}}
+        self.install_custody(self.custody_doc(signature=revoked), policy)   # 撤销也要报（第 2 轮审查 P2-05）
+        self.assertIn("托管策略失效：托管策略 v3 已于", self.run_script())
+
     def test_missing_installed_files_listed_by_path(self):
         for dst in ("hermes/skills/autonomous-ai-agents/workshop/references/r.md", "bin/health_check.py",
                     "hermes/scripts/self_check.py"):
