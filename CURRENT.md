@@ -23,6 +23,16 @@
 
 ---
 
+## 2026-11-14 · 个人项目日报连续三期降级查因；#176 核对与取数修复已合并并安装（PR #177 `801bd60`）
+
+- **来由**：常浩问 11-13 的日报为什么降级。查实 11-12、11-13、11-14 三期（统计日 11-11 / 11-12 / 11-13）都发的是「脚本事实版」。
+- **主因：Hermes 调不动 Claude，回退 deepseek-flash**：Hermes 最后一次成功调 Claude 在 11-11 10:32；11-12 写稿报 `ClaudeAPIError`（`HERMES_MODEL_ADMISSION_CONSUMED`，重试 3 次），11-13、11-14 报 `ClaudeCodeLoggedOut`（OAuth 过期刷新失败）。`ai_access.py status` 显示 Claude Code「未登录」、近 7 天回退 23 次（飞书对话同样在回退）。deepseek 写的稿核对不过，整份降级。**未修**：要常浩本人 `claude auth login`。
+- **副因（11-12、11-13）**：09:15 电脑在睡眠，09:38 / 09:36 醒来才跑（`pmset -g log`）；刚醒代理没通，16 个项目里 15 个 GitHub 取不到（connection reset / EOF / TLS 握手超时）；核对又把 null 当「没合并」，模型写对的推进被判错。
+- **#176 修复（PR #177，CI 通过，`--match-head-commit 0e464f2` squash 合并）**：`pdaily_publish` 合并或关闭记录取不到时不判「没有实质推进」；`pdaily_data.GitHub` 网络类失败每 15 秒重试，整轮最多 `DT_GH_WAIT_SECONDS`（默认 300）秒，只在日报取数入口启用。全量 hermes 847、orca 48 通过。回放真实快照：统计日 11-11 核对 3 处 → 0 处，11-12 4 处 → 1 处，11-13 两边都是 2 处（剩下的是 deepseek 在「今日推进」里没写项目名）。证据 `evidence/176-pdaily-null/`（全量输出、回放脚本、安装前备份 `install-before/`）。
+- **已安装**：`pdaily_data.py`、`pdaily_facts.py`、`pdaily_publish.py` 装到 `~/.hermes/scripts/`，逐个 `cmp` 一致；`/usr/bin/python3` 和 python3.14 导入自检正常；安装副本实跑 `--date 2026-11-11 --project digital-twin` 取到 9 个合并 PR（#152–#168），和 GitHub 一致。无模型定时任务每次现读脚本，没重启网关。
+- **同日另做（驿窗）**：侧栏猛鬼兽定时任务表把「个人项目日报·写稿 / ·发送」合成一行（postpane #326，PR #329，已装机 `c4e1930394b2`）。
+- **唯一的下一步**：常浩在终端 `claude auth login`，之后 `python3 ~/.hermes/scripts/ai_access.py status` 看 Claude 为「可用」；11-15 09:15 写稿后看 `DigitalTwin/daily/2026-11-14.build.json` 的 `model` 是不是 `claude-opus-5-5[1m]`、`degraded` 为 null。可选：常浩自己设 `sudo pmset repeat wake MTWRFSU 09:10:00`，让 09:15 不被睡眠推迟。
+
 ## 2026-11-14 · #131 托管状态底座已合并并安装（PR #167 `85611f7`）
 
 - **内容**：`hermes/scripts/custody.py` 是 `custody_state = off | on | draining | frozen` 的唯一真源，只有它写 `DigitalTwin/custody.json`（逐字段校验、原子替换 + 排他锁、写过后文件丢了不当成第一次用）。开启只认飞书私聊（twin_identity 回读核验 + 口令原文 + 防重放，时刻有歧义就拒绝、最多 24 小时）和已签策略的默认时段；关闭 / 撤销任何来源都可以；到点自动排空、到排空截止没收完自动冻结，冻结只能私聊「解除冻结」解除。策略签署：不许未填项、字段位置固定且唯一、版本单调、全文 SHA-256；`revoke` 持久撤销。`status --json` 带统一准入判定 `admission`，下游不得只看 `state`。工程自检只读显示托管状态。`twin_identity.lark_fetch` 加可选 `with_text`（默认不变）。接口要点给 #133 / #134 / #136 的在 custody.py 头注释。
