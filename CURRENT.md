@@ -11,7 +11,7 @@
 上线标准见 #126：沙盒夜跑里最小闭环端到端跑通 + 一次托管合并 + 三道闸各一次拦截实证，之后常浩签托管策略才生效。
 
 - ✅ #132 合并隔离：机器账号 + main「限制更新」，12 项反向测试通过；PR #146 `0a70219`（L3 三轮，第 3 轮通过），merge_act 已安装
-- ✅ #131 托管状态底座 custody.py：PR #167 `85611f7`（L3 三轮，第 3 轮常浩授权，通过）；未安装
+- ✅ #131 托管状态底座 custody.py：PR #167 `85611f7`（L3 三轮，第 3 轮常浩授权，通过）；已安装（托管仍不生效）
 - ▶ #135 执行防线反向测试：PR #169 `7cf6613` 已合并，结论不验收（容器经代理能访问宿主本机服务、经局域网 IP 能连宿主端口）；修复 #172（PR #173 出网默认拒绝）、#174（PR #175 开跑前身份闸）待 L3 送审，之后重新验收
 - ⏳ #133 账本、额度、汇报卡、推翻（#131 已合并，可开工；必须在 custody.drain_proof 里接账本）
 - ⏳ #136 托管合并（等 #133；硬性前置：不在宿主执行 PR 里的脚本）
@@ -23,14 +23,14 @@
 
 ---
 
-## 2026-11-14 · #131 托管状态底座已合并（PR #167 `85611f7`，未安装）
+## 2026-11-14 · #131 托管状态底座已合并并安装（PR #167 `85611f7`）
 
 - **内容**：`hermes/scripts/custody.py` 是 `custody_state = off | on | draining | frozen` 的唯一真源，只有它写 `DigitalTwin/custody.json`（逐字段校验、原子替换 + 排他锁、写过后文件丢了不当成第一次用）。开启只认飞书私聊（twin_identity 回读核验 + 口令原文 + 防重放，时刻有歧义就拒绝、最多 24 小时）和已签策略的默认时段；关闭 / 撤销任何来源都可以；到点自动排空、到排空截止没收完自动冻结，冻结只能私聊「解除冻结」解除。策略签署：不许未填项、字段位置固定且唯一、版本单调、全文 SHA-256；`revoke` 持久撤销。`status --json` 带统一准入判定 `admission`，下游不得只看 `state`。工程自检只读显示托管状态。`twin_identity.lark_fetch` 加可选 `with_text`（默认不变）。接口要点给 #133 / #134 / #136 的在 custody.py 头注释。
 - **审查**：L3 三轮（ChatGPT High，接力 `h1a1cef2477e01`）。第 1 轮 8 P1 + 3 P2 全部返修；第 2 轮新提 1 P1（会话 ID 只到秒）+ 3 P2；第 3 轮（常浩 11-14「补改并续审一次」）全部关闭、通过。全量 842 + 48 通过，CI 通过；常浩「合并」，`--match-head-commit 8ac42bb` squash 合并。证据 `evidence/131-custody/`（全量输出、变异检查、lark-cli 时区实测、第 3 轮送审包）。
-- **未安装**：`custody.py` 没装；本 PR 改了已安装的 `twin_identity.py`、`self_check.py`，`~/.hermes/scripts/` 里还是合并前的版本，下次 10:00 工程自检会报这两个不一致，等常浩定装不装。
+- **已安装**（常浩「安装」）：`custody.py`、`twin_identity.py`、`self_check.py` 从 main 装到 `~/.hermes/scripts/`，逐个 `cmp` 一致；旧副本备份在 `evidence/131-custody/install-before/`（回滚：拷回这两个、删 `custody.py`）。`/usr/bin/python3`（3.9）和 python3.14 下 `custody.py status` 都是「关着、还没签策略」、不准入，没生成 `custody.json`；twin_identity / twin_state 导入正常。脚本按需调用，没重启网关。工程自检里这三个已不报；仍报 4 项 `memdaily_*` 缺失——它们 11-12 装在亚古兽目录 `~/.hermes/profiles/agumon/`，自检只看 `~/.hermes/`，属自检没认亚古兽安装位置（11-12 起每天误报，未处理）。输出在 `evidence/131-custody/install-self-check.txt`。
 - **上线前还差**：`off --drained` 现在一律拒绝（`drain_proof` 等 #133 接账本），每次托管会以冻结收尾；本机还没配 `owner_chat_id`（`twin_identity.py setup-chat`），飞书开启 / 签署 / 解除冻结都会被拒；到点自动开关要定时任务（D 档，另问）。
 - **驿窗问题（范围外，没修）**：续审授权后接力立刻被判「Claude 2 小时没交回复审」停下（计时从两天前的上一轮回信算起），之后 Chrome 插件也断过；常浩点「继续自动」并修好插件后才送出。属 postpane。
-- **唯一的下一步**：常浩定是否把 `twin_identity.py`、`self_check.py`（及 `custody.py`）装到 `~/.hermes/scripts/`；托管主线下一项是 #133。
+- **唯一的下一步**：托管主线下一项是 #133 账本（在 `custody.drain_proof` 里接账本）。另：工程自检要认亚古兽的安装位置，否则每天误报 4 项 `memdaily_*`。
 
 
 ## 2026-11-12 · #132 合并隔离已合并并安装（PR #146 `0a70219`）
