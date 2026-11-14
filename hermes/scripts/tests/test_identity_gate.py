@@ -234,6 +234,25 @@ class IdentScript(unittest.TestCase):
                 self.assertIn(expect, text)
                 self.assertNotIn(SECRET, text, "拒绝原因不回显凭据值")
 
+    def test_multica_identity_include_is_the_only_include_allowed(self):
+        """2026-11-14 真机：Multica 在每个工作树的 config.worktree 里 include 一份提交身份，只放行这一种写法。"""
+        origin = "file:/home/node/multica_workspaces/.repos/ws/dt-sandbox.git/worktrees/dt-sandbox/config.worktree"
+        ident = "file:/home/node/multica_workspaces/.repos/ws/dt-sandbox.git/worktrees/dt-sandbox/multica-identity.config"
+        base = [["local", "file:.git/config", "remote.origin.url", "https://github.com/owner/dt-sandbox.git"],
+                ["worktree", origin, "include.path", "multica-identity.config"],
+                ["worktree", ident, "user.name", "Multica agent"], ["worktree", ident, "committer.email", "a@x.invalid"]]
+        self.set_git(local=base)
+        self.assertEqual(self.problems()[1], [])
+        for row, expect in ((["worktree", origin, "include.path", "/home/node/other.config"], "引入了其他文件"),
+                            (["worktree", "file:/x/config", "include.path", "multica-identity.config"], "引入了其他文件"),
+                            (["worktree", ident, "credential.helper", "store"], "git 凭据配置不认识"),
+                            (["worktree", origin, "includeif.onbranch:main.path", "multica-identity.config"], "includeif")):
+            with self.subTest(row=row):
+                self.set_git(local=base + [row])
+                self.assertIn(expect, "；".join(self.problems()[1]))
+        self.set_git(global_=HELPERS + [["global", "file:/home/node/.gitconfig", "include.path", "multica-identity.config"]])
+        self.assertIn("引入了其他文件：include.path（global", "；".join(self.problems()[1]))
+
     def test_bare_repo_cache_is_also_checked(self):
         bare = self.ws / ".repos" / "dt-sandbox.git"
         for d in ("objects", "refs"):

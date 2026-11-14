@@ -1081,7 +1081,7 @@ def protection_problems(repo, base):
 # 在执行器里只收集事实，不判断、不打印令牌：gh 身份、对 repo 的权限、规则集（分页）和各自的绕过状态、能访问的仓库（分页）、
 # gh 登录状态（先试 gh auth status --json hosts；容器里 gh 2.23 不支持，再按白名单结构解析 hosts.yml，只取主机、账号和键名）、
 # 凭据相关环境变量名、凭据文件、git 有效配置（system / global，加 MULTICA_WORKSPACES_ROOT 下每个仓库的 local / worktree；
-# 只带出凭据助手和 remote 地址的值，地址里的账号密码先去掉）。每项失败都记进 errors 接着收集，最后打印一行 JSON。
+# 只带出凭据助手、include.path 和 remote 地址的值，地址里的账号密码先去掉）。每项失败都记进 errors 接着收集，最后打印一行 JSON。
 IDENT_SCRIPT = r"""
 python3 - "$1" <<'PY'
 import json, os, re, subprocess, sys
@@ -1251,9 +1251,9 @@ def gitconf(args, what, where, keep):
         if keep and scope not in keep:
             continue
         key, _, val = kv.partition("\n")
-        e = {"scope": scope, "origin": origin[:200], "key": key, "where": where}
+        e = {"scope": scope, "origin": origin[-200:], "key": key, "where": where}
         lk = key.lower()
-        if lk.startswith("credential.") and lk.endswith(".helper") or lk == "credential.helper":
+        if lk.startswith("credential.") and lk.endswith(".helper") or lk == "credential.helper" or lk == "include.path":
             e["value"] = val
         elif re.fullmatch(r"remote\..+\.(url|pushurl)", lk):
             e["userinfo"] = bool(re.search(r"://[^/@]*@", val))
@@ -1300,6 +1300,9 @@ GH_TOKEN_SOURCES = {"oauth_token", "keyring"}                 # gh auth status -
 GH_FILE_KEYS = {"user", "oauth_token", "git_protocol", "users"}
 ENV_OK = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}   # compose 里定的提交身份
 GIT_SCOPES = {"system", "global", "local", "worktree"}
+# Multica 给每个工作树写的提交身份：config.worktree 里 include.path = multica-identity.config（只有 user / author / committer
+# 的 name、email）。git config --list 已把被引入的条目连同来源列出来、照样过下面的判定，所以只放行这一种写法（2026-11-14 真机核对）。
+MULTICA_INCLUDE = "multica-identity.config"
 PERM_KEYS = ("admin", "maintain", "push", "triage", "pull")
 
 
@@ -1361,6 +1364,9 @@ def git_problems(f, repo):
         elif k.startswith("credential."):
             if not (k in GH_HELPER_KEYS and e.get("value") in GH_HELPER_OK):
                 out.append(f"git 凭据配置不认识：{e['key']}（{where}）")
+        elif k == "include.path" and e["scope"] in ("local", "worktree") and e.get("value") == MULTICA_INCLUDE \
+                and e["origin"].endswith("/config.worktree"):
+            pass
         elif k.startswith(("include.", "includeif.")):
             out.append(f"git 配置引入了其他文件：{e['key']}（{where}）")
         elif k.startswith("url.") and last in ("insteadof", "pushinsteadof"):
@@ -1441,7 +1447,7 @@ def identity_problems(f, repo, login, ruleset_ids):
         why.append("执行器环境里有不认识的凭据相关变量：" + "、".join(env[:8]))
     if f["cred_files"]:
         why.append("执行器里有其他凭据文件：" + "、".join(f["cred_files"][:8]))
-    why += git_problems(f, repo)[:8]
+    why += list(dict.fromkeys(git_problems(f, repo)))[:8]      # 多个工作树的同一条只报一次
     return why
 
 
