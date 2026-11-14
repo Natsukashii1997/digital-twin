@@ -4,7 +4,7 @@
 每天 10:00 由个人项目日报发送（pdaily_publish.py send，#159）调用，输出并进日报卡片：空输出算正常，退出码非 0 卡片里写「自检没跑成」。
 也可以手动跑看结果。
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
-每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
+每天：仓库 main 上已提交的源文件和安装副本逐字节比对（memdaily_* 比亚古兽 profile 下的副本，#182），只报缺失或不一致的路径，安装位置多出的文件不管。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
 每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、Hermes 主模型走本机 Claude 而 Claude 没登录（#180，G-27）、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
 每天：跑同目录 custody.py status --json（托管状态，#131，只读），托管没关（开着、排空中、冻结）、状态读不了、已签策略失效或
@@ -40,6 +40,7 @@ CUSTODY_SCRIPT = Path(os.environ.get("DT_CUSTODY_SCRIPT", HERMES / "scripts/cust
 CUSTODY_TIMEOUT = 60
 CUSTODY_RENEW_DAYS = 3      # 托管策略模板：到期前 3 天日报提醒续签
 LIST_LIMIT = 10
+AGUMON_PREFIX = "memdaily_"   # 亚古兽 profile 的脚本和提示词，装在 ~/.hermes/profiles/agumon/ 下（#182）
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
 
@@ -71,7 +72,9 @@ def install_pairs(files):
     pairs = []
     for f in files:
         p = PurePosixPath(f)
-        if p.parent == PurePosixPath("hermes/scripts") and p.suffix in (".py", ".json"):   # .json：脚本读的规则（如 merge_rules.json，#65）
+        if p.name.startswith(AGUMON_PREFIX) and p.parent in (PurePosixPath("hermes/scripts"), PurePosixPath("hermes/prompts")):
+            pairs.append((f, HERMES / "profiles/agumon" / p.parent.name / p.name))   # 亚古兽的记忆日报（#182）
+        elif p.parent == PurePosixPath("hermes/scripts") and p.suffix in (".py", ".json"):   # .json：脚本读的规则（如 merge_rules.json，#65）
             pairs.append((f, HERMES / "scripts" / p.name))
         elif f.startswith("hermes/scripts/assets/"):      # 脚本用的固定素材（如 Tidings 周报横幅，#55）
             pairs.append((f, HERMES / "scripts" / p.relative_to("hermes/scripts")))
