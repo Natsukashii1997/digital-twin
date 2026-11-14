@@ -1,7 +1,7 @@
 """假 gh（执行器侧，#174 身份闸采集层集成测试）：真跑 IDENT_SCRIPT 时代替容器里的 gh。
 FAKE_GH_SCENARIO 指向的 JSON：
   version         gh --version 的第一行
-  auth_json       gh auth status --json hosts 的输出；null 时模仿 gh 2.23 报 unknown flag
+  auth_json       gh auth status --json hosts 的输出；null 时模仿 gh 2.23 报 unknown flag；auth_code 是它的退出码（缺省 0）
   user / repo     gh api user、gh api repos/<repo> 的输出
   rulesets_pages  规则集列表，每页一个数组；带 --paginate 时各页依次拼接输出（页间无分隔），不带只给第一页
   rulesets        id → 规则集详情（只用 current_user_can_bypass）
@@ -31,7 +31,7 @@ if args == ["--version"]:
 if args[:2] == ["auth", "status"]:
     if w.get("auth_json") is None:
         done(err="unknown flag: --json\n\nUsage:  gh auth status [flags]\n", code=1)
-    done(json.dumps(w["auth_json"]) + "\n")
+    done(json.dumps(w["auth_json"]) + "\n", code=w.get("auth_code", 0))
 if args[:1] != ["api"] or len(args) < 2:
     done(err=f"假 gh 不认识：{args}\n", code=2)
 path, paginate = args[1], "--paginate" in args[2:]

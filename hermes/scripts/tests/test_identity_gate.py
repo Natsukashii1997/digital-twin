@@ -72,15 +72,15 @@ class IdentScript(unittest.TestCase):
         self.git_file.write_text(json.dumps({"global": HELPERS if global_ is None else global_, "repos": {str(self.repo_dir): local},
                                              "fail": fail or {}}), encoding="utf-8")
 
-    def collect(self, env=None):
-        r = subprocess.run(["bash", "-c", mn.IDENT_SCRIPT, "ident", REPO], capture_output=True, text=True, timeout=60,
+    def collect(self, env=None, root=None):
+        r = subprocess.run(["bash", "-c", mn.IDENT_SCRIPT, "ident", REPO, root or str(self.ws)], capture_output=True, text=True, timeout=60,
                            env={**self.env, **(env or {})})
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout.strip().splitlines()[-1])
 
-    def problems(self, env=None):
-        facts = self.collect(env)
-        return facts, mn.identity_problems(facts, REPO, LOGIN, IDS)
+    def problems(self, env=None, root=None):
+        facts = self.collect(env, root)
+        return facts, mn.identity_problems(facts, REPO, LOGIN, IDS, str(self.ws))
 
     def gh_calls(self):
         return json.loads(self.gh_file.read_text(encoding="utf-8")).get("calls", [])
@@ -164,10 +164,20 @@ class IdentScript(unittest.TestCase):
                               ({"github.com": [ok, {**ok, "login": "Natsukashii1997", "active": False}]}, "其他主机或账号"),
                               ({"github.com": [ok], "ghe.example.com": [ok]}, "其他主机或账号"),
                               ({"github.com": [{**ok, "state": "error"}]}, "应为 bot"),
-                              ({"github.com": ["oops"]}, "读不懂")):
+                              ({"github.com": [{**ok, "host": "ghe.example.com"}]}, "主机和外层不一致")):
             with self.subTest(hosts=hosts):
                 self.set_gh(auth_json={"hosts": hosts})
                 self.assertIn(expect, "；".join(self.problems()[1]))
+        for entry in ("oops", {**ok, "active": "true"}, {k: v for k, v in ok.items() if k != "tokenSource"}):
+            with self.subTest(entry=entry):       # 第 2 轮 P2-02：账号记录字段缺失或类型不对，判为看不清
+                self.set_gh(auth_json={"hosts": {"github.com": [entry]}})
+                with self.assertRaises(mn.Unclear):
+                    self.problems()
+
+    def test_gh_auth_status_nonzero_exit_is_unclear_unless_old_gh(self):
+        ok = {"state": "success", "active": True, "host": "github.com", "login": LOGIN, "tokenSource": "oauth_token"}
+        self.set_gh(auth_json={"hosts": {"github.com": [ok]}}, auth_code=1)
+        self.assertIn("gh auth status --json hosts 失败（退出码 1）", "；".join(self.problems()[1]))
 
     def test_gh_auth_status_other_failure_is_unclear(self):
         self.set_gh(auth_json="not-a-dict")
@@ -200,7 +210,12 @@ class IdentScript(unittest.TestCase):
             ("env", {"MY_DEPLOY_TOKEN": SECRET}, "MY_DEPLOY_TOKEN"),
             ("global", ["global", "file:/home/node/.gitconfig", "credential.helper", "store"], "git 凭据配置不认识：credential.helper（global"),
             ("global", ["global", "file:/home/node/.gitconfig", "credential.helper", f"!f() {{ echo password={SECRET}; }}; f"], "credential.helper"),
-            ("global", ["global", "file:/home/node/.gitconfig", "credential.https://github.com.username", "bot"], "credential.https://github.com.username"),
+            ("global", ["global", "file:/home/node/.gitconfig", "credential.https://github.com.username", "bot"], "credential.<…>.username"),
+            ("global", ["global", "file:/home/node/.gitconfig", f"url.https://bot:{SECRET}@github.com/.insteadof", "https://github.com/"],
+             "改写了远端地址：url.<…>.insteadof"),
+            ("global", ["global", "file:/home/node/.gitconfig", f"credential.https://bot:{SECRET}@github.com.helper", "store"],
+             "git 凭据配置不认识：credential.<…>.helper"),
+            ("local", ["local", "file:.git/config", f"http.https://bot:{SECRET}@github.com/.extraheader", "x"], "http.<…>.extraheader"),
             ("global", ["system", "file:/etc/gitconfig", "include.path", "/opt/x.inc"], "引入了其他文件：include.path（system"),
             ("global", ["global", "file:/home/node/.gitconfig", "url.https://evil.example/.insteadof", "https://github.com/"], "改写了远端地址"),
             ("global", ["global", "file:/home/node/.gitconfig", "core.sshcommand", "ssh -i /k"], "认证程序：core.sshcommand"),
@@ -208,7 +223,8 @@ class IdentScript(unittest.TestCase):
             ("local", ["local", "file:.git/config", "http.https://github.com/.extraheader", f"AUTHORIZATION: basic {SECRET}"], "extraheader"),
             ("local", ["local", "file:.git/config", "remote.origin.url", f"https://bot:{SECRET}@github.com/owner/dt-sandbox.git"], "带了账号"),
             ("local", ["local", "file:.git/config", "remote.origin.url", "https://github.com/owner/digital-twin.git"], "远端不是 owner/dt-sandbox"),
-            ("local", ["worktree", "file:.git/config.worktree", "remote.fork.pushurl", "git@github.com:owner/dt-sandbox.git"], "remote.fork.pushurl"),
+            ("local", ["worktree", "file:.git/config.worktree", "remote.fork.pushurl", "git@github.com:owner/dt-sandbox.git"], "remote.<…>.pushurl"),
+            ("local", ["local", "file:.git/config", f"remote.{SECRET}.url", "https://github.com/owner/digital-twin"], "remote.<…>.url"),
         ]
         for kind, val, expect in cases:
             with self.subTest(kind=kind, val=val):
@@ -236,8 +252,8 @@ class IdentScript(unittest.TestCase):
 
     def test_multica_identity_include_is_the_only_include_allowed(self):
         """2026-11-14 真机：Multica 在每个工作树的 config.worktree 里 include 一份提交身份，只放行这一种写法。"""
-        origin = "file:/home/node/multica_workspaces/.repos/ws/dt-sandbox.git/worktrees/dt-sandbox/config.worktree"
-        ident = "file:/home/node/multica_workspaces/.repos/ws/dt-sandbox.git/worktrees/dt-sandbox/multica-identity.config"
+        wt = f"file:{self.ws}/.repos/ws/dt-sandbox.git/worktrees/dt-sandbox/"
+        origin, ident = wt + "config.worktree", wt + "multica-identity.config"
         base = [["local", "file:.git/config", "remote.origin.url", "https://github.com/owner/dt-sandbox.git"],
                 ["worktree", origin, "include.path", "multica-identity.config"],
                 ["worktree", ident, "user.name", "Multica agent"], ["worktree", ident, "committer.email", "a@x.invalid"]]
@@ -245,7 +261,13 @@ class IdentScript(unittest.TestCase):
         self.assertEqual(self.problems()[1], [])
         for row, expect in ((["worktree", origin, "include.path", "/home/node/other.config"], "引入了其他文件"),
                             (["worktree", "file:/x/config", "include.path", "multica-identity.config"], "引入了其他文件"),
-                            (["worktree", ident, "credential.helper", "store"], "git 凭据配置不认识"),
+                            (["worktree", ident, "credential.helper", "store"], "Multica 身份文件里有身份以外的配置"),
+                            (["worktree", ident, "core.hookspath", "/tmp/h"], "Multica 身份文件里有身份以外的配置"),
+                            (["worktree", ident, "http.sslverify", "false"], "Multica 身份文件里有身份以外的配置"),
+                            (["worktree", f"file:{self.ws}/.repos/ws/x.git/worktrees/other/multica-identity.config", "user.name", "x"],
+                             "来源不对"),
+                            (["worktree", "file:/elsewhere/x.git/worktrees/dt-sandbox/config.worktree", "include.path",
+                              "multica-identity.config"], "引入了其他文件"),
                             (["worktree", origin, "includeif.onbranch:main.path", "multica-identity.config"], "includeif")):
             with self.subTest(row=row):
                 self.set_git(local=base + [row])
@@ -266,19 +288,54 @@ class IdentScript(unittest.TestCase):
         self.assertIn("远端不是", "；".join(why))
 
 
+    # ---- 第 2 轮 P1-04：工作区扫描要能证明扫全了 ----
+    def test_workspace_root_missing_or_mismatched_is_refused(self):
+        self.assertIn("工作区根目录不存在", "；".join(self.problems(root=str(self.tmp / "nowhere"))[1]))
+        self.assertIn("工作区目录和名册不一致", "；".join(self.problems(env={"MULTICA_WORKSPACES_ROOT": "/elsewhere"})[1]))
+        env = dict(self.env)
+        del env["MULTICA_WORKSPACES_ROOT"]
+        r = subprocess.run(["bash", "-c", mn.IDENT_SCRIPT, "ident", REPO, str(self.ws)], capture_output=True, text=True, env=env)
+        facts = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertIn("MULTICA_WORKSPACES_ROOT 没设", "；".join(mn.identity_problems(facts, REPO, LOGIN, IDS, str(self.ws))))
+
+    def test_zero_repos_is_refused(self):
+        subprocess.run(["rm", "-rf", str(self.ws / "ws1")], check=True)
+        self.assertIn("一个仓库都没扫到", "；".join(self.problems()[1]))
+
+    def test_symlinks_deep_trees_and_huge_trees(self):
+        (self.ws / "ws1" / "task1" / "codex-home" / "plugins").mkdir(parents=True)
+        (self.tmp / "outside").mkdir()
+        (self.ws / "ws1" / "task1" / "codex-home" / "plugins" / "cache").symlink_to(self.tmp / "outside", target_is_directory=True)
+        deep = self.ws / "ws1" / "task2" / "codex-home" / "sessions" / "2026" / "11" / "14" / "a" / "b"
+        deep.mkdir(parents=True)
+        facts, why = self.problems()
+        self.assertEqual(why, [], "指向工作区外非仓库目录的符号链接、很深的非仓库目录都正常（真机就是这样）")
+        (deep / "repo" / ".git").mkdir(parents=True)
+        self.assertEqual(self.collect()["git_repos"], 2, "不限深度，深处的仓库也扫到")
+        other = self.tmp / "elsewhere"
+        (other / ".git").mkdir(parents=True)
+        (self.ws / "ws1" / "linked").symlink_to(other, target_is_directory=True)
+        self.assertIn("指向仓库的目录符号链接", "；".join(self.problems()[1]))
+        (self.ws / "ws1" / "linked").unlink()
+        many = self.ws / "many"
+        for i in range(20001):
+            (many / str(i)).mkdir(parents=True)
+        self.assertIn("目录超过 20000 个", "；".join(self.problems()[1]))
+
+
 class FactsSchema(unittest.TestCase):
     """P2-02：事实格式不对一律抛 Unclear，判定函数不让别的异常逃出去。"""
 
     def good(self):
-        return {"v": 2, "errors": [], "login": "bot",
+        return {"v": 2, "errors": [], "login": "bot", "ws_root": "/w", "ws_env": "/w", "git_repos": 1,
                 "permissions": {"admin": False, "maintain": False, "push": True, "triage": True, "pull": True},
                 "rulesets": [{"id": 1, "bypass": "never"}, {"id": 2, "bypass": "never"}], "repos": [REPO], "gh_version": "x",
                 "gh_json": None, "gh_json_unsupported": True,
                 "gh_file": {"exists": True, "hosts": {"github.com": {"user": "bot", "users": [], "keys": ["user"], "user_keys": []}}},
-                "env_names": [], "cred_files": [], "git": [], "git_repos": 0}
+                "env_names": [], "cred_files": [], "git": []}
 
     def test_good_passes(self):
-        self.assertEqual(mn.identity_problems(self.good(), REPO, LOGIN, IDS), [])
+        self.assertEqual(mn.identity_problems(self.good(), REPO, LOGIN, IDS, "/w"), [])
 
     def test_malformed_facts_raise_unclear(self):
         bads = [None, [], {"v": 1}, {**self.good(), "errors": "x"}, {**self.good(), "login": None}, {**self.good(), "permissions": []},
@@ -287,11 +344,13 @@ class FactsSchema(unittest.TestCase):
                 {**self.good(), "gh_json_unsupported": "yes"}, {**self.good(), "gh_file": {"exists": True}},
                 {**self.good(), "gh_file": {"exists": True, "hosts": {"github.com": {"user": 1, "users": [], "keys": [], "user_keys": []}}}},
                 {**self.good(), "env_names": "GH_TOKEN"}, {**self.good(), "cred_files": [1]},
-                {**self.good(), "git": [{"scope": "global", "key": "x"}]}]
+                {**self.good(), "git": [{"scope": "global", "key": "x"}]}, {**self.good(), "ws_root": 1}, {**self.good(), "git_repos": "1"},
+                {**self.good(), "gh_json": {"hosts": {"github.com": [{"host": "github.com", "login": "bot", "state": "success",
+                                                                        "active": True}]}}}]
         for f in bads:
             with self.subTest(f=f):
                 with self.assertRaises(mn.Unclear):
-                    mn.identity_problems(f, REPO, LOGIN, IDS)
+                    mn.identity_problems(f, REPO, LOGIN, IDS, "/w")
 
 
 if __name__ == "__main__":
