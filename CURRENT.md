@@ -31,7 +31,8 @@
 - **#176 修复（PR #177，CI 通过，`--match-head-commit 0e464f2` squash 合并）**：`pdaily_publish` 合并或关闭记录取不到时不判「没有实质推进」；`pdaily_data.GitHub` 网络类失败每 15 秒重试，整轮最多 `DT_GH_WAIT_SECONDS`（默认 300）秒，只在日报取数入口启用。全量 hermes 847、orca 48 通过。回放真实快照：统计日 11-11 核对 3 处 → 0 处，11-12 4 处 → 1 处，11-13 两边都是 2 处（剩下的是 deepseek 在「今日推进」里没写项目名）。证据 `evidence/176-pdaily-null/`（全量输出、回放脚本、安装前备份 `install-before/`）。
 - **已安装**：`pdaily_data.py`、`pdaily_facts.py`、`pdaily_publish.py` 装到 `~/.hermes/scripts/`，逐个 `cmp` 一致；`/usr/bin/python3` 和 python3.14 导入自检正常；安装副本实跑 `--date 2026-11-11 --project digital-twin` 取到 9 个合并 PR（#152–#168），和 GitHub 一致。无模型定时任务每次现读脚本，没重启网关。
 - **同日另做（驿窗）**：侧栏猛鬼兽定时任务表把「个人项目日报·写稿 / ·发送」合成一行（postpane #326，PR #329，已装机 `c4e1930394b2`）。
-- **唯一的下一步**：常浩在终端 `claude auth login`，之后 `python3 ~/.hermes/scripts/ai_access.py status` 看 Claude 为「可用」；11-15 09:15 写稿后看 `DigitalTwin/daily/2026-11-14.build.json` 的 `model` 是不是 `claude-opus-5-5[1m]`、`degraded` 为 null。可选：常浩自己设 `sudo pmset repeat wake MTWRFSU 09:10:00`，让 09:15 不被睡眠推迟。
+- **Claude 已重新登录（09:46）**：常浩前两次在终端登录，浏览器都显示授权成功，命令行却没登上；查实是终端面板的 shell 没有代理变量，命令行直连换凭据被拒，返回 `Login failed: Request failed with status code 403`。带上 `HTTPS_PROXY=http://127.0.0.1:8086` 重登后显示 `Login successful.`，`claude auth status` 为 `loggedIn: true`（claude.ai，max）。用干净环境、照网关的代理设置跑 `hermes chat -Q` 单次调用，会话 `20261114_094741_dec7f3` 实际用的是 `claude-opus-5-5[1m]`，没有回退。注意：在带桌面应用环境变量（`ANTHROPIC_BASE_URL`）的 shell 里测 Hermes，插件会拒绝走登录态（`OAuth provider refuses conflicting native auth/backend overrides`）、回退 deepseek，这是测试环境的问题，不是故障。今天 10:00 发的仍是 09:19 写好的事实版。
+- **唯一的下一步**：11-15 09:15 写稿后看 `DigitalTwin/daily/2026-11-14.build.json` 的 `model` 是不是 `claude-opus-5-5[1m]`、`degraded` 为 null。可选：常浩自己设 `sudo pmset repeat wake MTWRFSU 09:10:00`，让 09:15 不被睡眠推迟。
 
 ## 2026-11-14 · #131 托管状态底座已合并并安装（PR #167 `85611f7`）
 
