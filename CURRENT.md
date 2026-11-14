@@ -41,6 +41,8 @@
 - **已安装**：`pdaily_data.py`、`pdaily_facts.py`、`pdaily_publish.py` 装到 `~/.hermes/scripts/`，逐个 `cmp` 一致；`/usr/bin/python3` 和 python3.14 导入自检正常；安装副本实跑 `--date 2026-11-11 --project digital-twin` 取到 9 个合并 PR（#152–#168），和 GitHub 一致。无模型定时任务每次现读脚本，没重启网关。
 - **同日另做（驿窗）**：侧栏猛鬼兽定时任务表把「个人项目日报·写稿 / ·发送」合成一行（postpane #326，PR #329，已装机 `c4e1930394b2`）。
 - **Claude 已重新登录（09:46）**：常浩前两次在终端登录，浏览器都显示授权成功，命令行却没登上；查实是终端面板的 shell 没有代理变量，命令行直连换凭据被拒，返回 `Login failed: Request failed with status code 403`。带上 `HTTPS_PROXY=http://127.0.0.1:8086` 重登后显示 `Login successful.`，`claude auth status` 为 `loggedIn: true`（claude.ai，max）。用干净环境、照网关的代理设置跑 `hermes chat -Q` 单次调用，会话 `20261114_094741_dec7f3` 实际用的是 `claude-opus-5-5[1m]`，没有回退。注意：在带桌面应用环境变量（`ANTHROPIC_BASE_URL`）的 shell 里测 Hermes，插件会拒绝走登录态（`OAuth provider refuses conflicting native auth/backend overrides`）、回退 deepseek，这是测试环境的问题，不是故障。今天 10:00 发的仍是 09:19 写好的事实版。已记为全局坑 G-27（agent-kit PR #68 `75df67e`，运行副本已重装，`auth login` 等触发词会自动提醒）。
+- **#180 工程自检加 Claude 登录检查（PR #181 `7b425af`，CI 通过，常浩「合并并安装」）**：Hermes 主模型走本机 Claude 而 Claude 不可用时，每天 10:00 日报「🤖 AI 接入提醒」报后果和带代理的登录命令；复用自检已在跑的 `ai_access.py status --json`。全量 hermes 850、orca 48 通过。**已安装** `~/.hermes/scripts/self_check.py`（`cmp` 一致，旧副本在 `evidence/180-selfcheck-claude/install-before/`）；网关同款干净环境实跑，Claude 登录正常时这一项无输出。G-27 升级改为〔体检〕部分升级（agent-kit PR #69 `c93932f`，运行副本已同步）。
+- **顺带发现、待合并：#182（PR #183）**：自检把亚古兽的 4 个记忆日报文件按猛鬼兽目录比，天天在日报里误报「安装副本缺失」（亚古兽副本其实和 main 一致）。已修，全量 hermes 851、orca 48 通过，等常浩合并后安装 `self_check.py`。
 - **唯一的下一步**：11-15 09:15 写稿后看 `DigitalTwin/daily/2026-11-14.build.json` 的 `model` 是不是 `claude-opus-5-5[1m]`、`degraded` 为 null。可选：常浩自己设 `sudo pmset repeat wake MTWRFSU 09:10:00`，让 09:15 不被睡眠推迟。
 
 ## 2026-11-14 · #131 托管状态底座已合并并安装（PR #167 `85611f7`）
