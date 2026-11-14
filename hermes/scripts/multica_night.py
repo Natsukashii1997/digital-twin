@@ -5,7 +5,7 @@
 用法：
   multica_night.py plan PLAN.json                     建父单和子单（子单停在 backlog），记为当前夜跑
   multica_night.py start --approved-by 常浩 [--hours 4] [--max-runs 20]
-                                                      开跑前核对，记下授权，把第 1 个 stage 移出 backlog
+                                                      开跑前核对（含执行器 GitHub 身份闸，#172 / #174），记下授权，把第 1 个 stage 移出 backlog
   multica_night.py approve --by Hermes --start-at 2026-11-08T22:00 [--hours 4] [--max-runs 20]
                                                       记下“几点开跑”的批准，到点由 tick 执行 start（过了 30 分钟还没开就不开）
   multica_night.py tick                               Hermes 无模型定时任务每 5 分钟调一次（经 multica_night_tick.py，定时任务不能带参数）：
@@ -19,6 +19,9 @@
 不唤醒任何 agent；一个 stage 的子单都到 in_review / done / cancelled、且这些子单没有在跑的 run，就由本脚本把下一 stage
 移出 backlog。今晚不合并，所以不等 done。
 
+运行前身份闸（#174）：开跑和每次放出 stage（含异常后的补推进）之前，核对执行器容器是名册 executor_gate 里的那个、GitHub 身份和
+权限、规则集与 main 分支保护和基线一致、执行器里没有不认识的凭据来源；不通过就不放，tick 里不通过按 5.3a 停机并冻结执行器。
+
 停机条件（任一触发）：到时长上限；总 run 数到上限；同一子单连续失败到上限；子单被 agent 标为 blocked；
 子单停滞（不在 backlog、没交付、也没有在跑的 run，超过 stall_minutes）；run 记录核不清（命令失败、读不懂、
 以前见过的 run 不见了、消息序号有缺口）；父单之外的 issue 在开跑后被改动；家族里出现自建 Wakeup 或启用中的 Autopilot；
@@ -27,19 +30,20 @@
 停机步骤（5.3a）：禁用家族 issue 上的全部 Wakeup → 暂停启用中的 Autopilot → 取消 5 种非终态 run
 → 没交付的子单改 blocked（--no-start；不在子单上评论，评论会唤醒 agent）、原因写在父单 → 回读。
 回读时 run 全部终态、Wakeup 和 Autopilot 都停了，再到执行器容器里独立核对：除守护进程外没有 agent 派生的进程
-（计划 executor.kill 为 true 时先结束它们再核对，M5 #25、#27），才算停机成功，并给远端分支和 PR 拍快照（之后每次检查和晨报都比对）；否则冻结：执行计划里的 freeze_cmds（停隔离执行器容器、
+（计划 executor.kill 为 true 时先结束它们再核对，M5 #25、#27），才算停机成功，并给远端分支和 PR 拍快照（之后每次检查和晨报都比对）；否则冻结：按名册 executor_gate 停隔离执行器容器（#174 起不用计划里的 freeze_cmds；
 去掉自动重启），记 UNRECONCILED，打印告警（Hermes 定时任务把输出发到常浩私聊），之后不再推进、不再重试；
 冻结期间每次 tick 发现有 run 在跑就再取消一次并告警，直到常浩 release。
 
 所有计数存在夜跑目录的 state.json，进程或机器重启后从这里恢复，不清零。tick 没事时什么都不打印。
 
 环境变量：DT_NIGHT_ROOT 夜跑根目录（默认 ~/Library/Application Support/DigitalTwin/runs）；DT_MULTICA_CLI 换 multica（自测用）；
-DT_GH_CLI 换 gh；DT_ROSTER 名册（开跑前核对仓库标了 sandbox: true）；DT_NOW（ISO 时间）指定现在；DT_NIGHT_READBACK「次数,间隔秒」停机回读（默认 12,5）；DT_NIGHT_PROCWAIT「次数,间隔秒」
+DT_GH_CLI 换 gh；DT_ROSTER_REPO 名册仓库（名册和保护基线从它已合并的 origin/main 读，不读工作区）；DT_NOW（ISO 时间）指定现在；DT_NIGHT_READBACK「次数,间隔秒」停机回读（默认 12,5）；DT_NIGHT_PROCWAIT「次数,间隔秒」
 停机后等执行器里 agent 进程自己退出（默认 6,5）。
 """
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -51,7 +55,10 @@ from pathlib import Path
 
 MULTICA = os.environ.get("DT_MULTICA_CLI", "multica")
 GH = os.environ.get("DT_GH_CLI", "gh")
-ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
+# 名册和保护基线只从名册仓库已合并的 origin/main 读（git show），不读工作区（PR #175 第 2 轮 P1-03）
+ROSTER_REPO = Path(os.environ.get("DT_ROSTER_REPO", "~/Documents/ChatGPT/个人/work/digital-twin")).expanduser()
+ROSTER_REF = "origin/main"
+ROSTER_FILE = "projects.json"
 ROOT = Path(os.environ.get("DT_NIGHT_ROOT", "~/Library/Application Support/DigitalTwin/runs")).expanduser()
 BJ = dt.timezone(dt.timedelta(hours=8))
 UTC = dt.timezone.utc
@@ -226,6 +233,10 @@ def validate(plan):
     if not (isinstance(ex, dict) and isinstance(ex.get("docker"), list) and ex["docker"] and isinstance(ex.get("container"), str)
             and ex["container"]):
         errs.append("缺 executor（docker 命令前缀、container 容器名）：停机要到执行器里独立核对进程（M5 #25）")
+    elif not (isinstance(ex.get("github_login"), str) and ex["github_login"]):
+        errs.append("缺 executor.github_login（执行器里应登录的 GitHub 机器账号）：开跑前要核对身份（#172）")
+    if not (isinstance(plan.get("repo"), str) and "/" in plan["repo"]):
+        errs.append("缺 repo（owner/name）")
     if errs:
         return errs
     keys, stages = [], set()
@@ -574,11 +585,16 @@ def final_export(night):
     return None, [rid for rid, rec in night.state.get("runs", {}).items() if rec.get("status") in ACTIVE]
 
 
-def stop(night, reasons, finished=False, unclear=False):
+def stop(night, reasons, finished=False, unclear=False, distrust=False):
     """5.3a 停机。返回要打印的文字；没停干净就冻结。任何一步出错都只记下来、接着做后面的步骤，最后由回读判定。
-    unclear：触发原因本身就是 run 记录核不清。这时“现在看得见的 run 都结束了”证明不了“全部 run 都结束了”，回读通过也冻结。"""
+    unclear：触发原因本身就是 run 记录核不清。这时“现在看得见的 run 都结束了”证明不了“全部 run 都结束了”，回读通过也冻结。
+    distrust：触发原因是执行器身份闸没通过（#174）。执行器本身不可信，回读通过也冻结（停容器），等常浩核对。"""
     st, errs = night.state, []
-    st["stopping"] = {"at": iso(now()), "reasons": reasons, "finished": finished, "unclear": unclear}
+    prev = st.get("stopping") or {}      # 上次停机做到一半（含异常兜底重来）：unclear、distrust 只能升级不能降级（第 2 轮 P1-02）
+    unclear = bool(unclear or prev.get("unclear"))
+    distrust = bool(distrust or prev.get("distrust") or st.get("distrust"))
+    finished = bool(finished and not distrust)
+    st["stopping"] = {"at": iso(now()), "reasons": reasons, "finished": finished, "unclear": unclear, "distrust": distrust}
     night.save()
     night.log("stop_begin", reasons=reasons, finished=finished)
     fam = night.family()
@@ -619,6 +635,8 @@ def stop(night, reasons, finished=False, unclear=False):
     ok, left = readback(night, errs)   # ⑥ 回读
     if ok and unclear:
         ok, left = False, ["触发原因是 run 记录核不清，回读看得见的 run 都已终态也证明不了全部已终止"]
+    if ok and distrust:
+        ok, left = False, ["触发原因是执行器身份闸没通过，执行器不可信，停容器等常浩核对"]
     night.log("stop_readback", ok=ok, left=left, errors=errs)
     gap, late = final_export(night)    # ⑦ 最后一次导出（成功、冻结都做），结果纳入判定
     if ok and late:                    # 回读之后又冒出在跑的 run：再取消、再回读、再导出一次
@@ -688,17 +706,36 @@ def readback(night, errs):
     return False, left
 
 
-def hard_freeze(plan):
-    """停执行器（freeze_cmds），再用 freeze_check 独立回读：容器真的停了、也不会自动重启才算 verified。
-    只依赖计划和本机命令，不碰夜跑状态，应急路径也用它。返回 (各命令结果, verified, 回读输出)。"""
+def freeze_spec():
+    """冻结用的命令和回读：完全不看计划（计划可能已被改过），只按名册（origin/main）里唯一带 executor_gate 的沙盒条目生成
+    （PR #175 第 2、3 轮 P1-01）。名册读不到、没有或不止一个这样的条目时，不执行任何命令（trusted=False），由调用方告警请人手动停。
+    返回 (命令列表, 回读, trusted)。"""
+    try:
+        d = committed_json(ROSTER_FILE)
+        cands = [e for e in d.get("projects", []) + d.get("inventory", [])
+                 if isinstance(e, dict) and e.get("sandbox") is True and isinstance(e.get("executor_gate"), dict)]
+        if len(cands) != 1:
+            raise Unclear(f"名册里带 executor_gate 的沙盒条目有 {len(cands)} 个")
+        g = trusted_gate(cands[0])
+    except Exception:            # noqa: BLE001 —— 没有可信的停容器命令：一条都不执行
+        return [], {}, False
+    dk, c = list(g["docker"]), g["container"]
+    return ([dk + ["update", "--restart=no", c], dk + ["stop", c]],
+            {"cmd": dk + ["inspect", "-f", "{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}", c], "expect": "false no"}, True)
+
+
+def hard_freeze():
+    """停执行器，再独立回读：容器真的停了、也不会自动重启才算 verified。命令和回读只来自名册（freeze_spec），不看计划。
+    不碰夜跑状态，应急路径也用它。返回 (各命令结果, verified, 回读输出)。"""
+    cmds, chk, trusted = freeze_spec()
     results = []
-    for cmd in plan.get("freeze_cmds", []):
+    for cmd in cmds:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
             results.append({"cmd": cmd, "code": r.returncode, "out": (r.stderr or r.stdout).strip()[:200]})
         except Exception as e:   # noqa: BLE001 —— 一条命令出问题，后面的照样执行
             results.append({"cmd": cmd, "code": None, "out": type(e).__name__})
-    chk, seen = plan.get("freeze_check") or {}, ""
+    seen = ""
     if chk.get("cmd"):
         try:
             r = subprocess.run(chk["cmd"], capture_output=True, text=True, timeout=TIMEOUT)
@@ -708,6 +745,8 @@ def hard_freeze(plan):
             seen, verified = type(e).__name__, False
     else:
         verified = False         # 没有独立回读手段，就不能说已经冻住
+    if not trusted:
+        verified, seen = False, "名册里的执行器配置读不到，没执行任何停容器命令"
     return results, verified, seen
 
 
@@ -717,14 +756,14 @@ def freeze_lines(night, results, verified, seen):
     bad = [" ".join(r["cmd"]) for r in results if r["code"] != 0]
     out = ["⚠️ 执行器没确认停住" + (f"，失败的命令：{'；'.join(bad)}" if bad else "") + f"（回读：{seen or '无'}）。"
            "每次检查都会再试一次；请尽快手动停容器。"]
-    if not night.plan.get("freeze_cmds"):
-        out.append("⚠️ 计划里没有 freeze_cmds。")
+    if not freeze_spec()[2]:
+        out.append("⚠️ 名册里的执行器配置读不到，没执行任何停容器命令（不用计划里的命令），请立刻手动停隔离执行器容器。")
     return out
 
 
 def freeze(night, reasons, problems):
     st = night.state
-    results, verified, seen = hard_freeze(night.plan)
+    results, verified, seen = hard_freeze()
     st.update(frozen=True, freeze_verified=verified, outcome="UNRECONCILED", ended_at=iso(now()))
     st.pop("stopping", None)
     night.save()
@@ -891,24 +930,666 @@ def alarm_once(night, kind, text):
 
 # ---------- 命令 ----------
 
-def roster_gate(plan):
-    """5.3：无人值守只在名册里标了 sandbox: true、且登记了同一个 Multica 工作区的项目里跑。"""
+# ---------- 运行前身份闸（#172 / #174，#135 文档第五节 3；PR #175 第 2 轮返修） ----------
+# 信任基准不由计划自己定（P1-01）：允许的 GitHub 账号、执行器容器（docker 命令前缀、容器名、compose project / service）、
+# dt-sandbox 规则集和 main 分支保护的基线，都放在名册 dt-sandbox 那一条的 executor_gate 里（基线文件路径相对名册），
+# 改它们要走 PR。计划里的值和名册不一致就拒绝；查执行器一律用名册里的 docker 前缀和容器名，不用计划里的。
+# 开跑时记下计划摘要（定时开跑在批准时记），之后每次放 stage 都核对计划没改过。
+# 每次放出 stage 之前都重跑一遍（P1-05）：开跑、tick 推进、异常后的补推进；不通过就按 5.3a 停机并冻结执行器。
+# 两次检查之间的空档靠「容器里拿不到高权限凭据」（compose 只挂了 agent_home 卷，没有挂载宿主目录）。
+# Multica-local 的「E2-2 登录GitHub沙盒令牌」脚本和 runtime/login-gh.sh 仍可能引导用常浩账号登录容器：这在仓库外，
+# 本闸只能在下一次放 stage 前发现，不能阻止；见 #135 文档第五节 3 的「落地」。
+# 判定一律 fail-closed：任何一项不符、读不到、格式不对、本身出异常，都不放。拒绝原因只写违规类型、配置名和来源，
+# 不回显凭据助手原文、认证头等值；外部命令的报错统一脱敏、截短（P2-03）。
+
+_SECRET = re.compile(r"://[^/\s@]+@|gh[pousr]_[A-Za-z0-9_]{6,}|github_pat_[A-Za-z0-9_]{6,}"
+                     r"|(?i:authorization|bearer|basic|token|password)[\s:=]+\S+|[A-Za-z0-9+=_\-]{32,}")
+
+
+def scrub(s, n=160):
+    """外部命令的报错：压成一行，凭据样式的片段换成 <略>，截短。"""
+    return _SECRET.sub(lambda m: "://<略>@" if m.group(0).startswith("://") else "<略>", " ".join(str(s or "").split()))[:n]
+
+
+def plan_digest(plan):
+    return hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def committed_json(rel):
+    """名册仓库已合并版本（origin/main）里的 JSON 文件。读不到、不是 JSON 都抛 Unclear。
+    只认提交过、合并到 main 的内容：工作区里没提交的改动、另一份文件都不算数。"""
     try:
-        d = load(ROSTER)
-    except (OSError, ValueError) as e:
-        return f"读不了名册（{type(e).__name__}）"
+        r = subprocess.run(["git", "-C", str(ROSTER_REPO), "show", f"{ROSTER_REF}:{rel}"], capture_output=True, text=True,
+                           timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Unclear(f"读不了 {ROSTER_REF} 上的 {rel}（{type(e).__name__}）") from e
+    if r.returncode != 0:
+        raise Unclear(f"读不了 {ROSTER_REF} 上的 {rel}（退出码 {r.returncode}）")
+    try:
+        return json.loads(r.stdout)
+    except ValueError as e:
+        raise Unclear(f"{ROSTER_REF} 上的 {rel} 不是 JSON") from e
+
+
+def trusted_entry(plan):
+    """名册里这个仓库那一条：要标了 sandbox: true、登记了同一个 Multica 工作区。返回 (条目, 问题)。"""
+    try:
+        d = committed_json(ROSTER_FILE)
+        if not isinstance(d, dict):
+            raise Unclear("名册格式不对")
+    except Unclear as e:
+        return None, f"读不了名册：{e}"
     want = "github:" + str(plan.get("repo"))
     for e in d.get("projects", []) + d.get("inventory", []):
-        if want in (e.get("path"), "github:" + str(e.get("github"))):
-            if e.get("sandbox") is True and e.get("multica_workspace") == plan["workspace_id"]:
-                return None
-            return f"名册里的 {plan.get('repo')} 没标 sandbox: true 或工作区不符"
-    return f"名册里没有 {plan.get('repo')}"
+        if isinstance(e, dict) and want in (e.get("path"), "github:" + str(e.get("github"))):
+            if e.get("sandbox") is True and e.get("multica_workspace") == plan.get("workspace_id"):
+                return e, None
+            return None, f"名册里的 {plan.get('repo')} 没标 sandbox: true 或工作区不符"
+    return None, f"名册里没有 {plan.get('repo')}"
 
 
-def preflight(night):
-    gate = roster_gate(night.plan)
-    why = [gate] if gate else []
+def roster_gate(plan):
+    """5.3：无人值守只在名册里标了 sandbox: true、且登记了同一个 Multica 工作区的项目里跑。"""
+    return trusted_entry(plan)[1]
+
+
+def trusted_gate(entry):
+    """名册条目里的 executor_gate（受信任的执行器身份配置）：字段齐全、类型对，否则抛 Unclear。"""
+    g = entry.get("executor_gate")
+    if not isinstance(g, dict):
+        raise Unclear("名册里没有 executor_gate（受信任的执行器身份配置）")
+    for k in ("github_login", "container", "compose_project", "compose_service", "protection_baseline", "workspaces_root"):
+        if not (isinstance(g.get(k), str) and g[k]):
+            raise Unclear(f"名册 executor_gate.{k} 缺失或类型不对")
+    if not (isinstance(g.get("docker"), list) and g["docker"] and all(isinstance(x, str) and x for x in g["docker"])):
+        raise Unclear("名册 executor_gate.docker 缺失或类型不对")
+    if not g["workspaces_root"].startswith("/"):
+        raise Unclear("名册 executor_gate.workspaces_root 要是容器里的绝对路径")
+    return g
+
+
+def plan_vs_trusted(plan, g):
+    ex = plan.get("executor") or {}
+    return [f"计划的 executor.{k} 和名册 executor_gate 不一致" for k in ("github_login", "docker", "container") if ex.get(k) != g[k]]
+
+
+def _run(cmd, what, timeout=TIMEOUT):
+    """跑一条宿主命令，失败、超时都抛 Unclear（报错脱敏）。"""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Unclear(f"{what}失败：{type(e).__name__}") from e
+    if r.returncode != 0:
+        raise Unclear(f"{what}失败（退出码 {r.returncode}）：{scrub(r.stderr or r.stdout)}")
+    return r.stdout
+
+
+def json_pages(text):
+    """gh api --paginate 把每页的 JSON 依次拼在一起输出（数组页之间没有分隔）：逐个解析，返回页列表。"""
+    dec, i, out, t = json.JSONDecoder(), 0, [], (text or "").strip()
+    while i < len(t):
+        obj, i = dec.raw_decode(t, i)
+        out.append(obj)
+        while i < len(t) and t[i].isspace():
+            i += 1
+    return out
+
+
+def container_problems(g):
+    """被检查的容器就是 Multica-local 的隔离执行器：compose project / service 标签对得上，且是这个服务唯一的容器。"""
+    docker, name = list(g["docker"]), g["container"]
+    raw = _run(docker + ["inspect", "-f", "{{json .Config.Labels}}", name], "核对执行器容器标签").strip()
+    try:
+        labels = json.loads(raw)
+    except ValueError as e:
+        raise Unclear("核对执行器容器标签失败：输出读不懂") from e
+    if not isinstance(labels, dict):
+        raise Unclear("核对执行器容器标签失败：输出读不懂")
+    out = [f"执行器容器 {name} 的标签 {k} 不是 {v}" for k, v in (("com.docker.compose.project", g["compose_project"]),
+                                                          ("com.docker.compose.service", g["compose_service"]),
+                                                          ("com.docker.compose.oneoff", "False")) if labels.get(k) != v]
+    names = _run(docker + ["ps", "-a", "--filter", f"label=com.docker.compose.project={g['compose_project']}",
+                           "--filter", f"label=com.docker.compose.service={g['compose_service']}", "--format", "{{.Names}}"],
+                 "列执行器服务的容器").split()
+    if names != [name]:
+        out.append(f"compose 服务 {g['compose_project']}/{g['compose_service']} 的容器不是只有 {name}：" + "、".join(names[:5]))
+    return out
+
+
+RULESET_KEYS = ("id", "name", "target", "source_type", "source", "enforcement", "conditions", "rules", "bypass_actors")
+
+
+def strip_urls(o):
+    if isinstance(o, dict):
+        return {k: strip_urls(v) for k, v in o.items() if k not in ("url", "contexts_url")}
+    if isinstance(o, list):
+        return [strip_urls(x) for x in o]
+    return o
+
+
+def load_baseline(g, repo):
+    """名册 executor_gate.protection_baseline 指向的基线（名册仓库里的路径，同样只读 origin/main）；读不了、格式不对都抛 Unclear。"""
+    try:
+        b = committed_json(g["protection_baseline"])
+    except Unclear as e:
+        raise Unclear(f"读不了保护基线：{e}") from e
+    ok = (isinstance(b, dict) and str(b.get("repo", "")).lower() == repo.lower() and isinstance(b.get("rulesets"), list)
+          and b["rulesets"] and all(isinstance(r, dict) and type(r.get("id")) is int for r in b["rulesets"])
+          and isinstance(b.get("branch_protection"), dict) and b["branch_protection"]
+          and all(isinstance(v, dict) for v in b["branch_protection"].values()))
+    if not ok:
+        raise Unclear(f"保护基线 {g['protection_baseline']} 格式不对或不是 {repo} 的")
+    return b
+
+
+def _host_api(path, paginate=False):
+    """宿主用常浩的 gh 只读（GET）。返回页列表；读不到、读不懂都抛 Unclear。"""
+    out = _run([GH, "api", path] + (["--paginate"] if paginate else []), f"宿主读 {path} ")
+    try:
+        pages = json_pages(out)
+    except ValueError as e:
+        raise Unclear(f"宿主读 {path} 失败：输出读不懂") from e
+    if not pages or (not paginate and len(pages) != 1):
+        raise Unclear(f"宿主读 {path} 失败：输出读不懂")
+    return pages
+
+
+def protection_problems(repo, base):
+    """P1-02：宿主只读核对 dt-sandbox 的规则集（内容、enforcement、作用分支、bypass_actors）和分支保护，和基线比对。"""
+    pages = _host_api(f"repos/{repo}/rulesets", paginate=True)
+    if not all(isinstance(p, list) for p in pages):
+        raise Unclear(f"宿主读 {repo} 的规则集列表失败：输出读不懂")
+    ids = []
+    for x in (x for p in pages for x in p):
+        if not (isinstance(x, dict) and type(x.get("id")) is int):
+            raise Unclear(f"宿主读 {repo} 的规则集列表失败：输出读不懂")
+        ids.append(x["id"])
+    want = {r["id"]: r for r in base["rulesets"]}
+    out = []
+    if sorted(ids) != sorted(want):
+        out.append(f"{repo} 的规则集和基线不一致：现有 {sorted(ids)[:6]}，基线 {sorted(want)}")
+    for rid in sorted(set(ids) & set(want)):
+        live = _host_api(f"repos/{repo}/rulesets/{rid}")[0]
+        if not isinstance(live, dict):
+            raise Unclear(f"宿主读规则集 {rid} 失败：输出读不懂")
+        diff = [k for k in RULESET_KEYS if live.get(k) != want[rid].get(k)]
+        if diff:
+            out.append(f"规则集 {rid} 的 {'、'.join(diff)} 和基线不一致")
+    for br, wp in sorted(base["branch_protection"].items()):
+        live = _host_api(f"repos/{repo}/branches/{br}/protection")[0]
+        if not isinstance(live, dict):
+            raise Unclear(f"宿主读 {br} 分支保护失败：输出读不懂")
+        live = strip_urls(live)
+        diff = sorted(k for k in set(live) | set(wp) if live.get(k) != wp.get(k))
+        if diff:
+            out.append(f"{br} 分支保护的 {'、'.join(diff[:6])} 和基线不一致")
+    return out
+
+
+# 在执行器里只收集事实，不判断、不打印令牌：gh 身份、对 repo 的权限、规则集（分页）和各自的绕过状态、能访问的仓库（分页）、
+# gh 登录状态（先试 gh auth status --json hosts；容器里 gh 2.23 不支持，再按白名单结构解析 hosts.yml，只取主机、账号和键名）、
+# 凭据相关环境变量名、凭据文件、git 有效配置（system / global，加 MULTICA_WORKSPACES_ROOT 下每个仓库的 local / worktree；
+# 只带出凭据助手、include.path 和 remote 地址的值，地址里的账号密码先去掉）。工作区不限深度遍历（上限 20000 个目录），
+# 不跟符号链接，进到仓库后只跳过 .git（裸仓库整个跳过），嵌套仓库照样查；指向仓库的符号链接、根目录不存在都记为错误。每项失败都记进 errors 接着收集，最后打印一行 JSON。
+IDENT_SCRIPT = r"""
+python3 - "$1" "$2" <<'PY'
+import json, os, re, subprocess, sys
+repo, root = sys.argv[1], sys.argv[2]
+f = {"v": 2, "errors": []}
+SECRET = re.compile(r"://[^/\s@]+@|gh[pousr]_[A-Za-z0-9_]{6,}|github_pat_[A-Za-z0-9_]{6,}|(?i:authorization|bearer|basic|token|password)[\s:=]+\S+|[A-Za-z0-9+=_\-]{32,}")
+def scrub(s):
+    return SECRET.sub("<略>", " ".join(str(s or "").split()))[:160]
+def err(what, code, msg):
+    f["errors"].append({"what": what, "code": code, "msg": scrub(msg)})
+def run(cmd, what, cwd=None):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=40, cwd=cwd)
+    except Exception as e:
+        err(what, None, type(e).__name__)
+        return None
+    if r.returncode != 0:
+        err(what, r.returncode, r.stderr or r.stdout)
+        return None
+    return r.stdout
+def pages(text, what):
+    dec, i, out, t = json.JSONDecoder(), 0, [], text.strip()
+    try:
+        while i < len(t):
+            o, i = dec.raw_decode(t, i)
+            out.append(o)
+            while i < len(t) and t[i].isspace():
+                i += 1
+    except ValueError:
+        err(what, None, "输出不是 JSON")
+        return None
+    return out
+def api1(path, what):
+    out = run(["gh", "api", path], what)
+    p = None if out is None else pages(out, what)
+    if p is None:
+        return None
+    if len(p) != 1:
+        err(what, None, "输出不是一份 JSON")
+        return None
+    return p[0]
+def api_list(path, what):
+    out = run(["gh", "api", path, "--paginate"], what)
+    p = None if out is None else pages(out, what)
+    if p is None:
+        return None
+    if not all(isinstance(x, list) for x in p):
+        err(what, None, "分页输出不是数组")
+        return None
+    return [x for page in p for x in page]
+
+u = api1("user", "gh api user")
+if u is not None:
+    f["login"] = u.get("login") if isinstance(u, dict) else None
+r = api1("repos/" + repo, "gh api repos/" + repo)
+if r is not None:
+    f["permissions"] = r.get("permissions") if isinstance(r, dict) else None
+rs = api_list("repos/" + repo + "/rulesets", "gh api 规则集列表")
+if rs is not None:
+    f["rulesets"] = []
+    for x in rs[:200]:
+        rid = x.get("id") if isinstance(x, dict) else None
+        d = api1("repos/" + repo + "/rulesets/" + str(rid), "gh api 规则集 " + str(rid)) if type(rid) is int else None
+        f["rulesets"].append({"id": rid, "bypass": d.get("current_user_can_bypass") if isinstance(d, dict) else None})
+    if len(rs) > 200:
+        err("gh api 规则集列表", None, "规则集超过 200 个")
+repos = api_list("user/repos", "gh api user/repos")
+if repos is not None:
+    f["repos"] = [x.get("full_name") if isinstance(x, dict) else None for x in repos]
+v = run(["gh", "--version"], "gh --version")
+if v is not None:
+    f["gh_version"] = (v.strip().splitlines() or [""])[0]
+f["gh_json"], f["gh_json_unsupported"] = None, False
+try:
+    a = subprocess.run(["gh", "auth", "status", "--json", "hosts"], capture_output=True, text=True, timeout=40)
+    if a.returncode != 0:
+        if "unknown flag: --json" in (a.stderr + a.stdout):     # 只有明确是旧版不支持，才退回解析 hosts.yml
+            f["gh_json_unsupported"] = True
+        else:
+            err("gh auth status --json hosts", a.returncode, a.stderr or a.stdout)
+    else:
+        try:
+            j = json.loads(a.stdout)
+        except ValueError:
+            j = None
+        if isinstance(j, dict) and isinstance(j.get("hosts"), dict):
+            f["gh_json"] = {"hosts": {h: ([{k: e.get(k) for k in ("state", "active", "host", "login", "tokenSource")} if isinstance(e, dict)
+                                           else None for e in l] if isinstance(l, list) else None) for h, l in j["hosts"].items()}}
+        else:
+            err("gh auth status --json hosts", 0, "输出读不懂")
+except Exception as e:
+    err("gh auth status --json hosts", None, type(e).__name__)
+def parse_hosts(txt):
+    hosts, cur, l1, l2, in_users = {}, None, None, None, False
+    for raw in txt.splitlines():
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        ind = len(raw) - len(raw.lstrip(" "))
+        if raw[ind:ind + 1] == "\t":
+            raise ValueError("tab")
+        m = re.fullmatch(r"([^\s:#\"'][^:]*):(?:\s+(\S.*))?", s)
+        if not m:
+            raise ValueError("line")
+        k, val = m.group(1), m.group(2)
+        if ind == 0:
+            if val is not None or k in hosts:
+                raise ValueError("host")
+            cur, l1, in_users = hosts.setdefault(k, {"user": None, "users": [], "keys": [], "user_keys": []}), None, False
+        elif cur is None:
+            raise ValueError("indent")
+        elif l1 is None or ind == l1:
+            l1, in_users = ind, False
+            cur["keys"].append(k)
+            if k == "user":
+                if val is None:
+                    raise ValueError("user")
+                cur["user"] = val.strip("\"'")
+            elif k == "users":
+                if val is not None:
+                    raise ValueError("users")
+                in_users, l2 = True, None
+        elif in_users and ind > l1:
+            if l2 is None:
+                l2 = ind
+            if ind == l2:
+                if val is not None and val != "{}":
+                    raise ValueError("users entry")
+                cur["users"].append(k)
+            elif ind > l2:
+                cur["user_keys"].append(k)
+            else:
+                raise ValueError("indent")
+        else:
+            raise ValueError("indent")
+    return hosts
+hp = os.path.expanduser("~/.config/gh/hosts.yml")
+f["gh_file"] = {"exists": os.path.exists(hp)}
+if f["gh_file"]["exists"]:
+    try:
+        f["gh_file"]["hosts"] = parse_hosts(open(hp, encoding="utf-8").read())
+    except Exception as e:
+        err("解析 ~/.config/gh/hosts.yml", None, "结构不认识（" + str(e)[:20] + "）")
+def watched(k):
+    u = k.upper()
+    return (u.startswith(("GH_", "GITHUB_", "GIT_", "SSH_")) or "GITHUB" in u or u == "XDG_CONFIG_HOME"
+            or any(w in u for w in ("TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "ASKPASS")))
+f["env_names"] = sorted(k for k in os.environ if watched(k))
+home = os.path.expanduser("~")
+cands = [".git-credentials", ".netrc", "_netrc", ".config/git/credentials", ".cache/git/credential", ".git-credential-cache", ".config/hub"]
+f["cred_files"] = ["~/" + c for c in cands if os.path.lexists(os.path.join(home, c))]
+ssh = os.path.join(home, ".ssh")
+if os.path.isdir(ssh):
+    try:
+        f["cred_files"] += ["~/.ssh/" + n for n in sorted(os.listdir(ssh))
+                            if not (n.endswith(".pub") or n.startswith("known_hosts") or n in ("config", "authorized_keys"))]
+    except OSError as e:
+        err("列 ~/.ssh", None, type(e).__name__)
+def gitconf(args, what, where, keep):
+    out = run(["git"] + args + ["config", "--list", "--show-origin", "--show-scope", "-z"], what, cwd="/")
+    if out is None:
+        return
+    parts = out.split("\0")
+    if parts and parts[-1] == "":
+        parts.pop()
+    if len(parts) % 3:
+        err(what, None, "输出读不懂")
+        return
+    for i in range(0, len(parts), 3):
+        scope, origin, kv = parts[i:i + 3]
+        if keep and scope not in keep:
+            continue
+        key, _, val = kv.partition("\n")
+        e = {"scope": scope, "origin": origin[-400:], "key": key, "where": where}
+        lk = key.lower()
+        if lk.startswith("credential.") and lk.endswith(".helper") or lk == "credential.helper" or lk == "include.path":
+            e["value"] = val
+        elif re.fullmatch(r"remote\..+\.(url|pushurl)", lk):
+            e["userinfo"] = bool(re.search(r"://[^/@]*@", val))
+            e["value"] = re.sub(r"://[^/@]*@", "://", val)
+        f["git"].append(e)
+f["git"] = []
+gitconf([], "git config（system / global）", "", None)
+f["ws_root"], f["ws_env"] = root, os.environ.get("MULTICA_WORKSPACES_ROOT")
+found = []
+if not os.path.isdir(root) or os.path.islink(root):
+    err("列工作区", None, "工作区根目录不存在或是符号链接")
+else:
+    def is_repo(d, dns=None, fns=None):
+        if dns is None:
+            return os.path.exists(os.path.join(d, ".git")) or (os.path.isfile(os.path.join(d, "HEAD"))
+                                                                 and os.path.isdir(os.path.join(d, "objects")))
+        return ".git" in dns or ".git" in fns or ("HEAD" in fns and "objects" in dns and "refs" in dns)
+    walked = 0
+    for dp, dns, fns in os.walk(root, onerror=lambda e: err("列工作区", None, type(e).__name__)):
+        walked += 1
+        if walked > 20000:         # 不限深度；目录多到这个数就判为扫不全（2026-11-14 真机 539 个）
+            err("列工作区", None, "目录超过 20000 个，扫不全")
+            break
+        if is_repo(dp, dns, fns):
+            found.append(dp)       # 仓库本身由 git config 查；普通子目录照常往下扫，嵌套的仓库也要查（第 3 轮 P1-02）
+            if ".git" in dns or ".git" in fns:
+                dns[:] = [d for d in dns if d != ".git"]
+            else:
+                dns[:] = []        # 裸仓库里只有 git 自己的目录
+                continue
+        links = [d for d in dns if os.path.islink(os.path.join(dp, d))]
+        bad = [d for d in links if is_repo(os.path.join(dp, d))]
+        if bad:                    # 符号链接不跟进去；直接指向仓库的，等于有仓库没扫到
+            err("列工作区", None, "有指向仓库的目录符号链接，扫不全：" + "、".join(bad[:3]))
+        dns[:] = [d for d in dns if d not in links]
+        if len(found) > 300:
+            err("列工作区", None, "仓库超过 300 个")
+            break
+for d in found[:300]:
+    gitconf(["-C", d], "git config（" + d[-80:] + "）", d[-120:], ("local", "worktree"))
+f["git_repos"] = len(found)
+print(json.dumps(f, ensure_ascii=False))
+PY
+"""
+
+
+def executor_identity(g, repo):
+    """在执行器（名册里的 docker 前缀和容器）里收集 GitHub 身份事实。命令失败、超时、输出读不懂都抛 Unclear。"""
+    out = _run(list(g["docker"]) + ["exec", g["container"], "bash", "-c", IDENT_SCRIPT, "ident", repo, g["workspaces_root"]],
+               "核对执行器 GitHub 身份", timeout=TIMEOUT * 3)
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError) as e:
+        raise Unclear("核对执行器 GitHub 身份失败：输出读不懂") from e
+
+
+GH_HELPER_KEYS = {"credential.helper", "credential.https://github.com.helper", "credential.https://gist.github.com.helper"}
+GH_HELPER_OK = {"", "!/usr/bin/gh auth git-credential"}
+GH_TOKEN_SOURCES = {"oauth_token", "keyring"}                 # gh auth status --json 的 tokenSource：配置文件、钥匙串
+GH_FILE_KEYS = {"user", "oauth_token", "git_protocol", "users"}
+ENV_OK = {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}   # compose 里定的提交身份
+GIT_SCOPES = {"system", "global", "local", "worktree"}
+# Multica 给每个工作树写的提交身份：config.worktree 里 include.path = multica-identity.config（只有 user / author / committer
+# 的 name、email）。git config --list 已把被引入的条目连同来源列出来、照样判定。只放行这一种写法：include 要在工作区根目录下
+# 某个 worktrees/<名>/config.worktree 里；从这个文件引入的条目只能是这 6 个身份键，来源要是同一目录（2026-11-14 真机核对）。
+MULTICA_INCLUDE = "multica-identity.config"
+IDENTITY_KEYS = {"user.name", "user.email", "author.name", "author.email", "committer.name", "committer.email"}
+PERM_KEYS = ("admin", "maintain", "push", "triage", "pull")
+
+
+def _is_str_list(x):
+    return isinstance(x, list) and all(isinstance(i, str) for i in x)
+
+
+def check_facts(f):
+    """P2-02：先做 schema 校验，缺字段、类型不对都抛 Unclear（不让异常逃出去，也不拿半截事实去判）。"""
+    def bad(field):
+        raise Unclear(f"执行器身份事实格式不对：{field}")
+    if not isinstance(f, dict) or f.get("v") != 2:
+        bad("版本")
+    if not (isinstance(f.get("errors"), list) and all(isinstance(e, dict) and isinstance(e.get("what"), str) for e in f["errors"])):
+        bad("errors")
+    if f["errors"]:
+        return
+    if not isinstance(f.get("login"), str):
+        bad("login")
+    if not isinstance(f.get("permissions"), dict):
+        bad("permissions")
+    if not (isinstance(f.get("rulesets"), list) and all(isinstance(r, dict) for r in f["rulesets"])):
+        bad("rulesets")
+    if not isinstance(f.get("repos"), list):
+        bad("repos")
+    gj = f.get("gh_json")
+    if gj is not None:
+        if not (isinstance(gj, dict) and isinstance(gj.get("hosts"), dict) and all(isinstance(v, list) for v in gj["hosts"].values())):
+            bad("gh_json")
+        for l in gj["hosts"].values():      # 第 2 轮 P2-02：每条账号记录的关键字段类型都要对
+            for e in l:
+                if not (isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("host", "login", "state", "tokenSource"))
+                        and isinstance(e.get("active"), bool)):
+                    bad("gh_json 账号记录")
+    if not isinstance(f.get("gh_json_unsupported"), bool):
+        bad("gh_json_unsupported")
+    gf = f.get("gh_file")
+    if not (isinstance(gf, dict) and isinstance(gf.get("exists"), bool) and (not gf["exists"] or isinstance(gf.get("hosts"), dict))):
+        bad("gh_file")
+    for h in (gf.get("hosts") or {}).values():
+        if not (isinstance(h, dict) and (h.get("user") is None or isinstance(h["user"], str))
+                and all(_is_str_list(h.get(k)) for k in ("users", "keys", "user_keys"))):
+            bad("gh_file.hosts")
+    for k in ("env_names", "cred_files"):
+        if not _is_str_list(f.get(k)):
+            bad(k)
+    if not (isinstance(f.get("git"), list) and all(isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("scope", "origin", "key", "where"))
+                                                   for e in f["git"])):
+        bad("git")
+    if not (isinstance(f.get("ws_root"), str) and (f.get("ws_env") is None or isinstance(f["ws_env"], str))
+            and type(f.get("git_repos")) is int):
+        bad("工作区")
+
+
+GIT_KNOWN_SECTIONS = {"credential", "include", "includeif", "url", "core", "http", "remote", "user", "author", "committer"}
+GIT_KNOWN_VARS = {"helper", "username", "usehttppath", "path", "insteadof", "pushinsteadof", "askpass", "sshcommand", "extraheader",
+                  "cookiefile", "sslcert", "sslkey", "sslcertpasswordprotected", "url", "pushurl", "name", "email"}
+
+
+def _key_class(key):
+    """git 配置键只报类别（第 2、3 轮 P1-05 / P2-01）：子节（URL、remote 名）一律写成 <…>；节名、变量名不在固定白名单里的
+    写成 <未知节> / <未知项>，不保留任何原始字段名。"""
+    parts = key.lower().split(".")
+    sec = parts[0] if parts[0] in GIT_KNOWN_SECTIONS else "<未知节>"
+    var = parts[-1] if len(parts) > 1 and parts[-1] in GIT_KNOWN_VARS else "<未知项>"
+    return f"{sec}.<…>.{var}" if len(parts) > 2 else f"{sec}.{var}"
+
+
+def _git_where(e):
+    return f"{scrub(e['scope'], 20)}，{scrub(e['origin'], 100)}"
+
+
+def git_problems(f, repo, root):
+    """P1-04：git 有效配置里不认识的凭据来源（凭据助手、认证头、证书、改写地址、引入文件、认证程序）和不指向 repo 的远端。
+    原因里只写违规类型、配置类别、作用域和来源文件，不写配置值和子节。"""
+    remote_ok = re.compile(r"https://github\.com/" + re.escape(repo) + r"(\.git)?/?", re.I)
+    wt = re.compile(r"file:" + re.escape(root.rstrip("/")) + r"/.+/worktrees/[^/]+/")
+    def multica_include(e):
+        return (e["key"].lower() == "include.path" and e["scope"] in ("local", "worktree") and e.get("value") == MULTICA_INCLUDE
+                and e["origin"].endswith("/config.worktree") and bool(wt.match(e["origin"])))
+    idents = {(e["where"], e["origin"][:-len("config.worktree")]) for e in f["git"] if multica_include(e)}
+    out = []
+    for e in f["git"]:
+        k, where, kc = e["key"].lower(), _git_where(e), _key_class(e["key"])
+        last = k.rsplit(".", 1)[-1]
+        if e["origin"].endswith("/" + MULTICA_INCLUDE):       # 从 Multica 身份文件引入的条目：只能是 6 个身份键，来源要对得上
+            if not (e["scope"] in ("local", "worktree") and k in IDENTITY_KEYS
+                    and (e["where"], e["origin"][:-len(MULTICA_INCLUDE)]) in idents):
+                out.append(f"Multica 身份文件里有身份以外的配置或来源不对：{kc}（{where}）")
+            continue
+        if e["scope"] not in GIT_SCOPES:
+            out.append(f"git 配置来源不认识：{kc}（{where}）")
+        elif k.startswith("credential."):
+            if not (k in GH_HELPER_KEYS and e.get("value") in GH_HELPER_OK):
+                out.append(f"git 凭据配置不认识：{kc}（{where}）")
+        elif multica_include(e):
+            pass
+        elif k.startswith(("include.", "includeif.")):
+            out.append(f"git 配置引入了其他文件：{kc}（{where}）")
+        elif k.startswith("url.") and last in ("insteadof", "pushinsteadof"):
+            out.append(f"git 配置改写了远端地址：{kc}（{where}）")
+        elif k in ("core.askpass", "core.sshcommand"):
+            out.append(f"git 配置指定了认证程序：{kc}（{where}）")
+        elif k.startswith("http.") and last in ("extraheader", "cookiefile", "sslcert", "sslkey", "sslcertpasswordprotected"):
+            out.append(f"git 配置了认证头、cookie 或客户端证书：{kc}（{where}）")
+        elif re.fullmatch(r"remote\..+\.(url|pushurl)", k):
+            if e.get("userinfo") is not False or not isinstance(e.get("value"), str) or not remote_ok.fullmatch(e["value"]):
+                out.append(f"git 远端不是 {repo} 或带了账号：{kc}（{where}，{scrub(e['where'][-60:], 80)}）")
+    return out
+
+
+def gh_login_problems(f, login):
+    """P1-04：gh 登录状态只能是 github.com 上这一个账号，令牌来源认识。主机名、账号名都先脱敏再写进原因。"""
+    out, gj, gf = [], f["gh_json"], f["gh_file"]
+    if gj is not None:
+        hosts = gj["hosts"]
+        entries = [(h, e) for h, l in hosts.items() for e in l]
+        if sorted(hosts) != ["github.com"] or len(entries) != 1:
+            out.append(f"执行器 gh 登录里有其他主机或账号：{[scrub(h, 40) for h in sorted(hosts)[:4]]}，共 {len(entries)} 个账号")
+        for h, e in entries:
+            if e["host"] != h:
+                out.append(f"执行器 gh 登录记录的主机和外层不一致：{scrub(h, 40)}")
+            if e["login"] != login or e["state"] != "success" or e["active"] is not True:
+                out.append(f"执行器 gh 登录的账号是 {scrub(e['login'], 40)}（{scrub(e['state'], 20)}），应为 {login}")
+            if e["tokenSource"] not in GH_TOKEN_SOURCES:
+                out.append(f"执行器 gh 令牌来源不认识：{scrub(e['tokenSource'], 40)}")
+    elif not f["gh_json_unsupported"]:
+        out.append("执行器 gh 登录状态读不清")
+    if gf["exists"]:
+        hosts = gf["hosts"]
+        if sorted(hosts) != ["github.com"]:
+            out.append(f"执行器 gh 登录里有其他主机：{[scrub(h, 40) for h in sorted(hosts)[:4]]}")
+        for h, v in sorted(hosts.items()):
+            if v["user"] != login or v["users"] not in ([], [login]):
+                out.append(f"执行器 gh 登录里有其他账号（{scrub(h, 40)}）：{[scrub(u, 40) for u in [v['user']] + v['users']]}")
+            extra = sorted(set(v["keys"]) - GH_FILE_KEYS) + sorted(set(v["user_keys"]) - {"oauth_token"})
+            if extra:
+                out.append(f"执行器 gh 配置里有不认识的键（{scrub(h, 40)}）：{'、'.join(scrub(x, 30) for x in extra[:5])}")
+    elif gj is None:
+        out.append("执行器里没有 gh 登录文件，gh 的令牌来源不认识")
+    return out
+
+
+def identity_problems(f, repo, login, ruleset_ids, root):
+    """判执行器身份事实（#135 文档第五节 3 的四项，加 PR #175 两轮审查补的严格校验），返回不符合的说明（空列表 = 通过）。
+    root：名册 executor_gate.workspaces_root，执行器里 agent 实际用的工作区根目录。"""
+    check_facts(f)
+    if f["errors"]:
+        return [f"执行器里 {scrub(e.get('what'), 60)} 失败" + (f"（退出码 {e['code']}）" if type(e.get("code")) is int else "")
+                + f"：{scrub(e.get('msg'))}" for e in f["errors"][:5]]
+    why = []
+    if f["login"] != login:
+        why.append(f"执行器 GitHub 身份是 {scrub(f['login'], 40)}，应为 {login}")
+    p = f["permissions"]
+    if any(not isinstance(p.get(k), bool) for k in PERM_KEYS):       # P1-03：缺失或类型不对一律拒绝
+        why.append(f"执行器账号对 {repo} 的权限字段缺失或类型不对：" + "、".join(k for k in PERM_KEYS if not isinstance(p.get(k), bool)))
+    if p.get("admin") is not False or p.get("maintain") is not False:
+        why.append(f"执行器账号对 {repo} 的 admin / maintain 不是 false")
+    if p.get("push") is not True:
+        why.append(f"执行器账号对 {repo} 的 push 不是 true")
+    ids = [r.get("id") for r in f["rulesets"]]
+    if not ids:
+        why.append(f"执行器读不到 {repo} 的规则集，核对不了绕过名单")
+    elif sorted(map(str, ids)) != sorted(map(str, ruleset_ids)):
+        why.append(f"执行器看到的规则集和基线不一致：{[scrub(i, 20) for i in sorted(map(str, ids))[:6]]}")
+    bad = [f"{scrub(r.get('id'), 20)}={scrub(r.get('bypass'), 30)}" for r in f["rulesets"] if r.get("bypass") != "never"]
+    if bad:
+        why.append("执行器账号能绕过规则集：" + "、".join(bad[:5]))
+    repos = sorted(str(x).lower() for x in f["repos"])
+    if repos != [repo.lower()]:
+        why.append(f"执行器账号能访问的仓库不止 {repo}：共 {len(repos)} 个，" + "、".join(scrub(x, 60) for x in repos[:5]))
+    why += gh_login_problems(f, login)
+    env = sorted(set(f["env_names"]) - ENV_OK)
+    if env:
+        why.append("执行器环境里有不认识的凭据相关变量：" + "、".join(scrub(x, 40) for x in env[:8]))
+    if f["cred_files"]:
+        why.append("执行器里有其他凭据文件：" + "、".join(scrub(x, 60) for x in f["cred_files"][:8]))
+    if f["ws_root"] != root or f["ws_env"] != root:      # 第 2 轮 P1-04：扫的必须是 agent 实际用的工作区
+        why.append(f"执行器的工作区目录和名册不一致（名册 {root}）：扫描 {scrub(f['ws_root'], 60)}，"
+                   f"MULTICA_WORKSPACES_ROOT {scrub(f['ws_env'], 60) if f['ws_env'] is not None else '没设'}")
+    if f["git_repos"] == 0:
+        why.append("执行器工作区里一个仓库都没扫到，核对不了 git 配置")
+    why += list(dict.fromkeys(git_problems(f, repo, root)))[:8]      # 多个工作树的同一条只报一次
+    return why
+
+
+def gate_problems(plan, expect_digest=None, since=""):
+    """完整的运行前身份闸。返回问题列表（空 = 通过）；任何异常都转成问题（fail-closed，P2-02）。
+    expect_digest：批准或开跑时记下的计划摘要，计划之后被改过就拒绝。"""
+    try:
+        entry, why = trusted_entry(plan)
+        if why:
+            return [why]
+        g = trusted_gate(entry)
+        out = plan_vs_trusted(plan, g)
+        if expect_digest is not None and plan_digest(plan) != expect_digest:
+            out.append(f"计划在{since}之后被改过（摘要不一致）")
+        if out:                           # 计划和信任基准对不上：不再往下查
+            return out
+        out = container_problems(g)
+        if out:                           # 不是名册里的那个执行器：不进去查
+            return out
+        repo = plan["repo"]
+        base = load_baseline(g, repo)
+        out = protection_problems(repo, base)
+        out += identity_problems(executor_identity(g, repo), repo, g["github_login"], [r["id"] for r in base["rulesets"]],
+                                 g["workspaces_root"])
+        return out
+    except Unclear as e:
+        return [str(e)]
+    except Exception as e:                # noqa: BLE001 —— 身份闸自己出错也不放
+        return [f"身份闸自身出错：{type(e).__name__}"]
+
+
+def preflight(night, expect_digest=None, since=""):
+    why = gate_problems(night.plan, expect_digest, since)     # 运行前身份闸（含名册 sandbox 核对，#172 / #174）
     snap = {"runs": {}, "wakeups": {}, "issues": {}}
     for k in night.family():
         iss = night.mc("issue", "get", night.ident(k))
@@ -934,22 +1615,24 @@ def preflight(night):
     return why
 
 
-def cmd_start(night, by, hours, max_runs):
+def cmd_start(night, by, hours, max_runs, expect_digest=None, since=""):
     st = night.state
     if st.get("auth"):
         print("这次夜跑已经开跑过，不能再 start。")
         return 1
     try:
-        why = preflight(night)
+        why = preflight(night, expect_digest, since)
     except Unclear as e:
         why = [f"核对失败：{e}"]
+    except Exception as e:      # noqa: BLE001 —— 核对本身出错也不开跑（fail-closed）
+        why = [f"核对失败：{type(e).__name__}: {scrub(e)}"]
     if why:
         print("开跑前核对没通过，什么都没动：" + "；".join(why))
         return 1
     t = now()
     limits = {**night.limits, **({"hours": hours} if hours else {}), **({"max_runs": max_runs} if max_runs else {})}
     st["auth"] = {"approved_by": by, "started_at": iso(t), "deadline": iso(t + dt.timedelta(hours=limits["hours"])),
-                  "limits": limits, "mode": "UNATTENDED"}
+                  "limits": limits, "mode": "UNATTENDED", "plan_digest": plan_digest(night.plan)}
     st["last_tick"] = iso(t)
     night.limits = limits
     night.save()
@@ -973,7 +1656,7 @@ def watch_after(night):
     远端和停机时的快照不一致就告警（只告警：release 前常浩本人也可能动远端）。"""
     st, out, code = night.state, [], 0
     if st.get("frozen") and not st.get("freeze_verified"):
-        results, verified, seen = hard_freeze(night.plan)
+        results, verified, seen = hard_freeze()
         st["freeze_verified"] = verified
         night.save()
         night.log("freeze_retry", commands=results, verified=verified, check=seen)
@@ -1045,7 +1728,8 @@ def cmd_approve(night, by, start_at, hours, max_runs):
         return 1
     t = parse(start_at)
     t = t if t.tzinfo else t.replace(tzinfo=BJ)
-    night.state["approval"] = {"by": by, "start_at": iso(t), "hours": hours, "max_runs": max_runs, "at": iso(now())}
+    night.state["approval"] = {"by": by, "start_at": iso(t), "hours": hours, "max_runs": max_runs, "at": iso(now()),
+                               "plan_digest": plan_digest(night.plan)}      # 到点开跑时核对计划没被改过（#174）
     night.save()
     night.log("approve", by=by, start_at=iso(t), hours=hours, max_runs=max_runs)
     print(f"已记下：{by} 批准夜跑 {night.id} 在 {bj(t)} 开跑（过了 {bj(t + START_WINDOW)} 还没开就不开）。")
@@ -1070,11 +1754,28 @@ def scheduled_start(night, t):
     import contextlib
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        code = cmd_start(night, ap["by"], ap.get("hours"), ap.get("max_runs"))
+        if ap.get("plan_digest"):
+            code = cmd_start(night, ap["by"], ap.get("hours"), ap.get("max_runs"), ap["plan_digest"], "批准")
+        else:
+            print("开跑前核对没通过，什么都没动：批准里没记计划摘要，核对不了计划是否被改过（#174），请重新 approve。")
+            code = 1
     if code:
         ap["result"] = "refused"
         night.save()
     return code, buf.getvalue().strip()
+
+
+def regate(night, n):
+    """放出第 n 个 stage 之前重跑身份闸（P1-05）。通过返回空串；不通过就按 5.3a 停机，且执行器不再可信，回读通过也冻结（停容器）。"""
+    digest = night.state["auth"].get("plan_digest")
+    why = gate_problems(night.plan, digest, "开跑") if digest else ["开跑记录里没有计划摘要，核对不了计划是否被改过"]
+    if not why:
+        night.log("identity_gate", stage=n, ok=True)
+        return ""
+    night.state["distrust"] = True       # 先落盘：之后任何停机、异常兜底都按执行器不可信处理（第 2 轮 P1-02）
+    night.save()
+    night.log("identity_gate", stage=n, ok=False, why=why)
+    return stop(night, [f"放 stage {n} 前身份闸没通过：" + "；".join(why)], distrust=True)
 
 
 def cmd_tick(night):
@@ -1104,7 +1805,8 @@ def cmd_tick(night):
     night.save()
     if st.get("stopping"):   # 上次停机做到一半（进程被杀）：接着停，不推进
         s = st["stopping"]
-        out.append(stop(night, s["reasons"] + ["上次停机没做完，接着做"], s.get("finished", False), s.get("unclear", False)))
+        out.append(stop(night, s["reasons"] + ["上次停机没做完，接着做"], s.get("finished", False), s.get("unclear", False),
+                        s.get("distrust", False)))
         return (1 if night.state.get("frozen") else 0), "\n".join(out)
     try:
         snap = collect(night)
@@ -1128,6 +1830,10 @@ def cmd_tick(night):
     keys = night.stage_keys(n)
     behind = [k for k in keys if snap["issues"][k].get("status") == "backlog"]
     if behind:   # 上次推进做到一半就中断了：补推进（advance 只动还在 backlog 的单）
+        bad = regate(night, n)
+        if bad:
+            out.append(bad)
+            return (1 if night.state.get("frozen") else 0), "\n".join(out)
         try:
             moved = advance(night, n, t)
         except Unclear as e:
@@ -1138,6 +1844,10 @@ def cmd_tick(night):
     # 交付 = 当前 stage 都到 in_review / done，且整个家族没有非终态 run（P1-05：旧 stage 重入时不推进）
     if all(snap["issues"][k].get("status") in STAGE_DONE for k in keys) and not active_runs(snap):
         if n < night.last_stage():
+            bad = regate(night, n + 1)
+            if bad:
+                out.append(bad)
+                return (1 if night.state.get("frozen") else 0), "\n".join(out)
             try:
                 moved = advance(night, n + 1, t)
             except Unclear as e:
@@ -1298,11 +2008,10 @@ def emergency_freeze(nid, why):
     st = load(ROOT / nid / "state.json", {})
     if not st.get("auth") or st.get("released") or st.get("outcome") in ("STOPPED", "FINISHED"):
         return ""
-    plan = load(ROOT / nid / "plan.json")
     at = iso(now())
     # 先原子写入阻断标记，再停执行器（第 2 轮 P1-01）：卡住的主控只要看到标记就不再推进，不必等硬停做完
     dump(emergency_file(nid), {"status": "EMERGENCY_REQUESTED", "at": at, "why": why})
-    results, verified, seen = hard_freeze(plan)
+    results, verified, seen = hard_freeze()
     dump(emergency_file(nid), {"status": "EMERGENCY_FROZEN" if verified else "EMERGENCY_UNVERIFIED", "at": at, "why": why,
                                "commands": results, "verified": verified, "check": seen})
     append(ROOT / nid / "run-log.jsonl", {"ts": iso(now()), "event": "emergency_freeze", "why": why,
@@ -1313,7 +2022,7 @@ def emergency_freeze(nid, why):
 
 
 def guarded_stop(nid, why, unclear=False):
-    """停机，外加兜底：停机本身崩了就直接冻结（只依赖计划和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。
+    """停机，外加兜底：停机本身崩了就直接冻结（只依赖名册和本机命令），冻结也崩了就喊人。tick 和人工 stop 共用（P2-01）。
     返回 (ok, 文字)：只有回读确认的 STOPPED / FINISHED 才算 ok；冻结和“停机冻结都失败”都不算，退出码据此非零（第 2 轮 P1-02）。"""
     try:
         text = stop(Night(nid), why, unclear=unclear)

@@ -660,7 +660,17 @@
       "todo": "保留：DT-ORC M1 权限矩阵、M2 首跑、M5 夜跑（#92）都用它",
       "why": "DT-ORC V4.0 Multica 沙盒，公开仓库，只放合成内容",
       "sandbox": true,
-      "multica_workspace": "f2a6e4a9-5328-45b0-9752-cba5012d2aba"
+      "multica_workspace": "f2a6e4a9-5328-45b0-9752-cba5012d2aba",
+      "executor_gate": {
+        "note": "运行前身份闸的信任基准（#174）：夜跑计划里的 executor.github_login / docker / container 必须和这里一致；被检查的容器要带这里的 compose project / service 标签，且是该服务唯一的容器；冻结也按这里的 docker 前缀和容器名停；workspaces_root 是容器里 agent 的工作区根目录（要和容器的 MULTICA_WORKSPACES_ROOT 一致）；protection_baseline 是仓库里的路径，是 dt-sandbox 规则集和 main 分支保护的基线。multica_night.py 只读本仓库已合并的 origin/main 上的这一条和基线，不读工作区：改这里走 PR 由常浩合并，计划改不了。",
+        "github_login": "shanhao1997",
+        "docker": ["/opt/homebrew/bin/docker", "--context", "colima-multica"],
+        "container": "multica-isolated-agent-1",
+        "compose_project": "multica",
+        "compose_service": "isolated-agent",
+        "workspaces_root": "/home/node/multica_workspaces",
+        "protection_baseline": "hermes/baselines/dt-sandbox-github.json"
+      }
     },
     {
       "path": "github:Natsukashii1997/little-steps-private",

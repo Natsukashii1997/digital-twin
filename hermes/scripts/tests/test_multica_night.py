@@ -41,6 +41,30 @@ PLAN = {
 }
 
 
+GOOD_IDENT = {"v": 2, "errors": [], "login": "bot", "ws_root": "/home/node/multica_workspaces", "ws_env": "/home/node/multica_workspaces",
+              "permissions": {"admin": False, "maintain": False, "push": True, "triage": True, "pull": True},
+              "rulesets": [{"id": 1, "bypass": "never"}, {"id": 2, "bypass": "never"}], "repos": ["owner/dt-sandbox"],
+              "gh_version": "gh version 2.23.0 (2023-02-07)", "gh_json": None, "gh_json_unsupported": True,
+              "gh_file": {"exists": True, "hosts": {"github.com": {"user": "bot", "users": [], "keys": ["oauth_token", "user", "git_protocol"],
+                                                                   "user_keys": []}}},
+              "env_names": ["GIT_AUTHOR_EMAIL", "GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_NAME"], "cred_files": [],
+              "git": [{"scope": "global", "origin": "file:/home/node/.gitconfig", "key": "credential.https://github.com.helper", "where": "", "value": ""},
+                      {"scope": "global", "origin": "file:/home/node/.gitconfig", "key": "credential.https://github.com.helper", "where": "",
+                       "value": "!/usr/bin/gh auth git-credential"},
+                      {"scope": "local", "origin": "file:.git/config", "key": "remote.origin.url", "where": "/home/node/multica_workspaces/w/r",
+                       "value": "https://github.com/owner/dt-sandbox.git", "userinfo": False}],
+              "git_repos": 1}
+# dt-sandbox 的保护基线（名册 executor_gate.protection_baseline）和宿主读到的现状（多出 GitHub 附带的字段，比对时忽略）
+RULESETS = [{"id": 1, "name": "main-merge-reserved-to-admin", "target": "branch", "source_type": "Repository", "source": "owner/dt-sandbox",
+             "enforcement": "active", "conditions": {"ref_name": {"exclude": [], "include": ["refs/heads/main"]}}, "rules": [{"type": "update"}],
+             "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "exempt"}]},
+            {"id": 2, "name": "only-main-and-agent-branches", "target": "branch", "source_type": "Repository", "source": "owner/dt-sandbox",
+             "enforcement": "active", "conditions": {"ref_name": {"exclude": ["refs/heads/main", "refs/heads/agent/**"], "include": ["~ALL"]}},
+             "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}], "bypass_actors": []}]
+PROTECTION = {"required_pull_request_reviews": {"dismiss_stale_reviews": False, "required_approving_review_count": 0},
+              "enforce_admins": {"enabled": True}, "allow_force_pushes": {"enabled": False}}
+
+
 class MulticaNight(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="dt-night-"))
@@ -48,17 +72,18 @@ class MulticaNight(unittest.TestCase):
         self.world = self.tmp / "world.json"
         self.freeze_log = self.tmp / "freeze.log"
         plan = json.loads(json.dumps(PLAN))
-        plan["freeze_cmds"] = [["sh", "-c", f"echo stop >> '{self.freeze_log}'"]]
-        self.check_file = self.tmp / "container.txt"          # 假 docker inspect 的输出
-        self.check_file.write_text("false no", encoding="utf-8")
-        plan["freeze_check"] = {"cmd": ["cat", str(self.check_file)], "expect": "false no"}
+        # 计划里的冻结命令不再被采用（#174 第 2 轮 P1-01：冻结由名册生成），这里故意写成什么都不做、回读恒为「已停」
+        plan["freeze_cmds"] = [["true"]]
+        plan["freeze_check"] = {"cmd": ["echo", "false no"], "expect": "false no"}
         docker = self.tmp / "docker"                           # 假 docker exec：执行器里的进程（M5 #25、#27）
         docker.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{FAKE_DOCKER}' \"$@\"\n", encoding="utf-8")
         docker.chmod(0o755)
         self.procs = self.tmp / "procs.json"
-        plan["executor"] = {"docker": [str(docker), "--context", "colima-multica"], "container": "agent-1", "kill": True}
+        plan["executor"] = {"docker": [str(docker), "--context", "colima-multica"], "container": "agent-1", "kill": True,
+                            "github_login": "bot"}
         self.plan_obj = plan
         self.write_plan()
+        self.set_procs(ident=dict(GOOD_IDENT), freeze_log=str(self.freeze_log))
         wrapper = self.tmp / "multica"
         wrapper.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{FAKE}' \"$@\"\n", encoding="utf-8")
         wrapper.chmod(0o755)
@@ -68,20 +93,64 @@ class MulticaNight(unittest.TestCase):
         self.prs.write_text(json.dumps([{"number": 7, "title": "SBX-12 导出", "headRefName": "agent/claude/abc", "headRefOid": "bbb222",
                                          "url": "u", "state": "OPEN", "createdAt": "2026-11-08T14:30:00Z", "mergedAt": None}],
                                        ensure_ascii=False), encoding="utf-8")
+        self.host = self.tmp / "host"                          # 宿主 gh 只读到的规则集和分支保护（#174），删文件 = 读不到
+        self.host.mkdir()
+        self.set_host()
         gh = self.tmp / "gh"
         gh.write_text("#!/bin/sh\n"
-                      f"case \"$*\" in *commit.sha*) cat '{self.branches}';; api*) cut -d' ' -f1 '{self.branches}';; "
+                      f"case \"$*\" in *commit.sha*) cat '{self.branches}';; "
+                      f"*'/rulesets --paginate'*) cat '{self.host}/rulesets.json';; "
+                      f"*/rulesets/*) cat '{self.host}/ruleset-'\"${{2##*/}}\".json;; "
+                      f"*/protection*) cat '{self.host}/protection.json';; "
+                      f"api*) cut -d' ' -f1 '{self.branches}';; "
                       f"pr*) cat '{self.prs}';; esac\n", encoding="utf-8")
         gh.chmod(0o755)
-        self.roster = self.tmp / "projects.json"
-        self.roster.write_text(json.dumps({"projects": [], "inventory": [
-            {"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox"}]}), encoding="utf-8")
-        self.env = {**os.environ, "DT_NIGHT_ROOT": str(self.root), "DT_ROSTER": str(self.roster), "DT_MULTICA_CLI": str(wrapper), "DT_GH_CLI": str(gh),
+        self.gate = {"github_login": "bot", "docker": plan["executor"]["docker"], "container": "agent-1", "compose_project": "multica",
+                     "compose_service": "isolated-agent", "protection_baseline": "baselines/dt-sandbox.json",
+                     "workspaces_root": "/home/node/multica_workspaces"}
+        self.repo = self.tmp / "roster-repo"                   # 名册仓库：只认提交到 origin/main 的内容（第 2 轮 P1-03）
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.write_roster()
+        self.env = {**os.environ, "DT_NIGHT_ROOT": str(self.root), "DT_ROSTER_REPO": str(self.repo), "DT_MULTICA_CLI": str(wrapper), "DT_GH_CLI": str(gh),
                     "FAKE_MULTICA_WORLD": str(self.world), "DT_NIGHT_READBACK": "2,0",
                     "FAKE_DOCKER_PROCS": str(self.procs), "DT_NIGHT_PROCWAIT": "2,0"}
         self.put({"owner": OWNER, "now": "2026-11-08T13:00:00Z", "issues": {
             "SBX-1": {"id": "id-SBX-1", "identifier": "SBX-1", "status": "backlog", "assignee_type": None,
                       "updated_at": "2026-11-07T00:00:00Z"}}, "runs": [], "messages": {}, "wakeups": {}, "autopilots": []})
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@x.invalid", *args],
+                       check=True, capture_output=True)
+
+    def commit(self, files, merged=True):
+        """把文件提交进名册仓库；merged 为真时 origin/main 也指向这个提交（模拟已合并）。"""
+        for rel, text in files.items():
+            f = self.repo / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(text, encoding="utf-8")
+            self.git("add", rel)
+        self.git("commit", "-q", "--allow-empty", "-m", "x")
+        if merged:
+            self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    def write_roster(self, raw=None, baseline=None, merged=True, **entry):
+        e = {"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox", "executor_gate": self.gate, **entry}
+        base = {"repo": "owner/dt-sandbox", "rulesets": RULESETS, "branch_protection": {"main": PROTECTION}}
+        self.commit({"projects.json": raw if raw is not None else json.dumps({"projects": [], "inventory": [e]}),
+                     "baselines/dt-sandbox.json": baseline if baseline is not None else json.dumps(base)}, merged)
+
+    def set_host(self, rulesets=None, protection=None):
+        rulesets = RULESETS if rulesets is None else rulesets
+        for f in self.host.glob("*.json"):
+            f.unlink()
+        (self.host / "rulesets.json").write_text(json.dumps([{"id": r["id"], "name": r["name"]} for r in rulesets]), encoding="utf-8")
+        for r in rulesets:
+            (self.host / f"ruleset-{r['id']}.json").write_text(json.dumps({**r, "node_id": "x", "current_user_can_bypass": "exempt",
+                                                                          "updated_at": "2026-11-10T18:16:16Z"}), encoding="utf-8")
+        prot = PROTECTION if protection is None else protection
+        (self.host / "protection.json").write_text(json.dumps({"url": "https://api.github.com/x", **{
+            k: ({"url": "u", **v} if isinstance(v, dict) else v) for k, v in prot.items()}}), encoding="utf-8")
 
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
@@ -200,18 +269,416 @@ class MulticaNight(unittest.TestCase):
 
     def test_start_refuses_repo_not_marked_sandbox(self):
         self.run_cli("plan", str(self.plan_file))
-        self.roster.write_text(json.dumps({"projects": [], "inventory": [
-            {"path": "github:owner/dt-sandbox", "multica_workspace": "ws-sandbox"}]}), encoding="utf-8")
+        self.write_roster(raw=json.dumps({"projects": [], "inventory": [
+            {"path": "github:owner/dt-sandbox", "multica_workspace": "ws-sandbox"}]}))
         code, out = self.run_cli("start", "--approved-by", "Hermes")
         self.assertEqual(code, 1)
         self.assertIn("sandbox: true", out)
         self.assertEqual(self.issue("A")["status"], "backlog")
+
+    # ---- 运行前身份闸（#172）----
+    def test_identity_gate_checked_before_start(self):
+        self.run_cli("plan", str(self.plan_file))
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ident", self.docker_calls())
+
+    def refused(self, expect, now=T0):
+        """开跑被拒、什么都没动。"""
+        code, out = self.run_cli("start", "--approved-by", "Hermes", now=now)
+        self.assertEqual(code, 1, out)
+        self.assertIn("开跑前核对没通过", out)
+        self.assertIn(expect, out)
+        self.assertNotIn("auth", self.state())
+        self.assertEqual(self.issue("A")["status"], "backlog")
+        return out
+
+    def test_identity_gate_refuses_each_problem_and_changes_nothing(self):
+        perm = GOOD_IDENT["permissions"]
+        gfile = GOOD_IDENT["gh_file"]["hosts"]["github.com"]
+        cases = [
+            ("login", "someone-else", "身份是 someone-else"),
+            ("permissions", {**perm, "admin": True}, "admin / maintain 不是 false"),
+            ("permissions", {**perm, "maintain": True}, "admin / maintain 不是 false"),
+            ("permissions", {**perm, "push": False}, "push 不是 true"),
+            ("permissions", {k: v for k, v in perm.items() if k != "maintain"}, "权限字段缺失或类型不对：maintain"),
+            ("permissions", {**perm, "admin": "false"}, "权限字段缺失或类型不对：admin"),
+            ("rulesets", [{"id": 1, "bypass": "never"}, {"id": 2, "bypass": "always"}], "能绕过规则集：2=always"),
+            ("rulesets", [{"id": 1, "bypass": "pull_requests_only"}, {"id": 2, "bypass": "never"}], "能绕过规则集"),
+            ("rulesets", [{"id": 1, "bypass": "never"}], "执行器看到的规则集和基线不一致"),
+            ("rulesets", [], "执行器读不到 owner/dt-sandbox 的规则集"),
+            ("repos", ["owner/dt-sandbox", "owner/digital-twin"], "能访问的仓库不止"),
+            ("repos", [], "能访问的仓库不止"),
+            ("gh_file", {"exists": True, "hosts": {"github.com": {**gfile, "users": ["bot", "Natsukashii1997"]}}}, "其他账号"),
+            ("gh_file", {"exists": True, "hosts": {"github.com": gfile, "ghe.example.com": gfile}}, "其他主机"),
+            ("env_names", ["GH_TOKEN"], "不认识的凭据相关变量：GH_TOKEN"),
+            ("cred_files", ["~/.git-credentials"], "其他凭据文件"),
+            ("git", GOOD_IDENT["git"] + [{"scope": "global", "origin": "file:/home/node/.gitconfig", "key": "credential.helper", "where": "",
+                                          "value": "store"}], "git 凭据配置不认识：credential.helper"),
+            ("errors", [{"what": "gh api user/repos", "code": 1, "msg": "HTTP 502"}], "gh api user/repos 失败"),
+        ]
+        self.run_cli("plan", str(self.plan_file))
+        for field, value, expect in cases:
+            with self.subTest(field=field, value=value):
+                self.set_procs(ident={**GOOD_IDENT, field: value})
+                self.refused(expect)
+
+    def test_identity_gate_fails_closed_when_query_fails_and_scrubs_secrets(self):
+        self.run_cli("plan", str(self.plan_file))
+        self.set_procs(ident_fail=True)
+        out = self.refused("核对执行器 GitHub 身份失败")
+        self.assertNotIn("ghp_", out, "外部命令报错里的令牌样式片段要脱敏")
+
+    def test_identity_gate_refuses_malformed_facts(self):
+        self.run_cli("plan", str(self.plan_file))
+        for raw, expect in (("not json", "输出读不懂"), (json.dumps({**GOOD_IDENT, "permissions": [1]}), "格式不对：permissions"),
+                            (json.dumps({**GOOD_IDENT, "v": 1}), "格式不对：版本"), (json.dumps([1, 2]), "格式不对：版本")):
+            with self.subTest(raw=raw):
+                self.set_procs(ident_raw=raw)
+                self.refused(expect)
+
+    def test_plan_requires_github_login(self):
+        del self.plan_obj["executor"]["github_login"]
+        self.write_plan()
+        code, out = self.run_cli("plan", str(self.plan_file))
+        self.assertNotEqual(code, 0)
+        self.assertIn("github_login", out)
+
+    def test_identity_problems_accepts_good_facts_case_insensitively(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mn", SCRIPT)
+        mn = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mn)
+        facts = json.loads(json.dumps(GOOD_IDENT))
+        facts["git"][-1]["value"] = "https://github.com/Owner/DT-Sandbox"
+        self.assertEqual(mn.identity_problems(facts, "Owner/DT-Sandbox", "bot", [1, 2], "/home/node/multica_workspaces"), [])
+
+    # ---- 信任基准在名册，计划改不了（P1-01）----
+    def test_plan_values_must_match_trusted_roster(self):
+        self.run_cli("plan", str(self.plan_file))
+        for field, value in (("github_login", "Natsukashii1997"), ("container", "other-1"), ("docker", ["docker", "--context", "elsewhere"])):
+            with self.subTest(field=field):
+                self.write_roster(executor_gate={**self.gate, field: value})
+                self.refused(f"计划的 executor.{field} 和名册 executor_gate 不一致")
+                self.assertNotIn("ident", self.docker_calls(), "计划对不上名册就不进容器查")
+        self.write_roster()
+
+    def test_roster_without_trusted_gate_is_refused(self):
+        self.run_cli("plan", str(self.plan_file))
+        self.write_roster(raw=json.dumps({"projects": [], "inventory": [
+            {"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox"}]}))
+        self.refused("名册里没有 executor_gate")
+        self.write_roster(executor_gate={**self.gate, "docker": "docker"})
+        self.refused("executor_gate.docker 缺失或类型不对")
+
+    def test_container_must_be_the_compose_isolated_executor(self):
+        self.run_cli("plan", str(self.plan_file))
+        good = {"com.docker.compose.project": "multica", "com.docker.compose.service": "isolated-agent", "com.docker.compose.oneoff": "False"}
+        for kw, expect in (({"labels": {**good, "com.docker.compose.service": "backend"}}, "标签 com.docker.compose.service 不是 isolated-agent"),
+                           ({"labels": {**good, "com.docker.compose.project": "other"}}, "标签 com.docker.compose.project 不是 multica"),
+                           ({"labels": {**good, "com.docker.compose.oneoff": "True"}}, "com.docker.compose.oneoff"),
+                           ({"labels": None}, "核对执行器容器标签失败：输出读不懂"),
+                           ({"labels": good, "service": ["agent-1", "agent-2"]}, "的容器不是只有 agent-1"),
+                           ({"labels": good, "service": ["agent-1"], "inspect_fail": True}, "核对执行器容器标签失败")):
+            with self.subTest(kw=kw):
+                self.set_procs(**kw)
+                self.refused(expect)
+                self.set_procs(labels=good, service=["agent-1"], inspect_fail=False)
+
+    # ---- 宿主只读核对规则集和分支保护（P1-02）----
+    def test_protection_drift_or_unreadable_is_refused(self):
+        self.run_cli("plan", str(self.plan_file))
+        r1, r2 = RULESETS
+        cases = [
+            ({"rulesets": [{**r1, "bypass_actors": r1["bypass_actors"] + [{"actor_id": 9, "actor_type": "User", "bypass_mode": "always"}]}, r2]},
+             "规则集 1 的 bypass_actors 和基线不一致"),
+            ({"rulesets": [{**r1, "enforcement": "evaluate"}, r2]}, "规则集 1 的 enforcement"),
+            ({"rulesets": [r1, {**r2, "conditions": {"ref_name": {"exclude": [], "include": ["~ALL"]}}}]}, "规则集 2 的 conditions"),
+            ({"rulesets": [r1, {**r2, "rules": [{"type": "creation"}]}]}, "规则集 2 的 rules"),
+            ({"rulesets": [r1]}, "的规则集和基线不一致"),
+            ({"rulesets": [r1, r2, {**r2, "id": 3}]}, "的规则集和基线不一致"),
+            ({"protection": {**PROTECTION, "enforce_admins": {"enabled": False}}}, "main 分支保护的 enforce_admins"),
+            ({"protection": {k: v for k, v in PROTECTION.items() if k != "required_pull_request_reviews"}}, "required_pull_request_reviews"),
+        ]
+        for kw, expect in cases:
+            with self.subTest(expect=expect):
+                self.set_host(**kw)
+                self.refused(expect)
+        self.set_host()
+        (self.host / "protection.json").unlink()
+        self.refused("宿主读 repos/owner/dt-sandbox/branches/main/protection 失败")
+        self.set_host()
+        (self.host / "ruleset-2.json").unlink()
+        self.refused("宿主读 repos/owner/dt-sandbox/rulesets/2 失败")
+        self.set_host()
+        self.write_roster(baseline="{")
+        self.refused("读不了保护基线")
+
+    # ---- 计划摘要（P1-01）----
+    def test_plan_changed_after_approval_is_refused_at_scheduled_start(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        self.assertEqual(self.run_cli("approve", "--by", "Hermes", "--start-at", "2026-11-08T22:00", now="2026-11-08T13:00:00Z")[0], 0)
+        p = self.root / "night-test" / "plan.json"
+        plan = json.loads(p.read_text(encoding="utf-8"))
+        plan["limits"]["max_runs"] = 999
+        p.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        code, out = self.run_cli("tick", now=T0)
+        self.assertEqual(code, 1, out)
+        self.assertIn("计划在批准之后被改过", out)
+        self.assertNotIn("auth", self.state())
+        self.assertEqual(self.state()["approval"]["result"], "refused")
+        self.assertEqual(self.issue("A")["status"], "backlog")
+
+    def test_scheduled_start_with_broken_gate_input_refuses_once(self):
+        """P2-02：定时开跑入口里身份闸的输入坏了（事实格式不对、名册读不懂），也只是拒绝开跑，不抛异常、不重来。"""
+        for broken in ("facts", "roster"):
+            with self.subTest(broken=broken):
+                self.tearDown()       # 每种情形一个干净的世界
+                self.setUp()
+                self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+                self.run_cli("approve", "--by", "Hermes", "--start-at", "2026-11-08T22:00", now="2026-11-08T13:00:00Z")
+                if broken == "facts":
+                    self.set_procs(ident_raw=json.dumps({**GOOD_IDENT, "rulesets": "never"}))
+                else:
+                    self.write_roster(raw="{not json")
+                code, out = self.run_cli("tick", now=T0)
+                self.assertEqual(code, 1, out)
+                self.assertIn("开跑前核对没通过", out)
+                self.assertNotIn("Traceback", out)
+                self.assertEqual(self.state()["approval"]["result"], "refused")
+                self.assertEqual(self.issue("A")["status"], "backlog")
+                self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""), "拒绝过就不再每 5 分钟重来")
+
+    def test_approval_without_plan_digest_is_refused(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        self.run_cli("approve", "--by", "Hermes", "--start-at", "2026-11-08T22:00", now="2026-11-08T13:00:00Z")
+        st = self.state()
+        del st["approval"]["plan_digest"]
+        (self.root / "night-test" / "state.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+        code, out = self.run_cli("tick", now=T0)
+        self.assertEqual(code, 1)
+        self.assertIn("批准里没记计划摘要", out)
+        self.assertNotIn("auth", self.state())
+
+    # ---- 每次放 stage 前都重跑（P1-05）----
+    def test_gate_reruns_before_each_stage_and_failure_stops_and_freezes(self):
+        self.started()
+        self.assertEqual(self.docker_calls().count("ident"), 1)
+        self.set_procs(ident={**GOOD_IDENT, "login": "Natsukashii1997"})   # 夜里有人把常浩账号登进了容器
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("放 stage 2 前身份闸没通过", out)
+        self.assertIn("身份是 Natsukashii1997", out)
+        self.assertIn("已冻结", out)
+        self.assertEqual(self.docker_calls().count("ident"), 2)
+        self.assertEqual(self.issue("V")["status"], "backlog", "不放下一个 stage")
+        self.assertTrue(self.state()["frozen"])
+        self.assertIn("stop", self.freeze_log.read_text(encoding="utf-8"), "执行器不可信：停容器")
+        self.run_cli("tick", now=at(25))      # 已冻结且确认停住：之后的检查不出声，也不推进
+        self.assertEqual(self.issue("V")["status"], "backlog", "冻结后不再推进")
+
+    def test_gate_reruns_before_each_stage_and_passes(self):
+        self.started()
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.issue("V")["status"], "todo")
+        self.assertEqual(self.docker_calls().count("ident"), 2)
+        self.assertEqual([e["ok"] for e in self.log() if e["event"] == "identity_gate"], [True])
+
+    def test_gate_reruns_before_resumed_advance(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        self.assertEqual(self.run_cli("start", "--approved-by", "Hermes")[0], 0)
+        self.edit(lambda w: w["issues"][self.ident("B")].update(status="backlog"))    # 推进做到一半中断
+        self.set_procs(ident={**GOOD_IDENT, "env_names": ["GITHUB_TOKEN"]})
+        code, out = self.run_cli("tick", now=at(5))
+        self.assertEqual(code, 1, out)
+        self.assertIn("放 stage 1 前身份闸没通过", out)
+        self.assertEqual(self.issue("B")["status"], "backlog")
+        self.assertTrue(self.state()["frozen"])
+
+    def test_plan_changed_mid_night_stops_before_next_stage(self):
+        self.started()
+        p = self.root / "night-test" / "plan.json"
+        plan = json.loads(p.read_text(encoding="utf-8"))
+        plan["executor"]["kill"] = False
+        p.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("计划在开跑之后被改过", out)
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    # ---- 第 2 轮审查：冻结不信计划、distrust 不降级、名册只认已合并版本 ----
+    def load_module(self, now):
+        """在本进程里加载主控（用于故障注入）；环境变量按本测试的假命令设好，测试结束恢复。"""
+        import importlib.util
+        saved = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
+        os.environ.update({k: v for k, v in self.env.items() if k.startswith(("DT_", "FAKE_"))}, DT_NOW=now)
+        self.edit(lambda w: w.update(now=now))
+        spec = importlib.util.spec_from_file_location("mn_inproc", SCRIPT)
+        mn = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mn)
+        return mn
+
+    def tamper_plan(self, **fields):
+        p = self.root / "night-test" / "plan.json"
+        plan = json.loads(p.read_text(encoding="utf-8"))
+        plan.update(fields)
+        p.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+    def test_tampered_plan_cannot_fake_the_freeze(self):
+        """P1-01：夜里计划被改（含把冻结命令改成什么都不做、回读恒为已停），身份闸发现后照样按名册停容器，
+        容器没停住就不能记为已确认冻结。"""
+        self.started()
+        self.set_procs(unstoppable=True)
+        self.tamper_plan(freeze_cmds=[["true"]], freeze_check={"cmd": ["echo", "false no"], "expect": "false no"},
+                         limits={**PLAN["limits"], "max_runs": 999})
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("计划在开跑之后被改过", out)
+        calls = self.docker_calls()
+        self.assertIn("update", calls)
+        self.assertIn("stop", calls, "按名册停容器")
+        self.assertIn("inspect-state", calls, "按名册回读")
+        st = self.state()
+        self.assertEqual((st["frozen"], st["freeze_verified"]), (True, False), "计划里的假回读不算数")
+        self.assertIn("执行器没确认停住", out)
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_normal_freeze_also_uses_roster_commands(self):
+        self.started()
+        self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
+        self.edit(lambda w: w["runs"].pop(0))                     # 见过的 run 不见了：核不清，冻结
+        code, out = self.run_cli("tick", now=at(10))
+        self.assertIn("已停隔离执行器容器", out)
+        self.assertEqual([c for c in self.docker_calls() if c in ("update", "stop", "inspect-state")],
+                         ["update", "stop", "inspect-state"])
+
+    def test_plan_commands_never_run_even_when_roster_lookup_by_plan_fails(self):
+        """第 3 轮 P1-01：夜里计划被改成名册里没有的 repo、冻结命令换成别的宿主命令。身份闸照样拒绝放 stage，
+        冻结只按名册里唯一的沙盒执行器停，计划里的命令一条都不执行。"""
+        marker = self.tmp / "plan-cmd-ran.txt"
+        self.started()
+        self.tamper_plan(repo="owner/not-in-roster", freeze_cmds=[["sh", "-c", f"echo ran >> '{marker}'"]],
+                         freeze_check={"cmd": ["sh", "-c", f"echo ran >> '{marker}'; echo false no"], "expect": "false no"})
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("名册里没有 owner/not-in-roster", out)
+        self.assertFalse(marker.exists(), "计划里的命令不能在宿主机执行")
+        self.assertEqual([c for c in self.docker_calls() if c in ("update", "stop", "inspect-state")], ["update", "stop", "inspect-state"])
+        self.assertTrue(self.state()["freeze_verified"])
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_unreadable_roster_runs_no_freeze_command_and_alarms(self):
+        marker = self.tmp / "plan-cmd-ran.txt"
+        self.started()
+        self.tamper_plan(freeze_cmds=[["sh", "-c", f"echo ran >> '{marker}'"]])
+        self.write_roster(raw="{not json")
+        self.finish("A")
+        self.finish("B", minutes=15)
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("没执行任何停容器命令", out)
+        self.assertIn("请立刻手动停隔离执行器容器", out)
+        self.assertFalse(marker.exists(), "名册读不到也不退回计划里的命令")
+        self.assertNotIn("stop", self.docker_calls())
+        st = self.state()
+        self.assertEqual((st["frozen"], st["freeze_verified"]), (True, False))
+        code, out = self.run_cli("tick", now=at(25))                 # 之后每次检查都再试，仍不执行计划命令
+        self.assertIn("没执行任何停容器命令", out)
+        self.assertFalse(marker.exists())
+
+    def test_multiple_sandbox_gates_in_roster_run_no_freeze_command(self):
+        self.started()
+        e = {"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox", "executor_gate": self.gate}
+        self.write_roster(raw=json.dumps({"projects": [], "inventory": [e, {**e, "path": "github:owner/other"}]}))
+        mn = self.load_module(at(5))
+        self.assertEqual(mn.freeze_spec(), ([], {}, False), "不止一个沙盒执行器：不知道停哪个，就不执行")
+
+    def test_distrust_survives_crash_in_stop(self):
+        """P1-02：身份闸不通过的停机中途崩了，兜底重来的停机仍按执行器不可信处理：回读通过也冻结（停容器）。"""
+        self.started()
+        self.set_procs(ident={**GOOD_IDENT, "login": "Natsukashii1997"})
+        self.finish("A")
+        self.finish("B", minutes=15)
+        mn = self.load_module(at(20))
+        real, calls = mn.readback, []
+
+        def flaky(night, errs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("写状态时出错（注入）")
+            return real(night, errs)
+        mn.readback = flaky
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = mn.main(["tick"])
+        out = buf.getvalue()
+        self.assertEqual(code, 1, out)
+        self.assertGreaterEqual(len(calls), 2, "第一次停机崩了，兜底又停了一次")
+        st = self.state()
+        self.assertEqual((st["outcome"], st["frozen"]), ("UNRECONCILED", True), "不能降级成普通 STOPPED")
+        self.assertIn("执行器身份闸没通过", json.dumps(self.log(), ensure_ascii=False))
+        self.assertIn("stop", self.freeze_log.read_text(encoding="utf-8"))
+        self.assertEqual(self.issue("V")["status"], "backlog")
+
+    def test_roster_and_baseline_only_count_once_merged(self):
+        """P1-03：名册和保护基线只认已合并（origin/main）的内容：工作区里改了、提交了没合并、用旧的 DT_ROSTER 指别的文件，都不算数。"""
+        self.plan_obj["executor"]["github_login"] = "someone"
+        self.write_plan()
+        self.run_cli("plan", str(self.plan_file))
+        loose = json.dumps({"projects": [], "inventory": [{"path": "github:owner/dt-sandbox", "sandbox": True, "multica_workspace": "ws-sandbox",
+                                                           "executor_gate": {**self.gate, "github_login": "someone"}}]})
+        (self.repo / "projects.json").write_text(loose, encoding="utf-8")          # 工作区改了没提交
+        self.refused("计划的 executor.github_login 和名册 executor_gate 不一致")
+        self.commit({"projects.json": loose}, merged=False)                         # 提交了没合并
+        self.refused("计划的 executor.github_login 和名册 executor_gate 不一致")
+        other = self.tmp / "other.json"
+        other.write_text(loose, encoding="utf-8")
+        code, out = self.run_cli("start", "--approved-by", "Hermes", env={"DT_ROSTER": str(other)})   # 旧变量不再认
+        self.assertEqual(code, 1, out)
+        self.assertIn("和名册 executor_gate 不一致", out)
+
+    def test_baseline_edited_to_match_drift_is_not_trusted_until_merged(self):
+        self.run_cli("plan", str(self.plan_file))
+        r1, r2 = RULESETS
+        drift = [{**r1, "enforcement": "disabled"}, r2]
+        self.set_host(rulesets=drift)
+        (self.repo / "baselines" / "dt-sandbox.json").write_text(json.dumps(
+            {"repo": "owner/dt-sandbox", "rulesets": drift, "branch_protection": {"main": PROTECTION}}), encoding="utf-8")
+        self.refused("规则集 1 的 enforcement 和基线不一致")
 
     def test_real_roster_marks_dt_sandbox(self):
         real = json.loads((HERE.parents[2] / "projects.json").read_text(encoding="utf-8"))
         hits = [e for e in real["inventory"] if e.get("path") == "github:Natsukashii1997/dt-sandbox"]
         self.assertEqual(len(hits), 1)
         self.assertIs(hits[0]["sandbox"], True)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("mn", SCRIPT)
+        mn = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mn)
+        g = mn.trusted_gate(hits[0])          # 信任基准齐全（#174）
+        self.assertEqual((g["github_login"], g["container"], g["compose_project"], g["compose_service"]),
+                         ("shanhao1997", "multica-isolated-agent-1", "multica", "isolated-agent"))
+        self.assertEqual(g["workspaces_root"], "/home/node/multica_workspaces")
+        # 正式运行读 origin/main；这里核对本分支工作区里的文件本身（合并前 origin/main 还没有）
+        mn.committed_json = lambda rel: json.loads((HERE.parents[2] / rel).read_text(encoding="utf-8"))
+        base = mn.load_baseline(g, "Natsukashii1997/dt-sandbox")
+        self.assertEqual(sorted(r["id"] for r in base["rulesets"]), [26743254, 26932758])
+        sample = json.loads((HERE.parents[1] / "samples" / "multica-night-2026-11-08.json").read_text(encoding="utf-8"))
+        self.assertEqual(mn.plan_vs_trusted(sample, g), [], "样例计划和名册的信任基准一致")
         self.assertNotIn("github:Natsukashii1997/dt-sandbox", ["github:" + str(p.get("github")) for p in real["projects"]],
                          "沙盒不进 projects：不派单、合并官不扫")
 
@@ -652,7 +1119,7 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(self.issue("V")["status"], "backlog")
 
     def test_p1_03_unverified_freeze_is_retried(self):
-        self.check_file.write_text("true unless-stopped", encoding="utf-8")
+        self.set_procs(state="true unless-stopped")
         self.started()
         self.assertEqual(self.run_cli("tick", now=at(5)), (0, ""))
         self.edit(lambda w: w["runs"].pop(0))
@@ -664,7 +1131,7 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("执行器没确认停住", out)
         self.assertEqual(len(self.freeze_log.read_text().split()), 2, "每次检查都再试一次硬停")
-        self.check_file.write_text("false no", encoding="utf-8")
+        self.set_procs(state="false no")
         code, out = self.run_cli("tick", now=at(20))
         self.assertIn("已停隔离执行器容器", out)
         self.assertIs(self.state()["freeze_verified"], True)
@@ -762,9 +1229,7 @@ class MulticaNight(unittest.TestCase):
         """应急冻结：阻断标记先落盘，再停执行器（停容器那一刻标记已经在了）。"""
         marker = self.root / "night-test" / "emergency.json"
         seen = self.tmp / "marker-seen.log"
-        plan = json.loads(self.plan_file.read_text(encoding="utf-8"))
-        plan["freeze_cmds"].insert(0, ["sh", "-c", f"grep -q EMERGENCY_REQUESTED '{marker}' && echo yes >> '{seen}'"])
-        self.plan_file.write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+        self.set_procs(stop_probe=[str(marker), str(seen)])
         self.started()
         import fcntl
         lock = open(self.root / "night-test" / "tick.lock", "w")
