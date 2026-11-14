@@ -103,6 +103,30 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("车间默认执行方 Codex 现在未登录（codex login status 退出码 1）", out)
         self.assertIn("不会换成另一家", out)
 
+    def fake_hermes_on(self, provider, claude_state, detail="claude auth status 退出码 1"):
+        st = {"default_worker": "codex",
+              "workers": {"codex": {"name": "Codex", "state": "可用"},
+                          "claude": {"name": "Claude Code", "state": claude_state, "detail": detail}},
+              "hermes": {"models": {"model": {"default": "claude-opus-5-5[1m]", "provider": provider}}}}
+        self.fake_ai_access(f"print({json.dumps(st, ensure_ascii=False)!r})\n")
+
+    def test_hermes_on_claude_logged_out_is_reported(self):
+        """11-12 起 Claude 登录失效，Hermes 回退 deepseek 三天、日报三期降级都没人提醒（#180，G-27）。"""
+        self.fake_hermes_on("claude-subscription-directsdk-experimental", "未登录")
+        out = self.run_script()
+        self.assertIn("🤖 AI 接入提醒", out)
+        self.assertIn("Hermes 主模型 claude-opus-5-5[1m] 走本机 Claude，但 Claude Code 现在未登录（claude auth status 退出码 1）", out)
+        self.assertIn("回退到 deepseek", out)
+        self.assertIn("HTTPS_PROXY=", out)
+        self.assertIn("claude auth login", out)
+        self.assertIn("Login successful.", out)
+
+    def test_hermes_on_claude_available_or_not_on_claude_prints_nothing(self):
+        self.fake_hermes_on("claude-subscription-directsdk-experimental", "可用")
+        self.assertEqual(self.run_script(), "")
+        self.fake_hermes_on("openai-codex", "未登录")
+        self.assertEqual(self.run_script(), "")
+
     def test_ai_access_broken_config_is_reported(self):
         self.fake_ai_access('import sys\nprint("AI 接入：读不了 AI 接入配置", file=sys.stderr)\nsys.exit(2)\n')
         self.assertIn("AI 接入自检未完成：AI 接入：读不了 AI 接入配置", self.run_script())

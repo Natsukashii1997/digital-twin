@@ -59,7 +59,7 @@ orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
-  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
+  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
@@ -69,7 +69,7 @@ ops/
 全局规则 P-13 要求：本应用里 AI 产出的东西，谁做的、怎么接进来的、读什么、写到哪里都看得清，改设置就能切换。本项目没有图形界面，所以用配置文件代替设置页，用自检命令代替状态页：
 
 - 配置：仓库根目录 [ai_access.json](ai_access.json)（功能清单、出厂默认值，改了要和本节一起改）；常浩切换后的选择存在 `~/Library/Application Support/DigitalTwin/ai-access.json`，只由 `ai_access.py set` 写，下一次调用生效，不用改代码、不用重启。
-- 自检命令：`python3 ~/.hermes/scripts/ai_access.py status`（`--json` 给机器读）。工程自检（并进每天 10:00 的个人项目日报）会跑它，车间默认执行方不能用时才在日报里说。
+- 自检命令：`python3 ~/.hermes/scripts/ai_access.py status`（`--json` 给机器读）。工程自检（并进每天 10:00 的个人项目日报）会跑它，车间默认执行方不能用、或 Hermes 主模型走的本机 Claude 没登录时才在日报里说（后者附带代理的登录命令，#180、全局坑 G-27）。
 - 切换车间默认执行方：`python3 ~/.hermes/scripts/ai_access.py set default claude|codex`。Hermes 自己的模型用 `hermes config set model.default …` 切换，要重启网关。
 - Hermes 自己的模型（2026-11-10 起，PRD F10.1、F10.3 修订）：主对话和带模型的定时任务用 Claude `claude-opus-5-5[1m]`，经插件 `claude-subscription-directsdk-experimental` 调本机官方 `claude` 命令行（本机 CLI，Claude 会员额度）；辅助任务用 openai-codex `gpt-6-luna`；回退 deepseek-flash。亚古兽 2026-11-11 起主模型改为 openai-codex `gpt-6.1-sol`、思考 xhigh（Codex 会员额度），其余同猛鬼兽；配置在 `~/.hermes/profiles/agumon/config.yaml`，用 `hermes -p agumon config set …` 改，改完重启 `ai.hermes.gateway-agumon`。
 
