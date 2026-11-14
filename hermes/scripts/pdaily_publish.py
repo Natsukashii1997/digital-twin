@@ -443,7 +443,8 @@ def check(facts, card, report):
                 errs.append(f"progress_projects 里的「{p}」不是名册项目 id")
                 continue
             d = rec.get("yesterday_delta") or {}
-            if not (d.get("merged_prs") or d.get("closed_issues") or rec.get("installs")):
+            unknown = d.get("merged_prs") is None or d.get("closed_issues") is None   # GitHub 没取到：核不了，不当没合并（#176）
+            if not (unknown or d.get("merged_prs") or d.get("closed_issues") or rec.get("installs")):
                 errs.append(f"progress_projects 里的「{p}」昨天没有合并、关闭或安装，只有提交或 CURRENT 改动不算实质推进")
     need_list("decisions", ("project", "item", "recommendation", "reply"), {"type": DECISION_TYPES})
     ach = need_list("achievements", ("project", "text"))
@@ -755,7 +756,7 @@ def load_facts(path, day):
         if done:
             return facts
     projects = json.loads(pdaily_facts.progress_data.ROSTER.read_text())["projects"]
-    facts = pdaily_facts.build(day, projects)
+    facts = pdaily_facts.build(day, projects, pdaily_facts.pdaily_data.gh_wait())   # 唤醒后代理没通：最多等 300 秒（#176）
     pdaily_facts.write(facts)
     return facts
 

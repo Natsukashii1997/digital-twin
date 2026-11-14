@@ -258,6 +258,14 @@ class CheckTests(unittest.TestCase):
         e = self.errs(card_fields(progress_projects=["disk-slim"]), report_text())
         self.assertTrue(any("不算实质推进" in x for x in e), e)
 
+    def test_progress_not_judged_when_github_unknown(self):
+        """GitHub 取不到（null）不等于没合并：核不了就不判错（#176，11-12 那期误判 digital-twin）。"""
+        for key in ("merged_prs", "closed_issues"):
+            f = facts()
+            f["projects"][2]["yesterday_delta"][key] = None          # disk-slim：只有提交，这一项取不到
+            e = self.errs(card_fields(progress_projects=["disk-slim"]), report_text(), f)
+            self.assertFalse(any("不算实质推进" in x for x in e), (key, e))
+
     def test_today_limit_and_link(self):
         t = card_fields()["today"][0]
         e = self.errs(card_fields(today=[t] * 4))

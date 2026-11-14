@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,8 @@ PR_IN_TITLE = re.compile(r"PR\s*#(\d+)")
 HEAD_UPDATED = re.compile(r"更新[：:]\s*(\d{4}-\d{2}-\d{2})")   # 文件头「更新：2026-11-08。……唯一下一步：……」
 TITLE_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})|（(\d{4}-\d{2}-\d{2})")   # 节的日期：标题开头，或第一个括号开头
 GH_LIMIT = {"merged_prs": 200, "closed_issues": 200, "open_prs": 100, "milestones": 100}
+GH_RETRY_INTERVAL = 15   # 秒：网络类失败后隔多久再试
+NET_HINTS = ("connect", "timeout", "eof", "reset", "handshake", "resolve", "no such host")   # 算网络问题的报错
 REF = re.compile(r"#(\d+)")
 CLOSES = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)", re.I)
 SECTION_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -62,6 +65,18 @@ REF_ANY = re.compile(r"[A-Za-z0-9_.-] ?#\d+")
 
 class Fail(Exception):
     pass
+
+
+class NetFail(Fail):
+    """连不上、超时、断开这类网络问题：唤醒后代理还没通时会遇到，等一等能好。"""
+
+
+def gh_wait():
+    """日报取数遇到网络问题最多等几秒（DT_GH_WAIT_SECONDS，默认 300，0 不等）。"""
+    try:
+        return max(0, int(os.environ.get("DT_GH_WAIT_SECONDS", "300")))
+    except ValueError:
+        return 300
 
 
 def short(text, n=40):
@@ -283,23 +298,37 @@ def last_change(root, ref):
 # ---------- GitHub ----------
 
 class GitHub:
-    """gh 取数。连不上一次后，后面的仓库不再等超时，直接标同一个原因。"""
+    """gh 取数。网络类失败在 wait 秒的总预算里每 GH_RETRY_INTERVAL 秒重试（#176：唤醒后代理还没通）；
+    预算用完、或别的原因连不上一次后，后面的仓库不再等，直接标同一个原因。wait 默认 0：不等，照旧。"""
 
-    def __init__(self, w):
+    def __init__(self, w, wait=0, sleep=time.sleep, clock=time.monotonic):
         self.w = w
         self.capped = set()   # (仓库, 哪一项)：返回条数到了上限，可能截断
         self.exe = shutil.which("gh", path=os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin"]))
         self.down = None if self.exe else "找不到 gh 命令"
+        self.wait, self.sleep, self.clock = wait, sleep, clock
+        self.first_net_fail = None   # 第一次遇到网络问题的时刻：等待预算整轮共用，从这里算起
 
     def _run(self, *args, partial=False):
         """partial=True：gh 退出码非 0 但输出里有 data（graphql 里某个编号查不到）时，照样返回已查到的部分。"""
         if self.down:
             raise Fail(self.down)
+        while True:
+            try:
+                return self._once(args, partial)
+            except NetFail as e:
+                if self.first_net_fail is None:
+                    self.first_net_fail = self.clock()
+                if self.clock() - self.first_net_fail + GH_RETRY_INTERVAL > self.wait:
+                    self.down = str(e)
+                    raise
+                self.sleep(GH_RETRY_INTERVAL)
+
+    def _once(self, args, partial):
         try:
             r = subprocess.run([self.exe, *args], capture_output=True, text=True, timeout=60)
         except subprocess.TimeoutExpired:
-            self.down = "gh 60 秒没有回应"
-            raise Fail(self.down)
+            raise NetFail("gh 60 秒没有回应")
         except OSError as e:
             self.down = f"gh 启动失败：{e}"
             raise Fail(self.down)
@@ -313,8 +342,8 @@ class GitHub:
         if r.returncode:
             msg = (r.stderr or r.stdout).strip()
             msg = msg.splitlines()[-1][:150] if msg else f"gh 退出码 {r.returncode}"
-            if "connect" in msg or "timeout" in msg.lower():
-                self.down = msg
+            if any(h in msg.lower() for h in NET_HINTS):
+                raise NetFail(msg)
             raise Fail(msg)
         try:
             return json.loads(r.stdout or "null")
@@ -602,9 +631,9 @@ def project(p, w, hub):
     return rec
 
 
-def collect(day, projects):
+def collect(day, projects, gh_wait=0):
     w = window(day)
-    hub = GitHub(w)
+    hub = GitHub(w, wait=gh_wait)
     recs = [project(p, w, hub) for p in projects]
     return {
         "stat_day": day.isoformat(), "timezone": "Asia/Shanghai",
@@ -639,7 +668,7 @@ def main():
         if not projects:
             print(f"取数失败：名册里没有项目「{a.project}」")
             sys.exit(1)
-    json.dump(collect(day, projects), sys.stdout, ensure_ascii=False, indent=1)
+    json.dump(collect(day, projects, gh_wait()), sys.stdout, ensure_ascii=False, indent=1)
     print()
 
 
