@@ -23,13 +23,14 @@
 
 ---
 
-## 2026-11-14 · 记忆日报 11-12 验收通过；11-13 唤醒后网络没通没写成，已补写；非 JSON 网络错误重试修复待合并
+## 2026-11-14 · 记忆日报 11-12 验收通过；11-13 唤醒后网络没通没写成，已补写；非 JSON 网络错误重试修复已合并并安装（#178 `c7e00a2`）
 
 - **11-12（验收第 5 项，通过）**：11-13 电脑睡眠错过 07:30，09:56 跑；`2026-11-12.delivery.json` `read_back: true`、`pushed_at: 2026-11-13 09:56`，文档顶部依次是 11-13、11-12、11-11、10-27。
 - **11-13 首跑失败**：11-14 07:45 跑时网络没通，`lark-cli` 刷新常浩用户令牌失败（`dial tcp`），stdout 空、stderr 不是 JSON，`lark()` 直接报「输出不是 JSON」没重试（#170 只覆盖 JSON 里的网络错误）；失败通知也因 `open.feishu.cn` 连不上没发出去（Hermes cron 记 `live adapter send failed`）。
 - **已补写**：09:40 `hermes -p agumon cron run 45590a963269`（安装中的代码）：会话 `20261114_094022_5fb12e`，gpt-6.1-sol 一次过核对，9 张表，09:49 写入、回读通过、已推送（`2026-11-13.delivery.json`）。
 - **修复（分支 `claude/memdaily-wake-retry`，待合并）**：`memdaily_data.lark()` 输出不是 JSON 时也按网络错误判断；`NETWORK` 加 `dial tcp`、`token refresh request failed`；间隔改为 10、30、60、120、120 秒（共约 5 分钟，同 #176 pdaily 的唤醒等待），写文档仍 `tries=1`。新测试用 11-14 的真实报错原文，在旧代码上报错、新代码通过。
-- **唯一的下一步**：常浩确认后合并，安装到 `~/.hermes/profiles/agumon/scripts/memdaily_data.py` 并 `cmp`。
+- **已合并并安装**（常浩经 Agent HUD 回「合并」）：CI 通过后带 `--match-head-commit 190f55c` squash 合并为 `c7e00a2`；安装前备份 `evidence/memdaily-wake-retry-20261114/memdaily_data.py.before`，装到 `~/.hermes/profiles/agumon/scripts/memdaily_data.py`，`cmp` 一致（`memdaily_publish.py`、`memdaily_job.py` 也一致），安装副本导入自检正常。无模型定时任务每次现读脚本，不用重启网关。
+- **唯一的下一步**：无；记忆日报照常每天 07:30 跑。待办：接管《记忆周报汇总》（`KD1WdH6G6o…`），删测试文档 `BdqPdZsc…` 前先问常浩。
 
 ## 2026-11-14 · 个人项目日报连续三期降级查因；#176 核对与取数修复已合并并安装（PR #177 `801bd60`）
 
