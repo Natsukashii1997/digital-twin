@@ -1,0 +1,105 @@
+{
+ "_说明": "运行前身份闸（#174）的 GitHub 保护基线：开跑和每次放 stage 前，宿主用常浩的 gh 只读（GET）核对 dt-sandbox 的规则集和 main 分支保护，和这里逐字段比对，读不到或不一致都不放。规则集只比 id、name、target、source_type、source、enforcement、conditions、rules、bypass_actors；分支保护去掉 url 字段后整份比。取自 135 反向测试开测前快照（DigitalTwin/evidence/135-defense/20261111-151153-*-before.json），11-12 收尾的 after 快照一致，2026-11-14 宿主回读也一致。要改保护规则，先改 GitHub 再改这里，走 PR 由常浩合并。",
+ "repo": "Natsukashii1997/dt-sandbox",
+ "rulesets": [
+  {
+   "id": 26743254,
+   "name": "only-main-and-agent-branches",
+   "target": "branch",
+   "source_type": "Repository",
+   "source": "Natsukashii1997/dt-sandbox",
+   "enforcement": "active",
+   "conditions": {
+    "ref_name": {
+     "exclude": [
+      "refs/heads/main",
+      "refs/heads/agent/**",
+      "refs/heads/agent/**/*",
+      "refs/heads/agent/*/*",
+      "refs/heads/agent/*/*/*"
+     ],
+     "include": [
+      "~ALL"
+     ]
+    }
+   },
+   "rules": [
+    {
+     "type": "creation"
+    },
+    {
+     "type": "update"
+    },
+    {
+     "type": "deletion"
+    }
+   ],
+   "bypass_actors": []
+  },
+  {
+   "id": 26932758,
+   "name": "main-merge-reserved-to-admin",
+   "target": "branch",
+   "source_type": "Repository",
+   "source": "Natsukashii1997/dt-sandbox",
+   "enforcement": "active",
+   "conditions": {
+    "ref_name": {
+     "exclude": [],
+     "include": [
+      "refs/heads/main"
+     ]
+    }
+   },
+   "rules": [
+    {
+     "type": "update"
+    }
+   ],
+   "bypass_actors": [
+    {
+     "actor_id": 5,
+     "actor_type": "RepositoryRole",
+     "bypass_mode": "exempt"
+    }
+   ]
+  }
+ ],
+ "branch_protection": {
+  "main": {
+   "required_pull_request_reviews": {
+    "dismiss_stale_reviews": false,
+    "require_code_owner_reviews": false,
+    "require_last_push_approval": false,
+    "required_approving_review_count": 0
+   },
+   "required_signatures": {
+    "enabled": false
+   },
+   "enforce_admins": {
+    "enabled": true
+   },
+   "required_linear_history": {
+    "enabled": false
+   },
+   "allow_force_pushes": {
+    "enabled": false
+   },
+   "allow_deletions": {
+    "enabled": false
+   },
+   "block_creations": {
+    "enabled": false
+   },
+   "required_conversation_resolution": {
+    "enabled": false
+   },
+   "lock_branch": {
+    "enabled": false
+   },
+   "allow_fork_syncing": {
+    "enabled": false
+   }
+  }
+ }
+}

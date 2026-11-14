@@ -4,7 +4,9 @@
   exit_after  再被 list 几次后它们自己退出（模拟 agent 进程收尾慢），缺省不自己退
   stubborn    true 时 kill 也杀不掉
   fail        true 时命令失败（容器不在、docker 不通）
-  ident       身份闸（#172）要的 GitHub 身份事实；ident_fail 为 true 时身份查询失败
+  ident       身份闸（#172）要的 GitHub 身份事实；ident_fail 为 true 时身份查询失败；ident_raw 有值时原样输出（格式不对的情形）
+  labels      docker inspect 出的容器标签（缺省是 Multica-local 隔离执行器的 compose 标签）；inspect_fail 为 true 时 inspect 失败
+  service     docker ps 按 compose 标签列出的容器名（缺省只有被查的容器本身）
 每次调用记进 calls。"""
 import json
 import os
@@ -22,13 +24,27 @@ if w.get("fail"):
     p.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
     print("Error response from daemon: container is not running", file=sys.stderr)
     sys.exit(1)
+if args[:1] == ["inspect"]:                     # 身份闸（#174）：核对容器的 compose 标签
+    w["calls"][-1].update(action="inspect", container=args[-1])
+    p.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
+    if w.get("inspect_fail"):
+        print("Error: No such object: " + args[-1], file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(w.get("labels", {"com.docker.compose.project": "multica", "com.docker.compose.service": "isolated-agent",
+                                      "com.docker.compose.oneoff": "False"})))
+    sys.exit(0)
+if args[:1] == ["ps"]:                          # 身份闸（#174）：这个 compose 服务有哪些容器
+    w["calls"][-1].update(action="ps", container=None, args=args)
+    p.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
+    print("\n".join(w.get("service", ["agent-1"])))
+    sys.exit(0)
 if args[:1] == ["exec"] and args[2:4] == ["bash", "-c"] and args[5:6] == ["ident"]:   # 运行前身份闸（#172）
     w["calls"][-1]["action"] = "ident"
     p.write_text(json.dumps(w, ensure_ascii=False), encoding="utf-8")
     if w.get("ident_fail"):
-        print("gh api user 失败：HTTP 401: Bad credentials", file=sys.stderr)
+        print("gh api user 失败：HTTP 401: Bad credentials token ghp_abcdefghijklmnopqrstuvwxyz0123456789", file=sys.stderr)
         sys.exit(1)
-    print(json.dumps(w.get("ident", {})))
+    print(w["ident_raw"] if "ident_raw" in w else json.dumps(w.get("ident", {})))
     sys.exit(0)
 if args[:1] != ["exec"] or args[2:4] != ["bash", "-c"] or action not in ("list", "kill", "orphans", "kill-orphans"):
     print(f"假 docker 不认识：{args[:4]}", file=sys.stderr)
