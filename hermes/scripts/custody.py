@@ -11,8 +11,8 @@
   custody.py on --source feishu --message-id om_x 常浩私聊说「托管」或「托管到 X 点」开启
   custody.py on --source window                   已签策略的默认时段内开启（时段内只开一次）
   custody.py off --source <标签> [--skip-tonight]  关闭：on → draining；任何来源都可以（标签只是记录，自报、不核验）
-  custody.py off --source <标签> --drained        排空完成：draining → off；要本脚本自己能证明排空完成（drain_proof），
-                                                  账本（#133）接入前一律拒绝（DrainUnverified），排空到截止自动冻结
+  custody.py off --source <标签> --drained        排空完成：draining → off；要本脚本自己读账本证明排空完成（drain_proof：
+                                                  先作废已出未送达的决定，再核对没有在途、结果不明、UNRECONCILED），证明不了拒绝（DrainUnverified）
   custody.py freeze --source <标签> --reason 原因 [--item 未解决事项 ...]   转 frozen（on / draining）；已冻结时只补充事项
   custody.py unfreeze --message-id om_x          常浩私聊说「解除冻结」：frozen → off（只有这一条路；解除不等于重新开启）
   custody.py sign --message-id om_x              常浩私聊说「签托管策略 v<版本> <SHA-256 前 12 位>」签 policy.md
@@ -58,7 +58,7 @@ verify 每次重算：没签、撤销、文件不见、内容和签署时不同�
   admission = {"eligible", "reasons"}：状态能读、是 on、策略有效、会话策略就是当前有效策略才 eligible。下游不得只看 state=="on"，
   要看 admission；它只管托管这一层，夜跑授权、额度、合并条件各闸自己核；每次执行前现读，不缓存。
   命令行：custody.py status --json（同一份结构）。
-  排空：#133 在 drain_proof 里接账本后，off --drained 才可能成功；到截止还有对账不清的合并调 freeze --item …（已冻结也能补）。
+  排空：drain_proof 读 custody_ledger 的账本（#133）；到截止还有对账不清的合并调 freeze --item …（已冻结也能补）。
 威胁模型同 twin_identity：防模型自报、文本冒充、重放；不防同一 macOS 用户下的恶意本地进程。
 """
 import argparse
@@ -89,6 +89,7 @@ USED_KEEP_DAYS = 30         # 用过的消息 ID 留多久（消息本身 10 分
 EVENTS_KEEP = 50
 MAX_DRAIN_MINUTES = 24 * 60
 MAX_VALID_DAYS = 366
+MAX_LIMIT = 100              # 策略里单项额度上限的上限（防笔误写成 1000）
 SOURCE_LABEL = re.compile(r"^[\w\-一-鿿]{1,32}$")
 PUNCT = " \t\r\n　。.!！~～"
 PLACEHOLDER = "〔填"
@@ -169,8 +170,9 @@ def only_one(lines, pattern, what, errors):
 
 
 def parse_policy(text):
-    """读出本脚本要用的四项，位置固定：版本、有效期在开头的表里（第一个「## 」之前），默认时段和排空截止在「## 1. 默认托管时段」里；
-    引用块不参与；每项恰好一处。其余条款归出口闸、合并执行器（#134、#136）。返回 (字段, 错误列表)。"""
+    """读出托管要用的五项，位置固定：版本、有效期在开头的表里（第一个「## 」之前），默认时段和排空截止在「## 1. 默认托管时段」里，
+    额度上限在「## 2. 托管期间允许的动作」的表里（#133）；引用块不参与；每项恰好一处。其余条款归出口闸、合并执行器（#134、#136）。
+    返回 (字段, 错误列表)。"""
     errors, out = [], {}
     sec = sections(text)
     head = sec["前言"]
@@ -207,7 +209,33 @@ def parse_policy(text):
             errors.append("默认时段写的是「到次日」，结束时刻要早于开始时刻（例：每晚 23:30 到次日 08:00）")
         else:
             out["window"] = {"start": f"{sh:02d}:{sm:02d}", "end": f"{eh:02d}:{em:02d}"}
+    limits = parse_limits(sec, errors)
+    if limits:
+        out["limits"] = limits
     return out, errors
+
+
+def parse_limits(sec, errors):
+    """额度上限（#133，规格 §3.5）：只从「## 2. 托管期间允许的动作」的表里读两行，每行恰好一处：
+    「| 回复受限会话… | 是/否 | 每张子单 N 次，每次托管 M 次 |」「| 托管合并… | 是/否 | 每次托管 K 个 |」。
+    读不出就记错误（整份策略无效，签署时就拒绝），不猜默认值。"""
+    two = [v for k, v in sec.items() if k.startswith("## 2. 托管期间允许的动作")]
+    if len(two) != 1:
+        errors.append("要有且只有一节「## 2. 托管期间允许的动作」")
+        return None
+    out = {}
+    m = only_one(two[0], r"^\|\s*回复受限会话.*?\|\s*(是|否)\s*\|\s*每张子单\s*(\d+)\s*次\s*[，,]\s*每次托管\s*(\d+)\s*次\s*\|\s*$",
+                 "「回复受限会话」一行（是 / 否 | 每张子单 N 次，每次托管 M 次）", errors)
+    if m:
+        out["reply"] = {"allowed": m.group(1) == "是", "per_issue": int(m.group(2)), "per_session": int(m.group(3))}
+    m = only_one(two[0], r"^\|\s*托管合并.*?\|\s*(是|否)\s*\|\s*每次托管\s*(\d+)\s*个\s*\|\s*$",
+                 "「托管合并」一行（是 / 否 | 每次托管 N 个）", errors)
+    if m:
+        out["merge"] = {"allowed": m.group(1) == "是", "per_session": int(m.group(2))}
+    bad = [kind for kind, d in out.items() if any(not 1 <= v <= MAX_LIMIT for k, v in d.items() if k != "allowed")]
+    for kind in bad:
+        errors.append(f"「{'回复受限会话' if kind == 'reply' else '托管合并'}」的上限要在 1–{MAX_LIMIT} 之间")
+    return out if len(out) == 2 and not bad else None
 
 
 def read_policy(path=None):
@@ -251,7 +279,7 @@ def verify_policy(doc, now=None, path=None):
         return {**base, "code": "expired", "reason": f"托管策略 v{sig['version']} 已于 {sig['expires_at']} 过期，要续签（换版本）"}
     return {"ok": True, "code": "valid", "path": base["path"], "version": sig["version"], "sha256": sha,
             "signed_at": sig["signed_at"], "expires_at": sig["expires_at"], "drain_minutes": fields["drain_minutes"],
-            "window": fields["window"]}
+            "window": fields["window"], "limits": fields["limits"]}
 
 
 # ---------- 默认时段 ----------
@@ -739,10 +767,18 @@ def do_on(source, message_id=None, now=None, path=None, policy=None):
 
 
 def drain_proof(doc, now):
-    """排空完成的证明（第 1 轮审查 P1-08）：要由本脚本自己读账本核对「未送达决定已作废、在途合并已对账、没有 UNRECONCILED」。
-    账本（#133）还没有，所以现在一律证明不了：off --drained 全部拒绝，排空到截止自动冻结，常浩私聊「解除冻结」收尾。
-    #133 接入时在这里读账本；#134、#136 在这之前不得启用托管。返回 (能否证明, 原因)。"""
-    return False, "账本（#133）还没接入，证明不了未送达决定已作废、在途合并已对账：不能宣称排空完成（到截止会自动冻结）"
+    """排空完成的证明（第 1 轮审查 P1-08，#133 接账本）：本脚本自己读托管账本（custody_ledger.drain），先作废这次托管里
+    已出未送达的决定、释放额度（规格 §3.8 第 2 步），再核对没有进行中、结果不明、UNRECONCILED 的决定和没释放的预占。
+    一项都没有才算排空完成；账本读不了也算证明不了（fail closed，到截止自动冻结）。返回 (能否证明, 原因)。"""
+    import custody_ledger as L               # 账本反过来要 import 本脚本，所以在这里才导入
+    try:
+        with L.open_store() as st:
+            blockers = L.drain(st, doc["session"]["id"], now)
+    except Exception as e:                   # noqa: BLE001  任何读账本的失败都当成证明不了
+        return False, f"读不了托管账本，证明不了排空完成（{type(e).__name__}：{e}）"
+    if blockers:
+        return False, "排空还没收完：" + "；".join(blockers)
+    return True, ""
 
 
 def check_label(source):

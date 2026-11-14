@@ -58,7 +58,7 @@ DEFAULT_OWNER_FILE = "~/Library/Application Support/DigitalTwin/owner_open_id"  
 DEFAULT_OWNER_CHAT_FILE = "~/Library/Application Support/DigitalTwin/owner_chat_id"   # 常浩和 Hermes 私聊的 chat_id（B2.1 身份桥接判私聊用），同样 600
 OWNER_HINT = ("还没配置常浩的 open_id：设环境变量 DT_OWNER_OPEN_ID，或把 open_id 单行写进 "
               f"{DEFAULT_OWNER_FILE}（chmod 600；路径可用 DT_OWNER_FILE 改）；配置前 --by user 一律拒绝")
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 GOAL_STATUSES = ("observed", "authorized", "completed", "canceled")
 TASK_STATUSES = ("observed", "ready", "running", "blocked", "review", "completed", "canceled")
@@ -161,6 +161,24 @@ MIGRATIONS = [
     " owner TEXT NOT NULL DEFAULT '{}', order_no TEXT, run_id TEXT, lease_until TEXT NOT NULL,"
     " note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
     "CREATE UNIQUE INDEX sched_claims_open ON sched_claims(task_id) WHERE state IN ('claimed','ordered','unsafe')",
+    # v4（托管 #133）：托管账本。决定的当前状态在 custody_decisions，额度预占在 custody_quota；每次变化另在 events 记一条
+    # custody.decision.*（object_type = custody_decision），和状态变化同一个事务。读写逻辑在 custody_ledger.py
+    "CREATE TABLE custody_decisions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project TEXT NOT NULL,"
+    " action TEXT NOT NULL CHECK (action IN ('reply','merge','suspend')), target TEXT NOT NULL DEFAULT '{}',"
+    " issue_key TEXT, question TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',"
+    " basis TEXT NOT NULL, cites TEXT NOT NULL DEFAULT '[]',"
+    " revocability TEXT NOT NULL CHECK (revocability IN ('correctable','revertible','irrevocable')),"
+    " status TEXT NOT NULL CHECK (status IN ('issued','executing','done','failed','unknown','unreconciled','void','suspended')),"
+    " disposition TEXT NOT NULL DEFAULT 'open' CHECK (disposition IN ('open','overturned','corrected','reverted','revert_failed')),"
+    " expires_at TEXT, void_reason TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '{}',"
+    " raw_path TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    "CREATE INDEX custody_decisions_session ON custody_decisions(session_id);"
+    "CREATE TABLE custody_quota (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,"
+    " kind TEXT NOT NULL CHECK (kind IN ('reply','issue','merge')), scope TEXT NOT NULL DEFAULT '',"
+    " decision_id TEXT NOT NULL REFERENCES custody_decisions(id),"
+    " state TEXT NOT NULL CHECK (state IN ('reserved','used','released','frozen')),"
+    " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    "CREATE INDEX custody_quota_count ON custody_quota(kind, session_id, scope, state)",
 ]   # 第 n 项把库从版本 n 升到 n+1；改表结构只追加，不改已有项
 
 

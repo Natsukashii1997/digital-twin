@@ -191,7 +191,9 @@ class ScriptTest(unittest.TestCase):
     def test_custody_policy_invalid_or_expiring_is_reported(self):
         import datetime as dt
         import hashlib
-        policy = "| 版本 | 3 |\n| 有效期 | 签署日起 30 天 |\n\n## 1. 默认托管时段\n\n- 每晚 23:30 到次日 08:00\n- 排空截止：2 小时\n"
+        policy = ("| 版本 | 3 |\n| 有效期 | 签署日起 30 天 |\n\n## 1. 默认托管时段\n\n- 每晚 23:30 到次日 08:00\n- 排空截止：2 小时\n"
+                  "\n## 2. 托管期间允许的动作\n\n| 回复受限会话标为 blocked 的待决事项 | 是 | 每张子单 2 次，每次托管 10 次 |\n"
+                  "| 托管合并 | 是 | 每次托管 5 个 |\n")
         now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
         sig = {"version": 3, "sha256": hashlib.sha256(policy.encode()).hexdigest(), "message_id": "om_fixture0002", "open_id": "ou_x",
                "signed_at": (now - dt.timedelta(days=28)).isoformat(), "expires_at": (now + dt.timedelta(days=2)).isoformat(),

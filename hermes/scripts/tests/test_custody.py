@@ -68,8 +68,9 @@ class Base(unittest.TestCase):
         self.policy = self.root / "dt" / "custody" / "policy.md"
         self.policy.parent.mkdir(parents=True)
         self.template = TEMPLATE.read_text(encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("DT_OWNER", "HERMES_SESSION", "DT_CUSTODY"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("DT_OWNER", "HERMES_SESSION", "DT_CUSTODY", "DT_STATE_DB"))}
         env.update(DT_CUSTODY_FILE=str(self.state), DT_CUSTODY_POLICY=str(self.policy),
+                   DT_STATE_DB=str(self.root / "dt" / "twin-state.db"), DT_CUSTODY_DIR=str(self.root / "dt" / "custody"),
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT)
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
@@ -114,7 +115,7 @@ class Base(unittest.TestCase):
         return C.read_status(now=now)
 
     def allow_drain(self):
-        """账本（#133）还没有：要走完 draining → off 的用例在这里假装账本已经证明排空完成。"""
+        """状态机用例不关心账本：要走完 draining → off 的用例在这里假装账本已经证明排空完成（账本本身见 test_custody_ledger）。"""
         p = mock.patch.object(C, "drain_proof", return_value=(True, ""))
         p.start()
         self.addCleanup(p.stop)
@@ -129,7 +130,30 @@ class PolicyTemplateTests(Base):
         fields, errors = C.parse_policy(filled)
         self.assertEqual(errors, [])
         self.assertEqual(fields, {"version": 3, "valid_days": 30, "drain_minutes": 120,
-                                  "window": {"start": "23:30", "end": "08:00"}})
+                                  "window": {"start": "23:30", "end": "08:00"},
+                                  "limits": {"reply": {"allowed": True, "per_issue": 2, "per_session": 10},
+                                             "merge": {"allowed": True, "per_session": 5}}})
+
+    def test_parse_limits(self):
+        """#133：额度上限从第 2 节的表里读，每行恰好一处；读不出、超范围、重复都算策略无效（签署时就拒绝）。"""
+        filled = fill(self.template)
+        reply = next(ln for ln in filled.splitlines() if ln.startswith("| 回复受限会话"))
+        merge = next(ln for ln in filled.splitlines() if ln.startswith("| 托管合并"))
+        no = filled.replace(merge, merge.replace("| 是 |", "| 否 |"))
+        self.assertEqual(C.parse_policy(no)[0]["limits"]["merge"], {"allowed": False, "per_session": 5})
+        cases = {
+            "上限写成文字": filled.replace(reply, reply.replace("每次托管 10 次", "每次托管 十 次")),
+            "上限为 0": filled.replace(merge, merge.replace("每次托管 5 个", "每次托管 0 个")),
+            "上限过大": filled.replace(reply, reply.replace("每张子单 2 次", "每张子单 101 次")),
+            "允许没写是否": filled.replace(merge, merge.replace("| 是 |", "| 可以 |")),
+            "同一行写了两处": filled.replace(merge, merge + "\n" + merge),
+            "行在别的节": filled.replace(reply + "\n", "").replace("## 4. 一律挂起", reply + "\n\n## 4. 一律挂起"),
+        }
+        for why, text in cases.items():
+            with self.subTest(why):
+                fields, errors = C.parse_policy(text)
+                self.assertTrue(errors, why)
+                self.assertNotIn("limits", fields)
 
     def test_parse_policy_errors(self):
         _, errors = C.parse_policy(fill(self.template, valid="30 天", drain="很快"))
@@ -360,10 +384,13 @@ class TransitionTests(Base):
         self.open()
         self.rejects("BadTransition", C.do_off, "ledger", drained=True, now=at(22, 5))       # on：不能跳过排空
         C.do_off("feishu", now=at(22, 10))
-        self.assertIn("#133", self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 20)))  # 默认证明不了
+        with mock.patch("custody_ledger.drain", return_value=["d-261111-aaaaaa（合并 x#1）结果不明"]):
+            msg = self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 20))   # 账本说没收完
+        self.assertIn("d-261111-aaaaaa", msg)
+        with mock.patch("custody_ledger.drain", side_effect=OSError("磁盘坏了")):
+            self.assertIn("读不了托管账本", self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 25)))
         self.assertEqual(self.doc()["state"], "draining")
-        self.allow_drain()
-        doc, r = C.do_off("ledger", drained=True, now=at(22, 30))
+        doc, r = C.do_off("ledger", drained=True, now=at(22, 30))            # 真账本（空的）：排空完成
         self.assertEqual((doc["state"], doc["session"]), ("off", None))
         last = doc["history"][-1]
         self.assertEqual(last["ended"]["how"], "排空完成")
@@ -680,10 +707,20 @@ class ReviewRound1Tests(Base):
 
     # ---- P1-08 排空证明 ----
     def test_p1_08_drained_needs_proof(self):
+        """#133 起由账本证明：有结果不明的合并就证明不了，到截止冻结。"""
+        import custody_ledger as L
         self.sign(when=at(20))
         self.open()
+        sid = self.doc()["session"]["id"]
+        with L.open_store(at(22)) as st:
+            d = L.issue(st, session_id=sid, project="dt-sandbox", action="merge", basis="合并官建议合并",
+                        target={"repo": "o/dt-sandbox", "pr": 7, "head": "a" * 40}, revocability="revertible",
+                        expires_at=at(23), now=at(22))
+            L.begin(st, d["id"], now=at(22))
+            L.finish(st, d["id"], "unknown", now=at(22))
         C.do_off("feishu", now=at(22, 1))
-        self.rejects("DrainUnverified", C.do_off, "hermes", drained=True, now=at(22, 2))
+        msg = self.rejects("DrainUnverified", C.do_off, "hermes", drained=True, now=at(22, 2))
+        self.assertIn(d["id"], msg)
         self.assertEqual(self.status(at(0, 1, day=1))["state"], "frozen")   # 没人能证明 → 到截止冻结
 
     # ---- P2 ----
