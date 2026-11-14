@@ -28,7 +28,8 @@ GH = os.environ.get("DT_GH", "gh")
 TIMEOUT = 60
 NIGHT_ROOT = "~/Library/Application Support/DigitalTwin/runs"
 PR_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)$")
-RULES = {1: "同一子单之后的 run", 2: "这些 run 开出的分支和 PR", 3: "之后的合并和引用", 4: "依据它的其他决定"}
+RULES = {1: "这个任务后来的运行", 2: "这些运行开的分支和 PR", 3: "之后的合并和引用它的 issue / PR", 4: "依据这个决定做的其他决定"}
+RUN_WORDS = {"completed": "跑完了", "running": "正在跑", "queued": "排队中", "failed": "失败了", "cancelled": "被取消了", "canceled": "被取消了"}
 
 
 class Unavailable(Exception):
@@ -148,7 +149,7 @@ def impacts(store, d, gh=None, night_root=None):
         if runs is not None:
             prs = {}
             for r in runs:
-                add(1, f"run {r['run_id']}（{r.get('status') or '?'}，{r.get('created_at')}）", r["run_id"])
+                add(1, f"运行 {r['run_id']}（{RUN_WORDS.get(r.get('status'), '状态不明')}）", r["run_id"])
                 m = PR_URL.match(r.get("pr_url") or "")
                 if m:
                     prs[(m.group(1), int(m.group(2)))] = r["pr_url"]
@@ -159,16 +160,16 @@ def impacts(store, d, gh=None, night_root=None):
                 seeds = {}
                 for (repo, n), url in prs.items():
                     p = gh.pull(repo, n)
-                    add(2, f"PR #{n}（run 开的）", f"{repo}#{n}", url)
+                    add(2, f"PR #{n}（这些运行开的）", f"{repo}#{n}", url)
                     seeds.setdefault(repo, set()).add(p["head"]["sha"])
                 for repo, shas in seeds.items():
                     for name, sha in gh.branches(repo).items():
                         if name != "main" and any(gh.is_ancestor(repo, s, sha) for s in shas):
-                            add(2, f"分支 {name}（HEAD {sha[:7]}）", f"{repo}@{name}")
+                            add(2, f"分支 {name}", f"{repo}@{name}")
                     for p in gh.pulls(repo):
                         made = parse_time(p.get("created_at"))
                         if made and made > since and any(gh.is_ancestor(repo, s, p["head"]["sha"]) for s in shas):
-                            add(2, f"PR #{p['number']}（以 run 的提交为祖先）", f"{repo}#{p['number']}", p.get("html_url", ""))
+                            add(2, f"PR #{p['number']}（在这些运行的改动上接着改的）", f"{repo}#{p['number']}", p.get("html_url", ""))
             except (Unavailable, KeyError, TypeError) as e:
                 gaps.append({"rule": 2, "why": f"GitHub 没查全（{e}）"})
     elif d["action"] == "merge":
@@ -181,7 +182,7 @@ def impacts(store, d, gh=None, night_root=None):
                     merged = parse_time(p.get("merged_at"))
                     sha = p.get("merge_commit_sha")
                     if merged and merged > since and sha and sha != mc and gh.is_ancestor(repo, mc, sha):
-                        add(3, f"PR #{p['number']}（之后合并，带着这次合并）", f"{repo}#{p['number']}", p.get("html_url", ""))
+                        add(3, f"PR #{p['number']}（之后合进 main，里面带着这次合并的改动）", f"{repo}#{p['number']}", p.get("html_url", ""))
             except (Unavailable, KeyError, TypeError) as e:
                 gaps.append({"rule": 3, "why": f"GitHub 没查全之后的合并（{e}）"})
         for n in (t.get("pr"), t.get("gh_issue")):
@@ -195,7 +196,7 @@ def impacts(store, d, gh=None, night_root=None):
             except (Unavailable, KeyError, TypeError) as e:
                 gaps.append({"rule": 3, "why": f"GitHub 没查全引用 #{n} 的 issue / PR（{e}）"})
     for x, via in descendants(store, d["id"]):
-        add(4, f"决定 {x['id']}（{L.ACTIONS[x['action']]} {L.describe_target(x)}，依据 {via}）", x["id"])
+        add(4, f"「{x['context'] or L.describe_target(x)}」：{x['summary'] or '没替你定'}（{x['id']}）", x["id"])
     return {"items": items, "gaps": gaps}
 
 

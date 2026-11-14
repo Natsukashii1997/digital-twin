@@ -98,20 +98,21 @@ class Base(unittest.TestCase):
     # ---- 账本数据 ----
     def reply(self, issue="DTS-9", status="done", now=T0, **kw):
         d = L.issue(self.st, session_id=SID, project="dt-sandbox", action="reply", now=now, status_reader=lambda t: ON,
-                    target={"issue": issue, "repo": REPO, "night": "night-1114"}, question="重试次数上限设 3 还是 5",
-                    summary="设 3", basis="和现有配置一致", revocability="correctable",
+                    target={"issue": issue, "repo": REPO, "night": "night-1114"}, question="失败后最多重试几次：3 次还是 5 次",
+                    context="给示例服务加失败重试", summary="重试 3 次", basis="仓库现有配置就是 3 次", revocability="correctable",
                     expires_at=now + dt.timedelta(minutes=30), **kw)
         return self.drive(d, status, now)
 
     def merge(self, pr=38, status="done", merge_commit="m" * 40, now=T0):
         d = L.issue(self.st, session_id=SID, project="dt-sandbox", action="merge", now=now, status_reader=lambda t: ON,
-                    target={"repo": REPO, "pr": pr, "head": "a" * 40}, question="合并官判建议合并（L1）", summary=f"托管合并 #{pr}",
-                    basis="CI 通过，审核凭证对得上", revocability="revertible", expires_at=now + dt.timedelta(minutes=30))
+                    target={"repo": REPO, "pr": pr, "head": "a" * 40}, context=f"合并 PR #{pr}「重试次数改成可配置」", summary=f"合并 #{pr}",
+                    basis="测试全部通过，审查结论是通过", revocability="revertible", expires_at=now + dt.timedelta(minutes=30))
         return self.drive(d, status, now, {"merge_commit": merge_commit} if status == "done" else {})
 
     def suspend(self, issue="DTS-12"):
         return L.issue(self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": issue},
-                       question="要不要改 main 规则集", summary="挂起", basis="改规则集属 D 档", revocability="irrevocable", now=T0)
+                       context="让 agent 开的 PR 能自动合并", question="要不要把 main 分支规则改成 1 个人批准就能合并",
+                       ask_owner="回复我「同意改」或「不改」", basis="改仓库的合并规则只能你本人决定", revocability="irrevocable", now=T0)
 
     def drive(self, d, status, now, outcome=None):
         if status in ("issued", "void"):
@@ -151,6 +152,22 @@ def card_text(card):
     return json.dumps(card, ensure_ascii=False)
 
 
+def _button_nodes(card):
+    out = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            if x.get("tag") == "button":
+                out.append(x)
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(card)
+    return out
+
+
 def buttons(card):
     out = []
 
@@ -167,39 +184,83 @@ def buttons(card):
     return out
 
 
+def tables_of(card):
+    return [e for e in card["body"]["elements"] if e["tag"] == "table"]
+
+
+def cells(t, col):
+    return [r[col] for r in t["rows"]]
+
+
 class CardTests(Base):
-    def test_final_card_groups_and_pins(self):
+    """乙版表格 + 白话改写（常浩 11-14）：每行先说是哪件事，写清问了什么、怎么定、为什么、后来怎样、他要做什么，不出现内部术语。"""
+
+    def night_log(self, *runs):
+        night = self.nights / "night-1114"
+        night.mkdir(parents=True, exist_ok=True)
+        (night / "run-log.jsonl").write_text("\n".join(json.dumps(r) for r in runs) + "\n")
+
+    def test_final_card_two_tables_in_plain_words(self):
         ok = self.reply()
         merged = self.merge()
         unrec = self.merge(pr=41, status="unreconciled")
         susp = self.suspend()
         void = self.reply(issue="DTS-11", status="void")
-        s, kind, rows, card = R.build(SID, doc=ended_doc(), store=self.st)
+        self.night_log({"event": "run", "issue": "DTS-9", "run_id": "r-1", "status": "completed",
+                        "created_at": C.iso(T0 + dt.timedelta(minutes=3)), "pr_url": f"https://github.com/{REPO}/pull/50"})
+        s, kind, rows, card = R.build(SID, doc=ended_doc(), store=self.st, night_root=self.nights)
         self.assertEqual(kind, "final")
-        self.assertEqual(card["header"]["title"]["content"], "🌙 托管汇报 · 已安全收尾")
+        self.assertEqual(card["header"]["title"]["content"], "🌙 托管汇报：替你定了 2 件，2 件等你处理")
         self.assertEqual(card["header"]["template"], "blue")
         text = card_text(card)
-        self.assertIn(SID, text)                                              # 回读靠托管号
-        for d in (unrec, susp):                                               # 置顶的在「要你先看」之后、项目分组之前
-            self.assertLess(text.index("要你先看"), text.index(d["id"]))
-            self.assertLess(text.index(d["id"]), text.index("dt-sandbox · 2 条"))
-        for d in (ok, merged):
-            self.assertGreater(text.index(d["id"]), text.index("dt-sandbox · 2 条"))
-        for want in ("问：重试次数上限设 3 还是 5", "定：**设 3**", "依据：和现有配置一致", "已送达", "可纠正",
-                     "已合并（合并提交 mmmmmmm）", "可回退", "UNRECONCILED", "挂起，等你定", "作废 1 条", "托管排空"):
-            self.assertIn(want, text)
+        self.assertIn(SID, text)                                              # 回读靠托管号（页脚小字）
+        self.assertIn("替你回答了 agent 的 1 个问题、合并了 1 个 PR；有 2 件要你处理", text)
+        wait, done = tables_of(card)
+        self.assertEqual([c["display_name"] for c in wait["columns"]],
+                         ["哪件事", "agent 问你什么", "我怎么处理的", "为什么", "后来怎样", "你要做什么"])
+        self.assertEqual([c["display_name"] for c in done["columns"]],
+                         ["哪件事", "agent 问你什么", "我替你定的", "为什么", "后来怎样", "你不同意怎么办"])
+        self.assertTrue(all(c["data_type"] == "lark_md" for c in wait["columns"]))
+        for c in wait["columns"]:                                             # 飞书自定义列宽只收 80–600px（11-14 试发 70px 被拒）
+            if c["width"] != "auto":
+                self.assertTrue(c["width"].endswith("px") and 80 <= int(c["width"][:-2]) <= 600, c)
+        self.assertEqual(cells(wait, "what"), ["**合并 PR #41「重试次数改成可配置」**\ndt-sandbox PR #41",
+                                               "**让 agent 开的 PR 能自动合并**\n任务 DTS-12"])
+        self.assertEqual(cells(wait, "did"), ["**合并 #41**，但不确定做成没有", "**没替你定**"])
+        self.assertEqual(cells(wait, "todo"), ["到 GitHub 看 PR #41 合上没有，回复我「#41 已合并」或「#41 没合并」",
+                                               "回复我「同意改」或「不改」"])
+        self.assertEqual(cells(done, "ask"), ["失败后最多重试几次：3 次还是 5 次", "（不是 agent 问的：按托管规则可以直接合）"])
+        self.assertEqual(cells(done, "did"), ["**重试 3 次**", "**合并 #38**"])
+        self.assertEqual(cells(done, "after"), ["agent 后来又跑了 1 次，最近一次跑完了，开了 PR #50", "已合进 main"])
+        self.assertEqual(cells(done, "todo"), ["点「推翻」，再到任务 DTS-9 上写你要的答案",
+                                               "点「推翻」：我开一个撤销这次合并的 PR，你点合并才生效"])
+        self.assertIn("另有 1 个回复没发出去：任务 DTS-11", text)
         self.assertEqual(sorted(b["ref"] for b in buttons(card)), sorted(d["id"] for d in (ok, merged, unrec, susp)))
-        self.assertNotIn(void["id"], [b["ref"] for b in buttons(card)])     # 作废的没有推翻按钮
+        self.assertNotIn(void["id"], [b["ref"] for b in buttons(card)])     # 没发出去的没有推翻按钮
+        labels = [b["text"]["content"] for b in _button_nodes(card)]
+        self.assertIn("推翻：重试 3 次", labels)
+        self.assertIn("推翻：合并 #38", labels)
+        hit = L.JARGON.search(json.dumps([e for e in card["body"]["elements"][:-1]], ensure_ascii=False))
+        self.assertIsNone(hit, hit and hit.group(0))                          # 除了末尾编号，卡上没有内部术语
+
+    def test_after_column_says_unknown_when_night_log_missing(self):
+        self.reply()
+        _, _, _, card = R.build(SID, doc=ended_doc(), store=self.st, night_root=self.nights)
+        self.assertEqual(cells(tables_of(card)[0], "after"), ["还不知道（夜跑记录读不到）"])
+        self.night_log({"event": "run", "issue": "DTS-9", "run_id": "r-0", "created_at": C.iso(T0 - dt.timedelta(minutes=1))})
+        _, _, _, card = R.build(SID, doc=ended_doc(), store=self.st, night_root=self.nights)
+        self.assertEqual(cells(tables_of(card)[0], "after"), ["agent 还没开始处理"])    # 决定之前的运行不算
 
     def test_frozen_title_and_explanation(self):
         self.merge(pr=41, status="unreconciled")
         _, kind, _, card = R.build(SID, doc=frozen_doc(), store=self.st)
         self.assertEqual((kind, card["header"]["title"]["content"], card["header"]["template"]),
                          ("frozen", "⚠️ 托管未能安全收尾", "red"))
-        self.assertIn("解除冻结", card_text(card))
+        self.assertIn("托管已经锁住", card_text(card))
+        self.assertIn("在私聊说「解除冻结」", card_text(card))
         _, kind, _, card = R.build(SID, doc=ended_doc(frozen=frozen_doc()["session"]["frozen"]), store=self.st)
         self.assertEqual((kind, card["header"]["title"]["content"]), ("final", "⚠️ 托管未能安全收尾"))   # 冻结过，解除后汇报照样写
-        self.assertIn("已解除冻结", card_text(card))
+        self.assertIn("你已经解除", card_text(card))
 
     def test_only_after_session_ends(self):
         for state in ("on", "draining"):
@@ -214,16 +275,25 @@ class CardTests(Base):
         d = self.reply()
         L.set_disposition(self.st, d["id"], "overturned", "x", now=T0)
         _, _, _, card = R.build(SID, doc=ended_doc(), store=self.st)
-        self.assertIn("处置：已推翻·已记录", card_text(card))
+        self.assertEqual(cells(tables_of(card)[0], "todo"), ["你已处理：已推翻·已记录"])
         self.assertEqual(buttons(card), [])
+
+    def test_empty_session(self):
+        _, _, _, card = R.build(SID, doc=ended_doc(), store=self.st)
+        self.assertIn("agent 没来问过问题", card_text(card))
+        self.assertEqual(tables_of(card), [])
 
     def test_big_card_is_trimmed(self):
         for i in range(60):
             L.issue(self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": f"DTS-{i}"},
-                    question="很长的问题" * 10, summary="挂起", basis="拿不准" * 10, revocability="irrevocable", now=T0)
+                    context="很长的事情名字" * 5, question="很长的问题" * 10, ask_owner="回复我怎么定", basis="拿不准" * 30,
+                    revocability="irrevocable", now=T0)
         _, _, _, card = R.build(SID, doc=ended_doc(), store=self.st)
-        self.assertLessEqual(len(card_text(card).encode()), R.CARD_LIMIT + 200)
-        self.assertIn("卡片放不下", card_text(card))
+        self.assertLessEqual(len(card_text(card).encode()), R.CARD_LIMIT + 300)
+        self.assertIn("还有 40 件没列", card_text(card))
+        self.assertEqual(len(tables_of(card)[0]["rows"]), R.MAX_ROWS)
+        self.assertEqual(len(buttons(card)), R.MAX_ROWS)                     # 按钮只给列出来的
+        self.assertIn(SID, card_text(card))                                   # 截断也保留末尾编号（回读要用）
 
 
 class SendTests(Base):
@@ -277,7 +347,7 @@ class ButtonTests(Base):
             self.assertEqual(self.click("overturn", d["id"], chat="oc_someone_else")[0], 1)
         code, texts = self.click("overturn", d["id"])
         self.assertEqual(code, 1)
-        self.assertIn("不在发过的汇报卡上", texts[0])
+        self.assertIn("不在发给你的汇报卡上", texts[0])
         code, texts = self.click("overturn", "d-261115-ffffff")
         self.assertIn("没有决定", texts[0])
         self.assertEqual(L.get(self.st, d["id"])["disposition"], "open")
@@ -305,8 +375,9 @@ class ButtonTests(Base):
         got = L.get(self.st, d["id"])
         self.assertEqual(got["disposition"], "overturned")
         msg = texts[0]
-        for want in ("已推翻", "run r-1", "PR #50（run 开的）", "分支 agent/dts-9", "分支 agent/stack", "PR #51（以 run 的提交为祖先）",
-                     f"决定 {later['id']}", "撤回 " + d["id"]):
+        for want in ("已推翻：给示例服务加失败重试（任务 DTS-9），我当时定的是「重试 3 次」", "运行 r-1（跑完了）", "PR #50（这些运行开的）",
+                     "分支 agent/dts-9", "分支 agent/stack", "PR #51（在这些运行的改动上接着改的）",
+                     f"（{later['id']}）", "到任务 DTS-9 上评论「撤回 " + d["id"]):
             self.assertIn(want, msg)
         for unwanted in ("r-old", "r-x", "agent/other", "#52"):
             self.assertNotIn(unwanted, msg)
@@ -345,7 +416,7 @@ class ButtonTests(Base):
         self.assertEqual(code, 0, texts)
         self.assertEqual(calls, [(REPO, "m" * 40, d["id"], f"Revert：托管决定 {d['id']}（{REPO}#38@aaaaaaa）")])
         self.assertEqual(L.get(self.st, d["id"])["disposition"], "reverted")
-        for want in ("PR #39（之后合并", "issue #60 引用了 #38", "已开 revert PR"):
+        for want in ("PR #39（之后合进 main", "issue #60 引用了 #38", "已开撤销 PR"):
             self.assertIn(want, texts[0])
         self.assertNotIn("#30", texts[0])
         self.assertNotIn("#20", texts[0])
@@ -365,7 +436,7 @@ class ButtonTests(Base):
                 code, texts = self.click("overturn", d["id"], gh=FakeGitHub(), revert=revert)
                 self.assertEqual(code, 1)
                 self.assertEqual(L.get(self.st, d["id"])["disposition"], "revert_failed")
-                self.assertIn("回退失败", texts[0])
+                self.assertIn("撤销 PR 没开成", texts[0])
 
     def test_overturn_unreconciled_merge_does_not_revert(self):
         d = self.merge(pr=41, status="unreconciled")
@@ -373,7 +444,7 @@ class ButtonTests(Base):
         code, texts = self.click("overturn", d["id"], gh=FakeGitHub(), revert=lambda *a: self.fail("不该开 revert"))
         self.assertEqual(code, 1)
         self.assertEqual(L.get(self.st, d["id"])["disposition"], "revert_failed")
-        self.assertIn("没有合并提交号", texts[0])
+        self.assertIn("没确认合上，所以不开撤销 PR", texts[0])
 
     def merged_revert(self, d):
         self.reported(d)
@@ -390,12 +461,12 @@ class ButtonTests(Base):
                                  owner_merge=lambda card: merged.append(card) or {"returncode": 0})
         self.assertEqual(code, 0, texts)
         self.assertEqual(merged, [{"repo": REPO, "pr": 70, "head": "r" * 40}])
-        self.assertIn("revert PR 已合并", texts[0])
+        self.assertIn("撤销 PR 已合并", texts[0])
 
     def test_merge_revert_refuses_when_pr_changed(self):
         d = self.merge()
         self.merged_revert(d)
-        for view, why in (({"state": "OPEN", "headRefOid": "x" * 40, "baseRefName": "main", "mergeStateStatus": "CLEAN"}, "HEAD"),
+        for view, why in (({"state": "OPEN", "headRefOid": "x" * 40, "baseRefName": "main", "mergeStateStatus": "CLEAN"}, "开出来后又被改过"),
                           ({"state": "CLOSED", "headRefOid": "r" * 40, "baseRefName": "main", "mergeStateStatus": "CLEAN"}, "不是开着的"),
                           ({"state": "OPEN", "headRefOid": "r" * 40, "baseRefName": "main", "mergeStateStatus": "BLOCKED"}, "BLOCKED")):
             code, texts = self.click("merge_revert", d["id"], run_gh=lambda args, v=view: json.dumps(v),
@@ -408,7 +479,7 @@ class ButtonTests(Base):
         self.reported(d)
         code, texts = self.click("merge_revert", d["id"], run_gh=lambda a: self.fail("x"), owner_merge=lambda c: self.fail("x"))
         self.assertEqual(code, 1)
-        self.assertIn("没有开成的 revert PR", texts[0])
+        self.assertIn("没有开成的撤销 PR", texts[0])
 
 
 class RevertTests(unittest.TestCase):

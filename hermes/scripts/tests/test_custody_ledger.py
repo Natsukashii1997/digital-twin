@@ -52,7 +52,7 @@ def race_worker(db, raw, start, out, n):
     start.wait()
     try:
         with L.TS.Store(db) as st:
-            d = L.issue(st, session_id=SID, project="dt-sandbox", action="merge", basis="合并官建议合并",
+            d = L.issue(st, session_id=SID, project="dt-sandbox", action="merge", basis="测试全过、审查通过", context="合并 PR「重试可配置」", summary="合并",
                         target={"repo": "o/dt-sandbox", "pr": 100 + n, "head": "b" * 40}, revocability="revertible",
                         expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=lambda t: status(limits=lim))
         out.put(("ok", d["id"]))
@@ -78,16 +78,19 @@ class Base(unittest.TestCase):
 
     def reply(self, issue="DTS-7", session=SID, now=T0, **kw):
         kw.setdefault("status_reader", self.reader)
+        text = dict(context="给示例服务加超时", question="超时设 30 秒还是 60 秒", summary="超时 30 秒",
+                    basis="只影响沙盒里的示例服务，30 秒和现有配置一致")
+        text.update({k: kw.pop(k) for k in list(kw) if k in text})
         return L.issue(self.st, session_id=session, project="dt-sandbox", action="reply", target={"issue": issue, "repo": "o/dt-sandbox"},
-                       question="要不要把超时调到 30 秒", summary="调到 30 秒", basis="沙盒范围内的参数取舍",
+                       **text,
                        revocability="correctable", expires_at=now + dt.timedelta(minutes=30), now=now,
                        received={"issue": issue, "comment": "agent 问：超时调多少？"}, reply="调到 30 秒〔托管·猛鬼兽代发〕", **kw)
 
     def merge(self, pr=7, **kw):
         kw.setdefault("status_reader", self.reader)
         return L.issue(self.st, session_id=SID, project="dt-sandbox", action="merge",
-                       target={"repo": "o/dt-sandbox", "pr": pr, "head": "a" * 40}, summary=f"合并 PR #{pr}",
-                       basis="合并官建议合并，CI 通过", revocability="revertible", expires_at=T0 + dt.timedelta(hours=1),
+                       target={"repo": "o/dt-sandbox", "pr": pr, "head": "a" * 40}, summary=f"合并 PR #{pr}", context=f"合并 PR #{pr}「重试可配置」",
+                       basis="测试全过、审查通过", revocability="revertible", expires_at=T0 + dt.timedelta(hours=1),
                        now=T0, **kw)
 
     def rejects(self, code, fn, *a, **kw):
@@ -119,7 +122,8 @@ class IssueTests(Base):
 
     def test_suspend_needs_no_admission_and_takes_no_quota(self):
         d = L.issue(self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": "DTS-9"},
-                    question="要改规则集", summary="挂起：D 档", basis="改规则集属于 D 档", revocability="irrevocable",
+                    context="让 agent 的 PR 能自动合并", question="要不要改 main 分支的合并规则", ask_owner="回复我「同意改」或「不改」",
+                    basis="改仓库的合并规则只能你本人决定", revocability="irrevocable",
                     now=T0, status_reader=lambda t: status("draining", eligible=False))
         self.assertEqual((d["status"], L.quotas(self.st, d["id"])), ("suspended", []))
 
@@ -132,16 +136,34 @@ class IssueTests(Base):
         for kw in cases:
             with self.subTest(kw):
                 self.rejects("BadInput", L.issue, self.st, session_id=SID, project="p", target={"issue": "x", "repo": "r", "pr": 1, "head": "h"},
-                             basis="b", expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=self.reader, **kw)
-        self.rejects("BadInput", L.issue, self.st, session_id=SID, project="p", action="reply", target={"issue": "x"}, basis="b",
+                             basis="b", context="c", question="q", summary="s", expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=self.reader, **kw)
+        self.rejects("BadInput", L.issue, self.st, session_id=SID, project="p", action="reply", target={"issue": "x"}, basis="b", context="c", question="q", summary="s",
                      revocability="correctable", expires_at=T0 - dt.timedelta(minutes=1), now=T0, status_reader=self.reader)
-        self.rejects("BadInput", L.issue, self.st, session_id=SID, project="p", action="merge", target={"repo": "r"}, basis="b",
+        self.rejects("BadInput", L.issue, self.st, session_id=SID, project="p", action="merge", target={"repo": "r"}, basis="b", context="c", summary="s",
                      revocability="revertible", expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=self.reader)
         self.rejects("BadInput", self.reply, cites=["d-261114-ffffff"])          # 引用不存在的决定
-        self.rejects("BadInput", L.issue, self.st, session_id="c-坏的", project="p", action="suspend", target={}, basis="b",
+        self.rejects("BadInput", L.issue, self.st, session_id="c-坏的", project="p", action="suspend", target={}, basis="b", context="c", question="q", ask_owner="a",
                      revocability="irrevocable", now=T0)
         self.assertEqual(L.decisions(self.st), [])
         self.assertFalse(any(self.raw.rglob("*.json")))                      # 拒绝时原文也不留
+
+    def test_owner_text_must_be_plain(self):
+        """写给常浩看的字（常浩 11-14：看不懂就没法判断）：按动作必填、限长、不许内部术语；不合格不记账。"""
+        cases = {
+            "缺这件事在做什么": dict(context=""),
+            "缺 agent 问了什么": dict(question=""),
+            "我替你定的太长": dict(summary="把重试次数上限从现在的五次改成三次并同步修改文档"),
+            "依据里有术语 D 档": dict(basis="属于 D 档以外，可以直接答"),
+            "依据里有 L1": dict(basis="合并官判建议合并（L1）"),
+            "问题里有子单": dict(question="这张子单要不要拆开"),
+            "依据里有 HEAD": dict(basis="审查对得上 HEAD"),
+        }
+        for why, kw in cases.items():
+            with self.subTest(why):
+                self.rejects("BadText", self.reply, **kw)
+        self.rejects("BadText", L.issue, self.st, session_id=SID, project="p", action="suspend", target={"issue": "x"},
+                     context="c", question="q", basis="拿不准", revocability="irrevocable", now=T0)      # 挂起要写常浩要做什么
+        self.assertEqual(L.decisions(self.st), [])
 
     def test_cites_existing_decision(self):
         a = self.reply()
@@ -307,7 +329,7 @@ class TransitionTests(Base):
                                                      "custody.decision.disposition.reverted"])
 
     def test_suspended_can_be_overturned(self):
-        d = L.issue(self.st, session_id=SID, project="p", action="suspend", target={"issue": "DTS-1"}, basis="拿不准",
+        d = L.issue(self.st, session_id=SID, project="p", action="suspend", target={"issue": "DTS-1"}, basis="拿不准", context="c", question="q", ask_owner="回复我怎么定",
                     revocability="irrevocable", now=T0)
         L.set_disposition(self.st, d["id"], "overturned", "这个其实可以答", now=T0)
 

@@ -713,7 +713,7 @@ class ReviewRound1Tests(Base):
         self.open()
         sid = self.doc()["session"]["id"]
         with L.open_store(at(22)) as st:
-            d = L.issue(st, session_id=sid, project="dt-sandbox", action="merge", basis="合并官建议合并",
+            d = L.issue(st, session_id=sid, project="dt-sandbox", action="merge", basis="测试全过、审查通过", context="合并 PR #7「重试可配置」", summary="合并 #7",
                         target={"repo": "o/dt-sandbox", "pr": 7, "head": "a" * 40}, revocability="revertible",
                         expires_at=at(23), now=at(22))
             L.begin(st, d["id"], now=at(22))

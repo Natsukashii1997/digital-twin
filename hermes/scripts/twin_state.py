@@ -165,7 +165,8 @@ MIGRATIONS = [
     # custody.decision.*（object_type = custody_decision），和状态变化同一个事务。读写逻辑在 custody_ledger.py
     "CREATE TABLE custody_decisions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project TEXT NOT NULL,"
     " action TEXT NOT NULL CHECK (action IN ('reply','merge','suspend')), target TEXT NOT NULL DEFAULT '{}',"
-    " issue_key TEXT, question TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',"
+    " issue_key TEXT, context TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',"
+    " ask_owner TEXT NOT NULL DEFAULT '',"
     " basis TEXT NOT NULL, cites TEXT NOT NULL DEFAULT '[]',"
     " revocability TEXT NOT NULL CHECK (revocability IN ('correctable','revertible','irrevocable')),"
     " status TEXT NOT NULL CHECK (status IN ('issued','executing','done','failed','unknown','unreconciled','void','suspended')),"

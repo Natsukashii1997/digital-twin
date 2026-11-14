@@ -34,10 +34,16 @@ irrevocable（不可撤回）只许出现在挂起里——撤不回的动作一
 排空（custody.drain_proof 调 drain）：先把这次托管里 issued 的决定全部作废、释放额度（规格 §3.8 第 2 步），
   再看还有没有 executing、unknown、unreconciled 的决定或没释放的预占；一项都没有才算排空完成。
 
+写给常浩看的五项（汇报卡照抄，常浩 11-14 要求「看得懂到底做了什么」）：context 这件事在做什么（任务或 PR 的名字，≤40 字）、
+  question agent 问了什么（带选项，≤80）、summary 我替你定的（单独能看懂，≤20）、basis 为什么（写对常浩的影响，≤100）、
+  ask_owner 常浩要做什么（只在挂起时，≤60）；按动作必填，不许出现挂起、作废、HEAD、L1、D 档、决定号这类内部术语（JARGON），
+  不合格就不记账（BadText）。
+
 给后续批次的接口（#134 出口闸 / 送达闸、#136 合并执行器）：
   import custody_ledger as L; with L.open_store() as st:
-    L.issue(st, session_id=, project=, action=, target=, question=, summary=, basis=, cites=, revocability=, expires_at=,
-            received=, reply=)                  出口闸记账 + 原子预占（拒绝抛 LedgerError，code 给机器判）
+    L.issue(st, session_id=, project=, action=, target=, context=, question=, summary=, basis=, ask_owner=, cites=, revocability=,
+            expires_at=, received=, reply=)  出口闸记账 + 原子预占（拒绝抛 LedgerError，code 给机器判）
+    target：回复 {"issue": 任务编号, "repo", "night": 夜跑号}（night 用来从夜跑记录读后来怎样）；合并 {"repo", "pr", "head"}
     L.begin(st, d) / L.finish(st, d, "done"|"failed"|"unknown", outcome) / L.reconcile(st, d, 结果, evidence) / L.void(st, d, 原因)
   送达闸、合并执行器开始做之前必须调 begin（它现读托管准入、核有效期，过期就作废）；结果不明一律 finish(unknown)，不重发。
 命令行（最后一行都是一行 JSON：{"ok", "msg", ...}）：
@@ -91,6 +97,15 @@ DISPOSITION_MOVES = {
 }
 DISPOSITION_ACTION = {"corrected": ("reply",), "reverted": ("merge",), "revert_failed": ("merge",)}
 DECISION_ID = re.compile(r"^d-\d{6}-[0-9a-f]{6}$")
+# 写给常浩看的字（汇报卡上照抄）：要白话，不许内部术语（常浩 11-14：「看不懂到底做了什么，就没法判断」）
+JARGON = re.compile(r"挂起|作废|排空|送达|子单|决定号|托管号|审核凭证|可纠正|可回退|不可撤回|UNRECONCILED|HEAD|\bL[0-3]\b|[A-D]\s?档|策略\s?v\d")
+OWNER_TEXT = {  # 字段 → (中文名, 最长几个字, 哪些动作必填)
+    "context": ("这件事在做什么（任务或 PR 的名字）", 40, ("reply", "merge", "suspend")),
+    "question": ("agent 问了什么（带上选项）", 80, ("reply", "suspend")),
+    "summary": ("我替你定的（一句能单独看懂的话，例：重试 3 次）", 20, ("reply", "merge")),
+    "basis": ("为什么（写对常浩的影响，不只写规则名）", 100, ("reply", "merge", "suspend")),
+    "ask_owner": ("常浩要做什么（例：回复我「同意改」或「不改」）", 60, ("suspend",)),
+}
 SESSION_ID = re.compile(r"^c-(\d{8})-\d{6}-[0-9a-f]{12}$")
 
 
@@ -256,8 +271,23 @@ def new_decision_id(now):
     return "d-" + now.astimezone(C.TZ).strftime("%y%m%d") + "-" + secrets.token_hex(3)
 
 
-def issue(store, *, session_id, project, action, target, basis, revocability, question="", summary="", cites=(),
-          expires_at=None, received=None, reply=None, by="hermes", now=None, status_reader=None):
+def check_owner_text(action, fields):
+    """写给常浩看的五项：按动作必填、限长、不许内部术语。返回错误列表（空 = 通过）。"""
+    errors = []
+    for key, (name, limit, need) in OWNER_TEXT.items():
+        text = (fields.get(key) or "").strip()
+        if action in need and not text:
+            errors.append(f"缺「{name}」")
+        elif len(text) > limit:
+            errors.append(f"「{name}」超过 {limit} 个字")
+        hit = JARGON.search(text)
+        if hit:
+            errors.append(f"「{name}」里有内部术语「{hit.group(0)}」，要换成常浩看得懂的话")
+    return errors
+
+
+def issue(store, *, session_id, project, action, target, basis, revocability, context="", question="", summary="",
+          ask_owner="", cites=(), expires_at=None, received=None, reply=None, by="hermes", now=None, status_reader=None):
     """出口闸记账（规格 §2 第 ④ 步）：决定号、原文、额度原子预占。reply / merge 要托管准入、策略允许、额度够；suspend 只记账。
     返回决定（dict）。任何一项不满足抛 LedgerError，库里什么都不写。"""
     now = _now(now)
@@ -269,8 +299,12 @@ def issue(store, *, session_id, project, action, target, basis, revocability, qu
                           "（撤不回的动作一律挂起）", "BadInput")
     if not SESSION_ID.match(session_id or ""):
         raise LedgerError(f"托管号不对：{session_id}", "BadInput")
-    if not (project or "").strip() or not (basis or "").strip():
-        raise LedgerError("决定要写项目和依据", "BadInput")
+    if not (project or "").strip():
+        raise LedgerError("决定要写项目", "BadInput")
+    bad = check_owner_text(action, {"context": context, "question": question, "summary": summary, "basis": basis,
+                                    "ask_owner": ask_owner})
+    if bad:
+        raise LedgerError("写给常浩的字不合格：" + "；".join(bad), "BadText")
     if not isinstance(target, dict):
         raise LedgerError("对象（target）要是一个字典", "BadInput")
     issue_key = None
@@ -318,11 +352,11 @@ def issue(store, *, session_id, project, action, target, basis, revocability, qu
                         raise LedgerError(f"{what}已用完（{n}/{cap}）", "QuotaExhausted")
             status = "suspended" if action == "suspend" else "issued"
             ts = C.iso(now)
-            c.execute("INSERT INTO custody_decisions (id, session_id, project, action, target, issue_key, question, summary,"
-                      " basis, cites, revocability, status, disposition, expires_at, raw_path, created_at, updated_at)"
-                      " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",
-                      (did, session_id, project, action, _j(target), issue_key, question, summary, basis, _j(cites),
-                       revocability, status, C.iso(exp) if exp else None, raw_path, ts, ts))
+            c.execute("INSERT INTO custody_decisions (id, session_id, project, action, target, issue_key, context, question, summary,"
+                      " ask_owner, basis, cites, revocability, status, disposition, expires_at, raw_path, created_at, updated_at)"
+                      " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",
+                      (did, session_id, project, action, _j(target), issue_key, context.strip(), question.strip(), summary.strip(),
+                       ask_owner.strip(), basis.strip(), _j(cites), revocability, status, C.iso(exp) if exp else None, raw_path, ts, ts))
             for kind, scope, _, _ in holds:
                 c.execute("INSERT INTO custody_quota (session_id, kind, scope, decision_id, state, created_at, updated_at)"
                           " VALUES (?,?,?,?, 'reserved', ?, ?)", (session_id, kind, scope, did, ts, ts))
