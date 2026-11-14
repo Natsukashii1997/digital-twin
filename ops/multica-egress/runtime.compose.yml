@@ -94,7 +94,7 @@ services:
         ipv4_address: 172.30.0.2
 
 networks:
-  # compose 默认网络固定网段，虚拟机防火墙按它拒绝 backend、frontend、postgres 连宿主（含 8086）
+  # compose 默认网络固定网段，虚拟机防火墙按它只许 backend、frontend、postgres 网段内互通，宿主和外网一律拒绝
   default:
     enable_ipv6: false
     ipam:
