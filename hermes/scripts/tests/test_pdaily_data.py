@@ -437,6 +437,63 @@ class GitHubTests(Base):
         self.assertEqual(out["coverage"]["read_ok"], 0)
         self.assertIn(r.name, out["coverage"]["errors"])
 
+    def hub(self, wait, recover_after=None):
+        """recover_after：睡第几次后网络恢复（删掉 fail 文件）；None 一直不通。"""
+        clock, slept = [0.0], []
+
+        def sleep(sec):
+            slept.append(sec)
+            clock[0] += sec
+            if recover_after is not None and len(slept) >= recover_after:
+                (self.state / "fail").unlink(missing_ok=True)
+        hub = pd.GitHub(pd.window(D), wait=wait, sleep=sleep, clock=lambda: clock[0])
+        return hub, slept
+
+    def test_network_failure_after_wake_waits_and_retries(self):
+        """唤醒后代理还没通：等网络恢复再取，不一次失败就把后面的仓库全标连不上（#176）。"""
+        self.gh(prs=[self.PR])
+        (self.state / "fail").write_text("Post \"https://api.github.com/graphql\": read: connection reset by peer\n")
+        hub, slept = self.hub(wait=300, recover_after=2)
+        self.assertEqual([p["number"] for p in hub.merged_prs("o/fx")], [5])
+        self.assertEqual(slept, [pd.GH_RETRY_INTERVAL] * 2)
+        self.assertIsNone(hub.down)
+        self.assertEqual(len(hub.closed_issues("o/fx")), 0)          # 通了以后照常，不再等
+
+    def test_wait_budget_spent_then_fails_like_before(self):
+        self.gh(prs=[self.PR])
+        (self.state / "fail").write_text("Post \"https://api.github.com/graphql\": EOF\n")
+        hub, slept = self.hub(wait=60)
+        with self.assertRaises(pd.Fail):
+            hub.merged_prs("o/fx")
+        self.assertLessEqual(sum(slept), 60)
+        self.assertTrue(hub.down)
+        n = len(slept)
+        with self.assertRaises(pd.Fail):                               # 预算用完：后面的仓库直接失败，不再等
+            hub.closed_issues("o/fx")
+        self.assertEqual(len(slept), n)
+
+    def test_no_wait_by_default_and_no_retry_for_non_network_errors(self):
+        (self.state / "fail").write_text("error connecting to api.github.com\n")
+        hub, slept = self.hub(wait=0)
+        with self.assertRaises(pd.Fail):
+            hub.merged_prs("o/fx")
+        self.assertEqual(slept, [])
+        (self.state / "fail").write_text("gh: Not Found (HTTP 404)\n")
+        hub, slept = self.hub(wait=300)
+        with self.assertRaises(pd.Fail):
+            hub.merged_prs("o/fx")
+        self.assertEqual(slept, [])
+        self.assertIsNone(hub.down)
+
+    def test_gh_wait_from_env(self):
+        with mock.patch.dict(os.environ, {"DT_GH_WAIT_SECONDS": "0"}):
+            self.assertEqual(pd.gh_wait(), 0)
+        with mock.patch.dict(os.environ, {"DT_GH_WAIT_SECONDS": "坏的"}):
+            self.assertEqual(pd.gh_wait(), 300)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DT_GH_WAIT_SECONDS", None)
+            self.assertEqual(pd.gh_wait(), 300)
+
     def test_merged_prs_are_unverified_with_quotes_only(self):
         old = "\n## 更早（#4）（2026-11-07）\n- 已安装：旧的\n"      # 统计日开始前就在主分支上
         r = make_repo(self.root, "u", {"CURRENT.md": "# 当前状态\n" + old}, at="2026-11-07 10:00:00 +0800")
