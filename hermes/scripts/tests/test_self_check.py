@@ -128,7 +128,7 @@ class ScriptTest(unittest.TestCase):
     def custody_session(**kw):
         import datetime as dt
         now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
-        s = {"id": "c-20000101-233000", "started_at": now.isoformat(), "until": (now + dt.timedelta(hours=10)).isoformat(),
+        s = {"id": "c-20000101-233000-0123456789ab", "started_at": now.isoformat(), "until": (now + dt.timedelta(hours=10)).isoformat(),
              "source": {"kind": "feishu", "message_id": "om_fixture0001", "open_id": "ou_secret_fixture"},
              "policy": {"version": 3, "sha256": "0" * 64}, "drain_minutes": 120, "window_def": {"start": "23:30", "end": "08:00"},
              "drain": None, "frozen": None, "events": []}
@@ -145,7 +145,7 @@ class ScriptTest(unittest.TestCase):
         self.install_custody(self.custody_doc("on", self.custody_session()))
         out = self.run_script()
         self.assertIn("🛡️ 托管", out)
-        self.assertIn("托管开着（c-20000101-233000", out)
+        self.assertIn("托管开着（c-20000101-233000-0123456789ab", out)
         self.assertNotIn("ou_secret_fixture", out)
 
     def test_custody_frozen_is_reported_with_items(self):
@@ -177,6 +177,11 @@ class ScriptTest(unittest.TestCase):
         self.assertEqual(self.run_script(), "")
         self.install_custody(policy=policy + "改了一个字")
         self.assertIn("托管策略失效：策略文件内容和签署 v3 时不一样", self.run_script())
+        revoked = {**sig, "signed_at": (now - dt.timedelta(days=20)).isoformat(),
+                   "expires_at": (now + dt.timedelta(days=10)).isoformat(),
+                   "revoked": {"at": now.isoformat(), "source": "feishu", "reason": "先停用"}}
+        self.install_custody(self.custody_doc(signature=revoked), policy)   # 撤销也要报（第 2 轮审查 P2-05）
+        self.assertIn("托管策略失效：托管策略 v3 已于", self.run_script())
 
     def test_missing_installed_files_listed_by_path(self):
         for dst in ("hermes/skills/autonomous-ai-agents/workshop/references/r.md", "bin/health_check.py",

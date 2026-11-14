@@ -207,7 +207,7 @@ def check_custody():
         lines += [f"托管已冻结（{t(f['at'])}：{f['reason']}），禁止新决定、新合并和重新开启",
                   *[f"未解决：{i}" for i in f.get("items", [])],
                   "处理：核对后在猛鬼兽私聊说「解除冻结」"]
-    if pol and pol.get("code") in ("changed", "missing", "expired", "invalid"):
+    if pol and pol.get("code") in ("changed", "missing", "expired", "invalid", "revoked"):
         lines.append(f"托管策略失效：{pol['reason']}")
     elif pol and pol.get("ok"):
         left = dt.datetime.fromisoformat(pol["expires_at"]) - dt.datetime.fromisoformat(st["checked_at"])

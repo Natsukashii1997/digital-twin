@@ -719,6 +719,76 @@ class ReviewRound1Tests(Base):
         self.assertFalse(self.status(at(9, day=1))["admission"]["eligible"])             # 到点自动冻结
 
 
+class ReviewRound2Tests(Base):
+    """第 2 轮 L3 审查（2026-11-12）的回归测试。"""
+
+    # ---- P1-09 会话 ID 唯一 ----
+    def test_p1_09_same_second_sessions_get_distinct_ids(self):
+        self.sign(when=at(20))
+        t = at(22)
+        first = C.do_on("feishu", self.say("托管", t), now=t)[0]["session"]["id"]
+        C.do_freeze("ledger", "x", now=t)
+        C.do_unfreeze(self.say("解除冻结", t), now=t)
+        second = C.do_on("feishu", self.say("托管", t), now=t)[0]["session"]["id"]
+        self.assertNotEqual(first, second)
+        for sid in (first, second):
+            self.assertRegex(sid, r"^c-20261111-220000-[0-9a-f]{12}$")
+        self.assertEqual(self.doc()["history"][-1]["id"], first)
+
+    def test_p1_09_duplicate_ids_are_corrupt(self):
+        self.sign(when=at(20))
+        t = at(22)
+        C.do_on("feishu", self.say("托管", t), now=t)
+        C.do_freeze("ledger", "x", now=t)
+        C.do_unfreeze(self.say("解除冻结", t), now=t)
+        C.do_on("feishu", self.say("托管", t), now=t)
+        good = self.doc()
+        dup = json.loads(json.dumps(good))
+        dup["session"]["id"] = dup["history"][-1]["id"]                 # 当前会话和历史撞号
+        self.state.write_text(json.dumps(dup, ensure_ascii=False), encoding="utf-8")
+        self.assertIsNone(self.status(at(22, 1))["state"])
+        self.rejects("Corrupt", C.do_off, "feishu", now=at(22, 1))
+        old = json.loads(json.dumps(good))
+        old["session"]["id"] = "c-20261111-220000"                       # 旧的只到秒的格式不再认
+        self.state.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+        self.assertIsNone(self.status(at(22, 1))["state"])
+
+    # ---- P2-04 revoked 只能是完整记录或没有 ----
+    def test_p2_04_revoked_null_or_wrong_type_is_corrupt(self):
+        self.sign(when=at(20))
+        good = self.doc()
+        for value in (None, "", {}, [], {"at": C.iso(at(20, 5)), "source": "x"}):
+            with self.subTest(value=value):
+                doc = json.loads(json.dumps(good))
+                doc["signature"]["revoked"] = value
+                self.state.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+                st = self.status(at(20, 6))
+                self.assertIsNone(st["state"])
+                self.assertFalse(st["admission"]["eligible"])
+
+    # ---- P2-06 第一次写到一半崩溃 ----
+    def test_p2_06_marker_dir_synced_before_state_replace(self):
+        calls = []
+        real_fsync_dir, real_replace = C.fsync_dir, C.os.replace
+        with mock.patch.object(C, "fsync_dir", side_effect=lambda d: (calls.append("fsync_dir"), real_fsync_dir(d))), \
+                mock.patch.object(C.os, "replace", side_effect=lambda a, b: (calls.append("replace"), real_replace(a, b))):
+            self.sign(when=at(20))
+        self.assertEqual(calls, ["fsync_dir", "replace", "fsync_dir"])   # 标记目录项先落盘，再替换状态文件
+
+    def test_p2_06_crash_after_marker_is_not_trusted_as_first_use(self):
+        sha = self.write_policy()
+        mid = self.say(f"签托管策略 v3 {sha[:12]}", at(20))
+        with mock.patch.object(C.os, "replace", side_effect=OSError("模拟断电")):
+            with self.assertRaises(OSError):
+                C.do_sign(mid, now=at(20))
+        self.assertTrue(C.marker_path().exists())
+        self.assertFalse(self.state.exists())
+        self.assertEqual([p.name for p in self.state.parent.iterdir() if p.name.startswith(".custody")], [])  # 临时文件已清
+        st = self.status(at(20, 1))
+        self.assertIsNone(st["state"])                                   # 不把不确定的状态当成第一次用
+        self.rejects("Corrupt", C.do_sign, self.say(f"签托管策略 v3 {sha[:12]}", at(20, 2)), now=at(20, 2))
+
+
 class CliTests(Base):
     """命令行全程走假 lark-cli：口令从回读的原文里取。"""
 

@@ -35,10 +35,10 @@ Hermes 会话里 --message-id 可以省略，读 HERMES_SESSION_MESSAGE_ID（只
 
 状态文件 custody.json（DT_CUSTODY_FILE，默认 ~/Library/Application Support/DigitalTwin/custody.json，600）：
   schema "dt-custody/1"；state；updated_at；
-  session（当前这次托管，off 时为 null）：id、started_at、until、source{kind feishu|window, message_id, open_id | window}、
+  session（当前这次托管，off 时为 null）：id（c-YYYYMMDD-HHMMSS-12 位随机十六进制，和历史不重复，#133 账本按它建账）、started_at、until、source{kind feishu|window, message_id, open_id | window}、
           policy{version, sha256}、drain_minutes、window_def{start, end}、drain{started_at, deadline, source}、
           frozen{at, reason, items, source}、events[]；
-  signature（当前签署）：version、sha256（全文）、message_id、open_id、signed_at、expires_at、valid_days、revoked{at, source, reason}；
+  signature（当前签署）：version、sha256（全文）、message_id、open_id、signed_at、expires_at、valid_days、revoked{at, source, reason}（没撤销就没有这个字段，不许是 null）；
   signed_versions（签过的全部版本号，严格递增、不复用）；used_messages{message_id: {at, purpose}}（防重放）；
   consumed_windows{时段开始日期: 原因}；history（结束了的托管，留最近 30 次）。
   读的时候逐字段校验（类型、时区、先后、各状态必需字段），任何一处不对都算坏。
@@ -69,6 +69,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -432,6 +433,7 @@ def _keys(d, what, required, optional=()):
 
 
 HHMM = r"(?:[01]\d|2[0-3]):[0-5]\d"
+SESSION_ID = r"c-\d{8}-\d{6}-[0-9a-f]{12}"
 SHA = r"[0-9a-f]{64}"
 
 
@@ -444,7 +446,7 @@ def check_signature(sig):
     _int(sig["valid_days"], "signature.valid_days", 1, MAX_VALID_DAYS)
     signed, expires = _time(sig["signed_at"], "signature.signed_at"), _time(sig["expires_at"], "signature.expires_at")
     _need(expires - signed == dt.timedelta(days=sig["valid_days"]), "signature 的到期时间和有效天数对不上")
-    if sig.get("revoked") is not None:
+    if "revoked" in sig:                    # 只有两种合法形态：没有这个字段，或完整的撤销记录；null 等一律算坏（第 2 轮审查 P2-04）
         _keys(sig["revoked"], "signature.revoked", ("at", "source", "reason"))
         _time(sig["revoked"]["at"], "signature.revoked.at")
         _str(sig["revoked"]["source"], "signature.revoked.source")
@@ -453,7 +455,7 @@ def check_signature(sig):
 
 def check_session(s, state):
     _keys(s, "session", ("id", "started_at", "until", "source", "policy", "drain_minutes", "window_def", "drain", "frozen", "events"))
-    _str(s["id"], "session.id", r"c-\d{8}-\d{6}")
+    _str(s["id"], "session.id", SESSION_ID)
     started, until = _time(s["started_at"], "session.started_at"), _time(s["until"], "session.until")
     _need(started < until <= started + MAX_UNTIL + dt.timedelta(minutes=1), "session.until 要晚于开始、不超过 24 小时")
     src = s["source"]
@@ -517,6 +519,10 @@ def check_doc(doc):
         re.fullmatch(r"\d{4}-\d{2}-\d{2}", k) and isinstance(v, str) for k, v in doc["consumed_windows"].items()),
         "consumed_windows 格式不对")
     _need(isinstance(doc["history"], list) and all(isinstance(h, dict) for h in doc["history"]), "history 格式不对")
+    ids = [_str(h.get("id"), "history[].id", SESSION_ID) for h in doc["history"]]
+    if doc["session"] is not None:
+        ids.append(doc["session"]["id"])
+    _need(len(ids) == len(set(ids)), "托管会话 ID 有重复（当前会话或历史里），账本没法按它区分")
     return doc
 
 
@@ -544,6 +550,14 @@ def load(path=None):
         raise ValueError(f"{p} 内容不对（{e}），要人工核对")
 
 
+def fsync_dir(d):
+    fd = os.open(str(d), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def save(doc, path=None):
     """同目录临时文件（600）→ fsync → rename；失败时删临时文件、原文件不动。"""
     p = path or state_path()
@@ -557,6 +571,7 @@ def save(doc, path=None):
             f.write(iso(now_tz()) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        fsync_dir(p.parent)                 # 标记的目录项先落盘，再动状态文件（第 2 轮审查 P2-06：断电时也保证先后）
     try:
         fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -564,11 +579,7 @@ def save(doc, path=None):
             f.flush()
             os.fsync(f.fileno())
         os.replace(str(tmp), str(p))
-        dfd = os.open(str(p.parent), os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        fsync_dir(p.parent)
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
@@ -665,6 +676,17 @@ def transaction(fn, now=None, path=None):
         return doc, result
 
 
+def new_session_id(now, doc):
+    """托管会话 ID（#133 账本按它建账）：时间前缀便于人看，12 位随机十六进制保证唯一（第 2 轮审查 P1-09：只精确到秒会撞）；
+    万一和历史里的撞了就重抽，最多 10 次（正常不可能撞；连撞说明随机源有问题，拒绝开启而不是凑一个）。"""
+    used = {h.get("id") for h in doc["history"]}
+    for _ in range(10):
+        sid = "c-" + now.astimezone(TZ).strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(6)
+        if sid not in used:
+            return sid
+    raise Rejected("生成不出不重复的托管会话 ID（随机源异常），不开启", "Corrupt")
+
+
 def require_policy(doc, now, path=None):
     v = verify_policy(doc, now, path)
     if not v["ok"]:
@@ -705,7 +727,7 @@ def do_on(source, message_id=None, now=None, path=None, policy=None):
             until = end
             src = {"kind": "window", "window": key}
         doc["state"] = "on"
-        doc["session"] = {"id": "c-" + now.astimezone(TZ).strftime("%Y%m%d-%H%M%S"), "started_at": iso(now),
+        doc["session"] = {"id": new_session_id(now, doc), "started_at": iso(now),
                           "until": iso(until), "source": src,
                           "policy": {"version": pol["version"], "sha256": pol["sha256"]},
                           "drain_minutes": pol["drain_minutes"], "window_def": pol["window"],
