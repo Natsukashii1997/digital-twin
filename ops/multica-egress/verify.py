@@ -7,7 +7,7 @@
                     （egress-net 随代理创建，在 proxy 里核对）
   verify.py proxy   出口代理容器：不自动重启、网络和地址对、容器里的 squid 配置与源文件一致、对外只听 3128、没有 IPv6 地址
   verify.py agent   执行器容器：不自动重启、只接 agent-net、代理变量指向出口代理、没有 IPv6 地址；backend 在 agent-net 上
-                    固定 .2、对外只听 8080
+                    固定 .2、对外只听 8080、VCS 集成关闭
   verify.py all     以上全部（执行器和代理要在跑）
 
 只读：只执行 inspect、cat、iptables -S、ss 之类的查询，不改任何东西。agent-up.sh 在拉起执行器前后调用它。
@@ -258,6 +258,9 @@ def agent_checks():
         b = inspect(BACKEND)
         bn = nets_of(b)
         (good if bn.get("agent-net") == "172.30.0.2" and set(bn) == {"default", "agent-net"} else bad)(f"backend 网络={bn}")
+        benv = dict(e.split("=", 1) for e in b["Config"]["Env"] if "=" in e)
+        vcs = benv.get("MULTICA_VCS_INTEGRATION_ENABLED")
+        (good if vcs == "false" else bad)(f"backend VCS 集成开关={vcs}（应为 false）")
         lb = listeners(BACKEND)
         (good if tcp_only(lb, 8080) else bad)(f"backend 对外监听={sorted(lb)}")
     check("agent", body)

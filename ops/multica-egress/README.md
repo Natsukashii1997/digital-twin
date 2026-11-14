@@ -6,10 +6,10 @@
 |---|---|---|
 | `runtime.compose.yml` | `~/Documents/Codex/Multica-local/runtime.compose.yml` | 执行器只接内部网络 `agent-net`（172.30.0.0/24，`internal`），只能到 backend（固定 .2）和出口代理（固定 .3）；出口代理另接 `egress-net`（172.31.0.0/24）；compose 默认网络固定为 172.29.0.0/24；三个网络都关 IPv6。执行器和代理 `restart: "no"`、放在 profile `agent` 里，不会自动启动 |
 | `egress/`（Dockerfile、`squid.conf`、`allowed_domains.txt`） | `~/Documents/Codex/Multica-local/egress/` | 白名单出口代理：只接受 agent-net 来的、`CONNECT` 到白名单域名 443 的请求；拒绝 IP 形式的目标和普通 HTTP；域名自己解析后落在内网 / 回环 / 保留地址或解析不出就拒绝；上游只经宿主 8086 |
-| `colima-provision.sh` | `~/.colima/multica/colima.yaml` 的 `provision` 第一项 `script`（每次虚拟机启动都跑） | 虚拟机 iptables：`DOCKER-USER`、`DT-EGRESS` 一次事务重建；agent-net 只放行到 backend:8080、代理:3128；egress-net 只放行到宿主 8086；默认网络不能连宿主；`INPUT` 拒绝容器网段访问虚拟机；停掉并屏蔽 dnsmasq |
+| `colima-provision.sh` | `~/.colima/multica/colima.yaml` 的 `provision` 第一项 `script`（每次虚拟机启动都跑） | 虚拟机 iptables：`DOCKER-USER`、`DT-EGRESS` 一次事务重建；agent-net 只放行到 backend:8080、代理:3128；egress-net 只放行到宿主 8086；默认网络（backend、frontend、postgres）只许网段内互通，宿主和外网一律拒绝；`INPUT` 拒绝容器网段访问虚拟机；停掉并屏蔽 dnsmasq |
 | `agent-up.sh` | 不安装，从仓库主目录运行 | **拉起执行器的唯一入口**：先核对，通过才拉起；拉起后核对不过就停掉（fail-closed） |
 | `verify.py` | 不安装，从仓库主目录运行 | 只读核对：安装副本与源文件一致（drift）、虚拟机防火墙和 53 监听（vm）、代理容器（proxy）、执行器与 backend（agent） |
-| `selftest.py`、`dst-selftest.sh` | 不安装 | 执行器里的连通性反向 / 正向自测；squid 解析后地址拒绝的模拟测试 |
+| `selftest.py`、`dst-selftest.sh`、`app-selftest.sh` | 不安装 | 执行器里的连通性反向 / 正向自测；squid 解析后地址拒绝的模拟测试；backend 网络空间的出站自测 |
 
 网段在 `runtime.compose.yml`、`colima-provision.sh`、`squid.conf`、`verify.py` 四处一一对应，改一处要同步其余几处。
 
@@ -31,7 +31,7 @@ ops/multica-egress/agent-up.sh down   # 只停执行器和出口代理
 3. 拷文件：`runtime.compose.yml`、`egress/*` 拷到 Multica-local；`colima-provision.sh` 的内容每行缩进 6 格，替换 `colima.yaml` 里 `provision` 第一项的 `script`（`verify.py drift` 会逐字比对）。
 4. 先停执行器和代理（`agent-up.sh down`），再用 `control.sh` 里的同一组 compose 文件加 `--profile agent`：`build egress-proxy`，然后 `down` 再 `up -d --pull never`（只起非 agent 服务；网络配置变了，必须先 `down`）。
 5. `colima stop -p multica && colima start -p multica`：规则只在虚拟机启动时装，重启也顺带清掉旧连接的状态（conntrack），改规则后**一律重启虚拟机**，不在运行中改。
-6. `agent-up.sh` 拉起执行器（它会跑 `verify.py`）。然后跑自测：`selftest.py`（命令见文件开头）要求「不符合 0」；`dst-selftest.sh` 要求「符合」。前后 Multica 状态一致。
+6. `agent-up.sh` 拉起执行器（它会跑 `verify.py`）。然后跑自测：`selftest.py`（命令见文件开头）、`app-selftest.sh` 要求「不符合 0」；`dst-selftest.sh` 要求「符合」。前后 Multica 状态一致。
 
 ## 回滚（安全回退）
 
@@ -48,6 +48,6 @@ ops/multica-egress/agent-up.sh down   # 只停执行器和出口代理
 ## 已知限制
 
 - **宿主 8086 会再解析一次。** 真正连目标的是宿主上的加速器 `fc-core`（闭源、只监听 127.0.0.1:8086，规则改不了）。squid 拿白名单域名自己解析一次、拦掉内网结果，但 8086 连之前会再解析，两次结果不同时这里拦不住；#135 也证明 8086 本身会转发到宿主回环。要利用这一点，前提是能让 github.com、api.anthropic.com、chatgpt.com 等白名单域名在 8086 那一侧解析到内网地址（篡改这些域名的 DNS 或 8086 的解析），超出本项目能控制的范围。常浩 2026-11-14 选择接受这个剩余风险（「按推荐返修」）；要彻底消除，只能换掉 8086、另建可控出口。
-- backend 同时接默认网络和 agent-net。执行器能调用 backend 的 API（它就是任务服务器）；backend 所在的默认网络已不能连宿主任何端口，backend 对外只听 8080。backend 有哪些 agent 可触发的出站能力，见 `docs/DT-ORC/migration/2026-11-12-出网修复与复验.md` 第七节。
-- 只管隔离执行器。frontend、postgres 和构建容器的出网和改之前一样（构建容器只能连宿主 8086）。
+- backend 同时接默认网络和 agent-net。执行器能调用 backend 的 API（它就是任务服务器）。backend 的 VCS 连接接口会按调用方给的 URL 发请求，agent 令牌能触发，所以：本机关掉 VCS 集成（`runtime.compose.yml`），默认网络断宿主和外网（`colima-provision.sh`），backend 对外只听 8080（`verify.py` 核对）。代价是 Multica 网页里要连外网的功能（GitHub 导入 skill、VCS / GitHub 集成、遥测）不可用，常浩 2026-11-14 同意。盘点见 `docs/DT-ORC/migration/2026-11-12-出网修复与复验.md` 第七节。
+- 构建容器（docker build 用的默认网桥）的出网和改之前一样：只能连宿主 8086。
 - 运行前身份闸（#135 文档第五节 3）在 `hermes/scripts/multica_night.py`（#174），不在本目录。

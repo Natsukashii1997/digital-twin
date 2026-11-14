@@ -85,6 +85,9 @@ services:
 
   # backend 同时接默认网络（postgres、frontend 在那里）和 agent-net（给执行器，固定 .2，防火墙只放行执行器到它的 8080）
   backend:
+    environment:
+      # VCS 连接接口会按调用方给的 URL 发请求，agent 令牌（等同工作区 owner）能触发；本机不用，关掉（#172 返修）
+      MULTICA_VCS_INTEGRATION_ENABLED: "false"
     networks:
       default: {}
       agent-net:
