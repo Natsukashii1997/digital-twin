@@ -530,16 +530,36 @@ def run_custody_revert(repo, merge_commit, decision, title):
     return out
 
 
+def require_named_checks(p, names):
+    """撤销 PR 的有效测试证据（#133 第 2 轮审查 P1-03）：require_ci_passed 把 SKIPPED / NEUTRAL 当作不阻断，全是跳过也能过；
+    撤销 PR 另外要求 merge_rules.json 的 revert_required_checks[完整仓库名] 里登记的每项检查，在当前 HEAD 上真的跑完并且 SUCCESS。
+    没登记就停（不知道哪项是测试，就没有测试通过的证据）。飞书卡片合并不走这里，现有规则不变。"""
+    at("跑测试")
+    if not names:
+        raise Stop("这个仓库没登记撤销 PR 必须通过的测试检查（merge_rules.json 的 revert_required_checks）",
+                   "在电脑上交给 Claude 会话：给这个仓库配好 CI 并登记检查名")
+    got = {}
+    for c in p.get("statusCheckRollup") or []:
+        got.setdefault(c.get("name") or c.get("context"), []).append(
+            (str(c.get("status") or "COMPLETED").upper(), str(c.get("conclusion") or c.get("state") or "").upper()))
+    bad = [n for n in names if not got.get(n) or any(s != "COMPLETED" or r != "SUCCESS" for s, r in got[n])]
+    if bad:
+        raise Stop("必须通过的测试检查没有成功跑完：" + "、".join(bad), "交回开这个 PR 的会话看 CI")
+    at("核对版本")
+
+
 def merge_revert_as_owner(repo, pr, head):
     """撤销托管合并的 PR（#133 第 1 轮审查 P0-01）：常浩点「合并撤销 PR」后，走和飞书卡片合并同一套合并前检查（check_pr：
     PR 开着、HEAD 是开出来时的、合进 main、不是草稿、风险档不是 L3、没冲突不落后、当前 HEAD 的 CI 全部通过、CLEAN），
-    任一项不过就停（Stop），不合并、转电脑上处理。撤销 PR 没有 CI 也停：沙盒没登记本机测试命令，不在宿主跑 PR 里的脚本。
+    任一项不过就停（Stop），不合并、转电脑上处理。撤销 PR 没有 CI 也停：沙盒没登记本机测试命令，不在宿主跑 PR 里的脚本；
+    另外要求 revert_required_checks 里登记的测试检查真的 SUCCESS（require_named_checks，跳过 / 中立不算）。
     通过后用本机 gh（常浩本人，B 档）带 --match-head-commit 合并，再回读。返回 {"status", "merge_commit", "why"}：
     merged＝本次合并命令成功且回读已合并；merged_unattributed＝回读已合并但本次命令没成功（可能被别人合上），不归到这次按钮；
     failed＝回读仍没合并。"""
     card = {"repo": repo, "pr": pr, "head": head}
     rules = mo.load_rules()
-    check_pr(card, rules, "main", ci=True)
+    p = check_pr(card, rules, "main", ci=True)
+    require_named_checks(p, (rules.get("revert_required_checks") or {}).get(repo))
     at("执行合并")
     res = run_owner_merge(card)
     at("合并后回读")

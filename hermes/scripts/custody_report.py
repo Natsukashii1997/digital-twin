@@ -3,22 +3,29 @@
 
 汇报：托管收尾（排空完成到 off、或冻结）后，按账本给常浩私聊发一张卡片（乙版表格 + 白话，常浩 11-14 定）：
   「等你处理」「替你定了的」各一张六列表格，表下一排「推翻：我替你定的」按钮；这次托管冻结过，标题写「托管未能安全收尾」。
-  发卡前：只发常浩私聊（home_chat）；核对账本身份（会话里记的 ledger.id），对不上不发；在账本里排空这次托管（已出未送达的作废）。
+  发卡前：只发常浩私聊（home_chat）；先核对账本身份（check_ledger：会话里记的 ledger.id、开启登记、没有有原文没账本的决定），
+  对不上不发，「已经发过」这类提前返回也在核对之后；再在账本里排空这次托管（已出未送达的作废）。
+  卡片页脚小字写托管号和这张卡的令牌；回读（飞书只给渲染后的文字）要有托管号、令牌，「[推翻：」按钮数等于 actionable 才算核实。
   每次发送在 DT_CUSTODY_DIR/<托管号>/report.json 记一条：kind（final / frozen）、随机卡片令牌 card、decisions（卡上列的）、
   actionable（卡上真有「推翻」按钮的）、message_id、status（unverified 发了还没核实 / verified 按消息号回读核实了）。
   同一种收尾有 verified 就不再发（--force 才再发）；只有 unverified 的，先按原消息号回读，核实了就不重发，核实不了才换新令牌重发。
 推翻：按钮 value 是 {"custody": "overturn", "ref": 决定号, "card": 卡片令牌}；merge-buttons 插件的 /card 认出它，后台调
-  `custody_report.py button overturn <决定号> --chat <chat_id> --card <令牌>`。只认常浩私聊、只认 verified 的汇报卡上 actionable 里的决定。
+  `custody_report.py button overturn <决定号> --chat <chat_id> --card <令牌>`。只认常浩私聊、只认最新一张 verified 汇报卡上
+  actionable 里的决定（--force 重发后旧卡不认），并先过 check_ledger（账本对不上不处理）。
   分阶段、可恢复，进度记在 DT_CUSTODY_DIR/<托管号>/<决定号>.overturn.json 的 stages：
     registered 登记推翻（处置改成「已推翻·已记录」）→ candidate 规则补丁候选（rule-candidates.jsonl，同一决定只记一次）
     → impacts 下游影响清单（custody_impact，取不到的写「没列全」）→ revert 开撤销 PR（只限合并）
     → revert_card 发带「合并撤销 PR」按钮的卡片并回读 → result 把结果发到私聊。
   中断后再点一次「推翻」，或在电脑上跑 `custody_report.py resume <决定号>`（只续做常浩点过的），只补做没完成的阶段。
   开撤销 PR（merge_act.run_custody_revert，只开不合）：合并还没核清（结果不明 / 核不清）时记「等核清再开」，不算失败；
-  确定没开成记「回退失败」，再点会重试；开没开成不确定时只按分支 custody-revert/<决定号> 只读查，提交对得上才认，不再推送。
-合并撤销 PR：按钮 {"custody": "merge_revert", "ref": 决定号, "card": 撤销卡令牌}，只认最新一张、回读核实过的撤销卡；
+  确定没开成记「回退失败」，再点会重试；开 PR 前先记操作凭证（决定号、仓库、分支、合并提交号），中断或不确定时
+  只按分支 custody-revert/<决定号> 只读查，revert_pr_matches 核验（开着合进 main、只有一个提交、提交说明写着回退这次合并提交、
+  PR 正文有决定号和合并提交号、记下过 HEAD 的要相等）且唯一才认领，不再推送。
+合并撤销 PR：按钮 {"custody": "merge_revert", "ref": 决定号, "card": 撤销卡令牌}，先过 check_ledger，只认最新一张、回读核实过的撤销卡；
   交给 merge_act.merge_revert_as_owner：和飞书卡片合并同一套检查（开着、HEAD 没变、合进 main、不是草稿、没碰敏感路径、
-  CI 全部通过、CLEAN；撤销 PR 没有 CI 也停），过了才用本机 gh（常浩本人）带 --match-head-commit 合并、回读。
+  CI 全部通过、CLEAN；撤销 PR 没有 CI 也停），并要求 merge_rules.json 的 revert_required_checks 里登记的测试检查真的 SUCCESS
+  （跳过 / 中立不算，没登记就停；dt-sandbox 现在没有 CI，所以撤销 PR 现在都会停在这里），过了才用本机 gh（常浩本人）带
+  --match-head-commit 合并、回读。
 
 用法（card / send 最后一行是一行 JSON：{"ok", "msg", ...}）：
   custody_report.py card --session c-…        只打印卡片 JSON（不发、不清账）
@@ -264,7 +271,7 @@ def build_card(session, kind, rows, night_root=None, token=None):
             + ("…" if len(voids) > 5 else "") + "，但托管先结束了，agent 没收到，等于没定。")
     foot.append("点「推翻」后，我会记下以后同类事按你的意思办，并告诉你哪些后续工作受影响；撤销合并要你再点一次合并才生效。")
     els += [{"tag": "hr"}, {"tag": "markdown", "content": "<font color='grey'>" + md_escape("\n".join(foot)) + "</font>"}]
-    els.append({"tag": "markdown", "content": f"<font color='grey'>编号 {session['id']}</font>"})    # 回读和查账用
+    els.append({"tag": "markdown", "content": f"<font color='grey'>编号 {session['id']}" + (f" · {token}" if token else "") + "</font>"})  # 回读核对用
     card = {"schema": "2.0", "config": {"update_multi": True},
             "header": {"title": {"tag": "plain_text", "content": title}, "template": "red" if frozen_ever else "blue"},
             "body": {"elements": els}}
@@ -309,24 +316,54 @@ def card_refs(card, verb):
     return out
 
 
-def read_back(message_id, marker):
-    """按消息号回读：是卡片、内容里有 marker（汇报卡是托管号，撤销卡是决定号）才算核实。返回 (核实了没有, 没核实的原因)。"""
+def read_back(message_id, markers, button=None, count=0):
+    """按消息号回读（第 2 轮审查 P2-02）：是卡片、内容里有全部 markers（托管号或决定号，加这张卡的令牌；令牌写在页脚小字里，
+    飞书回读只给渲染后的文字，读不到按钮的 value），按钮 button（回读里显示成「[按钮字]」）正好 count 个，才算核实。
+    返回 (核实了没有, 没核实的原因)。"""
     try:
         got = lark(["im", "+messages-mget", "--message-ids", message_id], "回读")
     except SendError as e:
         return False, f"回读没成功（{e}）"
     m = (got.get("messages") or [{}])[0]
-    if m.get("msg_type") == "interactive" and marker in str(m.get("content")):
-        return True, ""
-    return False, "卡片已发，但回读对不上（不是卡片或内容对不上）"
+    content = str(m.get("content"))
+    if m.get("msg_type") != "interactive" or not all(x in content for x in markers):
+        return False, "卡片已发，但回读对不上（不是卡片，或没有编号和这张卡的令牌）"
+    if button and content.count(f"[{button}") != count:
+        return False, f"卡片已发，但回读到的按钮数对不上（应有 {count} 个「{button}」）"
+    return True, ""
+
+
+def ledger_of(session_id, doc=None):
+    """custody.json 里这次托管开启时记下的账本身份（现在这次或历史里的）；找不到返回 None。"""
+    try:
+        doc = doc or C.load()
+    except ValueError as e:
+        raise ReportError(f"托管状态读不了：{e}", "Corrupt")
+    for s in ([doc["session"]] if doc.get("session") else []) + list(reversed(doc.get("history") or [])):
+        if s.get("id") == session_id:
+            return (s.get("ledger") or {}).get("id")
+    return None
+
+
+def check_ledger(st, session_id, lid):
+    """账本身份统一核对（第 2 轮审查 P1-02）：库还是开启时登记的那一份、这次托管登记过、没有「有原文、账本里没有」的决定。
+    汇报（含提前返回）、推翻、合并撤销 PR 都先过这一关；对不上抛 ReportError（LedgerMismatch），什么都不做。"""
+    try:
+        L.check_session(st, session_id, lid)
+    except L.LedgerError as e:
+        raise ReportError(f"托管账本对不上，不处理：{e}", e.code)
+    orphans = L.raw_orphans(st, session_id)
+    if orphans:
+        raise ReportError(f"托管账本对不上，不处理：{len(orphans)} 个决定有原文、账本里却没有（账本可能被旧备份覆盖）", "LedgerMismatch")
 
 
 def send_report(session_id, force=False, now=None, chat=None, doc=None, store=None, night_root=None):
-    """发汇报卡并回读（第 1 轮审查 P1-04、P1-07、P2-03、P2-04）。
-    只发常浩私聊（chat 必须等于 home_chat）。发卡前先在账本里排空这次托管：已出未送达的决定作废、释放额度，并核对账本身份。
-    每次发送记一条：kind、随机卡片令牌 card、decisions（卡上列的）、actionable（卡上真有「推翻」按钮的）、message_id、
-    status（unverified 发了还没核实 / verified 回读核实了）。同一种收尾已有 verified 就不再发（--force 才再发）；
-    只有 unverified 的，先按原消息号回读，核实了就记 verified、不重发，核实不了才换新令牌重发。"""
+    """发汇报卡并回读（第 1 轮审查 P1-04、P1-07、P2-03、P2-04；第 2 轮 P1-02、P2-02）。
+    只发常浩私聊（chat 必须等于 home_chat）。先打开账本核对身份（check_ledger），任何返回（包括「已经发过」）都在这之后；
+    再在账本里排空这次托管（已出未送达的决定作废、释放额度）。每次发送记一条：kind、随机卡片令牌 card、decisions（卡上列的）、
+    actionable（卡上真有「推翻」按钮的）、message_id、status（unverified 发了还没核实 / verified 回读核实了）。
+    同一种收尾已有 verified 就不再发（--force 才再发）；只有 unverified 的，先按原消息号回读，核实了就记 verified、不重发，
+    核实不了才换新令牌重发。"""
     now = now or C.now_tz()
     home = home_chat()
     if not home.startswith("oc_"):
@@ -335,23 +372,27 @@ def send_report(session_id, force=False, now=None, chat=None, doc=None, store=No
         raise ReportError(f"汇报卡只发常浩私聊，不发 {chat}", "WrongChat")
     session, kind = find_session(session_id, doc)
     lid = (session.get("ledger") or {}).get("id")
-    if not lid:
-        raise ReportError("这次托管开启时没有登记账本，汇报对不上账，不发", "LedgerMismatch")
-    rec = read_report(session_id)
-    mine = [x for x in rec["sent"] if x["kind"] == kind]
-    if not force:
-        if any(x.get("status") == "verified" for x in mine):
-            return {"unchanged": True, "kind": kind}
-        last = next((x for x in reversed(mine) if x.get("message_id")), None)
-        if last:
-            ok, why = read_back(last["message_id"], session_id)
-            if ok:
-                last.update(status="verified", verified_at=C.iso(now))
-                last.pop("error", None)
-                write_json(report_path(session_id), rec)
-                return {**last, "rechecked": True}
-            last["recheck"] = why
-    with (contextlib.nullcontext(store) if store else L.open_store()) as st:
+    try:
+        cm = contextlib.nullcontext(store) if store else L.open_store()
+    except L.LedgerError as e:
+        raise ReportError(f"托管账本打不开，不汇报：{e}", e.code)
+    with cm as st:
+        check_ledger(st, session_id, lid)
+        rec = read_report(session_id)
+        mine = [x for x in rec["sent"] if x["kind"] == kind]
+        if not force:
+            if any(x.get("status") == "verified" for x in mine):
+                return {"unchanged": True, "kind": kind}
+            last = next((x for x in reversed(mine) if x.get("message_id")), None)
+            if last:
+                ok, why = read_back(last["message_id"], [session_id, last.get("card") or "（没有令牌）"], "推翻：",
+                                    len(last.get("actionable") or []))
+                if ok:
+                    last.update(status="verified", verified_at=C.iso(now))
+                    last.pop("error", None)
+                    write_json(report_path(session_id), rec)
+                    return {**last, "rechecked": True}
+                last["recheck"] = why
         try:
             L.drain(st, session_id, lid, now)
         except L.LedgerError as e:
@@ -369,7 +410,7 @@ def send_report(session_id, force=False, now=None, chat=None, doc=None, store=No
         entry["error"] = str(e)
     write_json(report_path(session_id), rec)          # 发出去了先记下消息号，回读失败下次还能按它核实
     if entry["message_id"]:
-        ok, why = read_back(entry["message_id"], session_id)
+        ok, why = read_back(entry["message_id"], [session_id, token], "推翻：", len(entry["actionable"]))
         if ok:
             entry["status"] = "verified"
         else:
@@ -385,12 +426,12 @@ CARD_TOKEN = re.compile(r"^[0-9a-f]{16}$")
 
 
 def reported(decision, card):
-    """这个决定的「推翻」按钮是不是在发出去并核实过的那张汇报卡上：令牌对得上、status 是 verified、决定在 actionable 里。"""
+    """这个决定的「推翻」按钮是不是在最新一张发出去并核实过的汇报卡上（第 2 轮审查 P2-02：--force 重发或收尾后再发新卡，
+    旧卡的按钮就不认了）：令牌等于最新一张 verified 卡的、决定在那张卡的 actionable 里。"""
     if not CARD_TOKEN.match(card or ""):
         return False
-    rec = read_report(decision["session_id"])
-    return any(x.get("card") == card and x.get("status") == "verified" and decision["id"] in x.get("actionable", [])
-               for x in rec["sent"])
+    verified = [x for x in read_report(decision["session_id"])["sent"] if x.get("status") == "verified"]
+    return bool(verified) and verified[-1].get("card") == card and decision["id"] in verified[-1].get("actionable", [])
 
 
 def overturn_path(decision):
@@ -433,15 +474,34 @@ def revert_card(d, rv, token):
     return {"schema": "2.0", "header": {"title": {"tag": "plain_text", "content": f"↩️ 撤销托管合并：{clip(d['context'], 20)}"},
                                         "template": "orange"},
             "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}, btn,
-                                  {"tag": "markdown", "content": f"<font color='grey'>编号 {d['id']}</font>"}]}}   # 回读用
+                                  {"tag": "markdown", "content": f"<font color='grey'>编号 {d['id']} · {token}</font>"}]}}   # 回读核对用
 
 
 def find_revert_pr(repo, branch):
-    """只读对账（P1-03）：按分支 custody-revert/<决定号> 查有没有撤销 PR。返回 PR 列表；查不了抛 merge_act.Stop。"""
+    """只读对账（P1-03）：按分支 custody-revert/<决定号> 查有没有撤销 PR（含 PR 正文和提交）。返回 PR 列表；查不了抛 merge_act.Stop。"""
     import merge_act as MA
     got = MA.gh_read(["pr", "list", "--repo", repo, "--head", branch, "--state", "all", "--json",
-                      "number,url,headRefOid,state,baseRefName"], "查撤销 PR")
+                      "number,url,headRefOid,state,baseRefName,body,commits"], "查撤销 PR")
     return got if isinstance(got, list) else []
+
+
+def revert_pr_matches(p, d, merge_commit, head=None):
+    """只读认领撤销 PR（第 2 轮审查 P1-01）：开着、合进 main、只有一个提交且就是 PR 的 HEAD、提交说明写着回退的正是这次合并提交
+    （git revert 的「This reverts commit <提交号>」）、PR 正文写着这个决定号和合并提交号；记下过 HEAD 的还要相等。
+    不靠分支名同名认领。返回没对上的原因列表（空 = 对上了）。"""
+    bad = []
+    commits = p.get("commits") or []
+    if p.get("state") != "OPEN" or p.get("baseRefName") != "main":
+        bad.append(f"PR 不是开着合进 main 的（{p.get('state')} → {p.get('baseRefName')}）")
+    if len(commits) != 1 or commits[0].get("oid") != p.get("headRefOid"):
+        bad.append(f"PR 里有 {len(commits)} 个提交，不是只有一个撤销提交")
+    elif f"This reverts commit {merge_commit}" not in f"{commits[0].get('messageHeadline', '')}\n{commits[0].get('messageBody', '')}":
+        bad.append("提交说明里没写回退的是这次合并提交")
+    if d["id"] not in str(p.get("body")) or merge_commit not in str(p.get("body")):
+        bad.append("PR 正文里没有这个决定和合并提交")
+    if head and p.get("headRefOid") != head:
+        bad.append("PR 的提交和开的时候记下的不一样")
+    return bad
 
 
 def revert_step(st, d, rec, save, now, revert=None, lookup=None):
@@ -460,20 +520,25 @@ def revert_step(st, d, rec, save, now, revert=None, lookup=None):
     branch = MA.REVERT_BRANCH.format(decision=d["id"])
     if not mc:
         rv = {"status": "failed", "why": "账本里没有合并提交号，开不了撤销 PR"}
-    elif rv.get("status") in ("opening", "unsure"):          # 上次开到一半：只读查，不再推送
+    elif rv.get("status") in ("opening", "unsure"):          # 上次开到一半：只读查、核验后认领，不再推送
+        repo = d["target"]["repo"]
         try:
-            found = (lookup or find_revert_pr)(d["target"]["repo"], branch)
+            found = (lookup or find_revert_pr)(repo, branch)
+            checked = [(x, revert_pr_matches(x, d, mc, rv.get("head"))) for x in found]
+            hit = [x for x, bad in checked if not bad]
+            why = ("GitHub 上没有这个分支的撤销 PR" if not found else
+                   "分支上的 PR 对不上：" + "；".join(b for _, bad in checked for b in bad) if not hit else
+                   f"分支上有 {len(hit)} 个对得上的 PR，认不出是哪个" if len(hit) > 1 else "")
         except Exception as e:  # noqa: BLE001
-            found, rv = [], {**rv, "why": f"查不了 GitHub（{getattr(e, 'why', None) or e}）"}
-        hit = [p for p in found if rv.get("head") and p.get("headRefOid") == rv["head"]
-               and p.get("state") == "OPEN" and p.get("baseRefName") == "main"]
-        if hit:
-            rv = {**rv, "status": "opened", "pr": hit[0]["number"], "url": hit[0]["url"], "repo": d["target"]["repo"]}
+            hit, why = [], f"查不了 GitHub（{getattr(e, 'why', None) or e}）"
+        if len(hit) == 1:
+            rv = {**rv, "status": "opened", "repo": repo, "pr": hit[0]["number"], "url": hit[0]["url"], "head": hit[0]["headRefOid"],
+                  "branch": branch, "claimed": "只读核验后认领"}
         else:
-            rv = {**rv, "status": "unsure", "branch": branch,
-                  "why": rv.get("why") if rv.get("status") == "unsure" else "上次开撤销 PR 时中断了，不知道开到哪一步"}
+            rv = {**rv, "status": "unsure", "repo": repo, "branch": branch, "why": why or rv.get("why") or "上次开撤销 PR 时中断了"}
     elif rv.get("status") != "opened":                        # 没开过，或上次确定没开成：开
-        rec["revert"] = {"status": "opening", "at": C.iso(now), "branch": branch}
+        rec["revert"] = {"status": "opening", "at": C.iso(now), "decision": d["id"], "repo": d["target"]["repo"],   # 中断后只读核验的凭证
+                         "branch": branch, "merge_commit": mc}
         save()
         revert = revert or MA.run_custody_revert
         try:
@@ -591,7 +656,7 @@ def deliver_revert_card(d, rec, save, now, chat, sender=None):
     """发带「合并撤销 PR」按钮的卡片并回读（P1-03、P1-04）。上次发了没核实的，先按原消息号回读；核实不了才换新令牌重发。"""
     rv, rc = rec["revert"], rec.get("revert_card") or {}
     if rc.get("message_id") and rc.get("status") != "verified":
-        good, why = read_back(rc["message_id"], d["id"])
+        good, why = read_back(rc["message_id"], [d["id"], rc.get("card") or "（没有令牌）"], "合并撤销 PR", 1)
         if good:
             rc["status"] = "verified"
             rec["revert_card"] = rc
@@ -608,7 +673,7 @@ def deliver_revert_card(d, rec, save, now, chat, sender=None):
     if not rc["message_id"]:
         rc["error"] = "发卡片没拿到消息号"
         return False
-    good, why = read_back(rc["message_id"], d["id"])
+    good, why = read_back(rc["message_id"], [d["id"], token], "合并撤销 PR", 1)
     rc["status"] = "verified" if good else "unverified"
     if not good:
         rc["error"] = why
@@ -702,8 +767,9 @@ def _button(st, verb, ref, chat, card, now, sender, resume, say, kw):
                 say(f"没处理：「{d['context']}」没有进行到一半的推翻（要先在汇报卡上点「推翻」）。")
                 return 1
         elif not reported(d, card):
-            say(f"没处理：这个按钮不在发给你、并且核对过的汇报卡上（{ref}）。")
+            say(f"没处理：这个按钮不在最新一张、核对过的汇报卡上，请用最新那张（{ref}）。")
             return 1
+    check_ledger(st, d["session_id"], ledger_of(d["session_id"]))          # 第 2 轮 P1-02：推翻、合并撤销 PR 都先核账本身份
     lock_path = L.raw_dir() / d["session_id"] / f".{ref}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = open(lock_path, "w")

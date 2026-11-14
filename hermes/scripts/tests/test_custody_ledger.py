@@ -341,7 +341,7 @@ class TransitionTests(Base):
 
     def test_suspended_can_be_overturned(self):
         d = L.issue(self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": "DTS-1"}, basis="拿不准", context="c", question="q", ask_owner="回复我怎么定",
-                    revocability="irrevocable", now=T0)
+                    revocability="irrevocable", now=T0, status_reader=self.reader)
         L.set_disposition(self.st, d["id"], "overturned", "这个其实可以答", now=T0)
 
 
@@ -438,6 +438,18 @@ class ReviewRound1Tests(Base):
         self.rejects("LedgerMismatch", self.reply, issue="DTS-8")
         self.assertEqual(L.raw_orphans(self.st, SID), [d["id"]])
         self.assertTrue(any("有原文、账本里却没有" in b for b in L.drain_blockers(self.st, SID)))
+
+    def test_round2_p1_02_suspend_only_into_current_session(self):
+        """第 2 轮 P1-02：已结束的托管不能再记（哪怕账本里有它的登记）；现在这次也要账本身份对得上。"""
+        def suspend(reader):
+            return L.issue(self.st, session_id=SID, project="dt-sandbox", action="suspend", target={"issue": "DTS-1"},
+                           context="c", question="q", ask_owner="回复我怎么定", basis="拿不准", revocability="irrevocable",
+                           now=T0, status_reader=reader)
+        self.rejects("WrongSession", suspend, lambda t: status("off", session=None))
+        self.rejects("WrongSession", suspend, lambda t: status(session=SID2))
+        self.rejects("LedgerMismatch", suspend, lambda t: {**status("draining"), "session": {"id": SID, "ledger": {"id": "L-" + "2" * 16}}})
+        self.assertEqual(suspend(lambda t: status("frozen"))["status"], "suspended")    # 冻结、排空中照样能记进现在这次
+        self.assertEqual(len(L.decisions(self.st)), 1)
 
     def test_p1_01_quota_aliases_and_targets(self):
         """名册外的项目、带空格的项目名、小写子单号、短 HEAD、非整数 PR、别的仓库：一律拒，额度键只有一种写法。"""

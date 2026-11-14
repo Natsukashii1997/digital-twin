@@ -64,7 +64,8 @@ verify 每次重算：没签、撤销、文件不见、内容和签署时不同�
   命令行：custody.py status --json（同一份结构）。
   排空：drain_proof 读 custody_ledger 的账本（#133）；到截止还有对账不清的合并调 freeze --item …（已冻结也能补）。
   清账：每次进入 draining / frozen（关闭、到点、撤销、冻结），transaction 在释放状态锁之后调 ledger_cleanup，尽力把这次托管里
-  已出未送达的决定作废、释放额度（#133 P1-07）；账本出错不挡关闭（关闭是安全方向），汇报卡发送前和排空证明时还会再清一次。
+  已出未送达的决定作废、释放额度（#133 P1-07）；命令本身被拒、但到点推进已落盘进入排空 / 冻结时也清（第 2 轮 P2-01）；
+  账本出错不挡关闭（关闭是安全方向）、不盖掉原来的拒绝原因，汇报卡发送前和排空证明时还会再清一次。
   #134 接夜跑主控时，「每次进入排空都清账」是阻断性的集成测试。
 威胁模型同 twin_identity：防模型自报、文本冒充、重放；不防同一 macOS 用户下的恶意本地进程。
 """
@@ -693,29 +694,38 @@ def prune(doc, now):
 def transaction(fn, now=None, path=None):
     """持锁：读 → 按时钟推进 → fn(doc) 改 → 落盘。fn 抛 Rejected 时什么都不写（含消息占用）。返回 (doc, fn 的结果)。"""
     now = now or now_tz()
-    with locked(path):
-        try:
-            doc = load(path)
-        except ValueError as e:
-            raise Rejected(f"托管状态文件有问题，拒绝一切改动：{e}", "Corrupt")
-        before = doc["state"]
-        advanced = advance(doc, now)
-        try:
-            result = fn(doc)
-        except Rejected:
-            if advanced:              # 时钟推进照样落盘，本次动作不落
+    saved = {}                                   # 落了盘的 (改之前的状态, 落盘后的 doc)：锁外据此清账
+    try:
+        with locked(path):
+            try:
                 doc = load(path)
-                advance(doc, now)
-                prune(doc, now)
-                doc["updated_at"] = iso(now)
-                save(doc, path)
-            raise
-        prune(doc, now)
-        doc["updated_at"] = iso(now)
-        save(doc, path)
-    s = doc.get("session")
-    if s and doc["state"] in ("draining", "frozen") and before != doc["state"]:
-        ledger_cleanup(s["id"], now)             # 锁外做：账本有自己的写锁，关闭不等账本
+            except ValueError as e:
+                raise Rejected(f"托管状态文件有问题，拒绝一切改动：{e}", "Corrupt")
+            before = doc["state"]
+            advanced = advance(doc, now)
+            try:
+                result = fn(doc)
+            except Rejected:
+                if advanced:              # 时钟推进照样落盘，本次动作不落
+                    doc = load(path)
+                    advance(doc, now)
+                    prune(doc, now)
+                    doc["updated_at"] = iso(now)
+                    save(doc, path)
+                    saved["doc"] = (before, doc)
+                raise
+            prune(doc, now)
+            doc["updated_at"] = iso(now)
+            save(doc, path)
+            saved["doc"] = (before, doc)
+    finally:
+        # 锁外清账（#133 P1-07）：账本有自己的写锁，关闭不等账本。命令被拒、但到点推进已落盘进入排空 / 冻结时也清
+        #（第 2 轮 P2-01）；ledger_cleanup 不抛异常，不会盖掉原来的拒绝原因。
+        if "doc" in saved:
+            b, d = saved["doc"]
+            s = d.get("session")
+            if s and d["state"] in ("draining", "frozen") and b != d["state"]:
+                ledger_cleanup(s["id"], now)
     return doc, result
 
 

@@ -793,6 +793,22 @@ class ReviewRound1Tests(Base):
                 L.begin(st, d["id"], now=at(22, 2))
             self.assertEqual(cm.exception.code, "BadTransition")
 
+    def test_133_round2_p2_01_cleanup_when_command_rejected(self):
+        """第 2 轮 P2-01：到点自动转排空、但这次命令本身被拒，也要清账；拒绝原因照常抛出。"""
+        import custody_ledger as L
+        self.sign(when=at(20))
+        doc, _ = self.open()                                                 # 托管到 7 点
+        sid = doc["session"]["id"]
+        with L.open_store(at(22)) as st:
+            d = L.issue(st, session_id=sid, project="dt-sandbox", action="reply", basis="只影响沙盒里的示例服务", context="给示例服务加超时",
+                        question="超时设 30 秒还是 60 秒", summary="超时 30 秒", target={"issue": "DTS-7", "repo": "Natsukashii1997/dt-sandbox"},
+                        revocability="correctable", expires_at=at(23, 30, day=1), now=at(22))
+        self.rejects("BadTransition", C.do_unfreeze, self.say("解除冻结", at(7, 1, day=1)), now=at(7, 1, day=1))
+        self.assertEqual(self.doc()["state"], "draining")                   # 到点推进落了盘
+        with L.open_store() as st:
+            got = L.get(st, d["id"])
+        self.assertEqual((got["status"], got["void_reason"]), ("void", "托管排空"))
+
     def test_133_p1_07_ledger_failure_does_not_block_off(self):
         import custody_ledger as L
         self.sign(when=at(20))

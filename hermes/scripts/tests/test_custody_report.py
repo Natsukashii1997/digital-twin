@@ -111,6 +111,10 @@ class Base(unittest.TestCase):
         sp.start()
         self.addCleanup(sp.stop)
         LEDGER["id"] = L.register_session(self.st, SID, T0)
+        self.doc = ended_doc()                                               # 按钮核账本身份时读的 custody.json
+        cl = mock.patch.object(R.C, "load", side_effect=lambda *a, **k: self.doc)
+        cl.start()
+        self.addCleanup(cl.stop)
         self.sent = []
         self.mget = {}
 
@@ -150,7 +154,10 @@ class Base(unittest.TestCase):
     def fake_send(self, chat, msg_type, content, key):
         self.sent.append({"chat": chat, "type": msg_type, "content": content, "key": key})
         mid = f"om_fixture{len(self.sent):04d}"
-        self.mget[mid] = {"msg_type": msg_type, "content": json.dumps(content, ensure_ascii=False)}
+        # 飞书回读只给渲染后的文字：正文照抄，按钮显示成「[按钮字]」（11-14 试发回读的样子），读不到按钮的 value
+        shown = json.dumps([e for e in _walk_text(content)], ensure_ascii=False) + "".join(
+            f"[{b['text']['content']}]" for b in _button_nodes(content)) if msg_type == "interactive" else json.dumps(content)
+        self.mget[mid] = {"msg_type": msg_type, "content": shown}
         return mid
 
     def fake_lark(self, args, what):
@@ -184,6 +191,26 @@ class Base(unittest.TestCase):
 
 def card_text(card):
     return json.dumps(card, ensure_ascii=False)
+
+
+def _walk_text(card):
+    """卡片里给人看的文字（markdown 和表格单元格），不含按钮的 value。"""
+    out = []
+
+    def walk(x):
+        if isinstance(x, dict):
+            if x.get("tag") == "markdown":
+                out.append(x["content"])
+            for r in x.get("rows") or []:
+                out.extend(str(v) for v in r.values())
+            for k, v in x.items():
+                if k not in ("behaviors", "rows"):
+                    walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(card)
+    return out
 
 
 def _button_nodes(card):
@@ -438,6 +465,41 @@ class SendTests(Base):
         self.assertEqual((got["status"], got["void_reason"]), ("void", "托管排空"))
         self.assertIn("另有 1 个回复没发出去", card_text(self.sent[0]["content"]))
 
+    def test_early_return_still_checks_ledger(self):
+        """第 2 轮 P1-02：已经发过（verified）时也先核账本：库不见了、换了身份都报错，不报「已经发过」。"""
+        self.reply()
+        self.send_report(ended_doc())
+        doc = ended_doc()
+        doc["history"][0]["ledger"] = {"id": "L-" + "0" * 16}
+        with self.assertRaises(R.ReportError) as cm:
+            self.send_report(doc)
+        self.assertEqual(cm.exception.code, "LedgerMismatch")
+        self.st.close()
+        self.db.rename(self.root / "moved.db")
+        with mock.patch.object(R, "send", side_effect=self.fake_send), mock.patch.object(R, "lark", side_effect=self.fake_lark):
+            with self.assertRaises(R.ReportError) as cm:
+                R.send_report(SID, now=T0, doc=ended_doc())
+        self.assertEqual(cm.exception.code, "LedgerMissing")
+        self.assertFalse(self.db.exists())
+        (self.root / "moved.db").rename(self.db)
+        self.st = L.TS.Store(self.db, clock=lambda: T0).open()
+
+    def test_readback_checks_token_and_buttons(self):
+        """第 2 轮 P2-02：回读要有这张卡的令牌、推翻按钮数对得上，才算核实。"""
+        self.reply()
+        bad = {"没有令牌": lambda c: c.replace(self.sent[-1]["key"].rsplit("-", 1)[-1], ""),
+               "少了按钮": lambda c: c.replace("[推翻：", "[")}
+        for name, mangle in bad.items():
+            with self.subTest(name):
+                def lark(args, what, mangle=mangle):
+                    m = dict(self.mget[args[args.index("--message-ids") + 1]])
+                    m["content"] = mangle(m["content"])
+                    return {"messages": [m]}
+                with mock.patch.object(R, "send", side_effect=self.fake_send), mock.patch.object(R, "lark", side_effect=lark):
+                    with self.assertRaises(R.ReportError) as cm:
+                        R.send_report(SID, now=T0, doc=ended_doc(), store=self.st, force=True)
+                self.assertEqual(cm.exception.code, "SendFailed")
+
     def test_ledger_identity_checked(self):
         """P0-02：账本身份对不上（库被换过）不发汇报。"""
         self.reply()
@@ -471,13 +533,38 @@ class ButtonTests(Base):
             self.assertIn("核对过的汇报卡上", texts[0])
         self.assertEqual(L.get(self.st, d["id"])["disposition"], "open")
 
-    def test_old_card_still_works_after_resend(self):
+    def test_only_latest_card_after_resend(self):
+        """第 2 轮 P2-02：--force 重发后只认最新一张，旧卡上的按钮不认。"""
         d = self.reply()
         self.reported(d)
         old = self.token_for("overturn", d["id"])
         self.reported(d)
-        code, _ = self.click("overturn", d["id"], card=old, gh=FakeGitHub(down=True), night_root=self.nights)
-        self.assertEqual(code, 0)                                             # 两张都是核实过的卡
+        code, texts = self.click("overturn", d["id"], card=old, gh=FakeGitHub(down=True), night_root=self.nights)
+        self.assertEqual(code, 1)
+        self.assertIn("最新一张", texts[0])
+        code, _ = self.click("overturn", d["id"], gh=FakeGitHub(down=True), night_root=self.nights)
+        self.assertEqual(code, 0)
+
+    def test_buttons_check_ledger_identity(self):
+        """第 2 轮 P1-02：库被换成旧备份、或身份对不上时，推翻和合并撤销 PR 都不处理。"""
+        d = self.merge()
+        self.reported(d)
+        good = json.loads(json.dumps(self.doc))
+        self.doc["history"][0]["ledger"] = {"id": "L-" + "0" * 16}
+        code, texts = self.click("overturn", d["id"], gh=FakeGitHub(), revert=lambda *a: self.fail("账本对不上不能开"))
+        self.assertEqual(code, 1)
+        self.assertIn("托管账本对不上", texts[0])
+        self.assertEqual(L.get(self.st, d["id"])["disposition"], "open")
+        self.doc = good
+        (self.raw / SID / "d-261114-abcdef.json").write_text("{}")         # 有原文、账本里没有
+        code, texts = self.click("overturn", d["id"], gh=FakeGitHub(), revert=lambda *a: self.fail("账本对不上不能开"))
+        self.assertIn("有原文、账本里却没有", texts[0])
+        (self.raw / SID / "d-261114-abcdef.json").unlink()
+        self.overturn_merge(d)
+        self.doc["history"][0]["ledger"] = {"id": "L-" + "0" * 16}
+        code, texts = self.click("merge_revert", d["id"], merge=lambda *a: self.fail("账本对不上不能合"))
+        self.assertEqual(code, 1)
+        self.assertIn("托管账本对不上", texts[0])
 
     def test_overturn_reply(self):
         d = self.reply()
@@ -524,6 +611,14 @@ class ButtonTests(Base):
         self.assertIn("没列全（规则 1", texts[0])
         self.assertIn("没列全（规则 2", texts[0])
         self.assertEqual(L.get(self.st, d["id"])["disposition"], "overturned")      # 清单不全不影响推翻本身
+
+    def gh_revert_pr(self, d, head="f" * 40, mc="e" * 40, **kw):
+        """GitHub 上合并执行器开出的撤销 PR（gh pr list --json 的形状）。"""
+        p = {"number": 70, "url": "u70", "headRefOid": head, "state": "OPEN", "baseRefName": "main",
+             "body": f"托管决定 {d['id']} 被常浩推翻，回退合并提交 {mc}。",
+             "commits": [{"oid": head, "messageHeadline": 'Revert "托管合并 #38"', "messageBody": f"This reverts commit {mc}."}]}
+        p.update(kw)
+        return p
 
     def overturn_merge(self, d, revert=None, gh=None, **kw):
         revert = revert or (lambda repo, mc, dec, t: {"status": "opened", "repo": repo, "pr": 70, "url": f"https://github.com/{repo}/pull/70",
@@ -595,16 +690,51 @@ class ButtonTests(Base):
             return []
         code, texts = self.overturn_merge(d, revert=lambda *a: self.fail("不确定时不能再开"), lookup=lookup)
         self.assertEqual((code, looked), (1, [(REPO, f"custody-revert/{d['id']}")]))
-        found = [{"number": 70, "url": "u70", "headRefOid": "f" * 40, "state": "OPEN", "baseRefName": "main"}]
+        found = [self.gh_revert_pr(d)]
         code, texts = self.overturn_merge(d, revert=lambda *a: self.fail("不确定时不能再开"), lookup=lambda r, b: found)
         self.assertEqual(code, 0, texts)
         self.assertEqual(L.get(self.st, d["id"])["disposition"], "reverted")
-        other = [{**found[0], "headRefOid": "0" * 40}]                      # 分支上的提交对不上的不认
         d2 = self.merge(pr=44)
+        other = [self.gh_revert_pr(d2, head="0" * 40)]                      # 分支上的提交和记下的对不上的不认
         self.reported(d2)
         self.overturn_merge(d2, revert=lambda *a: {"status": "unsure", "why": "x", "head": "f" * 40, "repo": REPO})
         code, _ = self.overturn_merge(d2, revert=lambda *a: self.fail("x"), lookup=lambda r, b: other)
         self.assertEqual((code, L.get(self.st, d2["id"])["disposition"]), (1, "overturned"))
+
+    def test_crash_after_pr_created_claims_only_verified_pr(self):
+        """第 2 轮 P1-01：PR 已开、结果没落盘就崩了。续做时只读核验认领（不看分支名同名），对不上或不唯一就保持不确定，全程只推一次。"""
+        class Crash(BaseException):
+            pass
+        d = self.merge()
+        self.reported(d)
+        pushes = []
+
+        def revert(*a):
+            pushes.append(a)
+            raise Crash()
+        with self.assertRaises(Crash):
+            self.overturn_merge(d, revert=revert)
+        rec = json.loads((self.raw / SID / f"{d['id']}.overturn.json").read_text())
+        self.assertEqual({k: rec["revert"][k] for k in ("status", "decision", "repo", "branch", "merge_commit")},
+                         {"status": "opening", "decision": d["id"], "repo": REPO, "branch": f"custody-revert/{d['id']}",
+                          "merge_commit": "e" * 40})
+        bad = {"别的合并提交": [self.gh_revert_pr(d, mc="0" * 40)],
+               "多了提交": [self.gh_revert_pr(d, commits=[{"oid": "1" * 40}, {"oid": "f" * 40}])],
+               "正文不对": [self.gh_revert_pr(d, body="随便写的")],
+               "已关闭": [self.gh_revert_pr(d, state="CLOSED")],
+               "两个都对得上": [self.gh_revert_pr(d), self.gh_revert_pr(d, number=71)],
+               "没有 PR": []}
+        for name, found in bad.items():
+            with self.subTest(name):
+                code, texts = self.overturn_merge(d, revert=revert, lookup=lambda r, b, f=found: f)
+                self.assertEqual(code, 1)
+                self.assertIn("我不会再推一次", texts[-1])
+        code, texts = self.overturn_merge(d, revert=revert, lookup=lambda r, b: [self.gh_revert_pr(d)])
+        self.assertEqual(code, 0, texts)
+        self.assertEqual(len(pushes), 1)
+        rec = json.loads((self.raw / SID / f"{d['id']}.overturn.json").read_text())
+        self.assertEqual((rec["revert"]["status"], rec["revert"]["head"], rec["revert"]["claimed"]), ("opened", "f" * 40, "只读核验后认领"))
+        self.assertEqual(L.get(self.st, d["id"])["disposition"], "reverted")
 
     def test_overturn_unreconciled_merge_waits_then_resumes(self):
         """合并还没核清时记「等核清再开」，不记回退失败；核清确认合上后 resume 开撤销 PR。"""
@@ -689,14 +819,9 @@ class ButtonTests(Base):
                 with (patch or contextlib.nullcontext()):
                     with self.assertRaises(Crash):
                         self.overturn_merge(d, revert=revert)
-                code, texts = self.overturn_merge(d, revert=revert,
-                                                  lookup=lambda r, b: [{"number": 70, "url": "u70", "headRefOid": "f" * 40,
-                                                                        "state": "OPEN", "baseRefName": "main"}])
+                code, texts = self.overturn_merge(d, revert=revert, lookup=lambda r, b, d=d: [self.gh_revert_pr(d)])
                 rec = json.loads((self.raw / SID / f"{d['id']}.overturn.json").read_text())
-                if stage == "revert":                                         # 中断在开 PR 中途：不知道 HEAD，只读查也认不了，不再开
-                    self.assertEqual((code, opened, rec["revert"]["status"]), (1, [d["id"]], "unsure"))
-                    continue
-                self.assertEqual(code, 0, texts)
+                self.assertEqual(code, 0, texts)                              # 崩在开 PR 中途：只读核验认领，不再开第二次
                 self.assertEqual(opened, [d["id"]])
                 self.assertEqual(set(rec["stages"]), {"registered", "candidate", "impacts", "revert", "revert_card", "result"})
                 self.assertEqual(L.get(self.st, d["id"])["disposition"], "reverted")
@@ -844,10 +969,12 @@ class MergeRevertAsOwnerTests(unittest.TestCase):
         v.update(kw)
         return v
 
-    def go(self, view, after=None, merge_code=0):
+    def go(self, view, after=None, merge_code=0, required=("test",)):
         reads = iter([view, after or {"state": "MERGED", "mergeCommit": {"oid": "9" * 40}}])
         merged = []
+        rules = {**MA.mo.load_rules(), "revert_required_checks": {REPO: list(required)} if required else {}}
         with mock.patch.object(MA, "gh_read", side_effect=lambda args, what: next(reads)), \
+                mock.patch.object(MA.mo, "load_rules", return_value=rules), \
                 mock.patch.object(MA, "run_owner_merge", side_effect=lambda card: merged.append(card) or {"returncode": merge_code, "why": "w"}):
             try:
                 return MA.merge_revert_as_owner(REPO, 70, self.HEAD), merged
@@ -868,6 +995,23 @@ class MergeRevertAsOwnerTests(unittest.TestCase):
                 out, merged = self.go(self.view(**kw))
                 self.assertIsInstance(out, MA.Stop)
                 self.assertEqual(merged, [])
+
+    def test_required_test_check_must_succeed(self):
+        """第 2 轮 P1-03：全是跳过、全是中立、只有非测试检查成功、没登记必过检查，都不合并。"""
+        done = lambda name, r: {"name": name, "status": "COMPLETED", "conclusion": r}  # noqa: E731
+        cases = {"全跳过": dict(statusCheckRollup=[done("test", "SKIPPED")]),
+                 "全中立": dict(statusCheckRollup=[done("test", "NEUTRAL"), done("lint", "NEUTRAL")]),
+                 "只有非测试检查成功": dict(statusCheckRollup=[done("lint", "SUCCESS")]),
+                 "同名检查一成一跳": dict(statusCheckRollup=[done("test", "SUCCESS"), done("test", "SKIPPED")])}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                out, merged = self.go(self.view(**kw))
+                self.assertIsInstance(out, MA.Stop)
+                self.assertEqual(merged, [])
+        out, merged = self.go(self.view(), required=())
+        self.assertIsInstance(out, MA.Stop)
+        self.assertIn("没登记撤销 PR 必须通过的测试检查", out.why)
+        self.assertEqual(merged, [])
 
     def test_unattributed_and_failed(self):
         out, _ = self.go(self.view(), merge_code=1)
@@ -940,6 +1084,12 @@ class RevertTests(unittest.TestCase):
         show = subprocess.run(["git", "show", "refs/heads/custody-revert/d-261115-e4f590:a.txt"], cwd=self.bare,
                               capture_output=True, text=True).stdout
         self.assertEqual(show, "1\n")                                         # 内容回到合并前
+        body = subprocess.run(["git", "log", "--format=%B", "-1", "refs/heads/custody-revert/d-261115-e4f590"], cwd=self.bare,
+                              capture_output=True, text=True).stdout
+        self.assertIn(f"This reverts commit {self.merge_commit}", body)     # 中断后认领撤销 PR 靠这句（第 2 轮 P1-01）
+        create = next(c for c, _ in self.calls if c[1:3] == ["pr", "create"])
+        pr_body = create[create.index("--body") + 1]
+        self.assertTrue("d-261115-e4f590" in pr_body and self.merge_commit in pr_body)
         for cmd, env in self.calls:
             self.assertNotIn(self.TOKEN, " ".join(cmd))                     # 令牌不进命令行
             if cmd[0] == MA.GIT:

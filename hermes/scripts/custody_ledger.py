@@ -12,7 +12,8 @@
   库文件不在就拒绝（LedgerMissing），不隐式新建（第 1 轮审查 P0-02）：账本丢了不能被当成「一个决定都没有」。
 账本身份（P0-02）：第一次登记托管时生成 L-16 位十六进制，存库的 meta（custody_ledger_id）；每次开启托管在 custody_sessions 登记
   （托管号 → 账本身份），custody 把身份记进会话。准入、排空、汇报都核对「库还是那一份、这次托管登记过」，对不上抛 LedgerMismatch；
-  原文目录里有、账本里没有的决定（库被旧备份覆盖后记的）算排空没收完。
+  原文目录里有、账本里没有的决定（库被旧备份覆盖后记的）算排空没收完。挂起（suspend）不要准入，但只能记进现在这次托管
+  （custody.json 里的当前会话，排空、冻结中也算），并核对账本身份；已结束的托管不能再往里记（第 2 轮 P1-02）。
 
 决定（action）三种：reply（回复 blocked 子单）、merge（托管合并）、suspend（挂起：底线、拿不准、闸不过，只记账、进汇报）。
 撤回能力（revocability，记账时写定）：reply 只能是 correctable（可纠正），merge 只能是 revertible（可回退）；
@@ -424,12 +425,11 @@ def issue(store, *, session_id, project, action, target, basis, revocability, co
             if exp and exp <= now:
                 raise LedgerError("有效期已经过了（拿到账本写锁时）", "BadInput")
             holds = []
-            if action == "suspend":
+            if action == "suspend":              # 不要准入（排空、冻结时也能记），但只能记进现在这次托管，并核对账本身份（第 2 轮 P1-02）
                 sess = (status_reader(now).get("session") or {})
-                if sess.get("id") == session_id:
-                    check_session(store, session_id, (sess.get("ledger") or {}).get("id"))
-                elif not c.execute("SELECT 1 FROM custody_sessions WHERE session_id=?", (session_id,)).fetchone():
-                    raise LedgerError(f"账本里没有托管 {session_id} 的开启登记", "LedgerMismatch")
+                if sess.get("id") != session_id:
+                    raise LedgerError(f"托管 {session_id} 不是现在这次（已结束或没开），不能再往里记", "WrongSession")
+                check_session(store, session_id, (sess.get("ledger") or {}).get("id"))
             else:
                 pol = _admitted(store, session_id, now, status_reader)
                 lim = (pol.get("limits") or {}).get(action)
