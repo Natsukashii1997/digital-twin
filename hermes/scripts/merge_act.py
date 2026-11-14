@@ -29,6 +29,7 @@ DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号
 托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
 内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
 不退回常浩本人的 gh 登录；走 REST 合并接口，以接口返回的本次合并提交为成功证据；返回 merged / failed / unsure，unsure 只做只读对账、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
+托管合并被常浩推翻（#133）后，run_custody_revert 用同一个凭据开 revert PR，只开不合；本机 git 配置隔离，凭据只经 gh 的 git-credential 取。
 """
 import argparse
 import contextlib
@@ -449,6 +450,83 @@ def run_custody_merge(card):
         out["status"] = "failed"
     else:
         out["status"] = "unsure"
+    return out
+
+
+GIT = "git"
+GIT_URL = "https://github.com/{repo}.git"      # 测试换成本地裸仓库
+REVERT_BRANCH = "custody-revert/{decision}"
+
+
+def _git_env(env, home):
+    """托管回退里 git 的环境：在合并执行器最小环境上再隔离本机 git 配置（不读 ~/.gitconfig、系统配置和钥匙串助手），
+    凭据只经 gh 的 git-credential 从 GH_TOKEN 取，不进命令行参数、不写进仓库配置；不交互。"""
+    return {**env, "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/false"}
+
+
+def run_custody_revert(repo, merge_commit, decision, title):
+    """托管合并被常浩推翻后开 revert PR（#133，规格 §3.6「已回退」）：只开 PR、不合并（revert PR 的合并仍由常浩点卡片，B 档）。
+    凭据同 run_custody_merge：函数里从钥匙串取合并执行器令牌，最小环境，不退回本机 gh 登录。
+    步骤：查令牌对应的账号（提交署名用它的 noreply 邮箱）→ 浅克隆 → 核对合并提交在 main 上 → 从 main 开分支
+    custody-revert/<决定号> → git revert（合并提交有两个父提交时 -m 1）→ 推分支 → gh pr create → 回读 PR。
+    返回 {"status": opened | failed | unsure, "why", "pr", "url", "head", "branch"}：
+    failed＝确定没在 GitHub 上留下东西（推之前就停了）；unsure＝推了分支或建 PR 之后没拿到确定结果，要人工看；
+    revert 有冲突就是 failed（转常浩处理，不自动解决冲突）。"""
+    token = custody_token(repo)
+    branch = REVERT_BRANCH.format(decision=decision)
+    out = {"status": "failed", "why": "", "pr": None, "url": None, "head": None, "branch": branch, "repo": repo}
+    with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg, tempfile.TemporaryDirectory(prefix="dt-custody-revert-") as work:
+        env = custody_env(token, cfg)
+        genv = _git_env(env, work)
+        cred = ["-c", "credential.helper=", "-c", f"credential.helper=!{mo.GH} auth git-credential"]
+
+        def run(cmd, e, cwd=None):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=mo.TIMEOUT, env=e, cwd=cwd)
+                return r.returncode, (r.stdout or "").replace(token, "***"), (r.stderr or "").replace(token, "***")
+            except (OSError, subprocess.SubprocessError) as x:
+                return None, "", type(x).__name__
+
+        def stop(why, status="failed"):
+            out.update(status=status, why=why)
+            return out
+
+        code, so, se = run([mo.GH, "api", "user", "--jq", ".login + \" \" + (.id|tostring)"], env)
+        if code != 0 or len(so.split()) != 2:
+            return stop(f"查不到合并执行器令牌对应的账号（{clip(se.strip() or so.strip() or '没有输出', 100)}）")
+        login, uid = so.split()
+        ident = ["-c", f"user.name={login}", "-c", f"user.email={uid}+{login}@users.noreply.github.com"]
+        dest = str(Path(work) / "repo")
+        code, _, se = run([GIT, *cred, "clone", "--quiet", "--no-tags", "--branch", "main", GIT_URL.format(repo=repo), dest], genv)
+        if code != 0:
+            return stop(f"克隆 {repo} 失败（{clip(se.strip(), 100)}）")
+        code, _, _ = run([GIT, "merge-base", "--is-ancestor", merge_commit, "origin/main"], genv, dest)
+        if code != 0:
+            return stop(f"合并提交 {merge_commit[:7]} 不在 main 上，不能回退")
+        code, so, _ = run([GIT, "rev-list", "--parents", "-n", "1", merge_commit], genv, dest)
+        parents = so.split()[1:]
+        mainline = ["-m", "1"] if len(parents) > 1 else []
+        code, _, se = run([GIT, "checkout", "--quiet", "-b", branch, "origin/main"], genv, dest)
+        if code != 0:
+            return stop(f"开分支失败（{clip(se.strip(), 100)}）")
+        code, _, se = run([GIT, *ident, "revert", "--no-edit", *mainline, merge_commit], genv, dest)
+        if code != 0:
+            run([GIT, "revert", "--abort"], genv, dest)
+            return stop(f"git revert 有冲突或失败，没推任何东西（{clip(se.strip(), 100)}）")
+        code, head, _ = run([GIT, "rev-parse", "HEAD"], genv, dest)
+        out["head"] = head.strip()
+        code, _, se = run([GIT, *cred, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"], genv, dest)
+        if code != 0:
+            return stop(f"推分支 {branch} 没拿到确定结果，要到 GitHub 上看（{clip(se.strip(), 100)}）", "unsure")
+        body = (f"托管决定 {decision} 被常浩推翻，回退合并提交 {merge_commit}。\n\n"
+                "本 PR 由合并执行器开出；合并仍由常浩在飞书卡片上点（B 档），托管不会自己合它。")
+        run([mo.GH, "pr", "create", "--repo", repo, "--base", "main", "--head", branch, "--title", title, "--body", body], env)
+        code, so, _ = run([mo.GH, "pr", "view", branch, "--repo", repo, "--json", "number,url,headRefOid,state,baseRefName"], env)
+        got = _json_dict(so) if code == 0 else None
+        if not got or got.get("headRefOid") != out["head"] or got.get("state") != "OPEN" or got.get("baseRefName") != "main":
+            return stop(f"分支已推（{branch}），但回读不到对得上的 revert PR，要到 GitHub 上看", "unsure")
+        out.update(status="opened", pr=got["number"], url=got["url"])
     return out
 
 

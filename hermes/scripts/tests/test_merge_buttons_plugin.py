@@ -20,7 +20,7 @@ def load():
 class MergeButtonsPlugin(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_MERGE_PYTHON": "/x/python3",
+        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_MERGE_PYTHON": "/x/python3",
                "HERMES_SESSION_CHAT_ID": "oc_home"}
         self.env = mock.patch.dict(os.environ, env)
         self.env.start()
@@ -47,6 +47,20 @@ class MergeButtonsPlugin(unittest.TestCase):
     def test_return_button(self):
         _, popen = self.click('button {"merge_officer": "return", "ref": "digital-twin#79@abcdef1"}')
         self.assertEqual(popen.call_args[0][0][2:5], ["button", "return", "digital-twin#79@abcdef1"])
+
+    def test_custody_buttons_start_custody_report(self):
+        for verb in ("overturn", "merge_revert"):
+            out, popen = self.click('button {"custody": "%s", "ref": "d-261115-3fa2c1"}' % verb)
+            self.assertIsNone(out)
+            self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/custody_report.py", "button", verb, "d-261115-3fa2c1",
+                                                     "--chat", "oc_home"])
+
+    def test_ignores_bad_custody_clicks(self):
+        for raw in ('button {"custody": "delete", "ref": "d-261115-3fa2c1"}', 'button {"custody": "overturn", "ref": "d-1; rm -rf /"}',
+                    'button {"custody": "overturn", "ref": "trainee-hub#31@1cc8e02"}', 'button {"custody": "overturn"}'):
+            out, popen = self.click(raw)
+            self.assertIsNone(out)
+            popen.assert_not_called()
 
     def test_ignores_other_clicks(self):
         for raw in ("", "button", "button not-json", 'button ["x"]', 'select {"merge_officer": "merge", "ref": "a#1@abcdef1"}',
