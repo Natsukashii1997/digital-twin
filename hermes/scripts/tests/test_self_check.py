@@ -31,6 +31,8 @@ SOURCES = {
     "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
     "hermes/skills/workshop/references/r.md": "hermes/skills/autonomous-ai-agents/workshop/references/r.md",
     "hermes/prompts/p.md": "hermes/prompts/p.md",
+    "hermes/scripts/memdaily_job.py": "hermes/profiles/agumon/scripts/memdaily_job.py",   # 亚古兽的（#182）
+    "hermes/prompts/memdaily_report.md": "hermes/profiles/agumon/prompts/memdaily_report.md",
     "ops/health_check.py": "bin/health_check.py",
     "ops/check_repos.py": "bin/check_repos.py",
     "ops/self_check.py": "hermes/scripts/self_check.py",
@@ -230,6 +232,14 @@ class ScriptTest(unittest.TestCase):
         self.assertNotIn("fixture.json", out)                     # tests/ 下的 json 不安装、不比对
         (self.home / "hermes/scripts/rules.json").unlink()
         self.assertIn("- ~/hermes/scripts/rules.json 缺失（源：hermes/scripts/rules.json）", self.run_script())
+
+    def test_memdaily_files_checked_in_agumon_profile(self):
+        """记忆日报是亚古兽的，装在 profiles/agumon 下；不在猛鬼兽目录下报缺失（#182）。"""
+        self.assertEqual(self.run_script(), "")
+        self.write(self.home / "hermes/profiles/agumon/scripts/memdaily_job.py", "旧的\n")
+        out = self.run_script()
+        self.assertIn("- ~/hermes/profiles/agumon/scripts/memdaily_job.py 和 hermes/scripts/memdaily_job.py 内容不同", out)
+        self.assertNotIn("~/hermes/scripts/memdaily", out)
 
     def test_check_repos_checked_in_both_install_places(self):
         (self.home / "hermes/scripts/check_repos.py").unlink()
