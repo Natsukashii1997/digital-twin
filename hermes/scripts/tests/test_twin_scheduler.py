@@ -331,7 +331,7 @@ class MigrationTests(Base):
         for v in (1, 2):
             self.make_old(v)
             with ts.Store(self.db) as s:
-                self.assertEqual(s.version(), 3)
+                self.assertEqual(s.version(), ts.SCHEMA_VERSION)
                 self.assertTrue(s._has_claims())
                 self.assertEqual(s.claims(), [])
             self.store = ts.Store(self.db, clock=lambda: self.t, dispatch_dir=self.ledger).open()

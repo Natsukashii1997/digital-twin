@@ -23,6 +23,7 @@ SCRIPTS = HERE.parent
 TEMPLATE = SCRIPTS.parents[1] / "docs/托管策略-模板.md"
 sys.path.insert(0, str(SCRIPTS))
 import custody as C  # noqa: E402
+import twin_state as TS  # noqa: E402
 
 TZ = C.TZ
 OWNER = "ou_fixture_owner_0001"
@@ -68,12 +69,18 @@ class Base(unittest.TestCase):
         self.policy = self.root / "dt" / "custody" / "policy.md"
         self.policy.parent.mkdir(parents=True)
         self.template = TEMPLATE.read_text(encoding="utf-8")
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("DT_OWNER", "HERMES_SESSION", "DT_CUSTODY"))}
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("DT_OWNER", "HERMES_SESSION", "DT_CUSTODY", "DT_STATE_DB"))}
         env.update(DT_CUSTODY_FILE=str(self.state), DT_CUSTODY_POLICY=str(self.policy),
+                   DT_STATE_DB=str(self.root / "dt" / "twin-state.db"), DT_CUSTODY_DIR=str(self.root / "dt" / "custody"),
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT)
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)
+        TS.Store(self.root / "dt" / "twin-state.db").open().close()      # 账本所在的库要先有（托管不自动新建，P0-02）
+        import custody_ledger as L
+        sp = mock.patch.object(L, "sandbox_projects", return_value={"dt-sandbox": "Natsukashii1997/dt-sandbox"})
+        sp.start()
+        self.addCleanup(sp.stop)
         self.msgs = {}
         f = mock.patch.object(C, "fetch_message", side_effect=self._fetch)
         f.start()
@@ -114,7 +121,7 @@ class Base(unittest.TestCase):
         return C.read_status(now=now)
 
     def allow_drain(self):
-        """账本（#133）还没有：要走完 draining → off 的用例在这里假装账本已经证明排空完成。"""
+        """状态机用例不关心账本：要走完 draining → off 的用例在这里假装账本已经证明排空完成（账本本身见 test_custody_ledger）。"""
         p = mock.patch.object(C, "drain_proof", return_value=(True, ""))
         p.start()
         self.addCleanup(p.stop)
@@ -129,7 +136,30 @@ class PolicyTemplateTests(Base):
         fields, errors = C.parse_policy(filled)
         self.assertEqual(errors, [])
         self.assertEqual(fields, {"version": 3, "valid_days": 30, "drain_minutes": 120,
-                                  "window": {"start": "23:30", "end": "08:00"}})
+                                  "window": {"start": "23:30", "end": "08:00"},
+                                  "limits": {"reply": {"allowed": True, "per_issue": 2, "per_session": 10},
+                                             "merge": {"allowed": True, "per_session": 5}}})
+
+    def test_parse_limits(self):
+        """#133：额度上限从第 2 节的表里读，每行恰好一处；读不出、超范围、重复都算策略无效（签署时就拒绝）。"""
+        filled = fill(self.template)
+        reply = next(ln for ln in filled.splitlines() if ln.startswith("| 回复受限会话"))
+        merge = next(ln for ln in filled.splitlines() if ln.startswith("| 托管合并"))
+        no = filled.replace(merge, merge.replace("| 是 |", "| 否 |"))
+        self.assertEqual(C.parse_policy(no)[0]["limits"]["merge"], {"allowed": False, "per_session": 5})
+        cases = {
+            "上限写成文字": filled.replace(reply, reply.replace("每次托管 10 次", "每次托管 十 次")),
+            "上限为 0": filled.replace(merge, merge.replace("每次托管 5 个", "每次托管 0 个")),
+            "上限过大": filled.replace(reply, reply.replace("每张子单 2 次", "每张子单 101 次")),
+            "允许没写是否": filled.replace(merge, merge.replace("| 是 |", "| 可以 |")),
+            "同一行写了两处": filled.replace(merge, merge + "\n" + merge),
+            "行在别的节": filled.replace(reply + "\n", "").replace("## 4. 一律挂起", reply + "\n\n## 4. 一律挂起"),
+        }
+        for why, text in cases.items():
+            with self.subTest(why):
+                fields, errors = C.parse_policy(text)
+                self.assertTrue(errors, why)
+                self.assertNotIn("limits", fields)
 
     def test_parse_policy_errors(self):
         _, errors = C.parse_policy(fill(self.template, valid="30 天", drain="很快"))
@@ -360,10 +390,13 @@ class TransitionTests(Base):
         self.open()
         self.rejects("BadTransition", C.do_off, "ledger", drained=True, now=at(22, 5))       # on：不能跳过排空
         C.do_off("feishu", now=at(22, 10))
-        self.assertIn("#133", self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 20)))  # 默认证明不了
+        with mock.patch("custody_ledger.drain", return_value=["d-261111-aaaaaa（合并 x#1）结果不明"]):
+            msg = self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 20))   # 账本说没收完
+        self.assertIn("d-261111-aaaaaa", msg)
+        with mock.patch("custody_ledger.drain", side_effect=OSError("磁盘坏了")):
+            self.assertIn("证明不了排空完成", self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 25)))
         self.assertEqual(self.doc()["state"], "draining")
-        self.allow_drain()
-        doc, r = C.do_off("ledger", drained=True, now=at(22, 30))
+        doc, r = C.do_off("ledger", drained=True, now=at(22, 30))            # 真账本（空的）：排空完成
         self.assertEqual((doc["state"], doc["session"]), ("off", None))
         last = doc["history"][-1]
         self.assertEqual(last["ended"]["how"], "排空完成")
@@ -470,8 +503,8 @@ class FileTests(Base):
 
     def test_no_temp_files_left_and_lock_timeout(self):
         self.sign(when=at(20))
-        self.assertEqual(sorted(p.name for p in self.state.parent.iterdir()),
-                         ["custody", "custody.json", "custody.json.initialized", "custody.json.lock"])
+        self.assertEqual(sorted(p.name for p in self.state.parent.iterdir() if not p.name.startswith("twin-state.db")),
+                         ["custody", "custody.json", "custody.json.initialized", "custody.json.lock"])   # 账本库（含 WAL）不算托管的临时文件
         import fcntl
         fd = os.open(str(self.state.with_name("custody.json.lock")), os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -680,11 +713,109 @@ class ReviewRound1Tests(Base):
 
     # ---- P1-08 排空证明 ----
     def test_p1_08_drained_needs_proof(self):
+        """#133 起由账本证明：有结果不明的合并就证明不了，到截止冻结。"""
+        import custody_ledger as L
         self.sign(when=at(20))
         self.open()
+        sid = self.doc()["session"]["id"]
+        with L.open_store(at(22)) as st:
+            d = L.issue(st, session_id=sid, project="dt-sandbox", action="merge", basis="测试全过、审查通过", context="合并 PR #7「重试可配置」", summary="合并 #7",
+                        target={"repo": "Natsukashii1997/dt-sandbox", "pr": 7, "head": "a" * 40}, revocability="revertible",
+                        expires_at=at(23), now=at(22))
+            L.begin(st, d["id"], now=at(22))
+            L.finish(st, d["id"], "unknown", now=at(22))
         C.do_off("feishu", now=at(22, 1))
-        self.rejects("DrainUnverified", C.do_off, "hermes", drained=True, now=at(22, 2))
+        msg = self.rejects("DrainUnverified", C.do_off, "hermes", drained=True, now=at(22, 2))
+        self.assertIn(d["id"], msg)
         self.assertEqual(self.status(at(0, 1, day=1))["state"], "frozen")   # 没人能证明 → 到截止冻结
+
+    # ---- #133 第 1 轮审查：账本身份（P0-02）与进入排空清账（P1-07）----
+    def test_133_p0_02_on_needs_ledger_and_records_identity(self):
+        import custody_ledger as L
+        self.sign(when=at(20))
+        db = self.root / "dt" / "twin-state.db"
+        backup = db.with_name("backup.db")
+        db.rename(backup)
+        self.rejects("LedgerUnavailable", self.open)                        # 库不在：不开启，也不偷偷新建
+        self.assertFalse(db.exists())
+        backup.rename(db)
+        doc, _ = self.open(when=at(22, 1))
+        lid = doc["session"]["ledger"]["id"]
+        self.assertRegex(lid, r"^L-[0-9a-f]{16}$")
+        with L.open_store() as st:
+            self.assertEqual(L.ledger_id(st), lid)
+            L.check_session(st, doc["session"]["id"], lid)
+
+    def test_133_p0_02_swapped_ledger_cannot_prove_drain(self):
+        """库丢了、被换成新建的、被旧备份覆盖：都证明不了排空，到截止冻结。"""
+        import shutil
+        db = self.root / "dt" / "twin-state.db"
+        pristine = db.with_name("pristine.db")
+        shutil.copy(db, pristine)                                             # 开启前的备份
+        self.sign(when=at(20))
+        doc, _ = self.open()
+        sid = doc["session"]["id"]
+        C.do_off("feishu", now=at(22, 1))
+        good = db.with_name("good.db")
+        shutil.copy(db, good)
+        for name, swap in (("库不见了", lambda: db.unlink()),
+                           ("换成新建的库", lambda: (db.unlink(), TS.Store(db).open().close())),
+                           ("旧备份（开启前）", lambda: shutil.copy(pristine, db))):
+            with self.subTest(name):
+                swap()
+                msg = self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 2))
+                self.assertIn("证明不了排空完成", msg)
+                shutil.copy(good, db)
+        raw = self.root / "dt" / "custody" / sid
+        raw.mkdir(parents=True, exist_ok=True)
+        (raw / "d-261114-abcdef.json").write_text("{}")                     # 有原文、账本里没有：账本被旧备份覆盖过
+        msg = self.rejects("DrainUnverified", C.do_off, "ledger", drained=True, now=at(22, 3))
+        self.assertIn("有原文、账本里却没有", msg)
+        (raw / "d-261114-abcdef.json").unlink()
+        doc, _ = C.do_off("ledger", drained=True, now=at(22, 4))
+        self.assertEqual(doc["state"], "off")
+        self.assertEqual(self.status(at(0, 1, day=1))["state"], "off")
+
+    def test_133_p1_07_entering_drain_voids_issued(self):
+        import custody_ledger as L
+        self.sign(when=at(20))
+        doc, _ = self.open()
+        sid = doc["session"]["id"]
+        with L.open_store(at(22)) as st:
+            d = L.issue(st, session_id=sid, project="dt-sandbox", action="reply", basis="只影响沙盒里的示例服务", context="给示例服务加超时",
+                        question="超时设 30 秒还是 60 秒", summary="超时 30 秒", target={"issue": "DTS-7", "repo": "Natsukashii1997/dt-sandbox"},
+                        revocability="correctable", expires_at=at(23), now=at(22))
+        C.do_off("feishu", now=at(22, 1))                                    # 进入排空：锁外清账
+        with L.open_store() as st:
+            got = L.get(st, d["id"])
+            self.assertEqual((got["status"], got["void_reason"]), ("void", "托管排空"))
+            with self.assertRaises(L.LedgerError) as cm:                      # 送达闸再也开始不了
+                L.begin(st, d["id"], now=at(22, 2))
+            self.assertEqual(cm.exception.code, "BadTransition")
+
+    def test_133_round2_p2_01_cleanup_when_command_rejected(self):
+        """第 2 轮 P2-01：到点自动转排空、但这次命令本身被拒，也要清账；拒绝原因照常抛出。"""
+        import custody_ledger as L
+        self.sign(when=at(20))
+        doc, _ = self.open()                                                 # 托管到 7 点
+        sid = doc["session"]["id"]
+        with L.open_store(at(22)) as st:
+            d = L.issue(st, session_id=sid, project="dt-sandbox", action="reply", basis="只影响沙盒里的示例服务", context="给示例服务加超时",
+                        question="超时设 30 秒还是 60 秒", summary="超时 30 秒", target={"issue": "DTS-7", "repo": "Natsukashii1997/dt-sandbox"},
+                        revocability="correctable", expires_at=at(23, 30, day=1), now=at(22))
+        self.rejects("BadTransition", C.do_unfreeze, self.say("解除冻结", at(7, 1, day=1)), now=at(7, 1, day=1))
+        self.assertEqual(self.doc()["state"], "draining")                   # 到点推进落了盘
+        with L.open_store() as st:
+            got = L.get(st, d["id"])
+        self.assertEqual((got["status"], got["void_reason"]), ("void", "托管排空"))
+
+    def test_133_p1_07_ledger_failure_does_not_block_off(self):
+        import custody_ledger as L
+        self.sign(when=at(20))
+        self.open()
+        with mock.patch.object(L, "open_store", side_effect=L.LedgerError("库坏了", "LedgerMissing")):
+            doc, _ = C.do_off("feishu", now=at(22, 1))                       # 关闭是安全方向：账本出错也照样转排空
+        self.assertEqual(doc["state"], "draining")
 
     # ---- P2 ----
     def test_p2_01_freeze_appends_items_when_already_frozen(self):

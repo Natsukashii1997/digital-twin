@@ -29,6 +29,7 @@ DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号
 托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
 内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
 不退回常浩本人的 gh 登录；走 REST 合并接口，以接口返回的本次合并提交为成功证据；返回 merged / failed / unsure，unsure 只做只读对账、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
+托管合并被常浩推翻（#133）后，run_custody_revert 用同一个凭据开 revert PR，只开不合；本机 git 配置隔离，凭据只经 gh 的 git-credential 取。
 """
 import argparse
 import contextlib
@@ -450,6 +451,150 @@ def run_custody_merge(card):
     else:
         out["status"] = "unsure"
     return out
+
+
+GIT = "git"
+GIT_URL = "https://github.com/{repo}.git"      # 测试换成本地裸仓库
+REVERT_BRANCH = "custody-revert/{decision}"
+
+
+def _git_env(env, home):
+    """托管回退里 git 的环境：在合并执行器最小环境上再隔离本机 git 配置（不读 ~/.gitconfig、系统配置和钥匙串助手），
+    凭据只经 gh 的 git-credential 从 GH_TOKEN 取，不进命令行参数、不写进仓库配置；不交互。"""
+    return {**env, "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/false"}
+
+
+def same_repo(p, repo):
+    """PR 的来源分支就在目标仓库本身（不是从 fork 用同名分支开过来的，#133 定向复核 P1-01）。
+    p 要带 gh 的 isCrossRepository、headRepository、headRepositoryOwner 字段。"""
+    owner, _, name = repo.partition("/")
+    return (p.get("isCrossRepository") is False
+            and str((p.get("headRepositoryOwner") or {}).get("login") or "").lower() == owner.lower()
+            and str((p.get("headRepository") or {}).get("name") or "").lower() == name.lower())
+
+
+REVERT_PR_FIELDS = "number,url,headRefOid,state,baseRefName,isCrossRepository,headRepository,headRepositoryOwner"
+
+
+def run_custody_revert(repo, merge_commit, decision, title, on_head=None):
+    """托管合并被常浩推翻后开 revert PR（#133，规格 §3.6「已回退」）：只开 PR、不合并（revert PR 的合并仍由常浩点卡片，B 档）。
+    凭据同 run_custody_merge：函数里从钥匙串取合并执行器令牌，最小环境，不退回本机 gh 登录。
+    步骤：查令牌对应的账号（提交署名用它的 noreply 邮箱）→ 浅克隆 → 核对合并提交在 main 上 → 从 main 开分支
+    custody-revert/<决定号> → git revert（合并提交有两个父提交时 -m 1）→ on_head(本地撤销提交号) → 推分支 → gh pr create → 回读 PR。
+    on_head 由调用方在推送之前把完整提交号落盘（#133 定向复核 P1-01）：中断后只认 HEAD 正好是这个提交号、来源就是目标仓库的 PR；
+    on_head 抛异常就停在推送之前（failed），所以「没记下提交号」一定等于「没推过」。
+    返回 {"status": opened | failed | unsure, "why", "pr", "url", "head", "branch"}：
+    failed＝确定没在 GitHub 上留下东西（推之前就停了）；unsure＝推了分支或建 PR 之后没拿到确定结果，要人工看；
+    revert 有冲突就是 failed（转常浩处理，不自动解决冲突）。"""
+    token = custody_token(repo)
+    branch = REVERT_BRANCH.format(decision=decision)
+    out = {"status": "failed", "why": "", "pr": None, "url": None, "head": None, "branch": branch, "repo": repo}
+    with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg, tempfile.TemporaryDirectory(prefix="dt-custody-revert-") as work:
+        env = custody_env(token, cfg)
+        genv = _git_env(env, work)
+        cred = ["-c", "credential.helper=", "-c", f"credential.helper=!{mo.GH} auth git-credential"]
+
+        def run(cmd, e, cwd=None):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=mo.TIMEOUT, env=e, cwd=cwd)
+                return r.returncode, (r.stdout or "").replace(token, "***"), (r.stderr or "").replace(token, "***")
+            except (OSError, subprocess.SubprocessError) as x:
+                return None, "", type(x).__name__
+
+        def stop(why, status="failed"):
+            out.update(status=status, why=why)
+            return out
+
+        code, so, se = run([mo.GH, "api", "user", "--jq", ".login + \" \" + (.id|tostring)"], env)
+        if code != 0 or len(so.split()) != 2:
+            return stop(f"查不到合并执行器令牌对应的账号（{clip(se.strip() or so.strip() or '没有输出', 100)}）")
+        login, uid = so.split()
+        ident = ["-c", f"user.name={login}", "-c", f"user.email={uid}+{login}@users.noreply.github.com"]
+        dest = str(Path(work) / "repo")
+        code, _, se = run([GIT, *cred, "clone", "--quiet", "--no-tags", "--branch", "main", GIT_URL.format(repo=repo), dest], genv)
+        if code != 0:
+            return stop(f"克隆 {repo} 失败（{clip(se.strip(), 100)}）")
+        code, _, _ = run([GIT, "merge-base", "--is-ancestor", merge_commit, "origin/main"], genv, dest)
+        if code != 0:
+            return stop(f"合并提交 {merge_commit[:7]} 不在 main 上，不能回退")
+        code, so, _ = run([GIT, "rev-list", "--parents", "-n", "1", merge_commit], genv, dest)
+        parents = so.split()[1:]
+        mainline = ["-m", "1"] if len(parents) > 1 else []
+        code, _, se = run([GIT, "checkout", "--quiet", "-b", branch, "origin/main"], genv, dest)
+        if code != 0:
+            return stop(f"开分支失败（{clip(se.strip(), 100)}）")
+        code, _, se = run([GIT, *ident, "revert", "--no-edit", *mainline, merge_commit], genv, dest)
+        if code != 0:
+            run([GIT, "revert", "--abort"], genv, dest)
+            return stop(f"git revert 有冲突或失败，没推任何东西（{clip(se.strip(), 100)}）")
+        code, head, _ = run([GIT, "rev-parse", "HEAD"], genv, dest)
+        out["head"] = head.strip()
+        if code != 0 or not re.fullmatch(r"[0-9a-f]{40}", out["head"]):
+            return stop("取不到撤销提交号，没推任何东西")
+        if on_head:
+            try:
+                on_head(out["head"])
+            except Exception as x:  # noqa: BLE001  记不下就不推：中断后要靠它认领
+                return stop(f"记不下撤销提交号，没推任何东西（{type(x).__name__}）")
+        code, _, se = run([GIT, *cred, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}"], genv, dest)
+        if code != 0:
+            return stop(f"推分支 {branch} 没拿到确定结果，要到 GitHub 上看（{clip(se.strip(), 100)}）", "unsure")
+        body = (f"托管决定 {decision} 被常浩推翻，回退合并提交 {merge_commit}。\n\n"
+                "本 PR 由合并执行器开出；合并仍由常浩在飞书卡片上点（B 档），托管不会自己合它。")
+        run([mo.GH, "pr", "create", "--repo", repo, "--base", "main", "--head", branch, "--title", title, "--body", body], env)
+        code, so, _ = run([mo.GH, "pr", "view", branch, "--repo", repo, "--json", REVERT_PR_FIELDS], env)
+        got = _json_dict(so) if code == 0 else None
+        if (not got or got.get("headRefOid") != out["head"] or got.get("state") != "OPEN" or got.get("baseRefName") != "main"
+                or not same_repo(got, repo)):
+            return stop(f"分支已推（{branch}），但回读不到对得上的 revert PR，要到 GitHub 上看", "unsure")
+        out.update(status="opened", pr=got["number"], url=got["url"])
+    return out
+
+
+def require_named_checks(p, names):
+    """撤销 PR 的有效测试证据（#133 第 2 轮审查 P1-03）：require_ci_passed 把 SKIPPED / NEUTRAL 当作不阻断，全是跳过也能过；
+    撤销 PR 另外要求 merge_rules.json 的 revert_required_checks[完整仓库名] 里登记的每项检查，在当前 HEAD 上真的跑完并且 SUCCESS。
+    没登记就停（不知道哪项是测试，就没有测试通过的证据）。飞书卡片合并不走这里，现有规则不变。"""
+    at("跑测试")
+    if not names:
+        raise Stop("这个仓库没登记撤销 PR 必须通过的测试检查（merge_rules.json 的 revert_required_checks）",
+                   "在电脑上交给 Claude 会话：给这个仓库配好 CI 并登记检查名")
+    got = {}
+    for c in p.get("statusCheckRollup") or []:
+        got.setdefault(c.get("name") or c.get("context"), []).append(
+            (str(c.get("status") or "COMPLETED").upper(), str(c.get("conclusion") or c.get("state") or "").upper()))
+    bad = [n for n in names if not got.get(n) or any(s != "COMPLETED" or r != "SUCCESS" for s, r in got[n])]
+    if bad:
+        raise Stop("必须通过的测试检查没有成功跑完：" + "、".join(bad), "交回开这个 PR 的会话看 CI")
+    at("核对版本")
+
+
+def merge_revert_as_owner(repo, pr, head):
+    """撤销托管合并的 PR（#133 第 1 轮审查 P0-01）：常浩点「合并撤销 PR」后，走和飞书卡片合并同一套合并前检查（check_pr：
+    PR 开着、HEAD 是开出来时的、合进 main、不是草稿、风险档不是 L3、没冲突不落后、当前 HEAD 的 CI 全部通过、CLEAN），
+    任一项不过就停（Stop），不合并、转电脑上处理。撤销 PR 没有 CI 也停：沙盒没登记本机测试命令，不在宿主跑 PR 里的脚本；
+    另外要求 revert_required_checks 里登记的测试检查真的 SUCCESS（require_named_checks，跳过 / 中立不算）。
+    通过后用本机 gh（常浩本人，B 档）带 --match-head-commit 合并，再回读。返回 {"status", "merge_commit", "why"}：
+    merged＝本次合并命令成功且回读已合并；merged_unattributed＝回读已合并但本次命令没成功（可能被别人合上），不归到这次按钮；
+    failed＝回读仍没合并。"""
+    card = {"repo": repo, "pr": pr, "head": head}
+    rules = mo.load_rules()
+    p = check_pr(card, rules, "main", ci=True)
+    require_named_checks(p, (rules.get("revert_required_checks") or {}).get(repo))
+    at("执行合并")
+    res = run_owner_merge(card)
+    at("合并后回读")
+    try:
+        after = gh_read(["pr", "view", str(pr), "--repo", repo, "--json", "state,mergeCommit"], "合并后回读")
+    except Stop as e:
+        e.verdict, e.state = UNSURE, "合并命令已经发出，但回读没成功，不知道合上没有"
+        e.todo = "到 GitHub 上看这个 PR 合上没有，不要再点合并"
+        raise
+    sha = (after.get("mergeCommit") or {}).get("oid")
+    if after.get("state") == "MERGED":
+        return {"status": "merged" if res["returncode"] == 0 else "merged_unattributed", "merge_commit": sha, "why": res["why"]}
+    return {"status": "failed", "merge_commit": None, "why": res["why"]}
 
 
 def cmd_merge(ref):

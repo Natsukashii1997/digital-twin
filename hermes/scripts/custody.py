@@ -10,9 +10,12 @@
   custody.py verify                               重算策略全文 SHA-256，和签署记录比对（只读）
   custody.py on --source feishu --message-id om_x 常浩私聊说「托管」或「托管到 X 点」开启
   custody.py on --source window                   已签策略的默认时段内开启（时段内只开一次）
+                                                  开启时在托管账本登记这次托管（custody_ledger.register_session），账本身份记进
+                                                  session.ledger.id；账本所在的库不在、打不开就不开启（LedgerUnavailable，#133 P0-02）
   custody.py off --source <标签> [--skip-tonight]  关闭：on → draining；任何来源都可以（标签只是记录，自报、不核验）
-  custody.py off --source <标签> --drained        排空完成：draining → off；要本脚本自己能证明排空完成（drain_proof），
-                                                  账本（#133）接入前一律拒绝（DrainUnverified），排空到截止自动冻结
+  custody.py off --source <标签> --drained        排空完成：draining → off；要本脚本自己读账本证明排空完成（drain_proof：
+                                                  先核对账本身份和开启登记，再作废已出未送达的决定，再核对没有在途、结果不明、UNRECONCILED、
+                                                  有原文没账本的），证明不了拒绝（DrainUnverified）
   custody.py freeze --source <标签> --reason 原因 [--item 未解决事项 ...]   转 frozen（on / draining）；已冻结时只补充事项
   custody.py unfreeze --message-id om_x          常浩私聊说「解除冻结」：frozen → off（只有这一条路；解除不等于重新开启）
   custody.py sign --message-id om_x              常浩私聊说「签托管策略 v<版本> <SHA-256 前 12 位>」签 policy.md
@@ -36,6 +39,7 @@ Hermes 会话里 --message-id 可以省略，读 HERMES_SESSION_MESSAGE_ID（只
 状态文件 custody.json（DT_CUSTODY_FILE，默认 ~/Library/Application Support/DigitalTwin/custody.json，600）：
   schema "dt-custody/1"；state；updated_at；
   session（当前这次托管，off 时为 null）：id（c-YYYYMMDD-HHMMSS-12 位随机十六进制，和历史不重复，#133 账本按它建账）、started_at、until、source{kind feishu|window, message_id, open_id | window}、
+          ledger{id}（托管账本身份 L-16 位十六进制，开启时写入；库被换成新建的或旧备份就对不上，#133）、
           policy{version, sha256}、drain_minutes、window_def{start, end}、drain{started_at, deadline, source}、
           frozen{at, reason, items, source}、events[]；
   signature（当前签署）：version、sha256（全文）、message_id、open_id、signed_at、expires_at、valid_days、revoked{at, source, reason}（没撤销就没有这个字段，不许是 null）；
@@ -58,7 +62,11 @@ verify 每次重算：没签、撤销、文件不见、内容和签署时不同�
   admission = {"eligible", "reasons"}：状态能读、是 on、策略有效、会话策略就是当前有效策略才 eligible。下游不得只看 state=="on"，
   要看 admission；它只管托管这一层，夜跑授权、额度、合并条件各闸自己核；每次执行前现读，不缓存。
   命令行：custody.py status --json（同一份结构）。
-  排空：#133 在 drain_proof 里接账本后，off --drained 才可能成功；到截止还有对账不清的合并调 freeze --item …（已冻结也能补）。
+  排空：drain_proof 读 custody_ledger 的账本（#133）；到截止还有对账不清的合并调 freeze --item …（已冻结也能补）。
+  清账：每次进入 draining / frozen（关闭、到点、撤销、冻结），transaction 在释放状态锁之后调 ledger_cleanup，尽力把这次托管里
+  已出未送达的决定作废、释放额度（#133 P1-07）；命令本身被拒、但到点推进已落盘进入排空 / 冻结时也清（第 2 轮 P2-01）；
+  账本出错不挡关闭（关闭是安全方向）、不盖掉原来的拒绝原因，汇报卡发送前和排空证明时还会再清一次。
+  #134 接夜跑主控时，「每次进入排空都清账」是阻断性的集成测试。
 威胁模型同 twin_identity：防模型自报、文本冒充、重放；不防同一 macOS 用户下的恶意本地进程。
 """
 import argparse
@@ -89,6 +97,7 @@ USED_KEEP_DAYS = 30         # 用过的消息 ID 留多久（消息本身 10 分
 EVENTS_KEEP = 50
 MAX_DRAIN_MINUTES = 24 * 60
 MAX_VALID_DAYS = 366
+MAX_LIMIT = 100              # 策略里单项额度上限的上限（防笔误写成 1000）
 SOURCE_LABEL = re.compile(r"^[\w\-一-鿿]{1,32}$")
 PUNCT = " \t\r\n　。.!！~～"
 PLACEHOLDER = "〔填"
@@ -169,8 +178,9 @@ def only_one(lines, pattern, what, errors):
 
 
 def parse_policy(text):
-    """读出本脚本要用的四项，位置固定：版本、有效期在开头的表里（第一个「## 」之前），默认时段和排空截止在「## 1. 默认托管时段」里；
-    引用块不参与；每项恰好一处。其余条款归出口闸、合并执行器（#134、#136）。返回 (字段, 错误列表)。"""
+    """读出托管要用的五项，位置固定：版本、有效期在开头的表里（第一个「## 」之前），默认时段和排空截止在「## 1. 默认托管时段」里，
+    额度上限在「## 2. 托管期间允许的动作」的表里（#133）；引用块不参与；每项恰好一处。其余条款归出口闸、合并执行器（#134、#136）。
+    返回 (字段, 错误列表)。"""
     errors, out = [], {}
     sec = sections(text)
     head = sec["前言"]
@@ -207,7 +217,33 @@ def parse_policy(text):
             errors.append("默认时段写的是「到次日」，结束时刻要早于开始时刻（例：每晚 23:30 到次日 08:00）")
         else:
             out["window"] = {"start": f"{sh:02d}:{sm:02d}", "end": f"{eh:02d}:{em:02d}"}
+    limits = parse_limits(sec, errors)
+    if limits:
+        out["limits"] = limits
     return out, errors
+
+
+def parse_limits(sec, errors):
+    """额度上限（#133，规格 §3.5）：只从「## 2. 托管期间允许的动作」的表里读两行，每行恰好一处：
+    「| 回复受限会话… | 是/否 | 每张子单 N 次，每次托管 M 次 |」「| 托管合并… | 是/否 | 每次托管 K 个 |」。
+    读不出就记错误（整份策略无效，签署时就拒绝），不猜默认值。"""
+    two = [v for k, v in sec.items() if k.startswith("## 2. 托管期间允许的动作")]
+    if len(two) != 1:
+        errors.append("要有且只有一节「## 2. 托管期间允许的动作」")
+        return None
+    out = {}
+    m = only_one(two[0], r"^\|\s*回复受限会话.*?\|\s*(是|否)\s*\|\s*每张子单\s*(\d+)\s*次\s*[，,]\s*每次托管\s*(\d+)\s*次\s*\|\s*$",
+                 "「回复受限会话」一行（是 / 否 | 每张子单 N 次，每次托管 M 次）", errors)
+    if m:
+        out["reply"] = {"allowed": m.group(1) == "是", "per_issue": int(m.group(2)), "per_session": int(m.group(3))}
+    m = only_one(two[0], r"^\|\s*托管合并.*?\|\s*(是|否)\s*\|\s*每次托管\s*(\d+)\s*个\s*\|\s*$",
+                 "「托管合并」一行（是 / 否 | 每次托管 N 个）", errors)
+    if m:
+        out["merge"] = {"allowed": m.group(1) == "是", "per_session": int(m.group(2))}
+    bad = [kind for kind, d in out.items() if any(not 1 <= v <= MAX_LIMIT for k, v in d.items() if k != "allowed")]
+    for kind in bad:
+        errors.append(f"「{'回复受限会话' if kind == 'reply' else '托管合并'}」的上限要在 1–{MAX_LIMIT} 之间")
+    return out if len(out) == 2 and not bad else None
 
 
 def read_policy(path=None):
@@ -251,7 +287,7 @@ def verify_policy(doc, now=None, path=None):
         return {**base, "code": "expired", "reason": f"托管策略 v{sig['version']} 已于 {sig['expires_at']} 过期，要续签（换版本）"}
     return {"ok": True, "code": "valid", "path": base["path"], "version": sig["version"], "sha256": sha,
             "signed_at": sig["signed_at"], "expires_at": sig["expires_at"], "drain_minutes": fields["drain_minutes"],
-            "window": fields["window"]}
+            "window": fields["window"], "limits": fields["limits"]}
 
 
 # ---------- 默认时段 ----------
@@ -454,7 +490,11 @@ def check_signature(sig):
 
 
 def check_session(s, state):
-    _keys(s, "session", ("id", "started_at", "until", "source", "policy", "drain_minutes", "window_def", "drain", "frozen", "events"))
+    _keys(s, "session", ("id", "started_at", "until", "source", "policy", "drain_minutes", "window_def", "drain", "frozen", "events"),
+          ("ledger",))
+    if "ledger" in s:                                   # 托管开启时账本的身份（#133 第 1 轮审查 P0-02）
+        _keys(s["ledger"], "session.ledger", ("id",))
+        _str(s["ledger"]["id"], "session.ledger.id", r"L-[0-9a-f]{16}")
     _str(s["id"], "session.id", SESSION_ID)
     started, until = _time(s["started_at"], "session.started_at"), _time(s["until"], "session.until")
     _need(started < until <= started + MAX_UNTIL + dt.timedelta(minutes=1), "session.until 要晚于开始、不超过 24 小时")
@@ -654,26 +694,39 @@ def prune(doc, now):
 def transaction(fn, now=None, path=None):
     """持锁：读 → 按时钟推进 → fn(doc) 改 → 落盘。fn 抛 Rejected 时什么都不写（含消息占用）。返回 (doc, fn 的结果)。"""
     now = now or now_tz()
-    with locked(path):
-        try:
-            doc = load(path)
-        except ValueError as e:
-            raise Rejected(f"托管状态文件有问题，拒绝一切改动：{e}", "Corrupt")
-        advanced = advance(doc, now)
-        try:
-            result = fn(doc)
-        except Rejected:
-            if advanced:              # 时钟推进照样落盘，本次动作不落
+    saved = {}                                   # 落了盘的 (改之前的状态, 落盘后的 doc)：锁外据此清账
+    try:
+        with locked(path):
+            try:
                 doc = load(path)
-                advance(doc, now)
-                prune(doc, now)
-                doc["updated_at"] = iso(now)
-                save(doc, path)
-            raise
-        prune(doc, now)
-        doc["updated_at"] = iso(now)
-        save(doc, path)
-        return doc, result
+            except ValueError as e:
+                raise Rejected(f"托管状态文件有问题，拒绝一切改动：{e}", "Corrupt")
+            before = doc["state"]
+            advanced = advance(doc, now)
+            try:
+                result = fn(doc)
+            except Rejected:
+                if advanced:              # 时钟推进照样落盘，本次动作不落
+                    doc = load(path)
+                    advance(doc, now)
+                    prune(doc, now)
+                    doc["updated_at"] = iso(now)
+                    save(doc, path)
+                    saved["doc"] = (before, doc)
+                raise
+            prune(doc, now)
+            doc["updated_at"] = iso(now)
+            save(doc, path)
+            saved["doc"] = (before, doc)
+    finally:
+        # 锁外清账（#133 P1-07）：账本有自己的写锁，关闭不等账本。命令被拒、但到点推进已落盘进入排空 / 冻结时也清
+        #（第 2 轮 P2-01）；ledger_cleanup 不抛异常，不会盖掉原来的拒绝原因。
+        if "doc" in saved:
+            b, d = saved["doc"]
+            s = d.get("session")
+            if s and d["state"] in ("draining", "frozen") and b != d["state"]:
+                ledger_cleanup(s["id"], now)
+    return doc, result
 
 
 def new_session_id(now, doc):
@@ -726,8 +779,10 @@ def do_on(source, message_id=None, now=None, path=None, policy=None):
             doc["consumed_windows"][key] = "默认时段开启"
             until = end
             src = {"kind": "window", "window": key}
+        sid = new_session_id(now, doc)
+        lid = register_ledger(sid, now)
         doc["state"] = "on"
-        doc["session"] = {"id": new_session_id(now, doc), "started_at": iso(now),
+        doc["session"] = {"id": sid, "started_at": iso(now), "ledger": {"id": lid},
                           "until": iso(until), "source": src,
                           "policy": {"version": pol["version"], "sha256": pol["sha256"]},
                           "drain_minutes": pol["drain_minutes"], "window_def": pol["window"],
@@ -738,11 +793,46 @@ def do_on(source, message_id=None, now=None, path=None, policy=None):
     return transaction(fn, now, path)
 
 
+def register_ledger(session_id, now):
+    """开启时在托管账本登记这次托管（#133 第 1 轮审查 P0-02）：账本不在、打不开就不开启（没有账本就没法记账和证明排空）。
+    返回账本身份，记进 session.ledger.id；排空证明时核对库还是这一份、登记还在。"""
+    import custody_ledger as L               # 账本反过来要 import 本脚本，所以在这里才导入
+    try:
+        with L.open_store() as st:
+            return L.register_session(st, session_id, now)
+    except Exception as e:                   # noqa: BLE001  任何账本失败都不开启
+        raise Rejected(f"托管账本不可用，不开启（{type(e).__name__}：{e}）", "LedgerUnavailable")
+
+
+def ledger_cleanup(session_id, now):
+    """进入排空 / 冻结后，尽力把这次托管里已出未送达的决定作废、释放额度（#133 第 1 轮审查 P1-07，规格 §3.8 第 2 步）。
+    关闭是安全方向，账本出错也不挡关闭；送达闸本来就要求托管开着才发，汇报前还会再清一次。返回 (成功, 说明)。"""
+    import custody_ledger as L
+    try:
+        with L.open_store() as st:
+            n = sum(1 for d in L.decisions(st, session_id) if d["status"] == "issued")
+            L.drain(st, session_id, now=now)
+        return True, f"作废 {n} 个已出未送达的决定"
+    except Exception as e:                   # noqa: BLE001
+        return False, f"{type(e).__name__}：{e}"
+
+
 def drain_proof(doc, now):
-    """排空完成的证明（第 1 轮审查 P1-08）：要由本脚本自己读账本核对「未送达决定已作废、在途合并已对账、没有 UNRECONCILED」。
-    账本（#133）还没有，所以现在一律证明不了：off --drained 全部拒绝，排空到截止自动冻结，常浩私聊「解除冻结」收尾。
-    #133 接入时在这里读账本；#134、#136 在这之前不得启用托管。返回 (能否证明, 原因)。"""
-    return False, "账本（#133）还没接入，证明不了未送达决定已作废、在途合并已对账：不能宣称排空完成（到截止会自动冻结）"
+    """排空完成的证明（第 1 轮审查 P1-08，#133 接账本）：本脚本自己读托管账本（custody_ledger.drain），先作废这次托管里
+    已出未送达的决定、释放额度（规格 §3.8 第 2 步），再核对没有进行中、结果不明、UNRECONCILED 的决定和没释放的预占。
+    一项都没有才算排空完成；账本读不了也算证明不了（fail closed，到截止自动冻结）。返回 (能否证明, 原因)。"""
+    import custody_ledger as L               # 账本反过来要 import 本脚本，所以在这里才导入
+    s = doc["session"]
+    if not (s.get("ledger") or {}).get("id"):
+        return False, "这次托管开启时没有登记账本，证明不了排空完成"
+    try:
+        with L.open_store() as st:
+            blockers = L.drain(st, s["id"], s["ledger"]["id"], now)
+    except Exception as e:                   # noqa: BLE001  账本不见、身份对不上、读不了都当成证明不了（P0-02）
+        return False, f"托管账本证明不了排空完成（{type(e).__name__}：{e}）"
+    if blockers:
+        return False, "排空还没收完：" + "；".join(blockers)
+    return True, ""
 
 
 def check_label(source):
