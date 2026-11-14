@@ -6,7 +6,7 @@
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
 每天：仓库 main 上已提交的源文件和安装副本逐字节比对，只报缺失或不一致的路径，安装位置多出的文件不管。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
-每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
+每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、Hermes 主模型走本机 Claude 而 Claude 没登录（#180，G-27）、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
 每天：跑同目录 custody.py status --json（托管状态，#131，只读），托管没关（开着、排空中、冻结）、状态读不了、已签策略失效或
   3 天内到期才说；关着且策略正常（或还没签过）不说；没装 custody.py 就跳过。
 每月 1 号（或 --monthly）：另查沙盒超过 30 天没动的目录，和名册仓库自检（同目录 check_repos.py，只报失败项）。
@@ -173,10 +173,25 @@ def check_ai_access():
         w = st["workers"][st["default_worker"]]
     except (ValueError, KeyError, TypeError):
         return ["AI 接入自检未完成（输出不是预期的 JSON）"]
-    if w.get("state") == "可用":
+    lines = []
+    if w.get("state") != "可用":
+        lines += [f"车间默认执行方 {w.get('name')} 现在{w.get('state')}（{w.get('detail')}）。没点名的派单会报错停下，不会换成另一家",
+                  "处理：在终端登录它，或改默认：python3 ~/.hermes/scripts/ai_access.py set default 另一家"]
+    return lines + hermes_claude(st)
+
+
+def hermes_claude(st):
+    """Hermes 主模型走本机 Claude 时，Claude 没登录就报（#180，全局坑 G-27）：
+    11-12 起登录失效，Hermes 回退 deepseek 三天、日报三期降级，没人提醒。"""
+    main = ((st.get("hermes") or {}).get("models") or {}).get("model") or {}
+    c = (st.get("workers") or {}).get("claude") or {}
+    if "claude" not in str(main.get("provider", "")) or not c or c.get("state") == "可用":
         return []
-    return [f"车间默认执行方 {w.get('name')} 现在{w.get('state')}（{w.get('detail')}）。没点名的派单会报错停下，不会换成另一家",
-            "处理：在终端登录它，或改默认：python3 ~/.hermes/scripts/ai_access.py set default 另一家"]
+    proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "http://127.0.0.1:8086"
+    return [f"Hermes 主模型 {main.get('default')} 走本机 Claude，但 {c.get('name')} 现在{c.get('state')}（{c.get('detail')}）。"
+            "日报写稿和飞书对话会回退到 deepseek，日报大概率降级成事实版",
+            f"处理：在终端带代理重新登录 HTTPS_PROXY={proxy} HTTP_PROXY={proxy} claude auth login，"
+            "终端出现 Login successful. 才算登上，浏览器页面显示成功不算（全局坑 G-27）"]
 
 
 def check_custody():
