@@ -66,6 +66,7 @@ ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
   self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
+  autoloop_isolation_check.py  0A 隔离门反向测试（#190）：在工人账号 dt-worker 里运行，逐项尝试越权（读主账号文件、改 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、GitHub 凭据、sudo、连主账号其他本机服务、经代理绕回本机、往主账号会执行的目录里写），每项都应被挡住；读不到监听端口判出错不判通过；结果写 /Users/Shared/dt-autoloop/results/；共享副本在 /Users/Shared/dt-autoloop/（连同 dt-worker 安装脚本 setup-dt-worker.sh、只读引擎副本）
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
 
