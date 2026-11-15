@@ -2,7 +2,7 @@
 # provision 第一项（mode: system）的 script。每次虚拟机启动都跑，前台同步执行，不放后台。
 # 网段与 ops/multica-egress/runtime.compose.yml 一一对应：
 #   172.29.0.0/24 app-net（compose 默认网络：backend、frontend、postgres）
-#   172.30.0.0/24 agent-net（内部网络：执行器、backend .2、出口代理 .3）
+#   172.30.0.0/24 agent-net（内部网络：执行器在 .128/25、backend .2、出口代理 .3）
 #   172.31.0.0/24 egress-net（只有出口代理，上游只许宿主 8086）
 # 本脚本拦不住容器启动，所以执行器和出口代理不自动启动（restart: "no" + profile agent），只能经 agent-up.sh 拉起；
 # agent-up.sh 先跑 verify.py 核对本脚本的结果，规则不全、顺序不对都不拉起（fail-closed）。
@@ -21,8 +21,8 @@ iptables-restore --noflush <<'RULES'
 -A DOCKER-USER -j DT-EGRESS
 -A DOCKER-USER -j RETURN
 -A DT-EGRESS -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
--A DT-EGRESS -s 172.30.0.0/24 -d 172.30.0.2/32 -p tcp -m tcp --dport 8080 -j RETURN
--A DT-EGRESS -s 172.30.0.0/24 -d 172.30.0.3/32 -p tcp -m tcp --dport 3128 -j RETURN
+-A DT-EGRESS -s 172.30.0.128/25 -d 172.30.0.2/32 -p tcp -m tcp --dport 8080 -j RETURN
+-A DT-EGRESS -s 172.30.0.128/25 -d 172.30.0.3/32 -p tcp -m tcp --dport 3128 -j RETURN
 -A DT-EGRESS -s 172.30.0.0/24 -j DROP
 -A DT-EGRESS -s 172.31.0.0/24 -d 192.168.5.2/32 -p tcp -m tcp --dport 8086 -j RETURN
 -A DT-EGRESS -s 172.31.0.0/24 -j DROP
@@ -33,7 +33,8 @@ iptables-restore --noflush <<'RULES'
 COMMIT
 RULES
 # 说明：
-# - agent-net 只放行到 backend:8080、代理:3128；同网段其他端口、以后加进来的服务一律拒绝（回包走第一条 ESTABLISHED）。
+# - agent-net 只放行执行器（动态地址段 .128/25）到 backend:8080、代理:3128；backend（.2）、代理（.3）自己不能主动连
+#   agent-net 里的任何东西，所以 backend 用不了代理出网；同网段其他端口、以后加进来的服务一律拒绝（回包走第一条 ESTABLISHED）。
 # - egress-net 只放行到宿主 8086。代理的 DNS 经 Docker 内置 DNS（容器内 127.0.0.11，由 dockerd 在虚拟机里转发），不经这里。
 # - app-net（backend、frontend、postgres）只能在自己网段内互通，宿主（网关 8086、局域网 IP）和外网一律拒绝。
 #   backend 有 agent 能触发、目标由调用方给的出站请求（VCS 连接，见复验记录第七节）；断网后它即使被借去发请求，

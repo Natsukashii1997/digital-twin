@@ -6,7 +6,8 @@
                     br_netfilter；dnsmasq 没在跑；虚拟机和宿主 TCP、UDP 53 都没有监听；默认网络、agent-net 没开 IPv6、网段对
                     （egress-net 随代理创建，在 proxy 里核对）
   verify.py proxy   出口代理容器：不自动重启、网络和地址对、容器里的 squid 配置与源文件一致、对外只听 3128、没有 IPv6 地址
-  verify.py agent   执行器容器：不自动重启、只接 agent-net、代理变量指向出口代理、没有 IPv6 地址；backend 在 agent-net 上
+  verify.py agent   执行器容器：不自动重启、只接 agent-net 的执行器网段、代理变量指向出口代理、没有 IPv6 地址；
+                    代理和执行器都按 compose 合并后的最终配置 + docker inspect 核对安全字段；backend 在 agent-net 上
                     固定 .2、对外只听 8080、VCS 集成关闭
   verify.py all     以上全部（执行器和代理要在跑）
 
@@ -134,14 +135,22 @@ def vm_checks():
     check("br_netfilter", sysctl)
 
     def dns():
-        st = subprocess.run(["colima", "ssh", "-p", "multica", "--", "systemctl", "is-active", "dnsmasq"],
-                            capture_output=True, text=True, env=ENV).stdout.strip()
-        (good if st != "active" else bad)(f"虚拟机 dnsmasq：{st or '未知'}")
-        ls = vm("ss -Hlntu '( sport = :53 )'").strip()
+        # 「明确没在跑 / 没有监听」才算过；命令失败、结果读不懂一律不过（第 2 轮 P2-01）
+        r = subprocess.run(["colima", "ssh", "-p", "multica", "--", "systemctl", "is-active", "dnsmasq"],
+                           capture_output=True, text=True, env=ENV)
+        st = r.stdout.strip()
+        (good if st in ("inactive", "failed") else bad)(f"虚拟机 dnsmasq：{st or '读不到'}")
+        r = subprocess.run(["colima", "ssh", "-p", "multica", "--", "systemctl", "is-enabled", "dnsmasq"],
+                           capture_output=True, text=True, env=ENV)
+        en = r.stdout.strip()
+        (good if en == "masked" else bad)(f"虚拟机 dnsmasq 开机自启：{en or '读不到'}（应为 masked）")
+        ls = vm("ss -Hlntu '( sport = :53 )'").strip()      # vm() 命令失败会抛异常，check 判失败
         (good if not ls else bad)(f"虚拟机 53 监听：{ls or '无'}")
         host = []
         for proto in ("-iTCP:53", "-iUDP:53"):
             r = subprocess.run(["lsof", "-nP", proto], capture_output=True, text=True)
+            if r.returncode not in (0, 1) or r.stderr.strip() or (r.returncode == 1 and r.stdout.strip()):
+                raise RuntimeError(f"宿主 lsof {proto} 结果不明（{r.returncode}）：{r.stderr.strip()[:120]}")
             for l in r.stdout.splitlines()[1:]:
                 name = l.split()[8] if len(l.split()) > 8 else ""
                 local = name.split("->")[0]
@@ -213,6 +222,44 @@ def no_ipv6(name):
     (good if not addrs else bad)(f"{name} IPv6 地址：{addrs or '无'}")
 
 
+def compose_config():
+    """三个 compose 文件合并、带 profile agent 之后的最终配置（第 2 轮 P2-02：只比对单个源文件不够）。"""
+    out = docker("compose", "--project-directory", str(RUNTIME), "-f", str(RUNTIME / "compose.yml"),
+                 "-f", str(RUNTIME / "local.override.yml"), "-f", str(RUNTIME / "runtime.compose.yml"),
+                 "--profile", "agent", "config", "--format", "json")
+    return json.loads(out)["services"]
+
+
+# 安全关键字段的期望值（与 runtime.compose.yml 一致）；最终配置和运行中的容器都要对上
+SECURITY = {
+    "isolated-agent": {"user": "1000:1000", "volumes": [("volume", "/home/node")], "networks": {"agent-net"}},
+    "egress-proxy": {"user": None, "volumes": [], "networks": {"agent-net", "egress-net"}},
+}
+
+
+def security_checks(name, svc_name):
+    """最终 compose 配置 + docker inspect 逐项核对：只读根、去掉全部权限、无新增权限、非特权、用户、挂载、镜像、命令、重启、网络。"""
+    svc = compose_config()[svc_name]
+    want = SECURITY[svc_name]
+    c = inspect(name)
+    hc, cfg = c["HostConfig"], c["Config"]
+    conf_ok = (svc.get("read_only") is True and svc.get("cap_drop") == ["ALL"] and not svc.get("cap_add")
+               and svc.get("security_opt") == ["no-new-privileges:true"] and not svc.get("privileged")
+               and str(svc.get("restart")) == "no" and svc.get("profiles") == ["agent"]
+               and set(svc.get("networks") or {}) == want["networks"]
+               and [(v.get("type"), v.get("target")) for v in svc.get("volumes") or []] == want["volumes"]
+               and svc.get("user") == want["user"])
+    (good if conf_ok else bad)(f"{svc_name} 最终 compose 配置的安全字段{'符合' if conf_ok else '不符：' + json.dumps({k: svc.get(k) for k in ('read_only', 'cap_drop', 'cap_add', 'security_opt', 'privileged', 'restart', 'profiles', 'user', 'volumes')}, ensure_ascii=False)[:300]}")
+    user = cfg.get("User") or ""
+    mounts = [(m.get("Type"), m.get("Destination")) for m in c.get("Mounts") or []]
+    run_ok = (hc.get("ReadonlyRootfs") is True and hc.get("CapDrop") == ["ALL"] and not hc.get("CapAdd")
+              and hc.get("SecurityOpt") == ["no-new-privileges:true"] and hc.get("Privileged") is False
+              and (user == want["user"] if want["user"] else user not in ("", "root", "0", "0:0"))
+              and sorted(mounts) == sorted(want["volumes"]) and not any(t == "bind" for t, _ in mounts)
+              and cfg.get("Image") == svc.get("image") and (svc.get("command") is None or cfg.get("Cmd") == svc.get("command")))
+    (good if run_ok else bad)(f"{name} 运行态安全字段{'与最终配置一致' if run_ok else '不符：' + json.dumps({'ReadonlyRootfs': hc.get('ReadonlyRootfs'), 'CapDrop': hc.get('CapDrop'), 'CapAdd': hc.get('CapAdd'), 'SecurityOpt': hc.get('SecurityOpt'), 'User': user, 'Mounts': mounts, 'Image': cfg.get('Image')}, ensure_ascii=False)[:300]}")
+
+
 def nets_of(c):
     return {k.split("_", 1)[1]: v.get("IPAddress") for k, v in c["NetworkSettings"]["Networks"].items()}
 
@@ -231,6 +278,7 @@ def proxy_checks():
         for rel in ("squid.conf", "allowed_domains.txt"):
             inside = docker("exec", PROXY, "cat", f"/etc/squid/{rel}")
             (good if inside == (HERE / "egress" / rel).read_text(encoding="utf-8") else bad)(f"容器内 {rel} 与源文件{'一致' if inside == (HERE / 'egress' / rel).read_text(encoding='utf-8') else '不一致'}")
+        security_checks(PROXY, "egress-proxy")
         lp = listeners(PROXY)
         (good if tcp_only(lp, 3128) else bad)(f"{PROXY} 对外监听={sorted(lp)}")
         no_ipv6(PROXY)
@@ -252,8 +300,7 @@ def agent_checks():
         want = "http://egress-proxy:3128"
         ok = all(env.get(k) == want for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"))
         (good if ok else bad)(f"{AGENT} 代理变量指向出口代理={ok}")
-        (good if c["HostConfig"].get("Privileged") is False and c["HostConfig"].get("CapDrop") == ["ALL"] else bad)(
-            f"{AGENT} 非特权、去掉全部权限")
+        security_checks(AGENT, "isolated-agent")
         no_ipv6(AGENT)
         b = inspect(BACKEND)
         bn = nets_of(b)

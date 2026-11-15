@@ -55,7 +55,7 @@ services:
 
   # 白名单出口代理：只接受 CONNECT 到 allowed_domains.txt 里域名的 443，上游只经宿主 8086
   egress-proxy:
-    image: dt-egress-proxy:squid-2
+    image: dt-egress-proxy:squid-3
     profiles: ["agent"]
     build:
       context: ./egress

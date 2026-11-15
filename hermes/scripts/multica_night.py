@@ -38,7 +38,8 @@
 
 环境变量：DT_NIGHT_ROOT 夜跑根目录（默认 ~/Library/Application Support/DigitalTwin/runs）；DT_MULTICA_CLI 换 multica（自测用）；
 DT_GH_CLI 换 gh；DT_ROSTER_REPO 名册仓库（名册和保护基线从它已合并的 origin/main 读，不读工作区）；DT_NOW（ISO 时间）指定现在；DT_NIGHT_READBACK「次数,间隔秒」停机回读（默认 12,5）；DT_NIGHT_PROCWAIT「次数,间隔秒」
-停机后等执行器里 agent 进程自己退出（默认 6,5）。
+停机后等执行器里 agent 进程自己退出（默认 6,5）；DT_EGRESS_VERIFY 出网防线核对脚本（默认名册仓库工作区的
+ops/multica-egress/verify.py，按 `python3 <脚本> all` 跑，退出码 0 才算通过）。
 """
 import argparse
 import datetime as dt
@@ -60,6 +61,8 @@ ROSTER_REPO = Path(os.environ.get("DT_ROSTER_REPO", "~/Documents/ChatGPT/个人/
 ROSTER_REF = "origin/main"
 ROSTER_FILE = "projects.json"
 ROOT = Path(os.environ.get("DT_NIGHT_ROOT", "~/Library/Application Support/DigitalTwin/runs")).expanduser()
+# 出网防线运行态核对（#172 第 2 轮 P1-01）：agent-up.sh 能被宿主上的 docker 命令绕开，所以派单入口自己再核一次
+EGRESS_VERIFY = Path(os.environ.get("DT_EGRESS_VERIFY", str(ROSTER_REPO / "ops/multica-egress/verify.py"))).expanduser()
 BJ = dt.timezone(dt.timedelta(hours=8))
 UTC = dt.timezone.utc
 TIMEOUT = 60
@@ -1588,8 +1591,23 @@ def gate_problems(plan, expect_digest=None, since=""):
         return [f"身份闸自身出错：{type(e).__name__}"]
 
 
+def egress_problems():
+    """出网防线运行态核对（#172 第 2 轮 P1-01）：跑 verify.py all（安装副本、虚拟机防火墙与顺序、53、IPv6、代理和执行器容器、
+    backend）。执行器可能是绕开 agent-up.sh 用 docker start 等拉起的，所以开跑和每次放 stage 前都由派单入口自己核。
+    核对不过、跑不起来、超时都算不通过（fail-closed）。只回报不符项的摘要，不回显命令原始输出。"""
+    try:
+        r = subprocess.run([sys.executable, str(EGRESS_VERIFY), "all"], capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        return [f"出网防线核对跑不起来：{type(e).__name__}"]
+    if r.returncode == 0:
+        return []
+    bad = [l.strip()[2:].strip() for l in r.stdout.splitlines() if l.strip().startswith("✗")]
+    return ["出网防线核对没通过：" + ("；".join(x[:120] for x in bad[:5]) if bad else f"退出码 {r.returncode}")]
+
+
 def preflight(night, expect_digest=None, since=""):
     why = gate_problems(night.plan, expect_digest, since)     # 运行前身份闸（含名册 sandbox 核对，#172 / #174）
+    why += egress_problems()                                    # 出网防线运行态（#172 第 2 轮 P1-01）
     snap = {"runs": {}, "wakeups": {}, "issues": {}}
     for k in night.family():
         iss = night.mc("issue", "get", night.ident(k))
@@ -1769,13 +1787,17 @@ def regate(night, n):
     """放出第 n 个 stage 之前重跑身份闸（P1-05）。通过返回空串；不通过就按 5.3a 停机，且执行器不再可信，回读通过也冻结（停容器）。"""
     digest = night.state["auth"].get("plan_digest")
     why = gate_problems(night.plan, digest, "开跑") if digest else ["开跑记录里没有计划摘要，核对不了计划是否被改过"]
-    if not why:
+    egress = egress_problems()            # 出网防线运行态（#172 第 2 轮 P1-01）：和身份闸一样，不过就不放、冻结
+    if not why and not egress:
         night.log("identity_gate", stage=n, ok=True)
+        night.log("egress_gate", stage=n, ok=True)
         return ""
     night.state["distrust"] = True       # 先落盘：之后任何停机、异常兜底都按执行器不可信处理（第 2 轮 P1-02）
     night.save()
-    night.log("identity_gate", stage=n, ok=False, why=why)
-    return stop(night, [f"放 stage {n} 前身份闸没通过：" + "；".join(why)], distrust=True)
+    night.log("identity_gate", stage=n, ok=not why, why=why)
+    night.log("egress_gate", stage=n, ok=not egress, why=egress)
+    parts = ([f"身份闸没通过：" + "；".join(why)] if why else []) + egress
+    return stop(night, [f"放 stage {n} 前" + "；".join(parts)], distrust=True)
 
 
 def cmd_tick(night):

@@ -7,6 +7,10 @@ import os, socket, ssl, subprocess, json
 PROXY = ("egress-proxy", 3128)
 HOSTS = [x for x in os.environ.get("HOST_IPS", "").split() if x]  # 宿主所有活动网卡地址（宿主侧枚举后传入）
 APP_IPS = [x for x in os.environ.get("APP_IPS", "").split() if x]  # app-net 里 postgres、frontend 的真实地址（宿主侧查出后传入）
+if not HOSTS or not APP_IPS:   # 少传了就会悄悄少测（第 2 轮 P2-03）：直接失败
+    print("!!! HOST_IPS、APP_IPS 都要传（宿主活动网卡地址、app-net 里 postgres 和 frontend 的地址），本次不算数")
+    raise SystemExit(2)
+print(f"== 本次目标：宿主地址 {len(HOSTS)} 个（{' '.join(HOSTS)}），app-net 地址 {len(APP_IPS)} 个（{' '.join(APP_IPS)}）")
 res = []
 
 

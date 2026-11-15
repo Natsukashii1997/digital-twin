@@ -112,7 +112,18 @@ class MulticaNight(unittest.TestCase):
         self.repo.mkdir()
         self.git("init", "-q")
         self.write_roster()
+        # 出网防线核对的替身（#172 第 2 轮 P1-01）：egress 文件写 ok 就通过，否则把内容当不符项报出来；每次调用记一行
+        self.egress = self.tmp / "egress.txt"
+        self.egress.write_text("ok", encoding="utf-8")
+        self.egress_calls = self.tmp / "egress-calls.txt"
+        verify = self.tmp / "verify.py"
+        verify.write_text("import sys, pathlib\n"
+                          f"pathlib.Path({str(self.egress_calls)!r}).open('a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                          f"t = pathlib.Path({str(self.egress)!r}).read_text().strip()\n"
+                          "if t == 'ok':\n    print('== all：通过'); sys.exit(0)\n"
+                          "print('  ✓ 其他项'); print('  ✗ ' + t); sys.exit(1)\n", encoding="utf-8")
         self.env = {**os.environ, "DT_NIGHT_ROOT": str(self.root), "DT_ROSTER_REPO": str(self.repo), "DT_MULTICA_CLI": str(wrapper), "DT_GH_CLI": str(gh),
+                    "DT_EGRESS_VERIFY": str(verify),
                     "FAKE_MULTICA_WORLD": str(self.world), "DT_NIGHT_READBACK": "2,0",
                     "FAKE_DOCKER_PROCS": str(self.procs), "DT_NIGHT_PROCWAIT": "2,0"}
         self.put({"owner": OWNER, "now": "2026-11-08T13:00:00Z", "issues": {
@@ -488,6 +499,38 @@ class MulticaNight(unittest.TestCase):
         self.assertEqual(self.issue("V")["status"], "todo")
         self.assertEqual(self.docker_calls().count("ident"), 2)
         self.assertEqual([e["ok"] for e in self.log() if e["event"] == "identity_gate"], [True])
+
+    # ---- 出网防线运行态核对（#172 第 2 轮 P1-01）----
+    def test_egress_gate_refuses_start_and_changes_nothing(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        self.egress.write_text("DT-EGRESS 与 provision 不一致", encoding="utf-8")
+        code, out = self.run_cli("start", "--approved-by", "Hermes")
+        self.assertEqual(code, 1, out)
+        self.assertIn("出网防线核对没通过：DT-EGRESS 与 provision 不一致", out)
+        self.assertNotIn("其他项", out, "只报不符项")
+        self.assertNotIn("auth", self.state())
+        self.assertEqual(self.issue("A")["status"], "backlog")
+        self.assertEqual(self.egress_calls.read_text(encoding="utf-8").split(), ["all"])
+
+    def test_egress_gate_fails_closed_when_verify_missing(self):
+        self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
+        code, out = self.run_cli("start", "--approved-by", "Hermes", env={"DT_EGRESS_VERIFY": str(self.tmp / "没有这个.py")})
+        self.assertEqual(code, 1, out)
+        self.assertIn("出网防线核对没通过", out)
+        self.assertNotIn("auth", self.state())
+
+    def test_egress_gate_reruns_before_each_stage_and_freezes(self):
+        self.started()
+        self.finish("A")
+        self.finish("B", minutes=15)
+        self.egress.write_text("multica-isolated-agent-1 重启策略=unless-stopped", encoding="utf-8")   # 有人绕开 agent-up.sh 换了容器
+        code, out = self.run_cli("tick", now=at(20))
+        self.assertEqual(code, 1, out)
+        self.assertIn("放 stage 2 前出网防线核对没通过", out)
+        self.assertEqual(self.issue("V")["status"], "backlog", "不放下一个 stage")
+        self.assertTrue(self.state()["frozen"])
+        self.assertTrue(self.state()["distrust"])
+        self.assertEqual([e["ok"] for e in self.log() if e["event"] == "egress_gate"], [False])
 
     def test_gate_reruns_before_resumed_advance(self):
         self.run_cli("plan", str(self.plan_file), now="2026-11-08T13:00:00Z")
