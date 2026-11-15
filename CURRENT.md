@@ -6,12 +6,12 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
-## 主线：数字分身执行底座改为 fork agent-autoloop（#188）｜完成 1/10
+## 主线：数字分身执行底座改为 fork agent-autoloop（#188）｜完成 2/11
 
 常浩 2026-11-15 定：只有基于 agent-autoloop 框架的这一条主线；常浩会 fork 它自己开发；数字分身、驿窗等已有探索里有价值的 agent 自动化内容融合进来；新结构跑通后只保留这一套。同日先说托管暂停，后改为**秘书代批「选 B」：托管从一开始并入新框架**（猛鬼兽按常浩签的清单代批，工人仍关在 dt-worker 里）。方案 V2.4：PR #189 `docs/agent-autoloop-底座-方案.md`；思维评审两轮已收口（决策记录 `docs/reviews/2026-11-15-执行底座改用agent-autoloop-思维评审.md`）。本机已装上游 v1.8.5（`~/.agent-autoloop`，launchd `agent-autoloop`，代理启动脚本在 `~/.agent-autoloop/bin/`），只有试跑规则。
 
 - ✅ 方案：V2.4，Fable 5.2 独立评估 + ChatGPT High 两轮评审，常浩 11-15 回「代批选 B，9 件事都按推荐」；PR #189 待常浩说「合并」
-- ❓ D 档能否由秘书代批：改原授权清单「托管时 D 档一项不减」，已发改动确认，等常浩回
+- ✅ D 档不代批：常浩 11-15 回「D档还是都不能替我批」，维持授权清单 v1
 - ⏳ 批 0A 隔离门：私有镜像 + 插件仓库；常浩建 dt-worker 账号并登录 Claude / Codex；反向测试
 - ⏳ 批 0B 授权门（含秘书代批、汇报卡、推翻；代批规格先出、只送这一块审查）
 - ⏳ 批 0C 执行门、0D 恢复门；之后写 ADR-015
