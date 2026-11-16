@@ -65,14 +65,17 @@ MIN_TEXT = 200                                          # 源头正文少于这�
 SKIP_HOSTS = ("x.com", "twitter.com", "t.co", "feishu.cn", "larksuite.com", "feishucdn.com", "larkoffice.com")
 WEEK = "一二三四五六日"
 CARD_MARK, REPORT_MARK = "<<<CARD>>>", "<<<REPORT>>>"
-SECTIONS = ["一、今日一句话", "二、昨日要点", "三、和你有关的", "四、今天就能做的", "五、值得深入学的",
-            "六、值得永久采纳的（提案）", "七、路径建议"]
-COVERAGE = "八、覆盖与可信度"
-LIMITS = {"headline": 80, "title": 30, "point": 120, "for_you": 80, "action": 60, "why": 60, "what": 50, "focus": 60,
-          "rule": 80, "where": 20, "direction": 160}
+SECTIONS = ["一、昨日信息梳理", "二、对你的帮助", "三、行动清单", "四、思考采纳建议（提案）", "五、路径建议"]
+COVERAGE = "六、覆盖与可信度"
+LIMITS = {"title": 32, "detail": 160, "quote": 120, "quote_zh": 80, "who": 24, "help": 160,
+          "task": 60, "where": 20, "done": 50, "snippet": 160, "idea": 80, "why": 60, "question": 50}
 SLACK = 1.5
-LISTS = {"highlights": (("title", "point", "for_you"), 1, 5), "do_today": (("action", "why"), 0, 3),
-         "learn": (("what", "focus"), 0, 3), "adopt": (("rule", "where", "why"), 0, 3)}
+# 三个板块（常浩 11-16 定）：信息只讲事，帮助收拢，行动清单是确定能做的，思考采纳是要他想清楚的提案
+# 键 → (必填字段, 选填字段, 最少条数, 最多条数)
+LISTS = {"highlights": (("title", "detail"), ("quote", "quote_zh", "who"), 1, 6),
+         "todo": (("task", "where", "done"), ("snippet",), 0, 4),
+         "consider": (("idea", "why", "question", "where"), (), 0, 3)}
+EMPTY_FIELDS = {"highlights": [], "help": "", "todo": [], "consider": []}
 DONE_CLAIM = re.compile(r"已(?:经)?(?:帮你)?(?:写入|采纳|加进|加入|改好|装好|安装|落地)")
 URL = re.compile(r"https?://[^\s<>\"'()\[\]（）【】，。；！？]+")
 REF = re.compile(r"\[([MS])(\d+)\](?!\()")
@@ -415,10 +418,17 @@ def allowed_urls(mat):
     return {u.split("#")[0].rstrip("/") for u in urls}
 
 
+def _norm(t):
+    """核对原话用：统一引号和空白、忽略大小写。"""
+    t = str(t or "").translate(str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"', "\u00a0": " "}))
+    return re.sub(r"\s+", " ", t).strip().casefold()
+
+
 def check(mat, fields, report):
     """核对模型稿。返回 (问题清单, 提醒清单, 规整后的卡片要素)。问题清单不空就不能发。"""
     errs, warns = [], []
     ids = set(link_of(mat))
+    texts_of = {i["id"]: i["text"] for i in mat["items"]} | {s["id"]: s.get("text") or "" for s in mat["sources"]}
     out = {}
 
     def too_long(v, limit_key, name):
@@ -427,13 +437,12 @@ def check(mat, fields, report):
             errs.append(f"{name} 有 {len(v)} 字，超过上限 {LIMITS[limit_key]} 字太多，压短重写")
         elif len(v) > LIMITS[limit_key]:
             warns.append(f"{name} 略超 {LIMITS[limit_key]} 字")
-    for key in ("headline", "direction"):
-        v = str(fields.get(key) or "").strip()
-        if not v:
-            errs.append(f"卡片要素缺 {key}")
-        too_long(v, key, key)
-        out[key] = v
-    for key, (texts, lo, hi) in LISTS.items():
+    v = str(fields.get("help") or "").strip()
+    if not v and mat["items"]:
+        errs.append("卡片要素缺 help")
+    too_long(v, "help", "help")
+    out["help"] = v
+    for key, (need, opt, lo, hi) in LISTS.items():
         rows = fields.get(key) if isinstance(fields.get(key), list) else []
         if len(rows) < min(lo, len(mat["items"])):
             errs.append(f"{key} 至少要 {lo} 条")
@@ -446,24 +455,37 @@ def check(mat, fields, report):
                 errs.append(f"{key} 第 {n} 条不是对象")
                 continue
             row = {}
-            for t in texts:
+            for t in need + opt:
                 v = str(r.get(t) or "").strip()
-                if not v:
+                if t == "snippet":
+                    v = v.replace("`", "").strip()
+                if not v and t in need:
                     errs.append(f"{key} 第 {n} 条缺 {t}")
-                too_long(v, t, f"{key} 第 {n} 条的 {t}")
-                row[t] = v
-            refs = [str(x).strip() for x in r.get("refs") or [] if str(x).strip()]
+                if v:
+                    too_long(v, t, f"{key} 第 {n} 条的 {t}")
+                    row[t] = v
+            refs = list(dict.fromkeys(str(x).strip() for x in r.get("refs") or [] if str(x).strip()))
             bad = [x for x in refs if x not in ids]
             if not refs:
                 errs.append(f"{key} 第 {n} 条没有出处编号")
             if bad:
                 errs.append(f"{key} 第 {n} 条引用了材料里没有的编号 {'、'.join(bad)}")
             row["refs"] = refs
-            if key == "do_today":
+            if key == "highlights":
+                row["read"] = r.get("read") is True
+                # 原话必须能在它引用的材料里逐字找到；找不到不打回，删掉原话并提醒（编造的原话比没有更糟）
+                if row.get("quote") and not any(_norm(row["quote"]) in _norm(texts_of.get(x)) for x in refs):
+                    warns.append(f"highlights 第 {n} 条的原话在引用的材料里找不到，已删掉")
+                    for t in opt:
+                        row.pop(t, None)
+                if not row.get("quote"):
+                    row.pop("quote_zh", None)
+                    row.pop("who", None)
+            if key == "todo":
                 try:
                     row["minutes"] = max(5, min(240, int(r.get("minutes"))))
                 except (TypeError, ValueError):
-                    errs.append(f"do_today 第 {n} 条的 minutes 不是数字")
+                    errs.append(f"todo 第 {n} 条的 minutes 不是数字")
             clean.append(row)
         out[key] = clean
     pos = [report.find("## " + s) for s in SECTIONS]
@@ -476,10 +498,12 @@ def check(mat, fields, report):
     if bad_refs:
         errs.append(f"完整报告引用了材料里没有的编号 {'、'.join(bad_refs)}")
     ok_urls = allowed_urls(mat)
-    foreign = sorted({u for u in (strip_url(x) for x in URL.findall(report)) if u.split("#")[0].rstrip("/") not in ok_urls})
+    card_text = json.dumps(out, ensure_ascii=False)
+    foreign = sorted({u for u in (strip_url(x) for x in URL.findall(report + "\n" + card_text))
+                      if u.split("#")[0].rstrip("/") not in ok_urls})
     if foreign:
-        errs.append(f"完整报告里有材料以外的网址（{clip('、'.join(foreign), 200)}）：只写编号，链接由脚本填")
-    claims = sorted(set(DONE_CLAIM.findall(report + json.dumps(out, ensure_ascii=False))))
+        errs.append(f"稿子里有材料以外的网址（{clip('、'.join(foreign), 200)}）：只写编号，链接由脚本填")
+    claims = sorted(set(DONE_CLAIM.findall(report + card_text)))
     if claims:
         errs.append(f"把提案说成已经做了（{'、'.join(claims)}）：猛鬼兽只出提案，常浩点头才落地")
     return errs, warns, out
@@ -522,11 +546,10 @@ def material_index(mat):
 def fallback(mat, reason):
     """事实版：模型没写成或核对不过时，只列原始内容和链接，不做分析。"""
     cards = [i for i in mat["items"] if i["kind"] == "card"] or mat["items"]
-    fields = {"headline": f"猛鬼兽今天没写成分析（{clip(reason, 40)}），先给你昨天群里的原始清单",
-              "highlights": [{"title": clip(i["title"] or i["sender"], LIMITS["title"]),
-                              "point": clip(i["gist"] or i["text"].splitlines()[0], LIMITS["point"]),
-                              "for_you": "", "refs": [i["id"]]} for i in cards[:8]],
-              "do_today": [], "learn": [], "adopt": [], "direction": ""}
+    fields = dict(EMPTY_FIELDS, help=f"猛鬼兽今天没写成分析（{clip(reason, 40)}），上面先给你昨天群里的原始内容。",
+                  highlights=[{"title": clip(i["title"] or i["sender"], LIMITS["title"]),
+                               "detail": clip(i["gist"] or i["text"].splitlines()[0], LIMITS["detail"]),
+                               "read": False, "refs": [i["id"]]} for i in cards[:8]])
     report = "\n\n".join([f"> 这是事实版：{reason}。下面只列原始内容和链接，没有分析。",
                           "## 昨天群里的全部内容", material_index(mat).split("\n", 2)[2]])
     return fields, report
@@ -544,7 +567,7 @@ def build(day, reply=None):
     meta = {"day": d, "model": None, "degraded": None, "attempts": [], "warnings": []}
     fields = report = None
     if not mat["items"]:
-        fields = {"headline": "昨天群里没有新消息", "highlights": [], "do_today": [], "learn": [], "adopt": [], "direction": ""}
+        fields = dict(EMPTY_FIELDS, help="昨天群里没有新消息。")
         report, meta["empty"] = "昨天群里没有新消息。", True
     feedback, checked = None, False
     for n in range(0 if fields else 2):
@@ -584,7 +607,7 @@ def build(day, reply=None):
 def esc(s):
     """模型写的文字放进卡片前转义 lark_md 语法字符，免得变成链接、@ 或标签。"""
     s = re.sub(r"[\x00-\x1f\x7f]", " ", str(s or ""))
-    return s.translate(str.maketrans({"[": "［", "]": "］", "<": "＜", ">": "＞", "`": "'", "\\": "＼"}))
+    return s.translate(str.maketrans({"[": "［", "]": "］", "<": "＜", ">": "＞", "`": "'", "\\": "＼", "*": "&#42;"}))
 
 
 def refs_md(refs, links):
@@ -599,91 +622,145 @@ def title_of(day):
     return f"🧭 AI 前沿群学习报告 · {short_day(day)}"
 
 
-STYLES = {"a": "甲 · 全文清单", "b": "乙 · 行动优先", "c": "丙 · 主题面板"}
-STYLE = os.environ.get("DT_GD_STYLE", "a")       # 常浩挑定前先用甲版；三版都发过私聊给他比（11-16）
-ADOPT_NOTE = "<font color='grey'>　提案，你点头才落地</font>"
+STYLES = {"a": "一 · 分区面板", "b": "二 · 表格对照", "c": "三 · 色带分区"}
+STYLE = os.environ.get("DT_GD_STYLE", "a")       # 常浩挑定前先用一版；三版都发过私聊给他比（11-16 第二轮）
+# 三个板块（常浩 11-16 定）各用一种颜色，数字块、面板、标题都跟着它：信息蓝、帮助靛、行动绿、采纳橙
+COLOR = {"info": "blue", "help": "indigo", "todo": "green", "consider": "orange"}
+ADOPT_NOTE = "<font color='grey'>提案，你想清楚、点头才落地</font>"
 
 
-def numbered(rows, fmt, links):
-    return md("\n".join(f"{n}. {fmt(r)}　{refs_md(r['refs'], links)}" for n, r in enumerate(rows, 1)))
+def panel(elements, color="grey", padding="12px", spacing="6px"):
+    """一整块带底色的面板（飞书卡片没有单独的面板组件，用单列 column_set 的列背景做）。"""
+    return {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "0px", "columns": [
+        {"tag": "column", "width": "weighted", "weight": 1, "background_style": f"{color}-50" if color != "grey" else "grey",
+         "padding": padding, "vertical_spacing": spacing, "elements": elements}]}
 
 
-def grey_box(elements, **kw):
-    """一整行灰底块（飞书卡片没有单独的面板组件，用单列 column_set 的背景色做）。"""
-    return {"tag": "column_set", "flex_mode": "none", "background_style": "grey", "horizontal_spacing": "8px", **kw,
-            "columns": [{"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "4px", "elements": elements}]}
+def stats(f, cov):
+    """顶上一排数字：读了多少消息，梳理出多少要点，多少件可做，多少条要你想。"""
+    cell = lambda n, label, color: {"tag": "column", "width": "weighted", "weight": 1, "padding": "8px",
+                                    "background_style": f"{color}-50" if color != "grey" else "grey", "vertical_spacing": "0px",
+                                    "elements": [md(f"<font color='{color}'>**{n}**</font>", text_align="center", text_size="heading-3"),
+                                                 md(f"<font color='grey'>{label}</font>", text_align="center", text_size="notation")]}
+    return {"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "8px", "columns": [
+        cell(cov["messages"], "条消息", "grey"), cell(len(f["highlights"]), "条要点", COLOR["info"]),
+        cell(len(f["todo"]), "件可做", COLOR["todo"]), cell(len(f["consider"]), "条待你想", COLOR["consider"])]}
+
+
+def head(icon, name, note, color):
+    return md(f"{icon} <font color='{color}'>**{name}**</font>　<font color='grey'>{note}</font>")
+
+
+def src(refs, links, label="出处"):
+    return md(f"<font color='grey'>{label}</font> {refs_md(refs, links)}", text_size="notation")
+
+
+def quote_md(r):
+    """原话用引用块：外文原话斜体，下一行中文意思和说话的人。"""
+    if not r.get("quote"):
+        return []
+    zh = f"\n> {esc(r['quote_zh'])}" if r.get("quote_zh") else ""
+    who = f"\n> <font color='grey'>—— {esc(r['who'])}</font>" if r.get("who") else ""
+    return [md(f"> *{esc(r['quote'])}*{zh}{who}")]
+
+
+def code(snippet):
+    return md(f"```\n{re.sub(r'[\x00-\x08\x0b-\x1f\x7f`]', '', snippet)}\n```")
+
+
+def info_title(n, r):
+    tag = f" <text_tag color='green'>值得精读</text_tag>" if r.get("read") else ""
+    return md(f"<number_tag background_color='{COLOR['info']}' font_color='white'>{n}</number_tag> **{esc(r['title'])}**{tag}", text_size="heading-4")
+
+
+def todo_meta(r):
+    return (f"<text_tag color='{COLOR['todo']}'>{esc(r['where'])}</text_tag> <text_tag color='neutral'>约 {r['minutes']} 分钟</text_tag>")
 
 
 def style_a(f, links):
-    """甲 · 全文清单：五块按顺序全放卡片，每条带编号链接。"""
-    els = [md(f"**{esc(f['headline'])}**")]
-    for icon, name, key, fmt, note in [
-            ("📌", "昨日要点", "highlights", lambda r: f"**{esc(r['title'])}**：{esc(r['point'])}"
-             + (f"\n<font color='grey'>和你：{esc(r['for_you'])}</font>" if r.get("for_you") else ""), ""),
-            ("⚡", "今天就能做", "do_today", lambda r: f"{esc(r['action'])}（约 {r['minutes']} 分钟）\n<font color='grey'>{esc(r['why'])}</font>", ""),
-            ("📚", "值得深入学", "learn", lambda r: f"{esc(r['what'])}\n<font color='grey'>带着这个问题读：{esc(r['focus'])}</font>", ""),
-            ("🧱", "值得永久采纳", "adopt", lambda r: f"{esc(r['rule'])}（建议放 {esc(r['where'])}）\n<font color='grey'>{esc(r['why'])}</font>",
-             ADOPT_NOTE)]:
-        if f[key]:
-            els += [{"tag": "hr"}, md(f"{icon} **{name}**{note}"), numbered(f[key], fmt, links)]
-    if f.get("direction"):
-        els += [{"tag": "hr"}, md(f"🧭 **路径建议**\n{esc(f['direction'])}")]
+    """一 · 分区面板：每条信息一块灰底面板（标题 → 展开 → 原话 → 出处），帮助一块靛色，行动、采纳各一块浅绿、浅橙。"""
+    els = []
+    if f["highlights"]:
+        els.append(head("📰", "昨日信息梳理", "只讲发生了什么，按价值排", COLOR["info"]))
+        els += [panel([info_title(n, r), md(esc(r["detail"])), *quote_md(r), src(r["refs"], links, "原文")])
+                for n, r in enumerate(f["highlights"], 1)]
+    if f["help"]:
+        els.append(panel([md(f"💡 <font color='{COLOR['help']}'>**这些对你的帮助**</font>"), md(esc(f["help"]))], COLOR["help"]))
+    if f["todo"]:
+        els.append(head("✅", "行动清单", "学完就能动手", COLOR["todo"]))
+        els += [panel([md(f"☐ **{esc(r['task'])}**"), md(todo_meta(r)),
+                       md(f"<font color='grey'>做到：</font>{esc(r['done'])}"),
+                       *([code(r["snippet"])] if r.get("snippet") else []), src(r["refs"], links)], COLOR["todo"])
+                for r in f["todo"]]
+    if f["consider"]:
+        els.append(head("🤔", "思考采纳建议", ADOPT_NOTE, COLOR["consider"]))
+        els += [panel([md(f"<number_tag background_color='{COLOR['consider']}' font_color='white'>{n}</number_tag> **{esc(r['idea'])}**"),
+                       md(f"<font color='grey'>为什么：</font>{esc(r['why'])}"),
+                       md(f"<font color='grey'>先想清楚：</font>*{esc(r['question'])}*"),
+                       md(f"<font color='grey'>采纳的话放：</font>{esc(r['where'])}"), src(r["refs"], links)], COLOR["consider"])
+                for n, r in enumerate(f["consider"], 1)]
     return els
+
+
+def table(cols, rows):
+    """飞书卡片表格（同个人项目日报速览表的写法）。cols = [(键, 列名, 宽度)]。"""
+    return {"tag": "table", "page_size": 10, "row_height": "auto", "row_max_height": "999px",
+            "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey", "bold": True, "lines": 1},
+            "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": w, "vertical_align": "top"}
+                        for k, n, w in cols], "rows": rows}
 
 
 def style_b(f, links):
-    """乙 · 行动优先：先摆今天能做的事（分钟数在左栏），要点只留标题和「和你的关系」，学习、采纳各一行。"""
-    els = [md(f"**{esc(f['headline'])}**")]
-    if f["do_today"]:
-        els.append(md("⚡ **今天就做**"))
-        for r in f["do_today"]:
-            els.append({"tag": "column_set", "flex_mode": "none", "background_style": "grey", "horizontal_spacing": "8px",
-                        "columns": [
-                            {"tag": "column", "width": "52px", "vertical_align": "top", "elements": [
-                                md(f"**<font color='red'>{r['minutes']}</font>**\n<font color='grey'>分钟</font>", text_align="center")]},
-                            {"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "2px", "elements": [
-                                md(f"{esc(r['action'])}　{refs_md(r['refs'], links)}"),
-                                md(f"<font color='grey'>{esc(r['why'])}</font>")]}]})
+    """二 · 表格对照：信息像一篇阅读稿（编号标题 → 展开 → 原话，条与条之间留空），行动清单、思考采纳各一张表横着看。"""
+    els = []
     if f["highlights"]:
-        els += [{"tag": "hr"}, md("📌 **昨日要点**"), numbered(
-            f["highlights"], lambda r: f"**{esc(r['title'])}**" + (f"\n<font color='grey'>{esc(r['for_you'])}</font>"
-                                                                  if r.get("for_you") else ""), links)]
-    if f["learn"]:
-        els += [{"tag": "hr"}, md("📚 **去学**"), numbered(f["learn"], lambda r: esc(r["what"]), links)]
-    if f["adopt"]:
-        els += [md(f"🧱 **可采纳**{ADOPT_NOTE}"),
-                numbered(f["adopt"], lambda r: f"{esc(r['rule'])} <font color='grey'>→ {esc(r['where'])}</font>", links)]
-    if f.get("direction"):
-        els += [{"tag": "hr"}, md(f"🧭 **方向**　{esc(f['direction'])}")]
+        els.append(head("📰", "昨日信息梳理", "只讲发生了什么，按价值排", COLOR["info"]))
+        for n, r in enumerate(f["highlights"], 1):
+            els += [info_title(n, r), md(esc(r["detail"])), *quote_md(r), src(r["refs"], links, "原文")]
+            if n < len(f["highlights"]):
+                els.append(md(" ", margin="4px 0px"))
+    if f["help"]:
+        els += [{"tag": "hr"}, panel([md(f"💡 <font color='{COLOR['help']}'>**这些对你的帮助**</font>"), md(esc(f["help"]))], COLOR["help"])]
+    if f["todo"]:
+        els += [head("✅", "行动清单", "学完就能动手", COLOR["todo"]),
+                table([("t", "做什么", "44%"), ("w", "在哪", "16%"), ("m", "时长", "12%"), ("d", "做到什么算完", "28%")],
+                      [{"t": f"**{esc(r['task'])}** {refs_md(r['refs'], links)}", "w": esc(r["where"]),
+                        "m": f"{r['minutes']} 分钟", "d": esc(r["done"])} for r in f["todo"]])]
+        for n, r in enumerate(f["todo"], 1):
+            if r.get("snippet"):
+                els += [md(f"<font color='grey'>第 {n} 条要用到：</font>", text_size="notation"), code(r["snippet"])]
+    if f["consider"]:
+        els += [head("🤔", "思考采纳建议", ADOPT_NOTE, COLOR["consider"]),
+                table([("i", "建议采纳", "36%"), ("y", "为什么", "24%"), ("q", "先想清楚", "24%"), ("w", "放哪", "16%")],
+                      [{"i": f"**{esc(r['idea'])}** {refs_md(r['refs'], links)}", "y": esc(r["why"]),
+                        "q": f"*{esc(r['question'])}*", "w": esc(r["where"])} for r in f["consider"]])]
     return els
 
 
-def style_c(f, links, cov):
-    """丙 · 主题面板：一排数字说明当天的量，每个要点一块灰底面板，下方左右两栏放「去做」和「去学 / 采纳」。"""
-    stat = lambda n, label: {"tag": "column", "width": "weighted", "weight": 1, "background_style": "grey", "elements": [
-        md(f"**{n}**\n<font color='grey'>{label}</font>", text_align="center")]}
-    els = [{"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "6px", "columns": [
-               stat(cov["messages"], "条消息"), stat(f"{cov['sources_ok']}/{cov['sources']}", "源头读到"),
-               stat(len(f["highlights"]), "个要点"), stat(len(f["do_today"]), "件可做")]},
-           md(f"**{esc(f['headline'])}**")]
-    for n, r in enumerate(f["highlights"], 1):
-        els.append(grey_box([md(f"<text_tag color='indigo'>要点 {n}</text_tag> **{esc(r['title'])}**"),
-                             md(esc(r["point"])),
-                             *([md(f"<font color='grey'>→ 和你：{esc(r['for_you'])}</font>")] if r.get("for_you") else []),
-                             md(refs_md(r["refs"], links), text_size="notation")]))
-    left = [md("⚡ **去做**")] + [md(f"{esc(r['action'])} <text_tag color='indigo'>{r['minutes']} 分钟</text_tag> "
-                                     f"{refs_md(r['refs'], links)}") for r in f["do_today"]]
-    right = [md("📚 **去学**")] + [md(f"{esc(r['what'])}\n<font color='grey'>{esc(r['focus'])}</font> {refs_md(r['refs'], links)}")
-                                    for r in f["learn"]]
-    if f["adopt"]:
-        right += [md(f"🧱 **采纳**{ADOPT_NOTE}")] + [
-            md(f"{esc(r['rule'])} <font color='grey'>→ {esc(r['where'])}</font> {refs_md(r['refs'], links)}") for r in f["adopt"]]
-    if f["do_today"] or f["learn"] or f["adopt"]:
-        els += [{"tag": "hr"}, {"tag": "column_set", "flex_mode": "stretch", "horizontal_spacing": "12px", "columns": [
-            {"tag": "column", "width": "weighted", "weight": 1, "vertical_align": "top", "vertical_spacing": "6px", "elements": left},
-            {"tag": "column", "width": "weighted", "weight": 1, "vertical_align": "top", "vertical_spacing": "6px", "elements": right}]}]
-    if f.get("direction"):
-        els += [{"tag": "hr"}, md(f"🧭 **路径建议**\n{esc(f['direction'])}")]
+def style_c(f, links):
+    """三 · 色带分区：三个板块各是一整条浅色色带，板块里的条目用编号列表，靠颜色分区、不靠一块块面板。"""
+    els = []
+    if f["highlights"]:
+        body = [md(f"📰 <font color='{COLOR['info']}'>**昨日信息梳理**</font>　<font color='grey'>只讲发生了什么</font>")]
+        for n, r in enumerate(f["highlights"], 1):
+            if n > 1:
+                body.append({"tag": "hr"})
+            body += [info_title(n, r), md(esc(r["detail"])), *quote_md(r), src(r["refs"], links, "原文")]
+        els.append(panel(body, COLOR["info"], spacing="8px"))
+    if f["help"]:
+        els.append(md(f"💡 **这些对你的帮助**\n{esc(f['help'])}"))
+    if f["todo"]:
+        body = [md(f"✅ <font color='{COLOR['todo']}'>**行动清单**</font>　<font color='grey'>学完就能动手</font>")]
+        for n, r in enumerate(f["todo"], 1):
+            body += [md(f"**{n}. {esc(r['task'])}**\n{todo_meta(r)}　<font color='grey'>做到：{esc(r['done'])}</font>　"
+                        f"{refs_md(r['refs'], links)}"), *([code(r["snippet"])] if r.get("snippet") else [])]
+        els.append(panel(body, COLOR["todo"], spacing="10px"))
+    if f["consider"]:
+        body = [md(f"🤔 <font color='{COLOR['consider']}'>**思考采纳建议**</font>　{ADOPT_NOTE}")]
+        for n, r in enumerate(f["consider"], 1):
+            body.append(md(f"**{n}. {esc(r['idea'])}**\n{esc(r['why'])}\n<font color='grey'>先想清楚：</font>*{esc(r['question'])}*"
+                           f"　<font color='grey'>放：{esc(r['where'])}</font>　{refs_md(r['refs'], links)}"))
+        els.append(panel(body, COLOR["consider"], spacing="10px"))
     return els
 
 
@@ -691,26 +768,23 @@ def build_card(day, fields, meta, mat, doc_url=None, doc_error=None, style=None,
     style = style if style in STYLES else (STYLE if STYLE in STYLES else "a")
     links = link_of(mat)
     c = mat["coverage"]
-    els = {"a": lambda: style_a(fields, links), "b": lambda: style_b(fields, links),
-           "c": lambda: style_c(fields, links, c)}[style]()
+    els = [stats(fields, c), *{"a": style_a, "b": style_b, "c": style_c}[style](fields, links)]
     if doc_url:
-        els.append({"tag": "button", "text": {"tag": "plain_text", "content": "查看完整报告"}, "type": "primary_filled",
-                    "behaviors": [{"type": "open_url", "default_url": doc_url}]})
+        els.append({"tag": "button", "text": {"tag": "plain_text", "content": "查看完整报告（含路径建议、材料目录）"},
+                    "type": "primary_filled", "width": "fill", "behaviors": [{"type": "open_url", "default_url": doc_url}]})
     elif doc_error:
         els.append(md(f"<font color='red'>完整报告没建成：{esc(clip(doc_error, 80))}，本地在 DigitalTwin/groupdigest/{day}.report.md</font>"))
     foot = f"读了 {c['messages']} 条消息、{c['sources_ok']}/{c['sources']} 个源头｜{meta['trace']}"
     els += [{"tag": "hr"}, md(f"<font color='grey'>{esc(foot)}</font>", text_size="notation")]
-    sub = (f"今天 {len(fields['do_today'])} 件可做 · {len(fields['highlights'])} 个要点" if style == "b"
-           else f"{GROUP_NAME}｜猛鬼兽深度梳理")
     title = title or title_of(day)
     return {"schema": "2.0", "config": {"update_multi": True, "summary": {"content": title}},
             "header": {"title": {"tag": "plain_text", "content": title},
-                       "subtitle": {"tag": "plain_text", "content": sub}, "template": "indigo"},
-            "body": {"elements": els}}
+                       "subtitle": {"tag": "plain_text", "content": f"{GROUP_NAME}｜猛鬼兽深度梳理"}, "template": "indigo"},
+            "body": {"elements": els, "vertical_spacing": "12px"}}
 
 
-def preview(day):
-    """把甲乙丙三版卡片都发到常浩私聊给他挑（常浩 11-16：要看飞书里的实际样子）。不记 delivery，不算当天已发。
+def preview(day, styles=None):
+    """把几版卡片都发到常浩私聊给他挑（常浩 11-16：要看飞书里的实际样子）。不记 delivery，不算当天已发。
     返回 [(版本, 消息号或错误)]。"""
     meta = json.loads((DIR / f"{day}.build.json").read_text(encoding="utf-8"))
     fields = json.loads((DIR / f"{day}.card-fields.json").read_text(encoding="utf-8"))
@@ -723,7 +797,8 @@ def preview(day):
     except Fail as e:
         doc_url, doc_error = None, str(e)
     out = []
-    for v, name in STYLES.items():
+    for v in styles or list(STYLES):
+        name = STYLES[v]
         title = f"【样式{name}】{title_of(day)}"
         card = build_card(day, fields, meta, mat, doc_url, doc_error, style=v, title=title)
         try:
@@ -847,6 +922,7 @@ def main(argv=None):
     p.add_argument("--date", help="统计日 YYYY-MM-DD，默认昨天")
     p.add_argument("--reply", help="build / run：用现成的模型回复文件（回放、测试用）")
     p.add_argument("--force", action="store_true", help="send：这一天已经发过也再发一次")
+    p.add_argument("--styles", help="preview：只发这几版，逗号分隔（a、b、c）")
     p.add_argument("--quiet", action="store_true", help="成功不输出（定时任务用）")
     a = p.parse_args(argv)
     try:
@@ -866,7 +942,7 @@ def main(argv=None):
         elif a.cmd == "build":
             res = build(day, reply)
         elif a.cmd == "preview":
-            res = preview(day.isoformat())
+            res = preview(day.isoformat(), a.styles.split(",") if a.styles else None)
         elif a.cmd == "card":
             d = day.isoformat()
             res = build_card(d, *(json.loads((DIR / f"{d}.{n}.json").read_text(encoding="utf-8"))

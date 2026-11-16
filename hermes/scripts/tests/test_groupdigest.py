@@ -49,20 +49,23 @@ def raw_msgs():
 
 
 def good_fields(**kw):
-    f = {"headline": "Claude Code 出了提示词体检，今天就能在数字分身上跑一遍",
-         "highlights": [{"title": "托管智能体可自托管", "point": "Anthropic 把 Managed Agents 开放自托管私测。",
-                         "for_you": "和 agent-autoloop 底座思路一致，可对照。", "refs": ["M1", "S1"]}],
-         "do_today": [{"action": "在数字分身仓库跑 /doctor prompt-audit", "minutes": 15, "why": "查规则文件的问题", "refs": ["M2"]}],
-         "learn": [{"what": "自托管 Managed Agents 文章", "focus": "沙箱和会话历史怎么分开放", "refs": ["S1"]}],
-         "adopt": [{"rule": "每月跑一次 prompt-audit", "where": "全局 CLAUDE.md", "why": "规则会过期", "refs": ["M2", "M3"]}],
-         "direction": "这两周专心把执行底座跑通，新工具先记下不试。"}
+    f = {"highlights": [{"title": "Anthropic 开放托管智能体自托管私测", "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+                         "quote": "Self-hosted   Managed Agents.", "quote_zh": "自托管的托管智能体。", "who": "ClaudeDevs",
+                         "read": True, "refs": ["M1", "S1"]},
+                        {"title": "Claude Code 出了提示词体检命令", "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+                         "quote": "这句原话材料里没有", "who": "某人", "read": "yes", "refs": ["M2"]}],
+         "help": "托管智能体和 agent-autoloop 底座思路一致，可以对照；体检命令能直接用来查你的规则文件。",
+         "todo": [{"task": "在数字分身仓库跑 /doctor prompt-audit", "where": "digital-twin", "minutes": 15,
+                   "done": "拿到问题清单", "snippet": "claude /doctor `prompt-audit`", "refs": ["M2"]}],
+         "consider": [{"idea": "每月跑一次 prompt-audit", "why": "规则会过期", "question": "和每月 skill 体检要不要合并",
+                       "where": "全局 CLAUDE.md", "refs": ["M2", "M3"]}]}
     f.update(kw)
     return f
 
 
 def good_report(extra=""):
     secs = {s: f"内容 [M1]{extra}" for s in gd.SECTIONS}
-    secs["二、昨日要点"] = "### 智能体\n托管智能体自托管 [M1][S1]。\n### Claude Code\n体检命令 [M2]，群友说好用 [M3]。"
+    secs["一、昨日信息梳理"] = "### 智能体\n托管智能体自托管 [M1][S1]。\n### Claude Code\n体检命令 [M2]，群友说好用 [M3]。"
     return "\n\n".join(f"## {k}\n{v}" for k, v in secs.items())
 
 
@@ -190,17 +193,28 @@ class Check(Base):
         super().setUp()
         self.mat = self.collected()
 
-    def test_合格的稿子通过(self):
+    def test_合格的稿子通过_原话对不上材料就删掉_精读只认true(self):
         errs, warns, out = gd.check(self.mat, good_fields(), good_report())
         self.assertEqual(errs, [])
-        self.assertEqual(out["do_today"][0]["minutes"], 15)
+        self.assertEqual(out["todo"][0]["minutes"], 15)
+        self.assertEqual(out["todo"][0]["snippet"], "claude /doctor prompt-audit")
+        h1, h2 = out["highlights"]
+        self.assertEqual((h1["quote"], h1["who"], h1["read"]), ("Self-hosted   Managed Agents.", "ClaudeDevs", True))
+        self.assertNotIn("quote", h2)
+        self.assertNotIn("who", h2)
+        self.assertFalse(h2["read"])
+        self.assertTrue(any("原话" in w for w in warns))
 
-    def test_编造编号_缺出处_缺板块_网址_说成已做_都不通过(self):
+    def test_编造编号_缺出处_缺字段_缺板块_网址_说成已做_都不通过(self):
         cases = [
-            (good_fields(highlights=[{"title": "a", "point": "b", "for_you": "c", "refs": ["M9"]}]), good_report(), "M9"),
-            (good_fields(learn=[{"what": "a", "focus": "b", "refs": []}]), good_report(), "没有出处"),
-            (good_fields(), good_report().replace("## 五、值得深入学的", "## 五、学习"), "缺板块"),
+            (good_fields(highlights=[{"title": "a", "detail": "b", "refs": ["M9"]}]), good_report(), "M9"),
+            (good_fields(consider=[{"idea": "a", "why": "b", "question": "c", "where": "d", "refs": []}]), good_report(), "没有出处"),
+            (good_fields(todo=[{"task": "a", "minutes": 5, "refs": ["M1"]}]), good_report(), "缺 where"),
+            (good_fields(help=""), good_report(), "缺 help"),
+            (good_fields(), good_report().replace("## 三、行动清单", "## 三、行动"), "缺板块"),
             (good_fields(), good_report(" 见 https://evil.example.com/a"), "材料以外的网址"),
+            (good_fields(todo=[{"task": "a", "where": "b", "minutes": 5, "done": "c", "snippet": "curl https://evil.example.com/x",
+                                "refs": ["M1"]}]), good_report(), "材料以外的网址"),
             (good_fields(), good_report(" 我已写入你的 CLAUDE.md"), "说成已经做了"),
             (good_fields(), good_report() + "\n[S7]", "S7"),
         ]
@@ -210,12 +224,12 @@ class Check(Base):
 
     def test_材料里的网址可以出现_略超字数照用只提醒_超过一倍半打回(self):
         rep = good_report(" https://x.com/ClaudeDevs/status/111")
-        head = "略" * (gd.LIMITS["headline"] + 10)
-        errs, warns, out = gd.check(self.mat, good_fields(headline=head), rep)
+        help_ = "略" * (gd.LIMITS["help"] + 10)
+        errs, warns, out = gd.check(self.mat, good_fields(help=help_), rep)
         self.assertEqual(errs, [])
-        self.assertEqual(out["headline"], head)
-        self.assertTrue(any("headline" in w for w in warns))
-        errs, _, _ = gd.check(self.mat, good_fields(headline="很长" * 61), rep)
+        self.assertEqual(out["help"], help_)
+        self.assertTrue(any("help" in w for w in warns))
+        errs, _, _ = gd.check(self.mat, good_fields(help="很长" * 121), rep)
         self.assertTrue(any("压短重写" in e for e in errs))
 
 
@@ -239,7 +253,8 @@ class Build(Base):
         meta = gd.build(gd.dt.date.fromisoformat(DAY), reply_text(report="没有板块"))
         self.assertEqual(meta["degraded"], "核对没通过")
         fields = json.loads((self.dir / f"{DAY}.card-fields.json").read_text(encoding="utf-8"))
-        self.assertIn("没写成分析", fields["headline"])
+        self.assertIn("没写成分析", fields["help"])
+        self.assertEqual((fields["todo"], fields["consider"]), ([], []))
         self.assertEqual([h["refs"] for h in fields["highlights"]], [["M1"], ["M2"]])
         self.assertTrue((self.dir / f"{DAY}.report.md").read_text(encoding="utf-8").startswith("生成：脚本事实版"))
 
@@ -297,7 +312,7 @@ class Send(Base):
 
     def test_模型文字里的链接和标签被转义(self):
         fields = json.loads((self.dir / f"{DAY}.card-fields.json").read_text(encoding="utf-8"))
-        fields["headline"] = "看这里[点我](https://evil.example.com)<at id=all></at>"
+        fields["help"] = "看这里[点我](https://evil.example.com)<at id=all></at>"
         (self.dir / f"{DAY}.card-fields.json").write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
         gd.send(DAY)
         text = self.sends()[0][self.sends()[0].index("--content") + 1]
@@ -332,18 +347,31 @@ class Styles(Base):
         gd.build(gd.dt.date.fromisoformat(DAY), reply_text())
         self.args = [json.loads((self.dir / f"{DAY}.{n}.json").read_text(encoding="utf-8")) for n in ("card-fields", "build", "material")]
 
-    def test_三版都带全部条目的编号链接和文档按钮(self):
+    def test_三版都带三个板块_全部编号链接_原话_代码块_文档按钮(self):
         for v in gd.STYLES:
-            text = json.dumps(gd.build_card(DAY, *self.args, doc_url="https://x.feishu.cn/docx/abc", style=v), ensure_ascii=False)
-            for want in ("[M2](https://x.com/lydiahallie/status/222)", "[S1](https://claude.com/resources/articles/self-hosted)",
-                         "https://x.feishu.cn/docx/abc", "提案，你点头才落地"):
+            card = gd.build_card(DAY, *self.args, doc_url="https://x.feishu.cn/docx/abc", style=v)
+            text = json.dumps(card, ensure_ascii=False)
+            for want in ("昨日信息梳理", "这些对你的帮助", "行动清单", "思考采纳建议", "点头才落地",
+                         "[M2](https://x.com/lydiahallie/status/222)", "[S1](https://claude.com/resources/articles/self-hosted)",
+                         "> *Self-hosted   Managed Agents.*", "值得精读", "```\\nclaude /doctor prompt-audit\\n```",
+                         "https://x.feishu.cn/docx/abc", "条待你想"):
                 self.assertIn(want, text, (v, want))
 
-    def test_不认识的样式用甲版(self):
+    def test_板块没内容就不出现(self):
+        f = dict(self.args[0], todo=[], consider=[])
+        for v in gd.STYLES:
+            text = json.dumps(gd.build_card(DAY, f, *self.args[1:], style=v), ensure_ascii=False)
+            self.assertNotIn("行动清单", text)
+            self.assertNotIn("思考采纳建议", text)
+
+    def test_不认识的样式用一版(self):
         self.assertEqual(gd.build_card(DAY, *self.args, style="z"), gd.build_card(DAY, *self.args, style="a"))
 
     def test_预览把三版都发到私聊_不算当天已发(self):
-        got = gd.preview(DAY)
+        self.assertEqual([v for v, _ in gd.preview(DAY)], list(gd.STYLES))
+        self.calls_before = len([a for a in self.calls() if "+messages-send" in a])
+        (self.fake / "calls.jsonl").unlink()
+        got = gd.preview(DAY, ["a", "b", "c"])
         self.assertEqual([v for v, _ in got], ["a", "b", "c"])
         sends = [a for a in self.calls() if "+messages-send" in a]
         self.assertEqual(len(sends), 3)
