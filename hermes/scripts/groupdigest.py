@@ -67,13 +67,13 @@ WEEK = "一二三四五六日"
 CARD_MARK, REPORT_MARK = "<<<CARD>>>", "<<<REPORT>>>"
 SECTIONS = ["一、昨日信息梳理", "二、对你的帮助", "三、行动清单", "四、思考采纳建议（提案）", "五、路径建议"]
 COVERAGE = "六、覆盖与可信度"
-LIMITS = {"title": 32, "detail": 160,
+LIMITS = {"title": 32, "detail": 160, "owner": 10,
           "task": 60, "where": 20, "done": 50, "snippet": 160, "idea": 80, "why": 60, "question": 50}
 SLACK = 1.5
 # 卡片三个板块（常浩 11-16 定）：信息只讲事，今日行动清单是确定能做的，思考采纳是要他想清楚的提案
 # 键 → (必填字段, 选填字段, 最少条数, 最多条数)
 LISTS = {"highlights": (("title", "detail"), (), 1, 6),
-         "todo": (("task", "where", "done"), ("snippet",), 0, 4),
+         "todo": (("task", "where", "done", "owner"), ("snippet",), 0, 4),
          "consider": (("idea", "why", "question", "where"), (), 0, 3)}
 EMPTY_FIELDS = {"highlights": [], "todo": [], "consider": []}
 DONE_CLAIM = re.compile(r"已(?:经)?(?:帮你)?(?:写入|采纳|加进|加入|改好|装好|安装|落地)")
@@ -297,7 +297,7 @@ def coordinates():
         import pdaily_data
         import progress_data
         for p in json.loads(progress_data.ROSTER.read_text(encoding="utf-8"))["projects"]:
-            rec = {"name": p["name"], "type": p.get("type"), "goal": None}
+            rec = {"id": p["id"], "name": p["name"], "type": p.get("type"), "goal": None}
             try:
                 root = Path(os.path.expanduser(p["path"]))
                 rec["goal"] = pdaily_data.goal(root, pdaily_data.main_ref(root, p.get("main") or "main")).get("text")
@@ -418,6 +418,15 @@ def allowed_urls(mat):
     return {u.split("#")[0].rstrip("/") for u in urls}
 
 
+def roster_ids():
+    """名册里能派单的项目 id（只认 projects，inventory 不派单）。读不到返回空集，标了 Claude 的条目就都改成你自己做。"""
+    try:
+        import progress_data
+        return {p["id"] for p in json.loads(progress_data.ROSTER.read_text(encoding="utf-8"))["projects"]}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def check(mat, fields, report):
     """核对模型稿。返回 (问题清单, 提醒清单, 规整后的卡片要素)。问题清单不空就不能发。"""
     errs, warns = [], []
@@ -462,6 +471,19 @@ def check(mat, fields, report):
             if key == "highlights":
                 row["read"] = r.get("read") is True
             if key == "todo":
+                # 谁做（常浩 11-16）：能派给 Claude 的写 claude 并给名册项目 id，他回「派 1 3」时猛鬼兽照这个开单
+                row["owner"] = "claude" if row.get("owner", "").strip().lower() == "claude" else "you"
+                projects = list(dict.fromkeys(str(x).strip() for x in r.get("projects") or [] if str(x).strip()))
+                if row["owner"] == "claude":
+                    roster = roster_ids()
+                    bad = [x for x in projects if x not in roster]
+                    projects = [x for x in projects if x in roster]
+                    if bad:
+                        warns.append(f"todo 第 {n} 条的项目 {'、'.join(bad)} 不在名册里，派单时不算")
+                    if not projects:
+                        warns.append(f"todo 第 {n} 条标了 Claude 但没有名册里的项目，改成你自己做")
+                        row["owner"] = "you"
+                row["projects"] = projects if row["owner"] == "claude" else []
                 try:
                     row["minutes"] = max(5, min(240, int(r.get("minutes"))))
                 except (TypeError, ValueError):
@@ -483,7 +505,10 @@ def check(mat, fields, report):
                       if u.split("#")[0].rstrip("/") not in ok_urls})
     if foreign:
         errs.append(f"稿子里有材料以外的网址（{clip('、'.join(foreign), 200)}）：只写编号，链接由脚本填")
-    claims = sorted(set(DONE_CLAIM.findall(report + card_text)))
+    text = report + card_text
+    # 「没有任何一条已经采纳」这类否定句不算（11-13 实测误报）：前面 8 个字里有否定词就跳过
+    claims = sorted({m.group(0) for m in DONE_CLAIM.finditer(text)
+                     if not re.search(r"[没未不无非]", text[max(0, m.start() - 8):m.start()])})
     if claims:
         errs.append(f"把提案说成已经做了（{'、'.join(claims)}）：猛鬼兽只出提案，常浩点头才落地")
     return errs, warns, out
@@ -627,6 +652,11 @@ def inline_code(snippet):
     return f"`{re.sub(r'[\x00-\x1f\x7f`]', ' ', snippet).strip()}`"
 
 
+def owner_tag(r):
+    return ("<text_tag color='indigo'>Claude</text_tag>" if r.get("owner") == "claude"
+            else "<text_tag color='neutral'>你</text_tag>")
+
+
 def table(cols, rows):
     """飞书卡片表格（同个人项目日报速览表的写法）。cols = [(键, 列名, 宽度)]。"""
     return {"tag": "table", "page_size": 10, "row_height": "auto", "row_max_height": "999px",
@@ -654,9 +684,19 @@ def body(f, links, degraded=None):
                     md(f"{esc(r['detail'])}　<font color='grey'>原文</font> {refs_md(r['refs'], links)}")]}]})
     if f["todo"]:
         els += [{"tag": "hr"}, head("✅", "今日行动清单", "学完就能动手", COLOR["todo"]),
-                table([("t", "做什么", "44%"), ("w", "在哪", "16%"), ("m", "时长", "12%"), ("d", "做到什么算完", "28%")],
-                      [{"t": f"**{esc(r['task'])}** {refs_md(r['refs'], links)}" + (f"\n{inline_code(r['snippet'])}" if r.get("snippet") else ""),
-                        "w": esc(r["where"]), "m": f"{r['minutes']} 分钟", "d": esc(r["done"])} for r in f["todo"]])]
+                table([("t", "做什么", "42%"), ("w", "谁做 · 在哪", "18%"), ("m", "时长", "12%"), ("d", "做到什么算完", "28%")],
+                      [{"t": f"**{n}. {esc(r['task'])}** {refs_md(r['refs'], links)}" + (f"\n{inline_code(r['snippet'])}" if r.get("snippet") else ""),
+                        "w": f"{owner_tag(r)}\n{esc(r['where'])}", "m": f"{r['minutes']} 分钟", "d": esc(r["done"])}
+                       for n, r in enumerate(f["todo"], 1)])]
+        mine = [str(n) for n, r in enumerate(f["todo"], 1) if r.get("owner") == "claude"]
+        if mine:
+            # 常浩 11-16：结尾问要不要派给 Claude，他回复后猛鬼兽按 groupdigest-act 技能开单
+            if len(mine) == 1:
+                ask = f"🤖 第 {mine[0]} 条标了 Claude，要我写成任务派给 Claude 吗？回「**派**」就开单。"
+            else:
+                example = f"派 {' '.join(mine[:2])}" + (f"，{mine[-1]} 不做" if len(mine) > 2 else "")
+                ask = f"🤖 标了 Claude 的第 {'、'.join(mine)} 条，要我写成任务派给 Claude 吗？回「**都派**」，或「**{example}**」。"
+            els.append(md(ask))
     if f["consider"]:
         els += [head("🤔", "思考采纳建议", ADOPT_NOTE, COLOR["consider"]),
                 table([("i", "建议采纳", "36%"), ("y", "为什么", "24%"), ("q", "先想清楚", "24%"), ("w", "放哪", "16%")],
@@ -792,6 +832,80 @@ def send(day, force=False):
     return None
 
 
+# ---------- 回复即派单（常浩 11-16） ----------
+# 卡片结尾问要不要把标了 Claude 的行动派出去；常浩回「都派」「派 1 3，2 不做」时，groupdigest-act 技能先跑 todos 看清单，
+# 把选中的写成任务说明经车间派单（dispatch.py，点名 Claude），每开一张单跑一次 mark，同一条同一项目不会派两次。
+
+def latest_sent_day():
+    for f in sorted(DIR.glob("*.delivery.json"), reverse=True):
+        try:
+            if json.loads(f.read_text(encoding="utf-8")).get("sent"):
+                return f.name.split(".")[0]
+        except ValueError:
+            continue
+    return None
+
+
+def dispatch_state(day):
+    try:
+        return json.loads((DIR / f"{day}.dispatch.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"day": day, "items": {}}
+
+
+def todos(day=None):
+    """某天（默认最近一张发出去的卡片）的今日行动清单和每条的派单情况。"""
+    day = day or latest_sent_day()
+    if not day:
+        raise Fail("还没有发出去的群学习报告")
+    try:
+        fields = json.loads((DIR / f"{day}.card-fields.json").read_text(encoding="utf-8"))
+        mat = json.loads((DIR / f"{day}.material.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise Fail(f"{day} 的报告文件读不到")
+    try:
+        deliv = json.loads((DIR / f"{day}.delivery.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        deliv = {}
+    links, state = link_of(mat), dispatch_state(day)
+    items = []
+    for n, r in enumerate(fields.get("todo") or [], 1):
+        items.append({"n": n, **{k: r.get(k) for k in ("task", "where", "minutes", "done", "snippet", "owner", "projects")},
+                      "refs": [{"id": x, "url": links.get(x)} for x in r.get("refs") or []],
+                      "decided": state["items"].get(str(n))})
+    return {"day": day, "card_message_id": deliv.get("message_id"), "doc_url": deliv.get("doc_url"),
+            "report": str(DIR / f"{day}.report.md"), "items": items,
+            "pending": [i["n"] for i in items if i["owner"] == "claude" and not i["decided"]]}
+
+
+def mark(day, item, project=None, order=None, skip=False):
+    """记下一条行动的去向：派出去的单号（按项目），或常浩说不做。返回一句话。"""
+    info = todos(day)
+    row = next((i for i in info["items"] if i["n"] == item), None)
+    if not row:
+        raise Fail(f"{info['day']} 没有第 {item} 条行动")
+    state = dispatch_state(info["day"])
+    rec = state["items"].setdefault(str(item), {"decision": None, "orders": []})
+    at = now().isoformat(timespec="seconds")
+    if skip:
+        if rec["orders"]:
+            raise Fail(f"第 {item} 条已经派过单（{'、'.join(o['order'] for o in rec['orders'])}），不能再记成不做")
+        rec.update(decision="skipped", at=at)
+        msg = f"已记下：第 {item} 条不做"
+    else:
+        if row["owner"] != "claude":
+            raise Fail(f"第 {item} 条是你自己做的，不派单")
+        if project not in row["projects"] or not order:
+            raise Fail(f"第 {item} 条只能派到 {'、'.join(row['projects'])}，且要带单号")
+        if any(o["project"] == project for o in rec["orders"]):
+            raise Fail(f"第 {item} 条在 {project} 已经派过单，不重复派")
+        rec["orders"].append({"project": project, "order": order, "at": at})
+        rec.update(decision="dispatched", at=at)
+        msg = f"已记下：第 {item} 条在 {project} 派了 {order}"
+    write_json(DIR / f"{info['day']}.dispatch.json", state)
+    return msg
+
+
 # ---------- 入口 ----------
 
 def run_build(day, reply=None):
@@ -812,11 +926,15 @@ def run_build(day, reply=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description="AI 前沿群每日学习报告：取数、写稿、发送")
-    p.add_argument("cmd", choices=("collect", "build", "run", "send", "card", "preview"))
+    p.add_argument("cmd", choices=("collect", "build", "run", "send", "card", "preview", "todos", "mark"))
     p.add_argument("--date", help="统计日 YYYY-MM-DD，默认昨天")
     p.add_argument("--reply", help="build / run：用现成的模型回复文件（回放、测试用）")
     p.add_argument("--force", action="store_true", help="send：这一天已经发过也再发一次")
     p.add_argument("--quiet", action="store_true", help="成功不输出（定时任务用）")
+    p.add_argument("--item", type=int, help="mark：第几条行动")
+    p.add_argument("--project", help="mark：派到哪个名册项目")
+    p.add_argument("--order", help="mark：车间单号")
+    p.add_argument("--skip", action="store_true", help="mark：常浩说这条不做")
     a = p.parse_args(argv)
     try:
         day = dt.date.fromisoformat(a.date) if a.date else default_day()
@@ -824,6 +942,15 @@ def main(argv=None):
         print(f"日期写法不对：{a.date}")
         return 1
     reply = Path(a.reply).read_text(encoding="utf-8") if a.reply else None
+    if a.cmd in ("todos", "mark"):
+        try:
+            res = (todos(a.date) if a.cmd == "todos"
+                   else mark(a.date, a.item, a.project, a.order, a.skip))
+        except Fail as e:
+            print(json.dumps({"ok": False, "msg": str(e)}, ensure_ascii=False))
+            return 1
+        print(json.dumps(res if a.cmd == "todos" else {"ok": True, "msg": res}, ensure_ascii=False, indent=1))
+        return 0
     if a.cmd == "send":
         err = send(day.isoformat(), a.force)
         if err:

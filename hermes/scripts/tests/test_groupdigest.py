@@ -54,7 +54,12 @@ def good_fields(**kw):
                         {"title": "Claude Code 出了提示词体检命令", "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
                          "read": "yes", "refs": ["M2"]}],
          "todo": [{"task": "在数字分身仓库跑 /doctor prompt-audit", "where": "digital-twin", "minutes": 15,
-                   "done": "拿到问题清单", "snippet": "claude /doctor `prompt-audit`", "refs": ["M2"]}],
+                   "done": "拿到问题清单", "snippet": "claude /doctor `prompt-audit`", "owner": "Claude",
+                   "projects": ["digital-twin", "agent-kit", "nope"], "refs": ["M2"]},
+                  {"task": "打开 Codex 用量页看额度", "where": "Codex", "minutes": 5, "done": "知道到账没有",
+                   "owner": "you", "projects": ["digital-twin"], "refs": ["M3"]},
+                  {"task": "给 agent-kit 加一条规则", "where": "agent-kit", "minutes": 10, "done": "规则写进去",
+                   "owner": "claude", "projects": ["nope"], "refs": ["M2"]}],
          "consider": [{"idea": "每月跑一次 prompt-audit", "why": "规则会过期", "question": "和每月 skill 体检要不要合并",
                        "where": "全局 CLAUDE.md", "refs": ["M2", "M3"]}]}
     f.update(kw)
@@ -94,14 +99,12 @@ class Base(unittest.TestCase):
                         mock.patch.dict(os.environ, {"FAKE_DIR": str(self.fake), "FEISHU_HOME_CHANNEL": "oc_home",
                                                      "DT_NOW": "2026-11-14T10:00:00+08:00", "HERMES_HOME": "/x"}),
                         mock.patch.object(gd, "read_source", side_effect=self.fake_source),
-                        mock.patch.object(gd, "coordinates", wraps=self.coords)]
-        for p in self.patches:
+                        mock.patch.object(gd, "coordinates", wraps=self.coords),
+                        mock.patch.object(gd, "roster_ids", return_value={"digital-twin", "agent-kit"})]
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)], check=False)
+        for p in self.patches:   # addCleanup：子类 setUp 出错时补丁也会撤掉，不漏到别的测试
             p.start()
-
-    def tearDown(self):
-        for p in reversed(self.patches):
-            p.stop()
-        subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
+            self.addCleanup(p.stop)
 
     @staticmethod
     def fake_source(url):
@@ -200,6 +203,18 @@ class Check(Base):
         self.assertNotIn("quote", h1)
         self.assertEqual((h1["read"], h2["read"]), (True, False))
 
+    def test_谁做_只认名册项目_没有项目就改成你自己做(self):
+        _, warns, out = gd.check(self.mat, good_fields(), good_report())
+        t1, t2, t3 = out["todo"]
+        self.assertEqual((t1["owner"], t1["projects"]), ("claude", ["digital-twin", "agent-kit"]))
+        self.assertEqual((t2["owner"], t2["projects"]), ("you", []))
+        self.assertEqual((t3["owner"], t3["projects"]), ("you", []))
+        self.assertTrue(any("nope" in w for w in warns))
+        self.assertTrue(any("改成你自己做" in w for w in warns))
+        errs, _, _ = gd.check(self.mat, good_fields(todo=[{"task": "a", "where": "b", "minutes": 5, "done": "c", "refs": ["M1"]}]),
+                              good_report())
+        self.assertTrue(any("缺 owner" in e for e in errs))
+
     def test_编造编号_缺出处_缺字段_缺板块_网址_说成已做_都不通过(self):
         cases = [
             (good_fields(highlights=[{"title": "a", "detail": "b", "refs": ["M9"]}]), good_report(), "M9"),
@@ -211,11 +226,16 @@ class Check(Base):
             (good_fields(todo=[{"task": "a", "where": "b", "minutes": 5, "done": "c", "snippet": "curl https://evil.example.com/x",
                                 "refs": ["M1"]}]), good_report(), "材料以外的网址"),
             (good_fields(), good_report(" 我已写入你的 CLAUDE.md"), "说成已经做了"),
+            (good_fields(), good_report(" 都是提案，没有任何一条已经采纳。我已写入你的 CLAUDE.md"), "已写入"),
             (good_fields(), good_report() + "\n[S7]", "S7"),
         ]
         for fields, report, want in cases:
             errs, _, _ = gd.check(self.mat, fields, report)
             self.assertTrue(any(want in e for e in errs), (want, errs))
+
+    def test_否定句不算说成已做(self):
+        errs, _, _ = gd.check(self.mat, good_fields(), good_report(" 以下都是提案，没有任何一条已经采纳或写入，也未落地。"))
+        self.assertEqual(errs, [])
 
     def test_材料里的网址可以出现_略超字数照用只提醒_超过一倍半打回(self):
         rep = good_report(" https://x.com/ClaudeDevs/status/111")
@@ -348,13 +368,22 @@ class Card(Base):
     def test_三个板块_编号链接_代码块_文档按钮_没有原话和帮助(self):
         text = json.dumps(gd.build_card(DAY, *self.args, doc_url="https://x.feishu.cn/docx/abc"), ensure_ascii=False)
         for want in ("昨日信息梳理", "今日行动清单", "思考采纳建议", "点头才落地", "值得精读", "条待你想",
+                     "谁做 · 在哪", ">Claude</text_tag>", ">你</text_tag>", "**1. 在数字分身仓库跑", "第 1 条标了 Claude", "回「**派**」就开单",
                      "[M2](https://x.com/lydiahallie/status/222)", "[S1](https://claude.com/resources/articles/self-hosted)",
                      "`claude /doctor prompt-audit`", "https://x.feishu.cn/docx/abc"):
             self.assertIn(want, text, want)
         for gone in ("这些对你的帮助", "模型多写的字段会被丢掉", "要用到"):
             self.assertNotIn(gone, text)
 
+    def test_多条可派_结尾给都派和逐条的写法(self):
+        todo = [dict(r, owner="claude", projects=["digital-twin"]) for r in self.args[0]["todo"]]
+        text = json.dumps(gd.build_card(DAY, dict(self.args[0], todo=todo), *self.args[1:]), ensure_ascii=False)
+        self.assertIn("标了 Claude 的第 1、2、3 条", text)
+        self.assertIn("「**都派**」，或「**派 1 2，3 不做**」", text)
+
     def test_板块没内容就不出现_没消息写一句(self):
+        f = dict(self.args[0], todo=[r for r in self.args[0]["todo"] if r["owner"] == "you"])
+        self.assertNotIn("都派", json.dumps(gd.build_card(DAY, f, *self.args[1:]), ensure_ascii=False))
         f = dict(self.args[0], todo=[], consider=[])
         text = json.dumps(gd.build_card(DAY, f, *self.args[1:]), ensure_ascii=False)
         self.assertNotIn("今日行动清单", text)
@@ -368,6 +397,43 @@ class Card(Base):
         (send,) = [a for a in self.calls() if "+messages-send" in a]
         self.assertTrue(json.loads(send[send.index("--content") + 1])["header"]["title"]["content"].startswith("【预览】"))
         self.assertFalse((self.dir / f"{DAY}.delivery.json").exists())
+
+
+class Dispatch(Base):
+    def setUp(self):
+        super().setUp()
+        self.collected()
+        gd.build(gd.dt.date.fromisoformat(DAY), reply_text())
+
+    def test_没发过卡片就没有清单(self):
+        with self.assertRaises(gd.Fail):
+            gd.todos()
+
+    def test_清单_派单记账_不重复派_你做的不派_不做的记下(self):
+        gd.send(DAY)
+        info = gd.todos()
+        self.assertEqual((info["day"], info["card_message_id"], info["pending"]), (DAY, "om_sent", [1]))
+        self.assertEqual(info["items"][0]["projects"], ["digital-twin", "agent-kit"])
+        self.assertEqual(info["items"][0]["refs"], [{"id": "M2", "url": "https://x.com/lydiahallie/status/222"}])
+        self.assertIn("已记下", gd.mark(None, 1, "digital-twin", "T-1"))
+        self.assertEqual(gd.todos()["pending"], [])
+        for args, want in [((None, 1, "digital-twin", "T-2"), "已经派过"), ((None, 1, "work-desk", "T-3"), "只能派到"),
+                           ((None, 2, "digital-twin", "T-4"), "你自己做"), ((None, 9, "digital-twin", "T-5"), "没有第 9 条"),
+                           ((None, 1, None, None, True), "不能再记成不做")]:
+            with self.assertRaises(gd.Fail) as cm:
+                gd.mark(*args)
+            self.assertIn(want, str(cm.exception))
+        gd.mark(None, 1, "agent-kit", "T-6")
+        self.assertIn("不做", gd.mark(DAY, 3, skip=True))
+        state = json.loads((self.dir / f"{DAY}.dispatch.json").read_text(encoding="utf-8"))
+        self.assertEqual([o["order"] for o in state["items"]["1"]["orders"]], ["T-1", "T-6"])
+        self.assertEqual(state["items"]["3"]["decision"], "skipped")
+
+    def test_命令行_出错给一句话(self):
+        gd.send(DAY)
+        with mock.patch("sys.stdout") as out:
+            self.assertEqual(gd.main(["mark", "--item", "2", "--project", "digital-twin", "--order", "T"]), 1)
+        self.assertIn("你自己做", "".join(c.args[0] for c in out.write.call_args_list))
 
 
 class Jobs(unittest.TestCase):

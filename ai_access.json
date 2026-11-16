@@ -79,7 +79,7 @@
       "executor": "hermes",
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
       "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；10:00 以猛鬼兽机器人发常浩私聊卡片（#155、#159；原 09:45）",
-      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 medium（#157，DT_PDAILY_REASONING 可改）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 medium（#157，DT_PDAILY_REASONING 可改）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。卡片「今日行动清单」每条标谁做（Claude / 你）；常浩回「都派」「派 1 3」后，groupdigest-act 技能把选中的写成任务说明、经车间派单开单（常浩 11-16 点名 Claude，一律 --tool claude），派单的执行方、留痕按 workshop。"
     },
     {
       "id": "memdaily",
@@ -94,7 +94,7 @@
       "name": "AI 前沿群每日学习报告（#192，常浩 2026-11-16 定；groupdigest.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后发卡片）",
       "executor": "hermes",
       "reads": "飞书外部群「Codex重置许愿群」前一天全部消息（猛鬼兽应用、常浩的用户身份）；消息里外链的源头正文（直接抓，抓不到经 agent-reach read）；项目名册各项目阶段目标、Vault 个人上下文三篇（受限，只给模型读）、全局 CLAUDE.md 的标题；提示词 hermes/prompts/groupdigest_report.md",
-      "writes": "DigitalTwin/groupdigest/<日期>.material.json（600）、.query.md、.reply1/2.md、.card-fields.json、.report.md、.build.json、.card.sent.json、.delivery.json；飞书完整报告云文档；10:45 以猛鬼兽机器人发常浩私聊卡片",
+      "writes": "DigitalTwin/groupdigest/<日期>.material.json（600）、.query.md、.reply1/2.md、.card-fields.json、.report.md、.build.json、.card.sent.json、.delivery.json、.dispatch.json（回复即派单的记账）；飞书完整报告云文档；10:45 以猛鬼兽机器人发常浩私聊卡片",
       "note": "仅支持 Hermes（常浩点名这是猛鬼兽的任务）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 high（DT_GD_REASONING 可改）。模型只写材料编号，链接由脚本填；核对不过带着问题重写一次，再不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
     },
     {
