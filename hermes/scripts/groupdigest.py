@@ -649,7 +649,8 @@ def head(icon, name, note, color):
 
 def inline_code(snippet):
     """命令放进它那一条的格子里（常浩 11-16：单独一块「第 1 条要用到」很突兀）。"""
-    return f"`{re.sub(r'[\x00-\x1f\x7f`]', ' ', snippet).strip()}`"
+    clean = re.sub(r"[\x00-\x1f\x7f`]", " ", snippet).strip()   # Python 3.9（CI）的 f-string 花括号里不能有反斜杠
+    return f"`{clean}`"
 
 
 def owner_tag(r):
