@@ -90,6 +90,14 @@
       "note": "仅支持 Hermes（亚古兽 profile 的主模型，2026-11-11 起 openai-codex gpt-6.1-sol、思考 xhigh；DT_MEMDAILY_REASONING 可改）。核对不过重写一次，再不过就不写，定时任务把原因发到亚古兽私聊，不换执行方。每篇标题下一行写「生成：亚古兽（实际模型）｜接入：Hermes 派单｜时间」。"
     },
     {
+      "id": "groupdigest",
+      "name": "AI 前沿群每日学习报告（#192，常浩 2026-11-16 定；groupdigest.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后发卡片）",
+      "executor": "hermes",
+      "reads": "飞书外部群「Codex重置许愿群」前一天全部消息（猛鬼兽应用、常浩的用户身份）；消息里外链的源头正文（直接抓，抓不到经 agent-reach read）；项目名册各项目阶段目标、Vault 个人上下文三篇（受限，只给模型读）、全局 CLAUDE.md 的标题；提示词 hermes/prompts/groupdigest_report.md",
+      "writes": "DigitalTwin/groupdigest/<日期>.material.json（600）、.query.md、.reply1/2.md、.card-fields.json、.report.md、.build.json、.card.sent.json、.delivery.json；飞书完整报告云文档；10:45 以猛鬼兽机器人发常浩私聊卡片",
+      "note": "仅支持 Hermes（常浩点名这是猛鬼兽的任务）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 high（DT_GD_REASONING 可改）。模型只写材料编号，链接由脚本填；核对不过带着问题重写一次，再不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+    },
+    {
       "id": "proposal-digest",
       "name": "每周待决提案的推荐（Hermes 带模型定时任务，每周一 10:00）",
       "executor": "hermes",
