@@ -22,8 +22,9 @@
   派单规则一直暂停到 0C 的启动脚本就绪，由常浩决定什么时候恢复。暂停失败时 install 报错，钥匙签不出来（第 2 步的门）。
 
   autoloop_config.py plan                 只读：打印要改的地方（和现在的 rules.json 比）
-  autoloop_config.py install --confirm    常浩说「装」之后
-  autoloop_config.py issue-source-key --confirm
+  autoloop_config.py install --confirm --target ~/.agent-autoloop          常浩说「装」之后
+  autoloop_config.py issue-source-key --confirm --target ~/.agent-autoloop
+  （--target 必须写明，且和实际要改的中台目录一致，免得继承来的环境变量把操作落到别的中台上）
   autoloop_config.py status               只读：来源、通道、派单规则是否暂停、钥匙有没有（只列名字）
 环境变量：AGENT_AUTOLOOP_HOME（中台目录，默认 ~/.agent-autoloop）、DT_AUTOLOOP_CLI（中台命令行）、DT_ROSTER、
 DT_OWNER_OPEN_ID（同 twin_state）、DT_HERMES_SOURCE_KEY_FILE（同 autoloop_grants）、DT_AUTOLOOP_EVIDENCE（备份目录）。
@@ -137,8 +138,7 @@ def render(current, owner_open_id, repos):
     """在现有配置上生成数字分身这一块；同样的输入总得到同样的输出（可重复跑）。"""
     if not re.match(r"^ou_[\w-]+$", owner_open_id or ""):
         raise Rejected("常浩的 open_id 没配好（twin_state.owner_open_id）")
-    others = [r.get("name", "?") for r in current.get("rules", [])
-              if not str(r.get("name", "")).startswith("dispatch-") and "secretary" in (r.get("channels") or [])]
+    others = secretary_routes(current)
     if others:      # 秘书通道只收派单规则的卡片（规格 §6）；别的规则点名它，秘书就能领到、答到不该它答的卡片
         raise Rejected(f"这些规则把卡片发给秘书通道，不装：{'、'.join(others)}")
     new = copy.deepcopy(current)
@@ -157,6 +157,12 @@ def render(current, owner_open_id, repos):
     rules += [dispatch_rule(repo, ex) for repo in sorted(repos) for ex in sorted(AGENTS)]
     new["rules"] = rules
     return new
+
+
+def secretary_routes(rules):
+    """把卡片显式发给秘书通道的非派单规则（秘书只该收派单规则的卡片，规格 §6）。生成配置和核对运行态共用。"""
+    return [r.get("name", "?") for r in rules.get("rules", [])
+            if not str(r.get("name", "")).startswith("dispatch-") and "secretary" in (r.get("channels") or [])]
 
 
 def dispatch_names(rules):
@@ -256,7 +262,8 @@ def loaded_rules():
 def mismatches(rules):
     """中台正在用的配置和 rules 比数字分身这一块，逐字段比，不只看 /v1/state 露出来的几项：
     每条派单规则的全部字段（中台载入时只补 group = 规则名、tell = needed 两个默认值，补上再比；上游以后多补别的字段
-    会比不上、拒绝放行）、中台在跑而 rules 里没有的派单规则、hermes 来源、dt-* Agent、feishu / secretary 通道、defaultChannels。"""
+    会比不上、拒绝放行）、中台在跑而 rules 里没有的派单规则、hermes 来源、dt-* Agent、feishu / secretary 通道、defaultChannels；
+    另外中台在用的配置里只要有普通规则把卡片发给秘书通道就算不一致（磁盘上的新版去掉了、但没载入成功时，旧路径还在跑）。"""
     live = loaded_rules()
     want, have = dispatch_rules_of(rules), dispatch_rules_of(live)
     bad = [name for name, r in want.items() if have.get(name) != {"group": name, "tell": "needed", **r}]
@@ -267,7 +274,8 @@ def mismatches(rules):
     for aid, _ in AGENTS.values():
         a = rules.get("agents", {}).get(aid)
         pairs.append((f"agents.{aid}", a and {"access": "edit", **a}, live.get("agents", {}).get(aid)))
-    return bad + [name for name, a, b in pairs if a != b]
+    bad += [name for name, a, b in pairs if a != b]
+    return bad + [f"{name}→secretary" for name in secretary_routes(live)]
 
 
 def wait_loaded(rules, timeout=30.0):
@@ -288,9 +296,18 @@ def _atomic_write(path, text, mode):
     os.replace(tmp, path)
 
 
-def install(confirm=False, now=None):
+def check_target(target):
+    """装配置、签钥匙前，调用方必须写明要改哪个中台目录，且和实际解析出来的目录一致（环境变量继承来的路径不算写明）。"""
+    if not target:
+        raise Rejected(f"要写明目标中台目录（--target），这次实际会改：{home()}")
+    if Path(target).expanduser().resolve() != home().resolve():
+        raise Rejected(f"写明的目标中台目录和实际要改的不一致：写的是 {target}，实际是 {home()}")
+
+
+def install(confirm=False, target=None, now=None):
     if not confirm:
         raise Rejected("装进中台要常浩确认：加 --confirm")
+    check_target(target)
     with config_lock():
         return _install(now)
 
@@ -332,9 +349,10 @@ def _install(now):
             "backup": str(backup), "draft": str(draft)}
 
 
-def issue_source_key(confirm=False):
+def issue_source_key(confirm=False, target=None):
     if not confirm:
         raise Rejected("签 hermes 来源钥匙要常浩确认：加 --confirm")
+    check_target(target)
     with config_lock():
         return _issue_source_key()
 
@@ -387,7 +405,9 @@ def main(argv=None):
     sub.add_parser("plan")
     sub.add_parser("status")
     for name in ("install", "issue-source-key"):
-        sub.add_parser(name).add_argument("--confirm", action="store_true")
+        sp = sub.add_parser(name)
+        sp.add_argument("--confirm", action="store_true")
+        sp.add_argument("--target", help="要改的中台目录，必须和实际的一致，如 ~/.agent-autoloop")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "plan":
@@ -395,7 +415,8 @@ def main(argv=None):
             print(out["diff"] or "（没有要改的）")
             print(json.dumps({k: v for k, v in out.items() if k != "diff"}, ensure_ascii=False))
             return 0
-        out = {"install": lambda: install(a.confirm), "issue-source-key": lambda: issue_source_key(a.confirm),
+        out = {"install": lambda: install(a.confirm, a.target),
+               "issue-source-key": lambda: issue_source_key(a.confirm, a.target),
                "status": status}[a.cmd]()
     except Rejected as e:
         print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))

@@ -249,7 +249,11 @@ class LoadedCompare(unittest.TestCase):
 
         def answerers(v):
             v["channels"]["secretary"]["answerers"].append(OWNER)
-        for name, f in (("prompt", prompt), ("cwd", cwd), ("emits", emits), ("extra", extra), ("answerers", answerers)):
+
+        def old_route(v):
+            next(r for r in v["rules"] if r["name"] == "试一下")["channels"] = ["desktop", "secretary"]
+        for name, f in (("prompt", prompt), ("cwd", cwd), ("emits", emits), ("extra", extra), ("answerers", answerers),
+                        ("old_route", old_route)):
             with self.subTest(name=name), mock.patch.object(C, "loaded_rules", return_value=self.live(x=f)):
                 self.assertTrue(C.mismatches(self.file))
 
@@ -266,10 +270,19 @@ class Guards(unittest.TestCase):
             with mock.patch.dict(os.environ, {"DT_AUTOLOOP_LOCK": str(lock)}), mock.patch.object(C, "LOCK_WAIT", 0.3), \
                     mock.patch.object(C, "_install", reached), mock.patch.object(C, "_issue_source_key", reached):
                 with C.config_lock():                              # 另一个配置操作拿着锁
-                    for call in (lambda: C.install(confirm=True), lambda: C.issue_source_key(confirm=True)):
+                    for call in (lambda: C.install(confirm=True, target=C.home()),
+                                 lambda: C.issue_source_key(confirm=True, target=C.home())):
                         with self.assertRaisesRegex(C.Rejected, "还在进行"):
                             call()
                 self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    def test_target_must_be_named_and_match(self):
+        for call in (C.install, C.issue_source_key):
+            with self.subTest(call=call.__name__):
+                with self.assertRaisesRegex(C.Rejected, "写明目标中台目录"):
+                    call(confirm=True)
+                with self.assertRaisesRegex(C.Rejected, "不一致"):
+                    call(confirm=True, target=Path.home() / ".agent-autoloop")      # 正式中台目录 ≠ 实际（临时）目录
 
     def test_install_and_key_need_confirm(self):
         with self.assertRaisesRegex(C.Rejected, "确认"):
