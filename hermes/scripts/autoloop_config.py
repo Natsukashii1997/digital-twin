@@ -14,9 +14,10 @@
 
 装进中台是改常驻配置，要常浩说「装」才跑（install / issue-source-key 都要 --confirm）。两条命令共用一把跨进程锁
 （DigitalTwin/autoloop/config.lock），检查、写配置、确认载入、暂停、签钥匙都在锁里，同一时间只有一条在跑。顺序保证没有派单能跑起来：
-  1. install：生成草稿 → agent-autoloop check 校验 → 备份原文件 → 原子替换 → 等中台载入（逐条核来源、类型、执行方，不只核名字）
+  1. install：生成草稿 → agent-autoloop check 校验 → 备份原文件 → 原子替换 → 等中台载入（只读打开中台库，读它正在用的配置，
+     和文件逐字段比，不只看 /v1/state 露出来的名字、来源、类型、执行方）
      → 逐条暂停派单规则 → 回读核对已暂停；hermes 来源钥匙已经存在时，派单规则一条也不许新增、不许改（只能原样重装）；
-  2. issue-source-key：中台正在跑的派单规则和 rules.json 逐条一致（来源、类型、执行方）、没有多出来的、全部暂停着，
+  2. issue-source-key：中台正在用的配置和 rules.json 逐字段一致（同上）、没有多出来的派单规则、全部暂停着，
      才签 hermes 来源钥匙，写到 600 文件（autoloop_grants 读它），不打印钥匙；
   派单规则一直暂停到 0C 的启动脚本就绪，由常浩决定什么时候恢复。暂停失败时 install 报错，钥匙签不出来（第 2 步的门）。
 
@@ -36,6 +37,7 @@ import fcntl
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -236,22 +238,44 @@ def dispatch_rules_of(rules):
     return {r["name"]: r for r in rules.get("rules", []) if str(r.get("name", "")).startswith("dispatch-")}
 
 
-def mismatches(rules, s):
-    """中台正在跑的派单规则和 rules 逐条比来源、类型、执行方；中台在跑而 rules 里没有的派单规则也算不一致。"""
-    want, lines = dispatch_rules_of(rules), lines_by_name(s)
-    bad = [name for name, r in want.items()
-           if not lines.get(name) or lines[name].get("source") != r["when"]["source"]
-           or list(lines[name].get("types") or []) != list(r["when"]["types"]) or lines[name].get("agent") != r["to"]]
-    return bad + [n for n in lines if n.startswith("dispatch-") and n not in want]
+def loaded_rules():
+    """中台正在用的整份规则：只读打开中台库，读它记下的当前配置（agent-autoloop 内部投影 projections 里
+    collection='config'、key='rules' 那一行，值是中台整理过的规则）。协议没有给这个接口，读不到就报错、不放行。"""
+    db = home() / "hub.db"
+    try:
+        con = sqlite3.connect(f"file:{urllib.parse.quote(str(db))}?mode=ro", uri=True, timeout=5)
+        try:
+            row = con.execute("SELECT data FROM projections WHERE collection = 'config' AND key = 'rules'").fetchone()
+        finally:
+            con.close()
+        return json.loads(row[0])["value"]
+    except (sqlite3.Error, TypeError, KeyError, ValueError) as e:
+        raise Rejected(f"读不到中台正在用的规则（{type(e).__name__}），不放行")
+
+
+def mismatches(rules):
+    """中台正在用的配置和 rules 比数字分身这一块，逐字段比，不只看 /v1/state 露出来的几项：
+    每条派单规则的全部字段（中台载入时只补 group = 规则名、tell = needed 两个默认值，补上再比；上游以后多补别的字段
+    会比不上、拒绝放行）、中台在跑而 rules 里没有的派单规则、hermes 来源、dt-* Agent、feishu / secretary 通道、defaultChannels。"""
+    live = loaded_rules()
+    want, have = dispatch_rules_of(rules), dispatch_rules_of(live)
+    bad = [name for name, r in want.items() if have.get(name) != {"group": name, "tell": "needed", **r}]
+    bad += [n for n in have if n not in want]
+    pairs = [("sources.hermes", rules.get("sources", {}).get(SOURCE), live.get("sources", {}).get(SOURCE)),
+             ("defaultChannels", rules.get("defaultChannels"), live.get("defaultChannels"))]
+    pairs += [(f"channels.{c}", rules.get("channels", {}).get(c), live.get("channels", {}).get(c)) for c in NEW_CHANNELS]
+    for aid, _ in AGENTS.values():
+        a = rules.get("agents", {}).get(aid)
+        pairs.append((f"agents.{aid}", a and {"access": "edit", **a}, live.get("agents", {}).get(aid)))
+    return bad + [name for name, a, b in pairs if a != b]
 
 
 def wait_loaded(rules, timeout=30.0):
-    """等中台把新规则文件载入：派单规则逐条和文件一致（不只看名字），两个新通道都在。"""
+    """等中台把新规则文件载入：中台库里记下的当前配置和文件逐字段一致。"""
     end = time.monotonic() + timeout
     while True:
-        s = state()
-        if not mismatches(rules, s) and set(NEW_CHANNELS) <= {c["id"] for c in s.get("channels", [])}:
-            return s
+        if not mismatches(rules):
+            return
         if time.monotonic() >= end:
             raise Rejected("中台没有载入新规则（规则文件不对时中台继续用旧规则）")
         time.sleep(0.5)
@@ -276,7 +300,7 @@ def _install(now):
     new = render(current, owner_open_id(), sandbox_repos())
     names = dispatch_names(new)
     if ("source", SOURCE) in key_names() and (dispatch_rules_of(new) != dispatch_rules_of(current)
-                                             or mismatches(current, state())):
+                                             or mismatches(current)):
         raise Rejected("hermes 来源钥匙已经在了：派单规则不许新增、删减或修改，中台在跑的也要和文件一致（只能原样重装）；"
                        "要改先 agent-autoloop key remove source hermes 并删掉钥匙文件")
     stamp = (now or dt.datetime.now(G.TZ)).strftime("%Y%m%d-%H%M%S")
@@ -323,8 +347,8 @@ def _issue_source_key():
     if SOURCE not in rules.get("sources", {}):
         raise Rejected("rules.json 里还没有 hermes 来源：先 install")
     names = dispatch_names(rules)
+    differ = mismatches(rules)
     s = state()
-    differ = mismatches(rules, s)
     if differ:
         raise Rejected(f"中台正在跑的派单规则和 rules.json 不一致：{'、'.join(differ)}；先 install")
     loaded = lines_by_name(s)

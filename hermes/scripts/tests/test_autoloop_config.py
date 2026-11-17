@@ -2,6 +2,9 @@
 
 autoloop_config.py（中台配置，#195 批 0B-2）的生成规则和 autoloop_readonly.py（只读窗口）的白名单、只读接口。
 不连中台、不碰 ~/.agent-autoloop；真中台的端到端在 test_autoloop_hub_e2e.py。
+
+整个模块先把中台目录、钥匙文件、备份目录、锁、令牌、名册都指到临时目录，命令行换成一定失败的 false，网络请求一律抛错：
+哪个测试或「故意改坏」漏过了某道闸，也碰不到本机正式中台（2026-11-17 一次反向验证漏了隔离，误装到正式中台，已恢复）。
 """
 import copy
 import json
@@ -20,6 +23,33 @@ sys.path.insert(0, str(HERE.parent))
 import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
+
+_ISOLATION = []
+
+
+def setUpModule():
+    tmp = tempfile.TemporaryDirectory(prefix="dt-config-test-")
+    _ISOLATION.append(tmp)
+    root = Path(tmp.name)
+    roster = root / "projects.json"
+    roster.write_text(json.dumps({"projects": [], "inventory": []}), encoding="utf-8")
+
+    def no_network(*a, **kw):
+        raise C.Rejected("单测不连中台")
+    for p in (mock.patch.dict(os.environ, {
+                  "AGENT_AUTOLOOP_HOME": str(root / "no-hub"), "DT_HERMES_SOURCE_KEY_FILE": str(root / "key/hermes-source.key"),
+                  "DT_AUTOLOOP_EVIDENCE": str(root / "evidence"), "DT_AUTOLOOP_LOCK": str(root / "lock/config.lock"),
+                  "DT_READONLY_TOKEN_FILE": str(root / "token/readonly.token"), "DT_AUTOLOOP_CLI": "/usr/bin/false",
+                  "DT_OWNER_OPEN_ID": OWNER}),
+              mock.patch.object(G, "ROSTER", roster), mock.patch.object(C, "hub", side_effect=no_network)):
+        p.start()
+        _ISOLATION.append(p)
+
+
+def tearDownModule():
+    while _ISOLATION:
+        x = _ISOLATION.pop()
+        (x.cleanup if isinstance(x, tempfile.TemporaryDirectory) else x.stop)()
 
 OWNER = "ou_fixture_owner_0001"
 CURRENT = {
@@ -186,11 +216,55 @@ class ReadonlyServer(unittest.TestCase):
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
 
 
+class LoadedCompare(unittest.TestCase):
+    def setUp(self):
+        self.file = C.render(CURRENT, OWNER, REPOS)
+
+    def live(self, **change):
+        v = copy.deepcopy(self.file)
+        for r in v["rules"]:
+            r.setdefault("group", r["name"])
+            r.setdefault("tell", "needed")
+        v["sources"]["schedule"] = {"name": "定时"}
+        for k, f in change.items():
+            f(v)
+        return v
+
+    def test_same_config_with_hub_defaults_matches(self):
+        with mock.patch.object(C, "loaded_rules", return_value=self.live()):
+            self.assertEqual(C.mismatches(self.file), [])
+
+    def test_hidden_field_difference_is_caught(self):
+        def prompt(v):
+            next(r for r in v["rules"] if r["name"] == "dispatch-dt-sandbox-codex")["prompt"] = "旧的"
+
+        def cwd(v):
+            next(r for r in v["rules"] if r["name"] == "dispatch-dt-sandbox-claude")["cwd"] = "~/old"
+
+        def emits(v):
+            next(r for r in v["rules"] if r["name"] == "dispatch-dt-sandbox-claude")["emits"] = {"source": "hermes", "types": ["x"]}
+
+        def extra(v):
+            v["rules"].append({"name": "dispatch-old-claude", "when": {"source": "hermes", "types": ["x"]}, "to": "dt-claude"})
+
+        def answerers(v):
+            v["channels"]["secretary"]["answerers"].append(OWNER)
+        for name, f in (("prompt", prompt), ("cwd", cwd), ("emits", emits), ("extra", extra), ("answerers", answerers)):
+            with self.subTest(name=name), mock.patch.object(C, "loaded_rules", return_value=self.live(x=f)):
+                self.assertTrue(C.mismatches(self.file))
+
+    def test_unreadable_hub_db_refuses(self):
+        with self.assertRaisesRegex(C.Rejected, "读不到"):
+            C.loaded_rules()
+
+
 class Guards(unittest.TestCase):
     def test_install_and_key_share_one_lock(self):
         with tempfile.TemporaryDirectory() as d:
             lock = Path(d) / "sub/config.lock"
-            with mock.patch.dict(os.environ, {"DT_AUTOLOOP_LOCK": str(lock)}), mock.patch.object(C, "LOCK_WAIT", 0.3):
+            reached = mock.Mock(side_effect=AssertionError("没拿到锁也跑进去了"))
+            with mock.patch.dict(os.environ, {"DT_AUTOLOOP_LOCK": str(lock)}), mock.patch.object(C, "LOCK_WAIT", 0.3), \
+                    mock.patch.object(C, "_install", reached), mock.patch.object(C, "_issue_source_key", reached):
                 with C.config_lock():                              # 另一个配置操作拿着锁
                     for call in (lambda: C.install(confirm=True), lambda: C.issue_source_key(confirm=True)):
                         with self.assertRaisesRegex(C.Rejected, "还在进行"):

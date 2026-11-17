@@ -106,11 +106,11 @@ class HubEndToEnd(unittest.TestCase):
         self.assertTrue(all(st["channels"][c]["in_rules"] for c in C.NEW_CHANNELS))
         self.assertFalse(st["source_hermes"]["key"])
 
-        rules_text = C.rules_file().read_text(encoding="utf-8")       # 文件改了但中台没载入（文件里有错规则）：签钥匙拒绝
-        broken = json.loads(rules_text)
+        rules_text = C.rules_file().read_text(encoding="utf-8")       # 磁盘改了、中台仍用旧配置（文件里有错规则）
+        broken = json.loads(rules_text)                                # 只改 /v1/state 看不到的提示词：签钥匙也要拒绝
         for r in broken["rules"]:
             if r["name"] == "dispatch-dt-sandbox-codex":
-                r["when"]["types"] = ["dispatch.dt-sandbox.codex.other"]
+                r["prompt"] = "换了提示词"
         broken["rules"].append({"name": "坏规则", "when": {"source": "local", "types": ["x"]}, "to": "agent", "title": "{坏}"})
         C.rules_file().write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
         time.sleep(1.5)
