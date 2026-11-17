@@ -3,29 +3,34 @@
 
 merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
   autoloop_answer.py <令牌> <选项号> --chat <网关给的聊天号> --operator <网关给的点击人>
-  autoloop_answer.py reconcile [--card <卡片号>]     对账（桥接常驻时每轮也会跑）
-核对（缺一样就不答）：点击人 = 常浩 open_id、聊天号 = 常浩私聊（网关报的聊天类型不可信，不看）——这两样不对就**不回话**，
-只记日志（防止别处的人反复打 /card 文本骚扰私聊）；令牌登记过、已有送达消息号、登记的私聊和现在的一致、选项号在范围。
+  autoloop_answer.py reconcile [--card <卡片号>]        对账（桥接常驻时每轮也跑）
+  autoloop_answer.py release --card <卡片号> --confirm  放开一张「结果不明」的卡，只在常浩明确同意后跑
+核对（缺一样就不答）：点击人 = 常浩 open_id、聊天号 = 常浩私聊（网关报的聊天类型不可信，不看）、本机配了这两样——
+这些不对就**不回话**，只记日志（防止别处的人反复打 /card 文本骚扰私聊）；令牌登记过、登记的私聊和现在的一致、选项号在范围。
 
-本人这一行（claims 表 who = owner）的状态：
-  queued    中台还没确认送达（桥接已发飞书、还没报 delivered 成功）：只记下选择，桥接报送达成功后马上提交（flush）
-  inflight  正在提交；记着进程号
+本人每次点击是一次「尝试」，有一个不复用的尝试号；claims 表 who = owner 那一行的状态：
+  queued    已记下选择，等发送：卡片还没拿到消息号、或中台还没确认送达，都先排队
+  inflight  某个执行者已领到这次尝试唯一的发送资格（只能从 queued 原子改过来，改成功的才发请求），记着进程号
   answered  中台受理了，回读 state、choice、by 都对上
-  settled   中台说这张卡已经有了回答（秘书或别处先到），按中台的结果结算
-  unknown   结果不明：连不上、超时、HTTP 5xx、回应读不懂、回读对不上。**不重答**（中台只认第一次，重答可能变成第二个回答）
-  （释放）  能证明中台没受理时删掉这一行（claim_log 留底），常浩可以再点：请求没发出去、中台明确拒绝（400/401/403/404/409）、
-            或对账时确认「发送进程已退出、过了 60 秒、卡仍开着」
-对账（reconcile）：queued 且已确认送达 → 提交；inflight 超过 2 分钟且进程已不在（或超过 10 分钟，防进程号被复用）、unknown →
-用只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 满足上面的释放条件才释放，
-否则保持 unknown。读不到就不动。
+  settled   这张卡已经有了别的结果（秘书或别处先到、卡已结束）
+  unknown   结果不明：连不上、超时、HTTP 5xx、回应读不懂、回读对不上、发送中途进程没了。**不重答、不自动放开**：
+            请求可能已进中台、晚些才被处理；只有回读看到「已决定 / 已结束」才能自动结算，卡还开着就交常浩决定（release）
+  （释放）  只在能证明中台没受理时自动删掉这一行（claim_log 留底），常浩可以再点：请求根本没发出去，或中台明确拒绝
+            （400/401/403/404/409）
+所有改状态的写入都带「尝试号 + 预期状态」做条件更新，改到 0 行就说明状态已变，放弃这次改动，不覆盖新的尝试。
+发送只有一个入口 submit()：本人点击、桥接送达后的 flush、对账，都走它，所以一次尝试最多发一次。
+对账（reconcile）：queued 的卡已有消息号但本地没记「中台确认送达」→ 按登记原样重报送达（中台幂等），再领发送资格；
+卡已不开着就把排队的结算掉（从没发过）；inflight 超过 2 分钟且进程不在（或超过 10 分钟，防进程号复用）、unknown →
+只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
 
 已知局限（PR #202 审查 P1-01）：点击人、聊天号是网关传进来的命令行参数；和猛鬼兽同一个 macOS 账号的进程
-（包括有终端工具的猛鬼兽模型）既能伪造这些参数，也能直接读 feishu 通道钥匙文件。同账号内没有软件办法堵住。
-常浩 2026-11-17 选甲：本批代码合并但**不签 feishu 通道钥匙、不装桥接**；隔离在 ADR-015 定（方向：独立账号 dt-gate +
-单独的飞书机器人直接收点击，通道钥匙只放在那个账号里），0C 前定，定好后桥接搬过去再启用。
+（包括有终端工具的猛鬼兽模型）既能伪造这些参数，也能直接读 feishu 通道钥匙文件，甚至自己跑 issue-channel-key 签钥匙
+（--confirm 只是命令行开关，证明不了是常浩本人）。同账号内没有软件办法堵住。常浩 2026-11-17 选甲：本批代码合并但
+**不签 feishu 通道钥匙、不装桥接**，这是常浩接受的操作约定，不是技术隔离；隔离在 ADR-015 定（方向：独立账号 dt-gate +
+单独的飞书机器人直接收点击，通道钥匙和签发、回答能力只在那个账号里），0C 前定，定好、重新验收后才启用。
 
-不调用 AI。退出码：0 已答上；1 没答；2 结果不明；3 已排队等送达确认。
+不调用 AI。退出码：0 已答上；1 没答；2 结果不明；3 已排队等发送。
 """
 import argparse
 import datetime as dt
@@ -42,7 +47,6 @@ import autoloop_feishu as F  # noqa: E402
 DEFINITE = (400, 401, 403, 404, 409)     # 中台明确没受理
 STALE = 120                              # 秒：在途超过这么久、发送进程已不在 → 对账
 HARD_STALE = 600                         # 秒：不管进程号还在不在都对账（进程号可能被复用）
-GRACE = 60                               # 秒：发送进程退出后至少等这么久、卡仍开着，才认定中台没受理
 SECRETARY_LIVE = ("approved", "delivered", "unknown")
 
 
@@ -72,8 +76,6 @@ def check(token, option, chat, operator):
     card = F.card_by_token(token)
     if not card:
         raise F.Fail("这张卡没有登记过（不是飞书桥接发的）")
-    if not card.get("message_id"):
-        raise F.Fail("这张卡还没发成功")
     if card["chat_id"] != home:
         raise F.Fail("这张卡登记的私聊和现在的对不上")
     if not (0 <= option < card["options"]):
@@ -81,7 +83,7 @@ def check(token, option, chat, operator):
     return card
 
 
-# ---------- 状态 ----------
+# ---------- 状态（一律按尝试号 + 预期状态条件更新） ----------
 def _age(at):
     try:
         return (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(at)).total_seconds()
@@ -106,43 +108,51 @@ def owner_row(con, card_id):
     return dict(r) if r else None
 
 
-def set_state(card_id, state, note=None, pid=None):
+def move(card_id, attempt, expect, state, note=None, pid=None):
+    """把这次尝试从 expect（一个或几个状态）改成 state；不是这次尝试或状态已变就不改，返回是否改成。"""
+    expect = (expect,) if isinstance(expect, str) else tuple(expect)
     with F.db(write=True) as con:
+        cur = con.execute(f"UPDATE claims SET state = ?, at = ?, pid = ?, note = COALESCE(?, note) WHERE card_id = ? "
+                          f"AND who = 'owner' AND attempt = ? AND state IN ({','.join('?' * len(expect))})",
+                          (state, F.now(), pid, note, card_id, attempt, *expect))
+        if cur.rowcount != 1:
+            return False
         r = owner_row(con, card_id)
-        if not r:
-            return
-        con.execute("UPDATE claims SET state = ?, at = ?, pid = ?, note = COALESCE(?, note) WHERE card_id = ? AND who = 'owner'",
-                    (state, F.now(), pid, note, card_id))
-        F.log_claim(con, card_id, "owner", state, r["choice"], note)
+        F.log_claim(con, card_id, "owner", state, r["choice"], note, attempt)
+        return True
 
 
-def release(card_id, note):
+def release(card_id, attempt, expect, note):
+    """删掉这次尝试（能证明中台没受理，或常浩明确同意放开）；不是这次尝试或状态已变就不删。"""
+    expect = (expect,) if isinstance(expect, str) else tuple(expect)
     with F.db(write=True) as con:
         r = owner_row(con, card_id)
-        if r:
-            con.execute("DELETE FROM claims WHERE card_id = ? AND who = 'owner'", (card_id,))
-            F.log_claim(con, card_id, "owner", "released", r["choice"], note)
+        if not r or r["attempt"] != attempt or r["state"] not in expect:
+            return False
+        con.execute("DELETE FROM claims WHERE card_id = ? AND who = 'owner' AND attempt = ?", (card_id, attempt))
+        F.log_claim(con, card_id, "owner", "released", r["choice"], note, attempt)
+        return True
 
 
 def claim(card, option):
-    """登记本人这一答。返回 (状态, 附言)。已有本人的行就不再登记。"""
-    reconcile(card["card_id"])                   # 上一次在途或结果不明的，先对一次账
+    """登记本人这一答（排队），返回 (尝试号, 附言)。已有本人的行就不再登记。"""
     with F.db(write=True) as con:
         r = owner_row(con, card["card_id"])
         if r and r["state"] == "answered":
             raise F.Fail("这张卡你已经点过了，以第一次为准")
         if r and r["state"] == "settled":
             raise F.Fail("这张卡已经有了回答")
+        if r and r["state"] == "unknown":
+            raise F.Fail("上一次回答结果不明，我不会让你重复回答；对账有结果会告诉你，要放开请明确说")
         if r:
-            raise F.Fail("上一次点击还在处理或等对账，先别重复点")
-        fresh = con.execute("SELECT hub_delivered_at FROM feishu_cards WHERE card_id = ?", (card["card_id"],)).fetchone()
-        state = "inflight" if fresh and fresh["hub_delivered_at"] else "queued"
+            raise F.Fail("上一次点击还在处理，先别重复点")
         sec = con.execute("SELECT state FROM claims WHERE card_id = ? AND who = 'secretary'", (card["card_id"],)).fetchone()
         note = "秘书已获准替你回答，以中台先受理的为准" if sec and sec["state"] in SECRETARY_LIVE else None
-        con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note) VALUES (?, 'owner', ?, ?, ?, ?, ?)",
-                    (card["card_id"], state, option, F.now(), os.getpid() if state == "inflight" else None, note))
-        F.log_claim(con, card["card_id"], "owner", state, option, note)
-    return state, note
+        attempt = secrets.token_hex(6)
+        con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note, attempt) "
+                    "VALUES (?, 'owner', 'queued', ?, ?, NULL, ?, ?)", (card["card_id"], option, F.now(), note, attempt))
+        F.log_claim(con, card["card_id"], "owner", "queued", option, note, attempt)
+    return attempt, note
 
 
 # ---------- 提交与回读 ----------
@@ -176,43 +186,46 @@ def describe(c):
 
 
 def submit(card_id):
-    """提交本人排着队或在途的一答。返回 (退出码, 给常浩的话)；没有可提交的返回 None。"""
+    """唯一的发送入口。原子领取这次尝试的发送资格（queued → inflight，且卡已有消息号、中台已确认送达），
+    领到的才发请求。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，返回 None；还不能发返回 (3, …)。"""
     owner = identities()[0]
     with F.db(write=True) as con:
         r = owner_row(con, card_id)
         card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
-        if not r or r["state"] not in ("queued", "inflight") or not card:
+        if not r or r["state"] != "queued" or not card:
             return None
-        if not card["hub_delivered_at"]:
+        if not card["message_id"] or not card["hub_delivered_at"]:
             return 3, "已记下你的选择，卡片送达确认后马上交给中台。"
-        con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner'",
-                    (F.now(), os.getpid(), card_id))
-        F.log_claim(con, card_id, "owner", "inflight", r["choice"])
-        choice, ref = r["choice"], card["message_id"]
+        cur = con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner' "
+                          "AND attempt = ? AND state = 'queued'", (F.now(), os.getpid(), card_id, r["attempt"]))
+        if cur.rowcount != 1:
+            return None
+        F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
+        attempt, choice, ref = r["attempt"], r["choice"], card["message_id"]
     try:
         out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": owner, "ref": ref})
     except F.HubError as e:
         if not e.sent or e.status in DEFINITE:
-            release(card_id, str(e))
+            release(card_id, attempt, "inflight", str(e))
             return 1, f"这次没交上：{e}。中台没有受理，你可以再点一次。"
-        set_state(card_id, "unknown", str(e))
-        return 2, f"这次回答结果不明（{e}），我不会重答，会自动对账后告诉你。"
+        move(card_id, attempt, "inflight", "unknown", str(e))
+        return 2, f"这次回答结果不明（{e}），我不会重答，会对账后告诉你。"
     except Exception as e:                       # 请求可能已发出：按结果不明处理
-        set_state(card_id, "unknown", f"{type(e).__name__}")
-        return 2, "这次回答结果不明，我不会重答，会自动对账后告诉你。"
+        move(card_id, attempt, "inflight", "unknown", type(e).__name__)
+        return 2, "这次回答结果不明，我不会重答，会对账后告诉你。"
     c = read_card(card_id)
     if not out.get("changed"):
-        set_state(card_id, "settled", f"中台说已有回答：{describe(c)}")
+        move(card_id, attempt, "inflight", "settled", f"中台说已有回答：{describe(c)}")
         return 1, f"这张卡已经有了回答（{describe(c)}），中台只认第一次，你这次没有改变结果。"
     if judge(c, choice, owner) == "answered":
-        set_state(card_id, "answered")
+        move(card_id, attempt, "inflight", "answered")
         return 0, "收到，已交给中台。"
-    set_state(card_id, "unknown", f"回读没对上：{describe(c)}")
-    return 2, f"已交给中台，但回读没对上（{describe(c)}），会自动对账后告诉你。"
+    move(card_id, attempt, "inflight", "unknown", f"回读没对上：{describe(c)}")
+    return 2, f"已交给中台，但回读没对上（{describe(c)}），会对账后告诉你。"
 
 
 def flush(card_id):
-    """桥接报送达成功后调用：有排着队的本人回答就提交，并在私聊回一句。"""
+    """桥接报送达成功后调用：有排着队的本人回答就提交（领不到发送资格就什么也不做），并在私聊回一句。"""
     try:
         got = submit(card_id)
     except F.Fail:
@@ -223,7 +236,7 @@ def flush(card_id):
 
 
 def reconcile(card_id=None):
-    """对账。返回给常浩看的变化列表 [(卡片号, 一句话)]；读不到中台就不动。"""
+    """对账。返回给常浩看的变化列表 [(卡片号, 一句话)]；读不到中台就不动；从不重答。"""
     notes = []
     try:
         owner = identities()[0]
@@ -233,28 +246,57 @@ def reconcile(card_id=None):
     with F.db() as con:
         rows = [dict(r) for r in (con.execute(sql) if card_id is None else con.execute(sql + " AND card_id = ?", (card_id,)))]
     for r in rows:
-        cid, age = r["card_id"], _age(r["at"])
+        cid, attempt, age = r["card_id"], r["attempt"], _age(r["at"])
         if r["state"] == "queued":
-            got = submit(cid)
-            if got and got[0] != 3:
-                notes.append((cid, got[1]))
+            notes += _reconcile_queued(cid, attempt)
             continue
         if r["state"] == "inflight" and age < HARD_STALE and (age < STALE or pid_alive(r["pid"])):
             continue                             # 还在跑
         c = read_card(cid)
         verdict = judge(c, r["choice"], owner)
-        if verdict == "answered":
-            set_state(cid, "answered", "对账：中台里是你这一答")
+        if verdict == "answered" and move(cid, attempt, r["state"], "answered", "对账：中台里是你这一答"):
             notes.append((cid, "对账结果：你上次的回答中台已经收下了。"))
-        elif verdict == "settled":
-            set_state(cid, "settled", f"对账：{describe(c)}")
-            notes.append((cid, f"对账结果：这张卡已经有了别的回答（{describe(c)}）。"))
-        elif verdict == "open" and not pid_alive(r["pid"]) and age >= GRACE:
-            release(cid, "对账：发送进程已退出、超过 60 秒、卡仍开着，确认中台没受理")
-            notes.append((cid, "对账结果：你上次的点击中台没有收下，卡片还开着，请再点一次。"))
-        elif r["state"] == "inflight":
-            set_state(cid, "unknown", "对账：在途过久")
+        elif verdict == "settled" and move(cid, attempt, r["state"], "settled", f"对账：{describe(c)}"):
+            notes.append((cid, f"对账结果：这张卡已经有了别的结果（{describe(c)}）。"))
+        elif r["state"] == "inflight" and move(cid, attempt, "inflight", "unknown", "对账：发送中途进程没了"):
+            notes.append((cid, "上次点击发送到一半中断了，结果不明，卡片还开着；我不会重答。"
+                               "要重新选，请明确告诉我放开这张卡。"))
     return notes
+
+
+def _reconcile_queued(cid, attempt):
+    with F.db() as con:
+        card = con.execute("SELECT message_id, hub_delivered_at FROM feishu_cards WHERE card_id = ?", (cid,)).fetchone()
+    if card and card["message_id"] and not card["hub_delivered_at"]:
+        try:
+            F.report_delivered(cid)              # 送达报告可能已被中台收下、本地没记上：按登记原样重报
+        except F.HubError as e:
+            if e.status in DEFINITE:             # 中台不收这份送达：看看卡还开不开
+                c = read_card(cid)
+                if c and c.get("state") != "open" and move(cid, attempt, "queued", "settled", f"对账：{describe(c)}，排队的没发过"):
+                    return [(cid, f"这张卡已经结束（{describe(c)}），你排队的选择没有发出去。")]
+            return []
+    got = submit(cid)
+    return [(cid, got[1])] if got and got[0] != 3 else []
+
+
+def release_unknown(card_id):
+    """常浩明确同意后放开一张结果不明的卡：先回读，卡已有结果就按结果结算，不放开。"""
+    owner = identities()[0]
+    with F.db() as con:
+        r = owner_row(con, card_id)
+    if not r or r["state"] != "unknown":
+        raise F.Fail(f"卡片 {card_id} 没有结果不明的本人回答")
+    c = read_card(card_id)
+    verdict = judge(c, r["choice"], owner)
+    if verdict in ("answered", "settled"):
+        move(card_id, r["attempt"], "unknown", verdict, f"放开前回读：{describe(c)}")
+        return f"没放开：中台里这张卡已经是 {describe(c)}，按这个结果记了。"
+    if verdict is None:
+        raise F.Fail("读不到中台，先不放开")
+    if not release(card_id, r["attempt"], "unknown", "常浩明确同意放开（接受原请求可能晚到、仍以中台先受理的为准）"):
+        raise F.Fail("状态已经变了，没放开")
+    return "已放开，可以再点。注意：上次的请求万一晚到，仍以中台先受理的为准。"
 
 
 # ---------- 入口 ----------
@@ -268,15 +310,17 @@ def answer(token, option, chat, operator):
         return 1, f"这次点击没有交给中台：{e}。", {"ok": False, "why": str(e)}
     try:
         F.hub_target()                           # 钥匙、配置读不到就先说，不登记
-        state, note = claim(card, option)
+        reconcile(card["card_id"])               # 上一次在途或结果不明的，先对一次账
+        attempt, note = claim(card, option)
     except F.Fail as e:
         return 1, f"这次点击没有交给中台：{e}。", {"ok": False, "card": card["card_id"], "why": str(e)}
-    if state == "queued":
-        return 3, "已记下你的选择，卡片送达确认后马上交给中台。", {"ok": True, "card": card["card_id"], "queued": True}
-    code, said = submit(card["card_id"]) or (1, "这次点击没有交给中台。")
+    got = submit(card["card_id"])
+    if got is None:                              # 别的执行者（送达后的 flush、对账）已经领走发送资格
+        got = (3, "已记下你的选择，正在交给中台。")
+    code, said = got
     if note:
         said += f"（{note}）"
-    return code, said, {"ok": code == 0, "card": card["card_id"], "code": code}
+    return code, said, {"ok": code == 0, "card": card["card_id"], "code": code, "attempt": attempt}
 
 
 def tell(chat, text):
@@ -289,11 +333,22 @@ def tell(chat, text):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["reconcile"]:
-        ap = argparse.ArgumentParser(description="对账")
-        ap.add_argument("--card", type=int)
+    if argv[:1] in (["reconcile"], ["release"]):
+        ap = argparse.ArgumentParser(description=argv[0])
+        ap.add_argument("--card", type=int, required=argv[0] == "release")
+        ap.add_argument("--confirm", action="store_true")
         a = ap.parse_args(argv[1:])
-        print(json.dumps({"at": F.now(), "notes": reconcile(a.card)}, ensure_ascii=False))
+        try:
+            if argv[0] == "reconcile":
+                out = {"notes": reconcile(a.card)}
+            elif not a.confirm:
+                raise F.Fail("放开结果不明的卡要常浩明确同意：加 --confirm")
+            else:
+                out = {"said": release_unknown(a.card)}
+        except F.Fail as e:
+            print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))
+            return 1
+        print(json.dumps({"at": F.now(), **out}, ensure_ascii=False))
         return 0
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("token")

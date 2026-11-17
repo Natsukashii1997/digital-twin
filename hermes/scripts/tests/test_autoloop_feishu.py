@@ -133,7 +133,7 @@ class Deliver(Base):
 
 
 class Answer(Base):
-    """本人点击：核对、排队、提交、错误分类、对账（中台和只读窗口都换成假的）。"""
+    """本人点击：核对、排队、唯一发送资格、错误分类、对账（中台和只读窗口都换成假的）。"""
     def setUp(self):
         super().setUp()
         self.register()
@@ -142,15 +142,14 @@ class Answer(Base):
         self.hub_calls = []
         self.hub_reply = {"changed": True}
         self.hub_card = {"id": 7, "state": "decided", "choice": 1, "by": OWNER}
-        for target, fake in ((F, "hub"), (A, "read_card")):
-            p = mock.patch.object(target, fake, self.fake_hub if fake == "hub" else (lambda cid: self.hub_card))
+        self.gate = None                                                        # 设成 threading.Event 时，答中台的请求卡在这里
+        for target, name, fake in ((F, "hub", self.fake_hub), (A, "read_card", lambda cid: self.hub_card),
+                                   (F, "hub_target", lambda: ("http://x", "k"))):
+            p = mock.patch.object(target, name, fake)
             p.start()
             self.addCleanup(p.stop)
         p = mock.patch.object(A, "tell")
         self.tell = p.start()
-        self.addCleanup(p.stop)
-        p = mock.patch.object(F, "hub_target", lambda: ("http://x", "k"))
-        p.start()
         self.addCleanup(p.stop)
 
     def confirm(self, card_id=7):
@@ -159,9 +158,15 @@ class Answer(Base):
 
     def fake_hub(self, method, path, body=None, timeout=20):
         self.hub_calls.append((path, body))
-        if isinstance(self.hub_reply, Exception):
+        if path.endswith("/answer") and self.gate is not None:
+            self.entered.set()
+            self.gate.wait(5)
+        if path.endswith("/answer") and isinstance(self.hub_reply, Exception):
             raise self.hub_reply
-        return self.hub_reply
+        return self.hub_reply if path.endswith("/answer") else {}
+
+    def answers(self):
+        return [c for c in self.hub_calls if c[0].endswith("/answer")]
 
     def claim(self):
         with F.db() as con:
@@ -180,12 +185,19 @@ class Answer(Base):
             con.execute("UPDATE claims SET at = ?, pid = ?, state = COALESCE(?, state) WHERE card_id = 7 AND who = 'owner'",
                         (at, pid, state))
 
+    def unknown_claim(self):
+        self.hub_reply = F.HubError("没等到回应")
+        A.answer(self.tok, 1, CHAT, OWNER)
+        self.hub_reply = {"changed": True}
+        self.assertEqual(self.claim()["state"], "unknown")
+        return self.claim()["attempt"]
+
     def test_owner_click_answers_with_registered_ref(self):
         code, said, rec = A.answer(self.tok, 1, CHAT, OWNER)
         self.assertEqual(code, 0, said)
-        self.assertEqual(self.hub_calls, [("/v1/cards/7/answer", {"choice": 1, "by": OWNER, "ref": "om_fixture_1"})])
-        self.assertEqual((self.claim()["state"], self.claim()["choice"]), ("answered", 1))
-        self.assertEqual(self.log(), ["inflight", "inflight", "answered"])
+        self.assertEqual(self.answers(), [("/v1/cards/7/answer", {"choice": 1, "by": OWNER, "ref": "om_fixture_1"})])
+        self.assertEqual((self.claim()["state"], self.claim()["choice"], self.claim()["attempt"]), ("answered", 1, rec["attempt"]))
+        self.assertEqual(self.log(), ["queued", "inflight", "answered"])
 
     def test_wrong_source_is_quiet_and_never_calls_hub(self):
         for args in ((self.tok, 0, CHAT, "ou_someone_else"), (self.tok, 0, "oc_group", OWNER), (self.tok, 0, CHAT, ""),
@@ -209,44 +221,106 @@ class Answer(Base):
         self.assertIn("私聊和现在的对不上", A.answer(self.tok, 0, CHAT, OWNER)[1])
         self.assertEqual(self.hub_calls, [])
 
-    def test_card_not_yet_sent_is_refused(self):
-        with F.db(write=True) as con:
-            con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
-                        "VALUES (8, 'aaaaaaaaaaaaaaaa', ?, 'ask', 2, 1)", (CHAT,))
-        code, said, _ = A.answer("aaaaaaaaaaaaaaaa", 0, CHAT, OWNER)
-        self.assertEqual(code, 1)
-        self.assertIn("还没发成功", said)
-        self.assertEqual(self.hub_calls, [])
-
-    def test_missing_identity_config_is_quiet(self):
+    def test_missing_identity_stops_everything(self):
         with mock.patch.dict(os.environ, {"DT_OWNER_CHAT_ID": "", "DT_OWNER_CHAT_FILE": self.tmp.name + "/none"}):
-            code, said, rec = A.answer(self.tok, 0, "", OWNER)
-            self.assertEqual((code, said), (1, None))
+            self.assertEqual(A.answer(self.tok, 0, "", OWNER)[:2], (1, None))
+            with self.assertRaisesRegex(A.Quiet, "没配置"):
+                A.identities()
             with self.assertRaisesRegex(F.Fail, "setup-chat"):
                 F.owner_chat()
+            self.assertEqual(A.reconcile(), [])
+        with mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": "", "DT_OWNER_FILE": self.tmp.name + "/none"}):
+            with self.assertRaisesRegex(A.Quiet, "没配置"):
+                A.identities()
         self.assertEqual(self.hub_calls, [])
 
-    def test_click_before_hub_confirms_delivery_is_queued_then_submitted(self):
+    def test_click_before_message_id_or_delivery_is_queued_then_submitted_once(self):
+        with F.db(write=True) as con:                                           # 令牌登记了、消息号还没落盘（审查 P2-05）
+            con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
+                        "VALUES (8, 'aaaaaaaaaaaaaaaa', ?, 'ask', 2, 1)", (CHAT,))
+        self.assertEqual(A.answer("aaaaaaaaaaaaaaaa", 0, CHAT, OWNER)[0], 3)
+        with F.db(write=True) as con:
+            con.execute("UPDATE claims SET card_id = card_id WHERE card_id = 8")
+            con.execute("UPDATE feishu_cards SET message_id = 'om_8' WHERE card_id = 8")
+        self.assertEqual(A.flush(8)[0], 3)                                      # 有消息号、中台还没确认送达：仍排队
+        self.assertEqual(self.answers(), [])
+        self.confirm(8)
+        self.hub_card = {"id": 8, "state": "decided", "choice": 0, "by": OWNER}
+        self.assertEqual(A.flush(8)[0], 0)
+        self.assertEqual(self.answers(), [("/v1/cards/8/answer", {"choice": 0, "by": OWNER, "ref": "om_8"})])
+        self.assertIsNone(A.flush(8))                                           # 只发一次
+        self.tell.assert_called_once()
+
+    def test_concurrent_submitters_send_at_most_once(self):
+        import threading
+        for second in (lambda: A.flush(7), lambda: A.reconcile(), lambda: A.submit(7)):
+            with F.db(write=True) as con:
+                con.execute("DELETE FROM claims")
+            self.hub_calls.clear()
+            self.gate, self.entered = threading.Event(), threading.Event()
+            t = threading.Thread(target=A.answer, args=(self.tok, 1, CHAT, OWNER))    # 本人点击领到资格、请求卡在半路
+            t.start()
+            self.assertTrue(self.entered.wait(5))
+            second()                                                            # 送达后的 flush / 对账 / 再一次提交
+            self.gate.set()
+            t.join(5)
+            self.assertEqual(len(self.answers()), 1, second)
+            self.assertEqual(self.claim()["state"], "answered")
+        self.gate = None
+
+    def test_queued_raced_by_flush_and_reconcile_sends_once(self):
+        import threading
         with F.db(write=True) as con:
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER)
-        self.assertEqual(code, 3)
-        self.assertIn("送达确认后", said)
-        self.assertEqual((self.claim()["state"], self.hub_calls), ("queued", []))   # 没先发一个注定失败的回答
-        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER)[0], 1)              # 排队期间再点不改选择
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)
         self.confirm()
-        self.assertEqual(A.flush(7)[0], 0)
-        self.assertEqual(self.hub_calls, [("/v1/cards/7/answer", {"choice": 1, "by": OWNER, "ref": "om_fixture_1"})])
-        self.assertEqual(self.claim()["state"], "answered")
-        self.tell.assert_called_once()
-        self.assertIsNone(A.flush(7))                                           # 只提交一次
+        self.gate, self.entered = threading.Event(), threading.Event()
+        t = threading.Thread(target=A.flush, args=(7,))
+        t.start()
+        self.assertTrue(self.entered.wait(5))
+        self.assertEqual(A.reconcile(), [])                                     # 对账看到在途、进程还活着：不动
+        self.gate.set()
+        t.join(5)
+        self.gate = None
+        self.assertEqual(len(self.answers()), 1)
+
+    def test_delivered_accepted_but_not_recorded_is_rereported_then_submitted(self):
+        with F.db(write=True) as con:                                           # 中台已收下送达报告，本地没来得及记
+            con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)
+        self.assertEqual(self.hub_calls, [])
+        notes = A.reconcile()                                                   # 重启后对账：按登记原样重报，再提交
+        self.assertEqual([c[0] for c in self.hub_calls], ["/v1/cards/7/delivered", "/v1/cards/7/answer"])
+        self.assertEqual(self.hub_calls[0][1], {"version": 1, "ref": "om_fixture_1"})
+        self.assertEqual(notes, [(7, "收到，已交给中台。")])
+        self.assertEqual(len(self.lark.sent()), 1)                              # 没有发新的飞书卡片
+
+    def test_queued_on_card_that_already_ended_is_settled_without_sending(self):
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
+        A.answer(self.tok, 1, CHAT, OWNER)
+        self.hub_card = {"id": 7, "state": "closed"}
+        with mock.patch.object(F, "report_delivered", side_effect=F.HubError("中台回 HTTP 409", status=409)):
+            A.reconcile()                                                       # 中台不收这份送达、卡已结束
+        self.assertEqual(self.claim()["state"], "settled")
+        self.assertEqual(self.answers(), [])
+
+    def test_queued_on_open_card_stays_queued_when_delivery_refused(self):
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
+        A.answer(self.tok, 1, CHAT, OWNER)
+        self.hub_card = {"id": 7, "state": "open"}
+        with mock.patch.object(F, "report_delivered", side_effect=F.HubError("中台回 HTTP 409", status=409)):
+            self.assertEqual(A.reconcile(), [])
+        self.assertEqual(self.claim()["state"], "queued")                       # 卡还开着：排队的不结算
+        self.assertEqual(self.answers(), [])
 
     def test_token_is_single_use(self):
         A.answer(self.tok, 1, CHAT, OWNER)
         code, said, _ = A.answer(self.tok, 0, CHAT, OWNER)
         self.assertEqual(code, 1)
         self.assertIn("已经点过", said)
-        self.assertEqual(len(self.hub_calls), 1)
+        self.assertEqual(len(self.answers()), 1)
 
     def test_secretary_rows_are_never_touched(self):
         with F.db(write=True) as con:
@@ -287,63 +361,76 @@ class Answer(Base):
         self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 2)             # 说收下了但回读对不上：结果不明
         self.assertEqual(self.claim()["state"], "unknown")
 
-    def test_unknown_blocks_reclick_until_reconciled(self):
-        self.hub_reply = F.HubError("没等到回应")
-        A.answer(self.tok, 1, CHAT, OWNER)
+    def test_unknown_with_open_card_is_never_released_automatically(self):
+        self.unknown_claim()
         self.hub_card = {"id": 7, "state": "open"}
-        self.assertIn("等对账", A.answer(self.tok, 1, CHAT, OWNER)[1])          # 刚出事：卡还开着也不能马上重点
-        self.age(GRACE_PLUS)                                                    # 发送进程已退出、过了宽限期、卡仍开着
-        self.assertEqual(A.reconcile(), [(7, "对账结果：你上次的点击中台没有收下，卡片还开着，请再点一次。")])
-        self.assertIsNone(self.claim())
-        self.hub_reply = {"changed": True}
+        self.age(10_000, pid=None)                                              # 进程早没了、过了很久、卡仍开着
+        self.assertEqual(A.reconcile(), [])
+        self.assertEqual(self.claim()["state"], "unknown")                      # 不放开（原请求可能晚到）
+        self.assertIn("结果不明", A.answer(self.tok, 0, CHAT, OWNER)[1])
+        self.assertEqual(len(self.answers()), 1)                                # 也从不重答
+        with mock.patch("sys.stdout"):
+            self.assertEqual(A.main(["release", "--card", "7"]), 1)             # 没写 --confirm 不放
+        self.assertIn("已放开", A.release_unknown(7))
+        self.hub_card = {"id": 7, "state": "decided", "choice": 0, "by": OWNER}
+        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER)[0], 0)
+
+    def test_release_unknown_settles_instead_if_card_has_result(self):
+        self.unknown_claim()
         self.hub_card = {"id": 7, "state": "decided", "choice": 1, "by": OWNER}
-        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 0)
+        self.assertIn("没放开", A.release_unknown(7))
+        self.assertEqual(self.claim()["state"], "answered")
+        with self.assertRaisesRegex(F.Fail, "没有结果不明"):
+            A.release_unknown(7)
+
+    def test_stale_writes_never_touch_a_newer_attempt(self):
+        old = self.unknown_claim()
+        self.hub_card = {"id": 7, "state": "open"}
+        self.assertTrue(A.release(7, old, "unknown", "常浩同意放开"))
+        A.claim(F.card_by_token(self.tok), 0)                                   # 常浩再点：新的尝试
+        new = self.claim()["attempt"]
+        self.assertNotEqual(new, old)
+        self.assertFalse(A.release(7, old, "unknown", "过期的对账"))            # 拿着旧快照的对账：删不掉新尝试
+        self.assertFalse(A.move(7, old, ("unknown", "inflight"), "settled"))   # 也改不了
+        self.assertFalse(A.move(7, new, "inflight", "answered"))               # 预期状态不对也不改
+        self.assertFalse(A.move(7, old, "queued", "settled"))                  # 状态碰巧一样、尝试号不对：也不改
+        self.assertEqual((self.claim()["attempt"], self.claim()["state"]), (new, "queued"))
+        with F.db() as con:
+            self.assertTrue(F.owner_holds(con, 7))
 
     def test_reconcile_after_kill(self):
-        A.claim(F.card_by_token(self.tok), 1)                                   # 登记了 inflight，进程在发出前被杀
-        self.age(30, pid=os.getpid())
+        A.claim(F.card_by_token(self.tok), 1)
+        self.age(30, pid=os.getpid(), state="inflight")                         # 领到资格后进程被杀
         self.assertEqual(A.reconcile(), [])                                     # 进程还在、没超时：不动
         self.age(30, pid=999999)
         self.assertEqual(A.reconcile(), [])                                     # 进程不在但还没过 2 分钟：不动
         self.age(200, pid=999999)
-        self.hub_card = {"id": 7, "state": "decided", "choice": 1, "by": OWNER}  # 其实中台已受理（写 answered 前被杀）
+        self.hub_card = {"id": 7, "state": "open"}
+        self.assertIn("结果不明", A.reconcile()[0][1])                          # 卡还开着：改成结果不明，不放开
+        self.assertEqual(self.claim()["state"], "unknown")
+        self.hub_card = {"id": 7, "state": "decided", "choice": 1, "by": OWNER}  # 其实中台已受理
         self.assertEqual(A.reconcile()[0][1], "对账结果：你上次的回答中台已经收下了。")
-        self.assertEqual(self.claim()["state"], "answered")
         with F.db(write=True) as con:
             con.execute("DELETE FROM claims")
         A.claim(F.card_by_token(self.tok), 1)
-        self.age(200, pid=999999)
-        self.hub_card = None                                                    # 读不到中台：只改成结果不明，不释放
+        self.age(700, pid=os.getpid(), state="inflight")                        # 进程号像是活的但超过 10 分钟：照样对账
+        self.hub_card = None                                                    # 读不到中台：改成结果不明
         A.reconcile()
         self.assertEqual(self.claim()["state"], "unknown")
         self.hub_card = {"id": 7, "state": "closed"}
         A.reconcile()
         self.assertEqual(self.claim()["state"], "settled")
-        self.age(700, pid=os.getpid(), state="inflight")                        # 进程号像是活的但超过 10 分钟：照样对账
-        self.hub_card = {"id": 7, "state": "decided", "choice": 1, "by": OWNER}
-        A.reconcile()
-        self.assertEqual(self.claim()["state"], "answered")
-        self.assertEqual(self.hub_calls, [])                                    # 对账从不重答
+        self.assertEqual(self.answers(), [])                                    # 对账从不重答
 
     def test_reconcile_checks_who_and_which_option(self):
-        for card in ({"id": 7, "state": "decided", "choice": 1, "by": "秘书"},          # 同一项但不是你答的
-                     {"id": 7, "state": "done", "choice": 0, "by": OWNER}):            # 你答的但不是这一项
-            A.claim(F.card_by_token(self.tok), 1)
-            self.age(200, pid=999999)
+        for card in ({"id": 7, "state": "decided", "choice": 1, "by": "秘书"},
+                     {"id": 7, "state": "done", "choice": 0, "by": OWNER}):
+            self.unknown_claim()
             self.hub_card = card
             A.reconcile()
             self.assertEqual(self.claim()["state"], "settled", card)
             with F.db(write=True) as con:
                 con.execute("DELETE FROM claims")
-
-    def test_missing_identity_stops_everything(self):
-        with mock.patch.dict(os.environ, {"DT_OWNER_CHAT_ID": "", "DT_OWNER_CHAT_FILE": self.tmp.name + "/none"}):
-            with self.assertRaisesRegex(A.Quiet, "没配置"):
-                A.identities()
-            self.assertEqual(A.reconcile(), [])
-        with mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": "", "DT_OWNER_FILE": self.tmp.name + "/none"}):
-            with self.assertRaisesRegex(A.Quiet, "没配置"):
-                A.identities()
 
     def test_main_replies_to_home_chat(self):
         with mock.patch("sys.stdout"):
@@ -352,9 +439,6 @@ class Answer(Base):
         with mock.patch("sys.stdout") as out:
             self.assertEqual(A.main(["reconcile"]), 0)
         self.assertIn("notes", "".join(str(c.args[0]) for c in out.write.call_args_list))
-
-
-GRACE_PLUS = A.GRACE + 5
 
 
 class HubCall(unittest.TestCase):
@@ -498,7 +582,7 @@ class FeishuEndToEnd(HubFixture):
             self.assertEqual(A.answer(tok, 0, CHAT, OWNER)[0], 3)              # 只排队，不先发注定失败的回答
             st = C.state()
             self.assertEqual(next(c for c in st["cards"] if c["id"] == card["id"])["state"], "open")
-            F.confirm(card, ref)                                                # 送达报告交上：自动提交排队的那一答
+            F.confirm(card["id"])                                              # 送达报告交上：自动提交排队的那一答
             tell.assert_called_once()
         st = C.state()
         got = next(c for c in st.get("cards", []) + st.get("recentCards", []) if c["id"] == card["id"])
@@ -506,6 +590,35 @@ class FeishuEndToEnd(HubFixture):
         self.assertIsNone(A.flush(card["id"]))                                  # 只提交一次
         with F.db() as con:
             self.assertEqual(con.execute("SELECT state FROM claims WHERE who = 'owner'").fetchone()[0], "answered")
+
+
+    def test_delivered_but_crashed_before_recording_recovers_once(self):
+        C.install(confirm=True, target=self.home)
+        rules = json.loads(C.rules_file().read_text(encoding="utf-8"))
+        next(r for r in rules["rules"] if r["name"] == "试一下")["channels"] = ["feishu"]
+        C.rules_file().write_text(json.dumps(rules, ensure_ascii=False), encoding="utf-8")
+        self._wait_live(lambda live: next(r for r in live["rules"] if r["name"] == "试一下").get("channels") == ["feishu"])
+        C.issue_channel_key("feishu", True, str(self.home))
+        import subprocess
+        subprocess.run([CLI, "try"], env={**os.environ, "AGENT_AUTOLOOP_HOME": str(self.home)}, capture_output=True, timeout=60)
+        card = None
+        for _ in range(60):
+            card = F.hub("GET", "/v1/cards/next?wait=1", timeout=30).get("card")
+            if card:
+                break
+        self.assertTrue(card, "中台没出卡片")
+        ref = F.deliver(card)
+        F.hub("POST", f"/v1/cards/{card['id']}/delivered", {"version": card["version"], "ref": ref})   # 中台收下了，桥接随即崩溃
+        tok = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["autoloop"]
+        with mock.patch.object(A, "tell"):
+            self.assertEqual(A.answer(tok, 1, CHAT, OWNER)[0], 3)              # 本地不知道已送达：排队
+            self.assertIsNone(F.hub("GET", "/v1/cards/next?wait=1", timeout=30).get("card"))   # 中台不会再把它给桥接
+            notes = A.reconcile()                                               # 重启后对账：按登记原样重报 → 提交
+        self.assertEqual(notes, [(card["id"], "收到，已交给中台。")])
+        st = C.state()
+        got = next(c for c in st.get("cards", []) + st.get("recentCards", []) if c["id"] == card["id"])
+        self.assertEqual((got["choice"], got["by"]), (1, OWNER))
+        self.assertEqual(len(self.lark.sent()), 1)                              # 没有新的飞书卡片
 
 
 if __name__ == "__main__":

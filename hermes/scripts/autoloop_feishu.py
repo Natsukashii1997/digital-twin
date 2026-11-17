@@ -50,9 +50,9 @@ CREATE TABLE IF NOT EXISTS feishu_cards (card_id INTEGER PRIMARY KEY, token TEXT
   chat_id TEXT NOT NULL, kind TEXT NOT NULL, options INTEGER NOT NULL, version INTEGER NOT NULL, delivered_at TEXT,
   hub_delivered_at TEXT);
 CREATE TABLE IF NOT EXISTS claims (card_id INTEGER NOT NULL, who TEXT NOT NULL CHECK (who IN ('owner', 'secretary')),
-  state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, PRIMARY KEY (card_id, who));
+  state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, attempt TEXT, PRIMARY KEY (card_id, who));
 CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL, who TEXT NOT NULL,
-  at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT);
+  at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT, attempt TEXT);
 """
 
 
@@ -73,9 +73,9 @@ def owner_holds(con, card_id):
     return bool(r) and r["state"] in OWNER_HOLDS
 
 
-def log_claim(con, card_id, who, state, choice=None, note=None):
-    con.execute("INSERT INTO claim_log (card_id, who, at, state, choice, note) VALUES (?, ?, ?, ?, ?, ?)",
-                (card_id, who, now(), state, choice, note))
+def log_claim(con, card_id, who, state, choice=None, note=None, attempt=None):
+    con.execute("INSERT INTO claim_log (card_id, who, at, state, choice, note, attempt) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (card_id, who, now(), state, choice, note, attempt))
 
 
 def now():
@@ -266,18 +266,28 @@ def once(wait=50):
     except (SendError, Fail) as e:
         hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
         return {"card": card["id"], "ok": False, "why": str(e)}
-    confirm(card, ref)
+    confirm(card["id"])
     return {"card": card["id"], "ok": True, "ref": ref}
 
 
-def confirm(card, ref):
-    """报送达；中台收下后记「中台确认送达」，再把送达前点的、排着队的本人回答提交掉。"""
-    hub("POST", f"/v1/cards/{card['id']}/delivered", {"version": card["version"], "ref": ref})
+def report_delivered(card_id):
+    """按登记的版本和消息号报送达（发卡后先落盘、再报，所以崩溃后可以照登记的原样重报；中台对同一 ref 重报是幂等的），
+    中台收下后记「中台确认送达」。登记里没有消息号就不报。"""
+    with db() as con:
+        r = con.execute("SELECT message_id, version FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
+    if not r or not r["message_id"]:
+        raise Fail(f"卡片 {card_id} 还没有登记的消息号，不能报送达")
+    hub("POST", f"/v1/cards/{card_id}/delivered", {"version": r["version"], "ref": r["message_id"]})
     with db(write=True) as con:
         con.execute("UPDATE feishu_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ?",
-                    (now(), card["id"]))
+                    (now(), card_id))
+
+
+def confirm(card_id):
+    """报送达，再把送达前点的、排着队的本人回答提交掉（发送资格只有一个执行者领得到，见 autoloop_answer.submit）。"""
+    report_delivered(card_id)
     import autoloop_answer as A
-    A.flush(card["id"])
+    A.flush(card_id)
 
 
 def run():
@@ -298,7 +308,8 @@ def run():
 
 def show():
     with db() as con:
-        cards = [dict(r) for r in con.execute("SELECT card_id, message_id, kind, options, version, delivered_at FROM feishu_cards ORDER BY card_id")]
+        cards = [dict(r) for r in con.execute("SELECT card_id, message_id, kind, options, version, delivered_at, hub_delivered_at "
+                                              "FROM feishu_cards ORDER BY card_id")]
         claims = [dict(r) for r in con.execute("SELECT * FROM claims ORDER BY card_id, who")]
         log = [dict(r) for r in con.execute("SELECT * FROM claim_log ORDER BY id DESC LIMIT 50")]
     return {"cards": cards, "claims": claims, "recent_log": log}
