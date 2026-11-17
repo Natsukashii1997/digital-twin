@@ -5,31 +5,52 @@
 允许的动作（只有 edit / push_branch / open_pr）、到期时间、状态和**执行代次**。秘书（猛鬼兽）不签凭证、不往凭证里加权限。
 
 批准分两步，把常浩的话绑定到这一单的具体内容（防止模型拼参数）：
-  1. propose：猛鬼兽整理好五要素，本脚本算出确认码（仓库、执行方、动作、到期、范围原文的 SHA-256 前 6 位），
-     猛鬼兽把五要素和「派单 <确认码>」发给常浩；
+  1. propose：猛鬼兽给出仓库、执行方、五要素；本脚本随机生成 8 位确认码（插入不覆盖，撞号重抽），提议里记完整的
+     GitHub 仓库和内容哈希，并**由本脚本自己**以猛鬼兽机器人把五要素原文和「派单 <确认码>」发到常浩私聊（不让模型转述）；
+     确认消息没发成的提议不能批；
   2. approve：常浩在私聊回「派单 <确认码>」，本脚本用 twin_identity 回读核验（常浩本人、私聊、10 分钟内、消息没用过），
-     口令以回读原文为准，确认码对得上一条没过期的提议，才签凭证（代次 1）并发第一个派单事件。
+     口令以回读原文为准；确认码对得上一条没过期、确认消息已送达、内容哈希没变、名册里仓库映射也没变的提议，才签凭证
+     （代次 1），写工人可读的任务单，再发第一个派单事件。
 
 网关只有两个入口往中台发 hermes 来源的事件：approve（本人批准建任务）和 resume（凭证有效时续接：重派、返修、更正）。
-冻结、撤销是安全方向，本机调用即可；解冻（恢复）要常浩私聊「恢复 <单号>」，恢复时代次 +1，被作废的旧代次永久失效。
+事件只带单号、代次和类别（方案 5.1 第 1 条「凭证内容不进事件」）；五要素原文写在工人只读的任务单
+/Users/Shared/dt-autoloop/tasks/<单号>.md（644，不含消息号），0C 的启动脚本据此取任务。
 
-工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-autoloop/grants/status.json（状态、代次、到期、动作），
-读不到凭证库，也改不了镜像。check() 是所有出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
+发事件（send_pending）：先记账后发。每个事件在写事务里现读凭证判定（状态、到期、作废代次、代次）后领取（在途），
+提交后才 POST；送达后条件更新为已送达。连不上中台记「结果不明」留在在途，过 60 秒、凭证仍有效才补发（中台同一 id 只记
+一次）；凭证已失效的不再发。冻结只作废还没领取的事件，不会把已送达的记录改掉。
+  hub_events.sent：0 待发，2 在途 / 结果不明，1 已送达，-1 作废未发，-2 作废前已领取（可能已送达，靠代次拦截）。
+
+冻结、撤销、完成是收紧方向，本机调用即可：**先写状态镜像再提交**，镜像写不成整笔回滚。批准、恢复是放宽方向：先提交再写
+镜像，镜像写不成也只会比库更严。所以镜像永远不比凭证库宽松。冻结时生成一个冻结码；恢复要常浩私聊「恢复 <单号> <冻结码>」，
+并且这次冻结已经由推翻流程记过更正（规格 §8 第 4 步「更正先持久记在账本」，record_resolution，0B-5 调用，本批不给命令行，
+所以本批恢复入口实际关闭）；恢复时代次 +1，被作废的旧代次永久失效。
+
+工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-autoloop/grants/status.json（状态、代次、到期、动作）和
+任务单，读不到凭证库，也改不了镜像。check() 是主账号出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
+工人侧按镜像做的检查只防正常流程误操作，不当作不可绕过的边界；权威判定在主账号的出口（方案 5.1 第 3 条）。
+
+威胁模型与已知局限（PR #199 审查 P0-01，常浩 2026-11-17 定：沙盒阶段先接受）：本脚本和猛鬼兽跑在同一个 macOS 账号，
+猛鬼兽的模型有 shell，能改身份配置（DT_OWNER_* 环境变量和配置文件）、读写凭证库、读 hermes 来源密钥，从而绕过两步批准。
+这里的检查挡得住模型拼错参数、复用旧消息、事后改提议，挡不住主账号上蓄意作恶的模型（twin_identity 头注释同一局限）。
+硬保证要把签发网关放进独立信任域（例如另一个 macOS 账号 dt-gate，猛鬼兽只能经窄接口递提议和消息号）；
+是否这样做，在 0A–0D 之后、真实切换前的 ADR-015 里决定。在那之前，写入单只派名册里的沙盒和明确允许写入的仓库。
 
   autoloop_grants.py propose --repo dt-sandbox --executor claude --scope-file 五要素.md [--hours 12]
   autoloop_grants.py approve --message-id om_xxx          常浩回了「派单 <确认码>」后由猛鬼兽调用
   autoloop_grants.py resume-dispatch --task T --kind redispatch|rework|correction --reason 原因
   autoloop_grants.py freeze --task T --reason 原因 | revoke --task T [--reason] | complete --task T
-  autoloop_grants.py unfreeze --message-id om_xxx        常浩私聊「恢复 <单号>」
+  autoloop_grants.py unfreeze --message-id om_xxx        常浩私聊「恢复 <单号> <冻结码>」（要先记过更正）
   autoloop_grants.py check --task T --action edit --generation 1
-  autoloop_grants.py show [--task T]
-环境变量：DT_GRANTS_DB（默认 DigitalTwin/autoloop/grants.db）、DT_GRANTS_STATUS（共享镜像）、DT_HUB（中台地址）、
-DT_HERMES_SOURCE_KEY_FILE（hermes 来源密钥文件，600；0B-2 建）。
+  autoloop_grants.py show [--task T] | send-pending
+环境变量：DT_GRANTS_DB（默认 DigitalTwin/autoloop/grants.db）、DT_GRANTS_STATUS（共享镜像）、DT_GRANTS_TASKS（任务单目录）、
+DT_HUB（中台地址）、DT_HERMES_SOURCE_KEY_FILE（hermes 来源密钥文件，600；0B-2 建）。
 """
 import argparse
 import contextlib
 import datetime as dt
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -49,33 +70,38 @@ TZ = dt.timezone(dt.timedelta(hours=8))
 SUPPORT = Path("~/Library/Application Support/DigitalTwin").expanduser()
 ROSTER = Path(os.environ.get("DT_ROSTER") or HERE.parents[1] / "projects.json")
 ACTIONS = ("edit", "push_branch", "open_pr")
+ACTION_WORDS = {"edit": "改文件", "push_branch": "推分支（不推 main）", "open_pr": "开 PR"}
 EXECUTORS = ("claude", "codex")
 KINDS = ("redispatch", "rework", "correction")
 PROPOSAL_TTL = dt.timedelta(minutes=30)
+STALE = dt.timedelta(seconds=60)          # 在途超过这么久没结果，才当结果不明补发（POST 超时 15 秒）
 MAX_HOURS = 72
-APPROVE_TEXT = re.compile(r"^派单\s*([0-9a-f]{6})$")
-UNFREEZE_TEXT = re.compile(r"^恢复\s*(t-\d{8}-[0-9a-f]{6})$")
+APPROVE_TEXT = re.compile(r"^派单\s*([0-9a-f]{8})$")
+UNFREEZE_TEXT = re.compile(r"^恢复\s*(t-\d{8}-[0-9a-f]{6})\s+([0-9a-f]{6})$")
 TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")
 REPO_NAME = re.compile(r"^[\w.-]{1,100}$")
 MAX_SCOPE = 3000
+SCHEMA_VERSION = 2
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS grants (
   task_id TEXT PRIMARY KEY, repo TEXT NOT NULL, github TEXT NOT NULL, scope_text TEXT NOT NULL, scope_hash TEXT NOT NULL,
   executor TEXT NOT NULL, rule TEXT NOT NULL, actions TEXT NOT NULL, valid_until TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('active','frozen','revoked','done')),
-  generation INTEGER NOT NULL, generation_started_at TEXT NOT NULL,
+  generation INTEGER NOT NULL, generation_started_at TEXT NOT NULL, freeze_code TEXT,
   approval_message TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS voided_generations (task_id TEXT NOT NULL, generation INTEGER NOT NULL, at TEXT NOT NULL,
   reason TEXT NOT NULL, PRIMARY KEY (task_id, generation));
+CREATE TABLE IF NOT EXISTS resolutions (task_id TEXT NOT NULL, generation INTEGER NOT NULL, decision TEXT NOT NULL,
+  resolution TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (task_id, generation));
 CREATE TABLE IF NOT EXISTS grant_log (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, at TEXT NOT NULL,
   what TEXT NOT NULL, detail TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS proposals (code TEXT PRIMARY KEY, repo TEXT NOT NULL, executor TEXT NOT NULL,
-  scope_text TEXT NOT NULL, actions TEXT NOT NULL, valid_until TEXT NOT NULL, created_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL, task_id TEXT);
+CREATE TABLE IF NOT EXISTS proposals (code TEXT PRIMARY KEY, repo TEXT NOT NULL, github TEXT NOT NULL,
+  executor TEXT NOT NULL, scope_text TEXT NOT NULL, actions TEXT NOT NULL, valid_until TEXT NOT NULL,
+  content_hash TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, notice_message TEXT, task_id TEXT);
 CREATE TABLE IF NOT EXISTS used_messages (message_id TEXT PRIMARY KEY, purpose TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hub_events (event_key TEXT PRIMARY KEY, task_id TEXT NOT NULL, rule TEXT NOT NULL,
   executor TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, hub_event INTEGER, at TEXT NOT NULL,
-  sent INTEGER NOT NULL DEFAULT 0);
+  sent INTEGER NOT NULL DEFAULT 0, claimed_at TEXT, tries INTEGER NOT NULL DEFAULT 0)
 """
 
 
@@ -90,6 +116,10 @@ def db_path():
 
 def status_path():
     return Path(os.environ.get("DT_GRANTS_STATUS") or "/Users/Shared/dt-autoloop/grants/status.json").expanduser()
+
+
+def tasks_dir():
+    return Path(os.environ.get("DT_GRANTS_TASKS") or "/Users/Shared/dt-autoloop/tasks").expanduser()
 
 
 def now_tz():
@@ -109,6 +139,17 @@ def sha256(text):
 
 
 # ---------- 库 ----------
+def _ensure_schema(con):
+    v = con.execute("PRAGMA user_version").fetchone()[0]
+    if v == SCHEMA_VERSION:
+        return
+    if v or con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table'").fetchone():
+        raise Rejected(f"凭证库结构是第 {v} 版，本脚本要第 {SCHEMA_VERSION} 版；没有自动迁移，请把旧库备份后移走")
+    for stmt in SCHEMA.split(";"):
+        con.execute(stmt)
+    con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 @contextlib.contextmanager
 def tx(path=None):
     """一个写事务：BEGIN IMMEDIATE 拿写锁，读和写在同一事务里，判定和状态变化之间没有空隙。"""
@@ -121,13 +162,14 @@ def tx(path=None):
         os.chmod(p, 0o600)
     con.row_factory = sqlite3.Row
     try:
-        con.executescript(SCHEMA)
         con.execute("BEGIN IMMEDIATE")
-        yield con
-        con.execute("COMMIT")
-    except BaseException:
-        con.execute("ROLLBACK")
-        raise
+        try:
+            _ensure_schema(con)
+            yield con
+            con.execute("COMMIT")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
     finally:
         con.close()
 
@@ -144,6 +186,10 @@ def grant_row(con, task_id):
     if row is None:
         raise Rejected(f"没有 {task_id} 这张任务凭证")
     return row
+
+
+def voided_of(con, task_id):
+    return {r[0] for r in con.execute("SELECT generation FROM voided_generations WHERE task_id = ?", (task_id,))}
 
 
 # ---------- 名册 ----------
@@ -168,14 +214,14 @@ def rule_name(repo, executor):
 
 # ---------- 判定（所有出口共用） ----------
 def check_row(row, action, generation, now, voided=()):
-    """返回 None 表示放行，否则返回拒绝原因。"""
+    """返回 None 表示放行，否则返回拒绝原因。action 为 None 时不查动作（发派单事件用）。"""
     if row is None:
         return "没有这张任务凭证"
     if row["status"] != "active":
         return {"frozen": "凭证已冻结", "revoked": "凭证已撤销", "done": "任务已完成"}[row["status"]]
     if now >= parse_iso(row["valid_until"]):
         return "凭证已过期"
-    if action not in json.loads(row["actions"]):
+    if action is not None and action not in json.loads(row["actions"]):
         return f"凭证不允许 {action}"
     if generation in voided:
         return f"第 {generation} 代已作废"
@@ -191,33 +237,44 @@ def check(task_id, action, generation, now=None, path=None):
             row = grant_row(con, task_id)
         except Rejected as e:
             return str(e)
-        voided = {r[0] for r in con.execute("SELECT generation FROM voided_generations WHERE task_id = ?", (task_id,))}
-        return check_row(row, action, generation, now, voided)
+        return check_row(row, action, generation, now, voided_of(con, task_id))
 
 
-# ---------- 状态镜像（工人只读） ----------
+# ---------- 共享文件（工人只读） ----------
+def _write_shared(p, text):
+    """原子写一个工人可读的文件：目录 755、文件 644。"""
+    p.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(p.parent, 0o755)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, p)
+
+
+def write_status(con, now):
+    """按 con 里看到的状态写镜像。调用方都持有写锁，所以镜像写入和库的变化一样是串行的。"""
+    tasks = {}
+    for r in con.execute("SELECT * FROM grants ORDER BY task_id"):
+        tasks[r["task_id"]] = {"repo": r["repo"], "executor": r["executor"], "rule": r["rule"], "status": r["status"],
+                               "generation": r["generation"], "voided_generations": sorted(voided_of(con, r["task_id"])),
+                               "valid_until": r["valid_until"], "actions": json.loads(r["actions"]),
+                               "scope_hash": r["scope_hash"]}
+    doc = {"schema": 1, "updated_at": iso(now), "tasks": tasks}
+    _write_shared(status_path(), json.dumps(doc, ensure_ascii=False, indent=1, sort_keys=True))
+
+
 def refresh_status(path=None, now=None):
-    """事务提交之后再写镜像：镜像只反映已经落盘的状态。"""
+    """放宽方向用：库已经提交，再按已落盘的状态写镜像。写不成就抛错，镜像停在更严的旧状态。"""
     with tx(path) as con:
         write_status(con, now or now_tz())
 
 
-def write_status(con, now):
-    tasks = {}
-    for r in con.execute("SELECT * FROM grants ORDER BY task_id"):
-        voided = [v[0] for v in con.execute(
-            "SELECT generation FROM voided_generations WHERE task_id = ? ORDER BY generation", (r["task_id"],))]
-        tasks[r["task_id"]] = {"repo": r["repo"], "executor": r["executor"], "rule": r["rule"], "status": r["status"],
-                               "generation": r["generation"], "voided_generations": voided,
-                               "valid_until": r["valid_until"], "actions": json.loads(r["actions"]),
-                               "scope_hash": r["scope_hash"]}
-    doc = {"schema": 1, "updated_at": iso(now), "tasks": tasks}
-    p = status_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, p)
+def write_task_file(row):
+    """工人可读的任务单：五要素原文和凭证的不变字段；不含批准消息号、不含代次（代次以镜像和事件为准）。"""
+    text = "\n".join([f"# 任务 {row['task_id']}", "", f"仓库：{row['github']}", f"执行方：{row['executor']}",
+                      f"允许的动作：{'、'.join(json.loads(row['actions']))}", f"有效到：{row['valid_until']}",
+                      f"范围哈希：{row['scope_hash']}", "", "## 五要素", "", row["scope_text"], ""])
+    _write_shared(tasks_dir() / f"{row['task_id']}.md", text)
 
 
 # ---------- 中台 ----------
@@ -249,14 +306,12 @@ def post_event(body):
         raise Rejected(f"连不上中台或回应不对：{type(e).__name__}")
 
 
-def event_body(row, kind, key, reason=""):
-    lines = [f"任务 {row['task_id']}（第 {row['generation']} 代）", f"仓库：{row['github']}", f"执行方：{row['executor']}",
-             f"允许的动作：{'、'.join(json.loads(row['actions']))}", f"有效到：{row['valid_until']}"]
-    if reason:
-        lines.append(f"本次：{kind}，原因：{reason}")
-    lines += ["", "五要素：", row["scope_text"]]
-    return {"id": key, "type": f"dispatch.{row['repo']}.{row['executor']}.write", "subject": row["task_id"],
-            "summary": f"{row['repo']} · {row['executor']} · {kind}", "detail": "\n".join(lines)[:4000]}
+def event_body(ev, row):
+    """事件只带单号、代次、类别（方案 5.1 第 1 条）；五要素在任务单里。"""
+    return {"id": ev["event_key"], "type": f"dispatch.{row['repo']}.{row['executor']}.write", "subject": row["task_id"],
+            "summary": f"{row['repo']} · {row['executor']} · {ev['kind']}",
+            "detail": json.dumps({"task_id": row["task_id"], "generation": ev["generation"], "kind": ev["kind"]},
+                                 sort_keys=True)}
 
 
 def record_event(con, row, kind, key, now):
@@ -264,31 +319,82 @@ def record_event(con, row, kind, key, now):
                 "VALUES (?,?,?,?,?,?,?)", (key, row["task_id"], row["rule"], row["executor"], row["generation"], kind, iso(now)))
 
 
-def send_pending(path=None, post=None):
-    """把记了账、还没送到中台的事件发出去（同一 id 中台去重）。先记账后发，所以强杀后补发不会丢也不会多派。"""
-    post = post or post_event
-    with tx(path) as con:
-        pending = [dict(r) for r in con.execute("SELECT * FROM hub_events WHERE sent = 0 ORDER BY at, event_key")]
-        rows = {p["task_id"]: dict(grant_row(con, p["task_id"])) for p in pending}
-    results = []
-    for p in pending:
-        row = rows[p["task_id"]]
-        if row["status"] != "active" or row["generation"] != p["generation"]:
-            results.append({"event_key": p["event_key"], "sent": False, "why": "凭证已不是这一代有效，作废不发"})
-            with tx(path) as con:
-                con.execute("UPDATE hub_events SET sent = -1 WHERE event_key = ?", (p["event_key"],))
+def _claim_next(con, now, seen):
+    """在写事务里挑下一个要发的事件：现读凭证判定，不能发的就地作废；能发的领取为在途。返回 (事件, 凭证, 作废清单)。"""
+    skipped = []
+    for e in con.execute("SELECT * FROM hub_events WHERE sent IN (0, 2) ORDER BY at, rowid").fetchall():
+        if e["event_key"] in seen:
             continue
-        hub_event = post(event_body(row, p["kind"], p["event_key"]))
+        if e["sent"] == 2 and now - parse_iso(e["claimed_at"]) < STALE:
+            continue                                  # 刚被领走、还在发，不抢
+        row = con.execute("SELECT * FROM grants WHERE task_id = ?", (e["task_id"],)).fetchone()
+        why = check_row(row, None, e["generation"], now, voided_of(con, e["task_id"]))
+        if why:
+            con.execute("UPDATE hub_events SET sent = ? WHERE event_key = ?", (-1 if e["sent"] == 0 else -2, e["event_key"]))
+            skipped.append({"event_key": e["event_key"], "sent": False, "why": f"{why}，作废不发"})
+            continue
+        con.execute("UPDATE hub_events SET sent = 2, claimed_at = ?, tries = tries + 1 WHERE event_key = ?",
+                    (iso(now), e["event_key"]))
+        return dict(e), dict(row), skipped
+    return None, None, skipped
+
+
+def send_pending(path=None, post=None, now=None):
+    """把记了账、还没确认送到中台的事件逐个发出去。先刷新镜像（镜像写不成就一个也不发），再逐个：
+    事务里现读凭证并领取 → 提交 → POST → 送达后条件更新。"""
+    post = post or post_event
+    try:
+        refresh_status(path, now)
+    except OSError as e:
+        raise Rejected(f"状态镜像写不了（{type(e).__name__}），事件先不发")
+    results, seen = [], set()
+    while True:
+        t = now or now_tz()
         with tx(path) as con:
-            con.execute("UPDATE hub_events SET sent = 1, hub_event = ? WHERE event_key = ?", (hub_event, p["event_key"]))
-        results.append({"event_key": p["event_key"], "sent": True, "hub_event": hub_event})
-    return results
+            ev, row, skipped = _claim_next(con, t, seen)
+        results += skipped
+        if ev is None:
+            return results
+        seen.add(ev["event_key"])
+        try:
+            hub_event = post(event_body(ev, row))
+        except Rejected as e:
+            results.append({"event_key": ev["event_key"], "sent": None, "why": f"结果不明（{e}），凭证仍有效时下次补发"})
+            continue
+        with tx(path) as con:
+            con.execute("UPDATE hub_events SET sent = 1, hub_event = ? WHERE event_key = ? AND sent IN (2, -2)",
+                        (hub_event, ev["event_key"]))
+        results.append({"event_key": ev["event_key"], "sent": True, "hub_event": hub_event})
 
 
-# ---------- 身份 ----------
+def _try_send(path, post, now):
+    try:
+        return send_pending(path, post, now)
+    except Rejected as e:
+        return {"error": str(e)}
+
+
+# ---------- 身份、私聊 ----------
 def fetch_message(message_id):
     """回读一条消息并带正文；测试打桩这里。"""
     return I.lark_fetch(message_id, with_text=True)
+
+
+def notify_owner(text, key):
+    """以猛鬼兽机器人把确认消息发到常浩私聊（批准口令必须来自的同一个会话）；返回消息号。测试打桩这里。"""
+    import tidings_weekly as W
+    import twin_state as T
+    try:
+        chat = T.owner_chat_id()
+    except T.StateError as e:
+        raise Rejected(str(e))
+    try:
+        mid = W.send(chat, "text", {"text": text}, key)
+    except W.SendError as e:
+        raise Rejected(f"确认消息没发出去：{e}")
+    if not mid:
+        raise Rejected("确认消息没发出去：飞书没回消息号")
+    return mid
 
 
 def verify_owner(message_id, now):
@@ -318,42 +424,65 @@ def claim_message(con, message_id, purpose, now):
 
 
 # ---------- 入口一：本人批准建任务 ----------
-def confirm_code(repo, executor, actions, valid_until, scope_text):
-    return sha256("\n".join([repo, executor, ",".join(actions), valid_until, scope_text]))[:6]
+def content_hash(repo, github, executor, actions, valid_until, scope_text):
+    return sha256("\n".join([repo, github, executor, ",".join(actions), valid_until, scope_text]))
+
+
+def notice_text(code, github, executor, actions, valid_until, scope_text):
+    until = parse_iso(valid_until).astimezone(TZ)
+    return "\n".join([
+        "【派单确认】猛鬼兽整理了一张写入任务，请核对：",
+        f"仓库：{github}", f"执行方：{executor}", f"允许的动作：{'、'.join(ACTION_WORDS[a] for a in actions)}",
+        f"有效到：{until:%m-%d %H:%M}", "", "五要素：", scope_text, "",
+        f"同意就回：派单 {code}", f"（{int(PROPOSAL_TTL.total_seconds() // 60)} 分钟内有效，只认你本人在这个私聊里回；不同意不用回）"])
 
 
 def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None):
     now = now or now_tz()
-    if not REPO_NAME.match(repo or "") or repo not in allowed_repos():
+    if not REPO_NAME.match(repo or ""):
+        raise Rejected(f"{repo} 不在名册能派写入单的仓库里")
+    github = allowed_repos().get(repo)
+    if not github:
         raise Rejected(f"{repo} 不在名册能派写入单的仓库里")
     if executor not in EXECUTORS:
         raise Rejected("执行方只能是 claude 或 codex")
-    actions = tuple(a for a in ACTIONS if a in actions)
     if not actions or set(actions) - set(ACTIONS):
         raise Rejected("动作只能是 edit、push_branch、open_pr")
+    actions = tuple(a for a in ACTIONS if a in actions)
     scope_text = (scope_text or "").strip()
     if not scope_text or len(scope_text) > MAX_SCOPE:
         raise Rejected(f"五要素不能为空，最多 {MAX_SCOPE} 字")
     if not 0 < hours <= MAX_HOURS:
         raise Rejected(f"有效期 1 到 {MAX_HOURS} 小时")
     valid_until = iso(now + dt.timedelta(hours=hours))
-    code = confirm_code(repo, executor, actions, valid_until, scope_text)
+    h = content_hash(repo, github, executor, actions, valid_until, scope_text)
     with tx(path) as con:
-        con.execute("INSERT OR REPLACE INTO proposals (code, repo, executor, scope_text, actions, valid_until, created_at, "
-                    "expires_at, task_id) VALUES (?,?,?,?,?,?,?,?,NULL)",
-                    (code, repo, executor, scope_text, json.dumps(list(actions)), valid_until, iso(now),
-                     iso(now + PROPOSAL_TTL)))
-    return {"code": code, "phrase": f"派单 {code}", "repo": repo, "executor": executor, "actions": list(actions),
-            "valid_until": valid_until, "expires_at": iso(now + PROPOSAL_TTL)}
+        for _ in range(5):
+            code = secrets.token_hex(4)
+            try:
+                con.execute("INSERT INTO proposals (code, repo, github, executor, scope_text, actions, valid_until, "
+                            "content_hash, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (code, repo, github, executor, scope_text, json.dumps(list(actions)), valid_until, h,
+                             iso(now), iso(now + PROPOSAL_TTL)))
+                break
+            except sqlite3.IntegrityError:
+                continue
+        else:
+            raise Rejected("确认码连撞 5 次，请重试")
+    notice = notify_owner(notice_text(code, github, executor, actions, valid_until, scope_text), f"dt-grant-{code}")
+    with tx(path) as con:
+        con.execute("UPDATE proposals SET notice_message = ? WHERE code = ? AND notice_message IS NULL", (notice, code))
+    return {"code": code, "repo": repo, "github": github, "executor": executor, "actions": list(actions),
+            "valid_until": valid_until, "expires_at": iso(now + PROPOSAL_TTL), "notice": "已发到常浩私聊"}
 
 
 def approve(message_id, now=None, path=None, post=None):
-    """常浩回了「派单 <确认码>」：核验后签凭证（代次 1），记一个 start 事件并发出去。"""
+    """常浩回了「派单 <确认码>」：核验后签凭证（代次 1），写任务单，记一个 start 事件并发出去。"""
     now = now or now_tz()
     text = verify_owner(message_id, now)
     m = APPROVE_TEXT.match(text)
     if not m:
-        raise Rejected("这条消息不是批准派单的口令（应为「派单 <确认码>」）")
+        raise Rejected("这条消息不是批准派单的口令（应为「派单 <8 位确认码>」）")
     with tx(path) as con:
         p = con.execute("SELECT * FROM proposals WHERE code = ?", (m.group(1),)).fetchone()
         if p is None:
@@ -362,31 +491,27 @@ def approve(message_id, now=None, path=None, post=None):
             raise Rejected(f"这个提议已经签过凭证（{p['task_id']}）")
         if now >= parse_iso(p["expires_at"]):
             raise Rejected("这个提议已过期（30 分钟），请猛鬼兽重新整理后再批")
+        if not p["notice_message"]:
+            raise Rejected("这个提议的确认消息没发到你私聊，不能批；请猛鬼兽重新提")
         actions = json.loads(p["actions"])
-        if confirm_code(p["repo"], p["executor"], actions, p["valid_until"], p["scope_text"]) != p["code"]:
-            raise Rejected("提议内容和确认码对不上，不签")
-        github = allowed_repos().get(p["repo"])
-        if not github:
-            raise Rejected(f"{p['repo']} 已不在名册能派写入单的仓库里")
+        if content_hash(p["repo"], p["github"], p["executor"], actions, p["valid_until"], p["scope_text"]) != p["content_hash"]:
+            raise Rejected("提议内容和提出时对不上，不签")
+        if allowed_repos().get(p["repo"]) != p["github"]:
+            raise Rejected(f"名册里 {p['repo']} 的仓库变了或已不能派写入单，请猛鬼兽重新提")
         claim_message(con, message_id, f"批准派单 {p['code']}", now)
         task_id = f"t-{now.astimezone(TZ):%Y%m%d}-{secrets.token_hex(3)}"
-        con.execute("INSERT INTO grants VALUES (?,?,?,?,?,?,?,?,?,'active',1,?,?,?,?)",
-                    (task_id, p["repo"], github, p["scope_text"], sha256(p["scope_text"]), p["executor"],
+        con.execute("INSERT INTO grants (task_id, repo, github, scope_text, scope_hash, executor, rule, actions, "
+                    "valid_until, status, generation, generation_started_at, approval_message, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,'active',1,?,?,?,?)",
+                    (task_id, p["repo"], p["github"], p["scope_text"], sha256(p["scope_text"]), p["executor"],
                      rule_name(p["repo"], p["executor"]), p["actions"], p["valid_until"], iso(now), message_id,
                      iso(now), iso(now)))
         con.execute("UPDATE proposals SET task_id = ? WHERE code = ?", (task_id, p["code"]))
         log(con, task_id, "签发", now, message=message_id, code=p["code"])
         row = grant_row(con, task_id)
         record_event(con, row, "start", f"{task_id}:g1:start", now)
-    refresh_status(path, now)
-    return {"task_id": task_id, "send": _try_send(path, post)}
-
-
-def _try_send(path, post):
-    try:
-        return send_pending(path, post)
-    except Rejected as e:
-        return {"error": str(e)}
+        write_task_file(row)          # 写不成整笔回滚：没有任务单就没有凭证
+    return {"task_id": task_id, "send": _try_send(path, post, now)}    # 发之前先写镜像（放宽方向：先提交后写）
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
@@ -398,8 +523,7 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None):
         raise Rejected("续接要写原因")
     with tx(path) as con:
         row = grant_row(con, task_id)
-        voided = {r[0] for r in con.execute("SELECT generation FROM voided_generations WHERE task_id = ?", (task_id,))}
-        why = check_row(row, "edit", row["generation"], now, voided)
+        why = check_row(row, "edit", row["generation"], now, voided_of(con, task_id))
         if why:
             raise Rejected(f"不能续接：{why}")
         n = con.execute("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND generation = ? AND kind = ?",
@@ -407,61 +531,96 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None):
         key = f"{task_id}:g{row['generation']}:{kind}:{n + 1}"
         record_event(con, row, kind, key, now)
         log(con, task_id, "续接", now, kind=kind, reason=reason.strip()[:200], event=key)
-    return {"event_key": key, "send": _try_send(path, post)}
+    return {"event_key": key, "send": _try_send(path, post, now)}
 
 
-# ---------- 安全方向：冻结、撤销、完成 ----------
-def _set_status(task_id, status, what, reason, now, path, void):
+# ---------- 收紧方向：冻结、撤销、完成（先写镜像再提交） ----------
+def _tighten(task_id, status, what, reason, now, path):
     with tx(path) as con:
         row = grant_row(con, task_id)
         if row["status"] in ("revoked", "done"):
             raise Rejected(f"{task_id} 已经是终态（{row['status']}），不能再改")
-        if void:
+        out = {"task_id": task_id, "status": status, "generation": row["generation"]}
+        if status == "frozen" and row["status"] == "frozen":
+            return {**out, "freeze_code": row["freeze_code"], "already": True}
+        code = secrets.token_hex(3) if status == "frozen" else None
+        if status != "done":
             con.execute("INSERT OR IGNORE INTO voided_generations VALUES (?,?,?,?)",
                         (task_id, row["generation"], iso(now), reason[:200]))
-        con.execute("UPDATE grants SET status = ?, updated_at = ? WHERE task_id = ?", (status, iso(now), task_id))
+        con.execute("UPDATE grants SET status = ?, freeze_code = ?, updated_at = ? WHERE task_id = ?",
+                    (status, code, iso(now), task_id))
         con.execute("UPDATE hub_events SET sent = -1 WHERE task_id = ? AND sent = 0", (task_id,))
-        log(con, task_id, what, now, reason=reason[:200], generation=row["generation"], voided=void)
-        out = {"task_id": task_id, "status": status, "generation": row["generation"]}
-    refresh_status(path, now)
-    return out
+        log(con, task_id, what, now, reason=reason[:200], generation=row["generation"], voided=status != "done")
+        write_status(con, now)        # 先写镜像再提交：写不成就整笔回滚，镜像不会比库宽松
+    return {**out, "freeze_code": code} if code else out
 
 
 def freeze(task_id, reason, now=None, path=None):
-    """推翻第一步：冻结并作废当前代次。冻结中不往中台投任何事件。"""
+    """推翻第一步：冻结并作废当前代次，生成这次冻结的冻结码。冻结中不往中台投任何事件。"""
     if not (reason or "").strip():
         raise Rejected("冻结要写原因")
-    return _set_status(task_id, "frozen", "冻结", reason, now or now_tz(), path, void=True)
+    return _tighten(task_id, "frozen", "冻结", reason, now or now_tz(), path)
 
 
 def revoke(task_id, reason="常浩撤销", now=None, path=None):
-    return _set_status(task_id, "revoked", "撤销", reason, now or now_tz(), path, void=True)
+    return _tighten(task_id, "revoked", "撤销", reason, now or now_tz(), path)
 
 
 def complete(task_id, now=None, path=None):
-    return _set_status(task_id, "done", "完成", "任务完成", now or now_tz(), path, void=False)
+    return _tighten(task_id, "done", "完成", "任务完成", now or now_tz(), path)
 
 
-# ---------- 恢复：常浩私聊「恢复 <单号>」，代次 +1 ----------
+# ---------- 更正记录与恢复 ----------
+def record_resolution(task_id, generation, decision, resolution, now=None, path=None):
+    """记这次冻结的更正（规格 §8 第 4 步：被替代的决定号、下游怎么处理），恢复的前提。
+    只由 0B-5 的推翻流程调用；本批不给命令行入口，所以本批恢复实际关闭。"""
+    now = now or now_tz()
+    decision, resolution = (decision or "").strip(), (resolution or "").strip()
+    if not decision or len(decision) > 100 or not resolution or len(resolution) > 500:
+        raise Rejected("更正要写被替代的决定号（100 字内）和下游怎么处理（500 字内）")
+    with tx(path) as con:
+        row = grant_row(con, task_id)
+        if row["status"] != "frozen":
+            raise Rejected(f"{task_id} 不是冻结状态，没有要更正的")
+        if generation != row["generation"]:
+            raise Rejected(f"这次冻结的是第 {row['generation']} 代，不是第 {generation} 代")
+        try:
+            con.execute("INSERT INTO resolutions VALUES (?,?,?,?,?)", (task_id, generation, decision, resolution, iso(now)))
+        except sqlite3.IntegrityError:
+            raise Rejected("这次冻结已经记过更正")
+        log(con, task_id, "更正", now, generation=generation, decision=decision)
+    return {"task_id": task_id, "generation": generation, "recorded": True}
+
+
 def unfreeze(message_id, now=None, path=None):
+    """常浩私聊「恢复 <单号> <冻结码>」：冻结码对得上这次冻结、这次冻结已记过更正，才恢复为有效，代次 +1。"""
     now = now or now_tz()
     text = verify_owner(message_id, now)
     m = UNFREEZE_TEXT.match(text)
     if not m:
-        raise Rejected("这条消息不是恢复任务的口令（应为「恢复 <单号>」）")
+        raise Rejected("这条消息不是恢复任务的口令（应为「恢复 <单号> <冻结码>」）")
     with tx(path) as con:
         row = grant_row(con, m.group(1))
         if row["status"] != "frozen":
             raise Rejected(f"{row['task_id']} 不是冻结状态（现在是 {row['status']}），不用恢复")
+        if not row["freeze_code"] or not hmac.compare_digest(row["freeze_code"], m.group(2)):
+            raise Rejected("冻结码对不上：冻结码只对这一次冻结有效")
         if now >= parse_iso(row["valid_until"]):
             raise Rejected("凭证已过期，恢复不了；要继续请重新批准派单")
+        if con.execute("SELECT 1 FROM resolutions WHERE task_id = ? AND generation = ?",
+                       (row["task_id"], row["generation"])).fetchone() is None:
+            raise Rejected("这次冻结还没记更正（规格 §8：更正先持久记在账本），不能恢复")
         claim_message(con, message_id, f"恢复 {row['task_id']}", now)
         gen = row["generation"] + 1
-        con.execute("UPDATE grants SET status = 'active', generation = ?, generation_started_at = ?, updated_at = ? "
-                    "WHERE task_id = ?", (gen, iso(now), iso(now), row["task_id"]))
+        con.execute("UPDATE grants SET status = 'active', generation = ?, generation_started_at = ?, freeze_code = NULL, "
+                    "updated_at = ? WHERE task_id = ?", (gen, iso(now), iso(now), row["task_id"]))
         log(con, row["task_id"], "恢复", now, message=message_id, generation=gen)
-    refresh_status(path, now)
-    return {"task_id": row["task_id"], "status": "active", "generation": gen}
+    out = {"task_id": row["task_id"], "status": "active", "generation": gen}
+    try:
+        refresh_status(path, now)     # 放宽方向：先提交后写镜像，写不成镜像停在冻结（更严）
+    except OSError as e:
+        out["mirror_error"] = f"状态镜像没写成（{type(e).__name__}），工人仍看到冻结；下次 send-pending 会重写"
+    return out
 
 
 def show(task_id=None, path=None):
@@ -469,10 +628,9 @@ def show(task_id=None, path=None):
         rows = [grant_row(con, task_id)] if task_id else list(con.execute("SELECT * FROM grants ORDER BY created_at"))
         out = []
         for r in rows:
-            d = {k: r[k] for k in r.keys() if k not in ("scope_text", "approval_message")}
+            d = {k: r[k] for k in r.keys() if k not in ("scope_text", "approval_message", "freeze_code")}
             d["actions"] = json.loads(r["actions"])
-            d["voided_generations"] = [v[0] for v in con.execute(
-                "SELECT generation FROM voided_generations WHERE task_id = ? ORDER BY generation", (r["task_id"],))]
+            d["voided_generations"] = sorted(voided_of(con, r["task_id"]))
             out.append(d)
         return out
 
