@@ -218,6 +218,11 @@ def rule_name(repo, executor):
     return f"dispatch-{repo}-{executor}"
 
 
+def event_type(repo, executor):
+    """派单事件的类型；中台派单规则按它接（autoloop_config 生成规则时用同一个函数）。"""
+    return f"dispatch.{repo}.{executor}.write"
+
+
 # ---------- 判定（所有出口共用） ----------
 def check_row(row, action, generation, now, voided=()):
     """返回 None 表示放行，否则返回拒绝原因。action 为 None 时不查动作（发派单事件用）。"""
@@ -324,7 +329,7 @@ def post_event(body):
 
 def event_body(ev, row):
     """事件只带单号、代次、类别（方案 5.1 第 1 条）；五要素在任务单里。"""
-    return {"id": ev["event_key"], "type": f"dispatch.{row['repo']}.{row['executor']}.write", "subject": row["task_id"],
+    return {"id": ev["event_key"], "type": event_type(row["repo"], row["executor"]), "subject": row["task_id"],
             "summary": f"{row['repo']} · {row['executor']} · {ev['kind']}",
             "detail": json.dumps({"task_id": row["task_id"], "generation": ev["generation"], "kind": ev["kind"]},
                                  sort_keys=True)}

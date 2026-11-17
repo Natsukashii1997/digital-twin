@@ -98,6 +98,14 @@
       "note": "仅支持 Hermes（常浩点名这是猛鬼兽的任务）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 high（DT_GD_REASONING 可改）。模型只写材料编号，链接由脚本填；核对不过带着问题重写一次，再不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
     },
     {
+      "id": "secretary",
+      "name": "秘书代批（#195 批 0B：猛鬼兽按常浩签的清单代批中台卡片；0B-4 才有判断和送达，现在只有中台里的 secretary 通道和只读窗口）",
+      "executor": "hermes",
+      "reads": "中台只读窗口 autoloop_readonly.py 的卡片快照（不含本人密钥、卡片链接、回答原文）、任务凭证（autoloop_grants.py）",
+      "writes": "0B-4 起：中台 secretary 通道的回答（by=秘书）、托管账本；现在不写任何东西",
+      "note": "仅支持 Hermes（规格 docs/秘书代批-规格.md §6：判断用 hermes chat 单次、最小工具集，模型不持通道钥匙）。0B-4 上线前不生效。"
+    },
+    {
       "id": "proposal-digest",
       "name": "每周待决提案的推荐（Hermes 带模型定时任务，每周一 10:00）",
       "executor": "hermes",
@@ -120,7 +128,8 @@
     "AI HOT 热点榜推送 aihot_hot.py：取 aihot.news 热点榜排版，概括按整句截取、话题标签按标题关键词，不经模型改写",
     "工程自检 self_check.py、每日巡检 health_check.py、仓库自检 check_repos.py：纯脚本",
     "skill 月度体检推送 skill_health.py：纯脚本，转发 my-skills 的 monthly-health.mjs 统计",
-    "晨报取数 brief_data.py：挂起中，不在运行"
+    "晨报取数 brief_data.py：挂起中，不在运行",
+    "任务凭证与派单网关 autoloop_grants.py、中台配置 autoloop_config.py、中台只读窗口 autoloop_readonly.py（#195 批 0B）：纯脚本"
   ],
   "exceptions": [
     {
