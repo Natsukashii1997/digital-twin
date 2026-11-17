@@ -143,6 +143,8 @@ def run(cmd, env=None, timeout=30, limit=300):
         return r.returncode, text if limit is None else text[:limit]
     except FileNotFoundError:
         return None, "没有这个命令"
+    except PermissionError:
+        return None, "没有权限运行这个命令"
     except subprocess.TimeoutExpired:
         return None, "超时"
 

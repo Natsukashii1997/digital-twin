@@ -103,6 +103,15 @@ tcp4       0      0  127.0.0.1.5280         127.0.0.1.60001        ESTABLISHED
         self.assertEqual(len(text), 500)
         self.assertEqual(len(iso.run(["/bin/sh", "-c", "printf '%0500d' 0"])[1]), 300)
 
+    def test_run_unexecutable_command_is_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "gh"
+            p.write_text("#!/bin/sh\nexit 0\n")
+            p.chmod(0o600)
+            code, text = iso.run([str(p), "auth", "status"])
+            self.assertIsNone(code)
+            self.assertIn("没有权限", text)
+
     def test_proxy_loopback_fails(self):
         out = iso.service_checks([5280], None,
                                  connect=lambda h, p: False, via_proxy=lambda pp, h, p: (True, "HTTP/1.1 200"))
