@@ -368,7 +368,7 @@ class Card(Base):
     def test_三个板块_编号链接_代码块_文档按钮_没有原话和帮助(self):
         text = json.dumps(gd.build_card(DAY, *self.args, doc_url="https://x.feishu.cn/docx/abc"), ensure_ascii=False)
         for want in ("昨日信息梳理", "今日行动清单", "思考采纳建议", "点头才落地", "值得精读", "条待你想",
-                     "谁做 · 在哪", ">Claude</text_tag>", ">你</text_tag>", "**1. 在数字分身仓库跑", "第 1 条标了 Claude", "回「**派**」就开单",
+                     "谁做 · 在哪", ">Claude</text_tag>", ">你</text_tag>", "**1. 在数字分身仓库跑", "❓ **要我把第 1 条写成任务派给 Claude 吗？**", "回「**派**」就开单",
                      "[M2](https://x.com/lydiahallie/status/222)", "[S1](https://claude.com/resources/articles/self-hosted)",
                      "`claude /doctor prompt-audit`", "https://x.feishu.cn/docx/abc"):
             self.assertIn(want, text, want)
@@ -378,8 +378,21 @@ class Card(Base):
     def test_多条可派_结尾给都派和逐条的写法(self):
         todo = [dict(r, owner="claude", projects=["digital-twin"]) for r in self.args[0]["todo"]]
         text = json.dumps(gd.build_card(DAY, dict(self.args[0], todo=todo), *self.args[1:]), ensure_ascii=False)
-        self.assertIn("标了 Claude 的第 1、2、3 条", text)
+        self.assertIn("要我把第 1、2、3 条写成任务派给 Claude 吗？", text)
         self.assertIn("「**都派**」，或「**派 1 2，3 不做**」", text)
+
+    def test_思考采纳在行动清单前_派单提问在最后且显眼(self):
+        els = gd.build_card(DAY, *self.args, doc_url="https://x.feishu.cn/docx/abc")["body"]["elements"]
+        flat = [json.dumps(e, ensure_ascii=False) for e in els]
+        at = lambda word: next(i for i, t in enumerate(flat) if word in t)
+        self.assertLess(at("昨日信息梳理"), at("思考采纳建议"))
+        self.assertLess(at("思考采纳建议"), at("今日行动清单"))
+        ask = at("❓")
+        self.assertGreater(ask, at("今日行动清单"))
+        self.assertEqual(els[ask + 1]["tag"], "button")  # 提问后面紧跟完整报告按钮
+        col = els[ask]["columns"][0]
+        self.assertEqual(col["background_style"], "red-50")
+        self.assertEqual(col["elements"][0].get("text_size"), "heading-4")
 
     def test_板块没内容就不出现_没消息写一句(self):
         f = dict(self.args[0], todo=[r for r in self.args[0]["todo"] if r["owner"] == "you"])
@@ -389,7 +402,45 @@ class Card(Base):
         self.assertNotIn("今日行动清单", text)
         self.assertNotIn("思考采纳建议", text)
         text = json.dumps(gd.build_card(DAY, dict(gd.EMPTY_FIELDS), *self.args[1:]), ensure_ascii=False)
+        self.assertIn("昨天群里的消息都是资讯，没有值得学的内容", text)   # 常浩 11-17：一天全是资讯就一条不写
+        empty = dict(self.args[2], items=[], sources=[])
+        text = json.dumps(gd.build_card(DAY, dict(gd.EMPTY_FIELDS), self.args[1], empty), ensure_ascii=False)
         self.assertIn("昨天群里没有新消息", text)
+
+    def test_全是资讯可以一条信息都不写(self):
+        errs, _, out = gd.check(self.args[2], good_fields(highlights=[], todo=[], consider=[]), good_report())
+        self.assertEqual(errs, [])
+        self.assertEqual(out["highlights"], [])
+
+    def test_每条信息_原文折叠面板在前_原地址在后(self):
+        els = gd.build_card(DAY, *self.args)["body"]["elements"]
+        first = next(e for e in els if e["tag"] == "column_set" and "number_tag" in json.dumps(e, ensure_ascii=False))
+        parts = first["columns"][0]["elements"]
+        tags = [p["tag"] for p in parts]
+        self.assertEqual(tags[-2:], ["collapsible_panel", "markdown"])
+        panel, link = parts[-2], parts[-1]
+        self.assertFalse(panel["expanded"])
+        self.assertEqual(panel["header"]["title"]["content"], "原文与译文 · 展开")
+        self.assertIn("原地址", link["content"])
+        self.assertIn("](https://", link["content"])
+        self.assertNotIn("原地址", parts[1]["content"])   # 总结里不再接链接
+
+    def test_思考和行动之间有分割线(self):
+        els = gd.build_card(DAY, *self.args)["body"]["elements"]
+        flat = [json.dumps(e, ensure_ascii=False) for e in els]
+        a = next(i for i, t in enumerate(flat) if "思考采纳建议" in t)
+        b = next(i for i, t in enumerate(flat) if "今日行动清单" in t)
+        self.assertIn({"tag": "hr"}, els[a:b])
+
+    def test_原文太长时收紧_卡片不超上限(self):
+        mat = json.loads(json.dumps(self.args[2]))
+        for i in mat["items"]:
+            i["text"] = "▶ 原文与译文 · 展开\n    **中文**\n    " + "很长的中文" * 400 + "\n    **Original**\n    " + "long " * 900 + "\n▲"
+        hl = [{"title": f"第{n}条", "detail": "说明", "read": False, "refs": ["M1", "M2", "M3"]} for n in range(6)]
+        card = gd.build_card(DAY, dict(self.args[0], highlights=hl), self.args[1], mat)
+        self.assertLessEqual(len(json.dumps(card["body"]["elements"], ensure_ascii=False).encode()), gd.CARD_MAX)
+        self.assertIn("原文与译文", json.dumps(card, ensure_ascii=False))
+
 
     def test_预览发到私聊_不算当天已发(self):
         mid = gd.preview(DAY)
@@ -397,6 +448,38 @@ class Card(Base):
         (send,) = [a for a in self.calls() if "+messages-send" in a]
         self.assertTrue(json.loads(send[send.index("--content") + 1])["header"]["title"]["content"].startswith("【预览】"))
         self.assertFalse((self.dir / f"{DAY}.delivery.json").exists())
+
+
+class Original(unittest.TestCase):
+    MAT = {"items": [
+        {"id": "M1", "kind": "card", "sender": "X.COM", "title": "Lydia @lydia", "gist": "摘要",
+         "text": "「新帖」\n**What's going on**\n摘要\n▶ 原文与译文 · 展开\n    **中文**\n    自定义主题就是 mod\n    **Original**\n"
+                 "    Custom themes are just mods\n▲\n📝 时间\n[查看 X 原帖 ↗](https://x.com/a)"},
+        {"id": "M2", "kind": "card", "sender": "X.COM", "title": "Bob", "gist": "只有摘要", "text": "只有摘要"},
+        {"id": "M3", "kind": "text", "sender": "张三", "title": "", "gist": "", "text": "这个 [技巧](https://e.com) 我试了"}],
+        "sources": [{"id": "S1", "ok": True, "title": "文章", "text": "正文 " * 500},
+                    {"id": "S2", "ok": False, "title": None, "text": None}]}
+
+    def test_X卡片取中文和Original_不带原帖链接(self):
+        t = gd.original_md("M1", self.MAT, 700)
+        for want in ("M1 · Lydia @lydia", "**中文**", "自定义主题就是 mod", "**Original**", "Custom themes are just mods"):
+            self.assertIn(want, t)
+        self.assertNotIn("查看 X 原帖", t)
+        self.assertNotIn("](", t)
+
+    def test_没有原文段取摘要_成员发言取原话并转义(self):
+        self.assertIn("只有摘要", gd.original_md("M2", self.MAT, 700))
+        t = gd.original_md("M3", self.MAT, 700)
+        self.assertIn("张三", t)
+        self.assertNotIn("](", t)
+
+    def test_源头取节选_没读到的不放(self):
+        self.assertIn("节选", gd.original_md("S1", self.MAT, 50))
+        self.assertIsNone(gd.original_md("S2", self.MAT, 50))
+        panel = gd.orig_panel(["S2", "S1", "M3", "M2", "M1"], self.MAT, 100)
+        self.assertEqual(len(panel["elements"]), gd.ORIG_REFS)   # 群消息在前，最多 3 条
+        self.assertTrue(panel["elements"][0]["content"].startswith("<font color='grey'>M3"))
+        self.assertIsNone(gd.orig_panel(["S2"], self.MAT, 100))
 
 
 class Dispatch(Base):
