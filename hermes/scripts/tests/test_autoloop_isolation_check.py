@@ -82,9 +82,21 @@ tcp4       0      0  127.0.0.1.5280         127.0.0.1.60001        ESTABLISHED
         self.assertEqual(iso.listening_ports(self.NETSTAT), [3350, 5178, 5280, 8086])
 
     def test_hub_and_proxy_ports_are_allowed(self):
-        out = iso.service_checks([3350, 8086, 1080], None,
-                                 connect=lambda h, p: True, via_proxy=lambda pp, h, p: (True, ""))
+        out = iso.service_checks([3350, 8090], None,
+                                 connect=lambda h, p: True, via_proxy=lambda pp, h, p: (False, "HTTP/1.1 403"))
         self.assertEqual({i["result"] for i in out}, {iso.BLOCKED})
+
+    def test_accelerator_proxy_port_must_be_blocked(self):
+        out = iso.service_checks([3350, 8086], None,
+                                 connect=lambda h, p: p == 8086, via_proxy=lambda pp, h, p: (False, ""))
+        self.assertEqual(out[0]["result"], iso.REACHABLE)
+        self.assertIn("8086", out[0]["detail"])
+
+    def test_proxy_probe_uses_egress_and_tries_443(self):
+        tried = []
+        iso.service_checks([5280], None, connect=lambda h, p: False,
+                           via_proxy=lambda pp, h, p: tried.append((pp, p)) or (False, ""))
+        self.assertEqual(tried, [(8090, 5280), (8090, 443)])
 
     def test_other_reachable_port_fails(self):
         out = iso.service_checks([3350, 5280], "10.0.0.2",

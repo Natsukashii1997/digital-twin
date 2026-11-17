@@ -3,7 +3,7 @@
 
 在「工人账号」dt-worker 里运行，逐项尝试越权，**每一项都应该被挡住**：
   读主账号文件、改主账号的 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、
-  拿到 GitHub 凭据、sudo、连主账号的其他本机服务、经代理绕回本机、往主账号会执行的目录里写东西。
+  拿到 GitHub 凭据、sudo、连主账号的其他本机服务（含加速器代理）、经过滤代理绕回本机、往主账号会执行的目录里写东西。
 
 只读：除了尝试本身（都会被拒绝），不写主账号任何东西；结果写到共享目录 results/ 和标准输出。
 用法：python3 /Users/Shared/dt-autoloop/autoloop_isolation_check.py [--main-home /Users/nat]
@@ -25,7 +25,7 @@ from pathlib import Path
 
 HUB = "http://127.0.0.1:3350"
 HUB_PORT = 3350
-PROXY_PORTS = {8086, 1080}  # 上网要用的本机代理，允许连
+EGRESS_PORT = 8090  # 工人账号唯一的上网出口：过滤代理（ops/dt_worker_egress.py），允许连；加速器的 8086、1080 不许直连
 RESULTS = Path("/Users/Shared/dt-autoloop/results")
 MAIN_PATH_DIRS = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin"]
 
@@ -201,7 +201,7 @@ def proxy_connect(proxy_port, host, port, timeout=3.0):
 
 def service_checks(ports, lan_ip, connect=can_connect, via_proxy=proxy_connect):
     out = []
-    targets = [p for p in ports if p != HUB_PORT and p not in PROXY_PORTS]
+    targets = [p for p in ports if p not in (HUB_PORT, EGRESS_PORT)]
     if not ports:
         # 一个监听端口都没读到，说明读端口清单失败了；不能当成「都连不上」
         return [item("本机服务", "读本机监听端口", ERROR, "没读到任何监听端口")]
@@ -210,8 +210,8 @@ def service_checks(ports, lan_ip, connect=can_connect, via_proxy=proxy_connect):
         out.append(item("本机服务", f"直连 {host} 上的其他服务",
                         REACHABLE if open_ports else BLOCKED,
                         f"连得上的端口：{open_ports}" if open_ports else f"试了 {len(targets)} 个端口都连不上"))
-        proxied = [p for p in targets if via_proxy(8086, host, p)[0]]
-        out.append(item("本机服务", f"经代理 8086 绕回 {host}",
+        proxied = [p for p in targets + [443] if via_proxy(EGRESS_PORT, host, p)[0]]
+        out.append(item("本机服务", f"经过滤代理 {EGRESS_PORT} 绕回 {host}",
                         REACHABLE if proxied else BLOCKED,
                         f"绕得回去的端口：{proxied}" if proxied else "代理没放行"))
     return out

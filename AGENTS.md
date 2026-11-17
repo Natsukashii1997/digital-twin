@@ -63,10 +63,12 @@ docs/托管模式-设计.md          托管模式（PRD D24，ADR-014 及修订 
 orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
-  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
+  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务、工人账号的过滤代理和门卫规则（#190），另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
   self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
-  autoloop_isolation_check.py  0A 隔离门反向测试（#190）：在工人账号 dt-worker 里运行，逐项尝试越权（读主账号文件、改 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、GitHub 凭据、sudo、连主账号其他本机服务、经代理绕回本机、往主账号会执行的目录里写），每项都应被挡住；读不到监听端口判出错不判通过；结果写 /Users/Shared/dt-autoloop/results/；共享副本在 /Users/Shared/dt-autoloop/（连同 dt-worker 安装脚本 setup-dt-worker.sh、只读引擎副本）
+  autoloop_isolation_check.py  0A 隔离门反向测试（#190）：在工人账号 dt-worker 里运行，逐项尝试越权（读主账号文件、改 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、GitHub 凭据、sudo、连主账号其他本机服务、连加速器代理、经过滤代理绕回本机、往主账号会执行的目录里写），每项都应被挡住；读不到监听端口判出错不判通过；结果写 /Users/Shared/dt-autoloop/results/；共享副本在 /Users/Shared/dt-autoloop/（连同 dt-worker 安装脚本 setup-dt-worker.sh（源文件 ops/dt_worker_setup.sh，可重复跑）、门卫脚本 dt_worker_pf.sh、只读引擎副本）
+  dt_worker_egress.py  工人账号的过滤代理（#190，常浩 11-17 同意装，D 档）：dt-worker 唯一的上网出口 127.0.0.1:8090，只接 CONNECT 到 443，目标解析出非公网地址就拒绝，放行的转给加速器代理 8086；普通 HTTP 一律拒绝；以主账号身份常驻（launchd cn.digital-twin.egress，配置副本 cn.digital-twin.egress.plist），安装在 ~/Library/Application Support/DigitalTwin/bin/；日志 evidence/egress/；剩余风险：DNS 重绑定且加速器直连时挡不住
+  dt_worker_pf.sh      工人账号的门卫规则（#190）：pf 规则挂在 com.apple/dt-worker 锚点，dt-worker 只准连本机 3350（中台）和 8090（过滤代理），本机其他端口、局域网一律拒绝；常浩用 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install` 装，开机和每 5 分钟由 LaunchDaemon cn.digital-twin.pf-dt-worker 重新加载并写状态文件 /Library/Application Support/DigitalTwin/pf-dt-worker.status；health_check.py 每天查过滤代理拦不拦本机、门卫状态文件新不新
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
 

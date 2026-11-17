@@ -4,14 +4,17 @@
 --dry-run 只打印，不发消息。
 由 launchd 任务 cn.digital-twin.health 每天 09:45 调用，只查网关、飞书连接、24 小时内异常退出、回退模型、
 辅助任务失败和定时任务；网关、异常退出、回退、辅助任务猛鬼兽和亚古兽各查一遍（#147），另提醒飞书技能源头有更新。
+另查工人账号 dt-worker 的两道隔离（#190）：过滤代理在跑且拦得住本机地址、门卫规则（pf）在生效。
 launchd 起的 python 读不了 ~/Documents，沙盒和仓库自检已搬到 self_check.py（Hermes 无模型定时任务调用）。
 """
 import datetime as dt
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HOME = Path.home()
@@ -23,6 +26,9 @@ HEARTBEAT_STALE_MIN = 10
 AGENT_SKILLS = HOME / ".agents/skills"   # 飞书 lark-* 技能的源头；两只机器人各有一份复制件
 # (名字, launchd 标签, 相对 HERMES 的目录)；猛鬼兽是默认 profile，亚古兽是 profiles/agumon（#147）
 BOTS = (("猛鬼兽", "ai.hermes.gateway", ""), ("亚古兽", "ai.hermes.gateway-agumon", "profiles/agumon"))
+EGRESS_PORT = 8090                       # 工人账号的过滤代理（ops/dt_worker_egress.py，#190）
+PF_STATUS = Path("/Library/Application Support/DigitalTwin/pf-dt-worker.status")   # 门卫规则每 5 分钟刷新一次
+PF_STALE_MIN = 20
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
 
@@ -194,6 +200,36 @@ def check_cron():
     return [f"定时任务有 {len(ids)} 条未处理的失败记录（{first or ids[0]}）；看 `hermes cron incidents`，处理完 ack"]
 
 
+def check_egress(port=EGRESS_PORT):
+    """过滤代理在跑，而且让它转到本机地址时回 403。"""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+            s.sendall(b"CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n")
+            line = s.recv(200).split(b"\r\n", 1)[0].decode(errors="replace")
+    except OSError as e:
+        return [f"工人账号的过滤代理没在运行（127.0.0.1:{port}，{type(e).__name__}）；"
+                "`launchctl kickstart -k gui/$(id -u)/cn.digital-twin.egress`"]
+    if line.split()[1:2] != ["403"]:
+        return [f"工人账号的过滤代理没拦住本机地址（回的是「{line[:60]}」）"]
+    return []
+
+
+def check_pf(path=PF_STATUS, now=None):
+    """门卫规则的状态文件由 root 每 5 分钟写一次：在生效、规则数对、没过期。"""
+    try:
+        text = path.read_text()
+        age_min = ((now or time.time()) - path.stat().st_mtime) / 60
+    except OSError:
+        return ["工人账号的门卫规则没装（没有状态文件）；主账号终端运行 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install`"]
+    fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
+    rules = int(fields["rules"]) if fields.get("rules", "").isdigit() else 0
+    if fields.get("enabled") != "yes" or rules < 3:
+        return [f"工人账号的门卫规则没在生效（{text.strip()[:80]}）"]
+    if age_min > PF_STALE_MIN:
+        return [f"工人账号的门卫规则 {int(age_min)} 分钟没刷新，开机任务 cn.digital-twin.pf-dt-worker 可能停了"]
+    return []
+
+
 def send(msg, key, now):
     r = run(["lark-cli", "--profile", LARK_PROFILE, "im", "+messages-send", "--as", "bot",
              "--chat-id", DM_CHAT, "--text", msg, "--idempotency-key", key])
@@ -203,7 +239,7 @@ def send(msg, key, now):
 
 def main():
     dry = "--dry-run" in sys.argv
-    issues = check_bots() + check_skill_sync() + check_cron()
+    issues = check_bots() + check_skill_sync() + check_cron() + check_egress() + check_pf()
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_DIR / f"{now[:7]}.log", "a") as f:
