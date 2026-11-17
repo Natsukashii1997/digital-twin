@@ -6,16 +6,19 @@
   - Agent dt-claude / dt-codex：跑在工人账号 dt-worker 上的接单程序（主账号的 claude / codex 是上游试跑用的，不动）；
   - 通道 feishu（answerers 只有常浩的 open_id）和 secretary（answerers 只有「秘书」）：两把通道钥匙分开，
     秘书的钥匙答不出 by=常浩，飞书桥接的钥匙答不出 by=秘书（中台按通道核 answerers）；
-    defaultChannels 显式写成原有的通道，新增的两个通道只收派单规则的卡片，不收中台告警和别的规则的卡片；
+    defaultChannels 显式写成原有的通道（原来一个通道都没有时回退成 ["feishu"]：中台告警等没写通道的卡片会发到飞书），
+    新增的两个通道里秘书只收派单规则的卡片：别的规则自己点名 secretary 的，生成时直接拒绝并报规则名；
   - 派单规则 dispatch-<仓库>-<执行方>：只接 hermes 来源、只接 autoloop_grants.event_type 那一种类型，
     按事件对象（= 任务单号）分事项，不开 emits（工人的回执发不出任何事件，触发不了派单规则），卡片只发 feishu 和 secretary。
     现在只给名册里的沙盒生成（批 2 前不往正式仓库派）。
 
-装进中台是改常驻配置，要常浩说「装」才跑（install / issue-source-key 都要 --confirm）。顺序保证装的过程中没有派单能跑起来：
-  1. install：生成草稿 → agent-autoloop check 校验 → 备份原文件 → 原子替换 → 等中台载入 → 逐条暂停派单规则 → 回读核对已暂停；
-     hermes 来源钥匙已经存在时，不许新增派单规则（新规则载入到暂停之间有空隙）；
-  2. issue-source-key：所有派单规则都在、都暂停着，才签 hermes 来源钥匙，写到 600 文件（autoloop_grants 读它），不打印钥匙；
-  派单规则一直暂停到 0C 的启动脚本就绪，由常浩决定什么时候恢复。
+装进中台是改常驻配置，要常浩说「装」才跑（install / issue-source-key 都要 --confirm）。两条命令共用一把跨进程锁
+（DigitalTwin/autoloop/config.lock），检查、写配置、确认载入、暂停、签钥匙都在锁里，同一时间只有一条在跑。顺序保证没有派单能跑起来：
+  1. install：生成草稿 → agent-autoloop check 校验 → 备份原文件 → 原子替换 → 等中台载入（逐条核来源、类型、执行方，不只核名字）
+     → 逐条暂停派单规则 → 回读核对已暂停；hermes 来源钥匙已经存在时，派单规则一条也不许新增、不许改（只能原样重装）；
+  2. issue-source-key：中台正在跑的派单规则和 rules.json 逐条一致（来源、类型、执行方）、没有多出来的、全部暂停着，
+     才签 hermes 来源钥匙，写到 600 文件（autoloop_grants 读它），不打印钥匙；
+  派单规则一直暂停到 0C 的启动脚本就绪，由常浩决定什么时候恢复。暂停失败时 install 报错，钥匙签不出来（第 2 步的门）。
 
   autoloop_config.py plan                 只读：打印要改的地方（和现在的 rules.json 比）
   autoloop_config.py install --confirm    常浩说「装」之后
@@ -25,9 +28,11 @@
 DT_OWNER_OPEN_ID（同 twin_state）、DT_HERMES_SOURCE_KEY_FILE（同 autoloop_grants）、DT_AUTOLOOP_EVIDENCE（备份目录）。
 """
 import argparse
+import contextlib
 import copy
 import datetime as dt
 import difflib
+import fcntl
 import json
 import os
 import re
@@ -53,6 +58,7 @@ PROMPT = ("这一轮的事件对象是任务单号。任务的五要素在 /User
           "开工前核对 /Users/Shared/dt-autoloop/grants/status.json 里这张单有效、动作在列。"
           "只做任务单写明的范围，只改文件、推非 main 分支、开 PR，不合并。")
 KEY_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+LOCK_WAIT = 10.0                          # 等另一个配置操作结束的最长秒数
 
 
 class Rejected(Exception):
@@ -80,6 +86,32 @@ def cli():
     return os.environ.get("DT_AUTOLOOP_CLI", "agent-autoloop")
 
 
+def lock_file():
+    return Path(os.environ.get("DT_AUTOLOOP_LOCK") or G.SUPPORT / "autoloop/config.lock").expanduser()
+
+
+@contextlib.contextmanager
+def config_lock():
+    """install 和 issue-source-key 共用的跨进程排他锁（flock）：检查到签发之间不会插进另一个配置操作。"""
+    f = lock_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(f.parent, 0o700)
+    fd = os.open(f, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        end = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= end:
+                    raise Rejected("另一个中台配置操作还在进行，稍后再试")
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)                      # 关掉就释放锁
+
+
 # ---------- 生成 ----------
 def sandbox_repos():
     """名册里的沙盒仓库：短名 → owner/repo（和 autoloop_grants 的写法一致）。"""
@@ -103,6 +135,10 @@ def render(current, owner_open_id, repos):
     """在现有配置上生成数字分身这一块；同样的输入总得到同样的输出（可重复跑）。"""
     if not re.match(r"^ou_[\w-]+$", owner_open_id or ""):
         raise Rejected("常浩的 open_id 没配好（twin_state.owner_open_id）")
+    others = [r.get("name", "?") for r in current.get("rules", [])
+              if not str(r.get("name", "")).startswith("dispatch-") and "secretary" in (r.get("channels") or [])]
+    if others:      # 秘书通道只收派单规则的卡片（规格 §6）；别的规则点名它，秘书就能领到、答到不该它答的卡片
+        raise Rejected(f"这些规则把卡片发给秘书通道，不装：{'、'.join(others)}")
     new = copy.deepcopy(current)
     new.setdefault("sources", {})[SOURCE] = {"name": "猛鬼兽派单网关"}
     agents = new.setdefault("agents", {})
@@ -196,12 +232,25 @@ def lines_by_name(s):
     return {line["name"]: line for line in s.get("lines", [])}
 
 
-def wait_loaded(names, timeout=30.0):
-    """等中台把新规则文件载入：派单规则和两个新通道都出现在状态里。"""
+def dispatch_rules_of(rules):
+    return {r["name"]: r for r in rules.get("rules", []) if str(r.get("name", "")).startswith("dispatch-")}
+
+
+def mismatches(rules, s):
+    """中台正在跑的派单规则和 rules 逐条比来源、类型、执行方；中台在跑而 rules 里没有的派单规则也算不一致。"""
+    want, lines = dispatch_rules_of(rules), lines_by_name(s)
+    bad = [name for name, r in want.items()
+           if not lines.get(name) or lines[name].get("source") != r["when"]["source"]
+           or list(lines[name].get("types") or []) != list(r["when"]["types"]) or lines[name].get("agent") != r["to"]]
+    return bad + [n for n in lines if n.startswith("dispatch-") and n not in want]
+
+
+def wait_loaded(rules, timeout=30.0):
+    """等中台把新规则文件载入：派单规则逐条和文件一致（不只看名字），两个新通道都在。"""
     end = time.monotonic() + timeout
     while True:
         s = state()
-        if set(names) <= set(lines_by_name(s)) and set(NEW_CHANNELS) <= {c["id"] for c in s.get("channels", [])}:
+        if not mismatches(rules, s) and set(NEW_CHANNELS) <= {c["id"] for c in s.get("channels", [])}:
             return s
         if time.monotonic() >= end:
             raise Rejected("中台没有载入新规则（规则文件不对时中台继续用旧规则）")
@@ -218,13 +267,18 @@ def _atomic_write(path, text, mode):
 def install(confirm=False, now=None):
     if not confirm:
         raise Rejected("装进中台要常浩确认：加 --confirm")
+    with config_lock():
+        return _install(now)
+
+
+def _install(now):
     current = load_current()
     new = render(current, owner_open_id(), sandbox_repos())
     names = dispatch_names(new)
-    loaded = lines_by_name(state())
-    added = [n for n in names if n not in loaded]
-    if added and (("source", SOURCE) in key_names()):
-        raise Rejected(f"hermes 来源钥匙已经在了，不能新增派单规则（{'、'.join(added)}）：先删钥匙或另议")
+    if ("source", SOURCE) in key_names() and (dispatch_rules_of(new) != dispatch_rules_of(current)
+                                             or mismatches(current, state())):
+        raise Rejected("hermes 来源钥匙已经在了：派单规则不许新增、删减或修改，中台在跑的也要和文件一致（只能原样重装）；"
+                       "要改先 agent-autoloop key remove source hermes 并删掉钥匙文件")
     stamp = (now or dt.datetime.now(G.TZ)).strftime("%Y%m%d-%H%M%S")
     ev = evidence_dir()
     ev.mkdir(parents=True, exist_ok=True)
@@ -240,7 +294,7 @@ def install(confirm=False, now=None):
     if new != current:
         _atomic_write(rules_file(), dumps(new), mode)
         try:
-            wait_loaded(names)
+            wait_loaded(new)
         except Rejected:
             _atomic_write(rules_file(), backup.read_text(encoding="utf-8"), mode)
             raise
@@ -257,6 +311,11 @@ def install(confirm=False, now=None):
 def issue_source_key(confirm=False):
     if not confirm:
         raise Rejected("签 hermes 来源钥匙要常浩确认：加 --confirm")
+    with config_lock():
+        return _issue_source_key()
+
+
+def _issue_source_key():
     f = source_key_file()
     if f.exists() or ("source", SOURCE) in key_names():
         raise Rejected("hermes 来源钥匙已经有了；要换先 agent-autoloop key remove source hermes 并删掉钥匙文件")
@@ -264,7 +323,11 @@ def issue_source_key(confirm=False):
     if SOURCE not in rules.get("sources", {}):
         raise Rejected("rules.json 里还没有 hermes 来源：先 install")
     names = dispatch_names(rules)
-    loaded = lines_by_name(state())
+    s = state()
+    differ = mismatches(rules, s)
+    if differ:
+        raise Rejected(f"中台正在跑的派单规则和 rules.json 不一致：{'、'.join(differ)}；先 install")
+    loaded = lines_by_name(s)
     bad = [n for n in names if not (loaded.get(n) or {}).get("paused")]
     if not names or bad:
         raise Rejected(f"派单规则要全部载入并暂停着才签钥匙（没暂停：{'、'.join(bad) or '没有派单规则'}）")

@@ -6,6 +6,10 @@
 （result）、提问留给下一轮的说明（about）、会话号、用量、回执摘要、事件详情。
 没有回答、结案、停止、暂停、补跑等任何写操作：snapshot() 只读，serve 只认 GET /v1/snapshot。
 
+这是展示和巡视用的窗口，**不能证明一张卡属于哪一单**：中台状态里卡片不带创建它的轮次，轮次的事件也不带事件号，同一规则、
+同一 lane 可以跨多轮、多代。规格 §5 的可信绑定（卡片 → 轮次 → 事件号 → 凭证、代次）由 0B-4 的网关在送达时补记；
+来源追溯不了的卡片一律交常浩。
+
   autoloop_readonly.py show                         打印一次快照（JSON）
   autoloop_readonly.py serve [--port 3352]          给驿窗的本机只读接口（只听 127.0.0.1；要带 Bearer 令牌，令牌在
                                                     DigitalTwin/autoloop/readonly.token，600，第一次运行时生成）
@@ -17,6 +21,7 @@ import hmac
 import http.server
 import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -33,6 +38,7 @@ RUN_EVENT_FIELDS = ("source", "type", "subject")
 LINE_FIELDS = ("id", "source", "types", "agent")
 CHANNEL_FIELDS = ("id", "name", "online")
 PATH = "/v1/snapshot"
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 
 
 def _pick(d, fields):
@@ -71,7 +77,10 @@ def load_token():
             pass
     if os.stat(f).st_mode & 0o077:
         raise C.Rejected(f"只读令牌文件权限必须是 600：{f}")
-    return f.read_text(encoding="utf-8").strip()
+    token = f.read_text(encoding="utf-8").strip()
+    if not TOKEN_RE.match(token):         # 空文件、只有空白、被截断的都不能拿来开服务
+        raise C.Rejected(f"只读令牌文件内容不对（应为至少 32 位的 URL 安全字符）：{f}；删掉它重新生成")
+    return token
 
 
 def make_handler(token, fetch):

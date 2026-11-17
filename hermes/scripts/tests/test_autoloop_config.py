@@ -78,6 +78,12 @@ class Render(unittest.TestCase):
         cur = copy.deepcopy(CURRENT) | {"defaultChannels": ["desktop", "secretary"]}
         self.assertEqual(C.render(cur, OWNER, REPOS)["defaultChannels"], ["desktop"])
 
+    def test_other_rules_cannot_route_to_secretary(self):
+        cur = copy.deepcopy(CURRENT)
+        cur["rules"][0]["channels"] = ["desktop", "secretary"]
+        with self.assertRaisesRegex(C.Rejected, "试一下"):
+            C.render(cur, OWNER, REPOS)
+
     def test_owner_must_be_configured(self):
         with self.assertRaises(C.Rejected):
             C.render(CURRENT, "", REPOS)
@@ -168,11 +174,29 @@ class ReadonlyServer(unittest.TestCase):
             with self.subTest(path=path, method=method):
                 self.assertIn(self.call(path, method, token=self.token)[0], (404, 405))
 
+    def test_bad_token_file_refused(self):
+        tf = Path(os.environ["DT_READONLY_TOKEN_FILE"])
+        for bad in ("", "   \n", "short"):
+            with self.subTest(bad=bad):
+                tf.write_text(bad)
+                with self.assertRaisesRegex(C.Rejected, "令牌"):
+                    R.load_token()
+
     def test_listens_on_loopback_only(self):
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
 
 
 class Guards(unittest.TestCase):
+    def test_install_and_key_share_one_lock(self):
+        with tempfile.TemporaryDirectory() as d:
+            lock = Path(d) / "sub/config.lock"
+            with mock.patch.dict(os.environ, {"DT_AUTOLOOP_LOCK": str(lock)}), mock.patch.object(C, "LOCK_WAIT", 0.3):
+                with C.config_lock():                              # 另一个配置操作拿着锁
+                    for call in (lambda: C.install(confirm=True), lambda: C.issue_source_key(confirm=True)):
+                        with self.assertRaisesRegex(C.Rejected, "还在进行"):
+                            call()
+                self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
     def test_install_and_key_need_confirm(self):
         with self.assertRaisesRegex(C.Rejected, "确认"):
             C.install(confirm=False)

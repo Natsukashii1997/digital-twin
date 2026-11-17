@@ -106,6 +106,19 @@ class HubEndToEnd(unittest.TestCase):
         self.assertTrue(all(st["channels"][c]["in_rules"] for c in C.NEW_CHANNELS))
         self.assertFalse(st["source_hermes"]["key"])
 
+        rules_text = C.rules_file().read_text(encoding="utf-8")       # 文件改了但中台没载入（文件里有错规则）：签钥匙拒绝
+        broken = json.loads(rules_text)
+        for r in broken["rules"]:
+            if r["name"] == "dispatch-dt-sandbox-codex":
+                r["when"]["types"] = ["dispatch.dt-sandbox.codex.other"]
+        broken["rules"].append({"name": "坏规则", "when": {"source": "local", "types": ["x"]}, "to": "agent", "title": "{坏}"})
+        C.rules_file().write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+        time.sleep(1.5)
+        with self.assertRaisesRegex(C.Rejected, "不一致"):
+            C.issue_source_key(confirm=True)
+        C.rules_file().write_text(rules_text, encoding="utf-8")
+        time.sleep(1.5)
+
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-codex/resume", {})
         with self.assertRaisesRegex(C.Rejected, "暂停"):
             C.issue_source_key(confirm=True)                               # 有一条没暂停就不签
@@ -135,13 +148,37 @@ class HubEndToEnd(unittest.TestCase):
         with self.assertRaisesRegex(C.Rejected, "已经有了"):
             C.issue_source_key(confirm=True)
         self.write_roster(["o/dt-sandbox", "o/dt-sandbox2"])
-        with self.assertRaisesRegex(C.Rejected, "不能新增派单规则"):
+        with self.assertRaisesRegex(C.Rejected, "不许新增"):
             C.install(confirm=True)                                        # 钥匙在时新规则会有未暂停的空隙
+        self.write_roster(["o/dt-sandbox"])
+        with mock.patch.object(C, "PROMPT", "换了提示词"), self.assertRaisesRegex(C.Rejected, "不许新增"):
+            C.install(confirm=True)                                        # 钥匙在时同名规则也不许改
+        with mock.patch.object(C, "AGENTS", {**C.AGENTS, "codex": ("dt-claude", "x")}), \
+                self.assertRaisesRegex(C.Rejected, "不许新增"):
+            C.install(confirm=True)                                        # 换执行方同样拒绝
 
         snap = R.read()
         lines = {line["id"]: line for line in snap["lines"]}
         self.assertTrue(lines["dispatch-dt-sandbox-claude"]["paused"])
         self.assertNotIn(key, json.dumps(snap))
+
+
+    def test_pause_failure_leaves_no_key(self):
+        real = C.hub
+
+        def flaky(method, path, body=None):
+            if path.endswith("/pause"):
+                raise C.Rejected("中台回 HTTP 500")
+            return real(method, path, body)
+        with mock.patch.object(C, "hub", side_effect=flaky), self.assertRaisesRegex(C.Rejected, "500"):
+            C.install(confirm=True)
+        st = C.status()
+        self.assertTrue(all(v["loaded"] and not v["paused"] for v in st["dispatch_rules"].values()))
+        with self.assertRaisesRegex(C.Rejected, "暂停"):
+            C.issue_source_key(confirm=True)                               # 规则开着就签不出钥匙
+        self.assertFalse(self.key_file.exists())
+        C.install(confirm=True)                                            # 重装补上暂停
+        self.assertTrue(C.issue_source_key(confirm=True)["ok"])
 
 
 if __name__ == "__main__":
