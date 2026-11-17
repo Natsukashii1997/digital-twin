@@ -24,10 +24,14 @@
   autoloop_config.py plan                 只读：打印要改的地方（和现在的 rules.json 比）
   autoloop_config.py install --confirm --target ~/.agent-autoloop          常浩说「装」之后
   autoloop_config.py issue-source-key --confirm --target ~/.agent-autoloop
+  autoloop_config.py issue-channel-key feishu|secretary --confirm --target ~/.agent-autoloop
+                                          签通道钥匙（批 0B-4）：中台正在用的配置和 rules.json 一致、这条通道的 answerers
+                                          正好是预期的（feishu 只有常浩的 open_id，secretary 只有「秘书」）才签，写到 600 文件
   （--target 必须写明，且和实际要改的中台目录一致，免得继承来的环境变量把操作落到别的中台上）
   autoloop_config.py status               只读：来源、通道、派单规则是否暂停、钥匙有没有（只列名字）
 环境变量：AGENT_AUTOLOOP_HOME（中台目录，默认 ~/.agent-autoloop）、DT_AUTOLOOP_CLI（中台命令行）、DT_ROSTER、
-DT_OWNER_OPEN_ID（同 twin_state）、DT_HERMES_SOURCE_KEY_FILE（同 autoloop_grants）、DT_AUTOLOOP_EVIDENCE（备份目录）。
+DT_OWNER_OPEN_ID（同 twin_state）、DT_HERMES_SOURCE_KEY_FILE（同 autoloop_grants）、DT_AUTOLOOP_EVIDENCE（备份目录）、
+DT_AUTOLOOP_CHANNEL_KEY_DIR（通道钥匙文件所在目录，默认 DigitalTwin/autoloop/，文件名 <通道>-channel.key）。
 """
 import argparse
 import contextlib
@@ -83,6 +87,11 @@ def evidence_dir():
 
 def source_key_file():
     return Path(os.environ.get("DT_HERMES_SOURCE_KEY_FILE") or G.SUPPORT / "autoloop/hermes-source.key").expanduser()
+
+
+def channel_key_file(channel):
+    d = Path(os.environ.get("DT_AUTOLOOP_CHANNEL_KEY_DIR") or G.SUPPORT / "autoloop").expanduser()
+    return d / f"{channel}-channel.key"
 
 
 def cli():
@@ -385,6 +394,39 @@ def _issue_source_key():
     return {"ok": True, "file": str(f), "mode": "600"}
 
 
+def issue_channel_key(channel, confirm=False, target=None):
+    if channel not in NEW_CHANNELS:
+        raise Rejected(f"只签这两条通道的钥匙：{'、'.join(NEW_CHANNELS)}")
+    if not confirm:
+        raise Rejected(f"签 {channel} 通道钥匙要常浩确认：加 --confirm")
+    check_target(target)
+    with config_lock():
+        return _issue_channel_key(channel)
+
+
+def _issue_channel_key(channel):
+    f = channel_key_file(channel)
+    if f.exists() or ("channel", channel) in key_names():
+        raise Rejected(f"{channel} 通道钥匙已经有了；要换先 agent-autoloop key remove channel {channel} 并删掉钥匙文件")
+    rules = load_current()
+    want = [owner_open_id()] if channel == "feishu" else [SECRETARY]
+    if (rules.get("channels", {}).get(channel) or {}).get("answerers") != want:
+        raise Rejected(f"rules.json 里 {channel} 通道的回答人不是预期的那一个：先 install")
+    differ = mismatches(rules)
+    if differ:
+        raise Rejected(f"中台正在用的配置和 rules.json 不一致：{'、'.join(differ)}；先 install")
+    code, out, err = run_cli("key", "new", "channel", channel)
+    key = out.strip()
+    if code or not KEY_RE.match(key):
+        raise Rejected(f"签钥匙失败：{err.strip()[:200]}")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(f.parent, 0o700)
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(key + "\n")
+    return {"ok": True, "channel": channel, "file": str(f), "mode": "600"}
+
+
 def status():
     rules = load_current()
     s = state()
@@ -393,6 +435,7 @@ def status():
     return {"source_hermes": {"in_rules": SOURCE in rules.get("sources", {}), "key": ("source", SOURCE) in keys,
                               "key_file": source_key_file().exists()},
             "channels": {c: {"in_rules": c in rules.get("channels", {}), "key": ("channel", c) in keys,
+                             "key_file": channel_key_file(c).exists(),
                              "answerers": len(rules.get("channels", {}).get(c, {}).get("answerers", []))}
                          for c in NEW_CHANNELS},
             "dispatch_rules": {n: {"loaded": n in loaded, "paused": bool((loaded.get(n) or {}).get("paused"))}
@@ -408,6 +451,10 @@ def main(argv=None):
         sp = sub.add_parser(name)
         sp.add_argument("--confirm", action="store_true")
         sp.add_argument("--target", help="要改的中台目录，必须和实际的一致，如 ~/.agent-autoloop")
+    sp = sub.add_parser("issue-channel-key")
+    sp.add_argument("channel", choices=NEW_CHANNELS)
+    sp.add_argument("--confirm", action="store_true")
+    sp.add_argument("--target", help="要改的中台目录，必须和实际的一致，如 ~/.agent-autoloop")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "plan":
@@ -417,6 +464,7 @@ def main(argv=None):
             return 0
         out = {"install": lambda: install(a.confirm, a.target),
                "issue-source-key": lambda: issue_source_key(a.confirm, a.target),
+               "issue-channel-key": lambda: issue_channel_key(a.channel, a.confirm, a.target),
                "status": status}[a.cmd]()
     except Rejected as e:
         print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))

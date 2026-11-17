@@ -41,8 +41,10 @@ def raw_post(url, key, body):
         return json.loads(r.read())
 
 
-@unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
-class HubEndToEnd(unittest.TestCase):
+class HubFixture(unittest.TestCase):
+    """临时中台（批 0B-4 的飞书桥接测试也用）；COMMAND 是 init 时的接单命令。"""
+    COMMAND = "echo {prompt}"
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="dt-hub-e2e-")
         self.addCleanup(tmp.cleanup)
@@ -51,7 +53,7 @@ class HubEndToEnd(unittest.TestCase):
         self.home.mkdir()
         self.port = free_port()
         env = {**os.environ, "AGENT_AUTOLOOP_HOME": str(self.home)}
-        r = subprocess.run([CLI, "init", "--no-service", "--port", str(self.port), "--command", "echo {prompt}"],
+        r = subprocess.run([CLI, "init", "--no-service", "--port", str(self.port), "--command", self.COMMAND],
                            capture_output=True, text=True, timeout=60, env=env, cwd=root)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.log = open(root / "up.log", "w")
@@ -101,6 +103,10 @@ class HubEndToEnd(unittest.TestCase):
         self.roster.write_text(json.dumps({"projects": [], "inventory": [
             {"path": f"github:{gh}", "category": "沙盒", "sandbox": True} for gh in sandboxes]}), encoding="utf-8")
 
+
+
+@unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
+class HubEndToEnd(HubFixture):
     def test_install_key_dedupe_and_isolation(self):
         with self.assertRaisesRegex(C.Rejected, "先 install"):
             C.issue_source_key(confirm=True, target=self.home)                               # 规则还没装，不签钥匙

@@ -21,7 +21,7 @@ def load():
 class MergeButtonsPlugin(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_MERGE_PYTHON": "/x/python3",
+        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_AUTOLOOP_ANSWER": "/x/autoloop_answer.py", "DT_MERGE_PYTHON": "/x/python3",
                "HERMES_SESSION_CHAT_ID": "oc_home", "DT_PROBE_DIR": self.tmp.name + "/probe",
                "HERMES_SESSION_USER_ID": "ou_owner", "HERMES_SESSION_USER_ID_ALT": "on_owner", "HERMES_SESSION_USER_NAME": "常浩",
                "HERMES_SESSION_CHAT_TYPE": "dm", "HERMES_SESSION_PLATFORM": "feishu", "HERMES_SESSION_MESSAGE_ID": "c-callbacktoken123"}
@@ -101,6 +101,24 @@ class MergeButtonsPlugin(unittest.TestCase):
             self.assertIsNone(out)
             popen.assert_not_called()
         self.assertFalse((Path(self.tmp.name) / "probe" / "clicks.jsonl").exists())
+
+    def test_autoloop_click_forwards_token_option_chat_and_operator(self):
+        out, popen = self.click('button {"autoloop": "0123456789abcdef", "o": 1}')
+        self.assertIsNone(out)
+        self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/autoloop_answer.py", "0123456789abcdef", "1",
+                                                 "--chat", "oc_home", "--operator", "ou_owner"])
+        self.assertTrue(popen.call_args[1]["start_new_session"])
+        self.assertNotIn("0123456789abcdef", (Path(self.tmp.name) / "buttons.log").read_text())   # 日志不记令牌
+
+    def test_autoloop_rejects_bad_values(self):
+        for raw in ('button {"autoloop": "0123", "o": 1}', 'button {"autoloop": "0123456789abcdef", "o": "1"}',
+                    'button {"autoloop": "0123456789abcdef", "o": true}', 'button {"autoloop": "0123456789abcdef", "o": -1}',
+                    'button {"autoloop": "0123456789abcdef", "o": 100}', 'button {"autoloop": "0123456789abcdef"}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "by": "ou_x"}',
+                    'button {"autoloop": "0123456789abcdef --x", "o": 1}'):
+            out, popen = self.click(raw)
+            self.assertIsNone(out)
+            popen.assert_not_called()
 
     def test_registers_card_command(self):
         ctx = mock.Mock()
