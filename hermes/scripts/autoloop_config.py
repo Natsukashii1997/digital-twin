@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""中台配置（批 0B-2，#195；规格 docs/秘书代批-规格.md §5、§6、§9，方案 docs/agent-autoloop-底座-方案.md 5.1）。
+
+按名册生成本机中台 rules.json 里数字分身这一块，其余原样保留：
+  - 来源 hermes：只有派单网关（autoloop_grants.py）持有它的钥匙；
+  - Agent dt-claude / dt-codex：跑在工人账号 dt-worker 上的接单程序（主账号的 claude / codex 是上游试跑用的，不动）；
+  - 通道 feishu（answerers 只有常浩的 open_id）和 secretary（answerers 只有「秘书」）：两把通道钥匙分开，
+    秘书的钥匙答不出 by=常浩，飞书桥接的钥匙答不出 by=秘书（中台按通道核 answerers）；
+    defaultChannels 显式写成原有的通道，新增的两个通道只收派单规则的卡片，不收中台告警和别的规则的卡片；
+  - 派单规则 dispatch-<仓库>-<执行方>：只接 hermes 来源、只接 autoloop_grants.event_type 那一种类型，
+    按事件对象（= 任务单号）分事项，不开 emits（工人的回执发不出任何事件，触发不了派单规则），卡片只发 feishu 和 secretary。
+    现在只给名册里的沙盒生成（批 2 前不往正式仓库派）。
+
+装进中台是改常驻配置，要常浩说「装」才跑（install / issue-source-key 都要 --confirm）。顺序保证装的过程中没有派单能跑起来：
+  1. install：生成草稿 → agent-autoloop check 校验 → 备份原文件 → 原子替换 → 等中台载入 → 逐条暂停派单规则 → 回读核对已暂停；
+     hermes 来源钥匙已经存在时，不许新增派单规则（新规则载入到暂停之间有空隙）；
+  2. issue-source-key：所有派单规则都在、都暂停着，才签 hermes 来源钥匙，写到 600 文件（autoloop_grants 读它），不打印钥匙；
+  派单规则一直暂停到 0C 的启动脚本就绪，由常浩决定什么时候恢复。
+
+  autoloop_config.py plan                 只读：打印要改的地方（和现在的 rules.json 比）
+  autoloop_config.py install --confirm    常浩说「装」之后
+  autoloop_config.py issue-source-key --confirm
+  autoloop_config.py status               只读：来源、通道、派单规则是否暂停、钥匙有没有（只列名字）
+环境变量：AGENT_AUTOLOOP_HOME（中台目录，默认 ~/.agent-autoloop）、DT_AUTOLOOP_CLI（中台命令行）、DT_ROSTER、
+DT_OWNER_OPEN_ID（同 twin_state）、DT_HERMES_SOURCE_KEY_FILE（同 autoloop_grants）、DT_AUTOLOOP_EVIDENCE（备份目录）。
+"""
+import argparse
+import copy
+import datetime as dt
+import difflib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import autoloop_grants as G  # noqa: E402
+
+SOURCE = "hermes"
+WORKER = "dt-worker"
+AGENTS = {"claude": ("dt-claude", "Claude Code（dt-worker）"), "codex": ("dt-codex", "Codex（dt-worker）")}
+NEW_CHANNELS = ("feishu", "secretary")
+SECRETARY = "秘书"
+PAUSE_REASON = "0C 启动脚本就绪前暂停（#195 0B-2），由常浩决定恢复"
+PROMPT = ("这一轮的事件对象是任务单号。任务的五要素在 /Users/Shared/dt-autoloop/tasks/<任务单号>.md；"
+          "开工前核对 /Users/Shared/dt-autoloop/grants/status.json 里这张单有效、动作在列。"
+          "只做任务单写明的范围，只改文件、推非 main 分支、开 PR，不合并。")
+KEY_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+
+
+class Rejected(Exception):
+    """拒绝：说人话的原因，不带钥匙。"""
+
+
+# ---------- 路径 ----------
+def home():
+    return Path(os.environ.get("AGENT_AUTOLOOP_HOME") or "~/.agent-autoloop").expanduser()
+
+
+def rules_file():
+    return home() / "rules.json"
+
+
+def evidence_dir():
+    return Path(os.environ.get("DT_AUTOLOOP_EVIDENCE") or G.SUPPORT / "evidence/autoloop-config").expanduser()
+
+
+def source_key_file():
+    return Path(os.environ.get("DT_HERMES_SOURCE_KEY_FILE") or G.SUPPORT / "autoloop/hermes-source.key").expanduser()
+
+
+def cli():
+    return os.environ.get("DT_AUTOLOOP_CLI", "agent-autoloop")
+
+
+# ---------- 生成 ----------
+def sandbox_repos():
+    """名册里的沙盒仓库：短名 → owner/repo（和 autoloop_grants 的写法一致）。"""
+    r = json.loads(G.ROSTER.read_text(encoding="utf-8"))
+    out = {}
+    for p in r.get("inventory", []):
+        if p.get("sandbox") and str(p.get("path", "")).startswith("github:"):
+            gh = p["path"].split(":", 1)[1]
+            out[gh.split("/")[-1]] = gh
+    return out
+
+
+def dispatch_rule(repo, executor):
+    return {"name": G.rule_name(repo, executor),
+            "when": {"source": SOURCE, "types": [G.event_type(repo, executor)]},
+            "to": AGENTS[executor][0], "cwd": f"~/dt-work/{repo}", "title": "dt-{subject}", "prompt": PROMPT,
+            "parallel": 2, "resume": True, "channels": list(NEW_CHANNELS)}
+
+
+def render(current, owner_open_id, repos):
+    """在现有配置上生成数字分身这一块；同样的输入总得到同样的输出（可重复跑）。"""
+    if not re.match(r"^ou_[\w-]+$", owner_open_id or ""):
+        raise Rejected("常浩的 open_id 没配好（twin_state.owner_open_id）")
+    new = copy.deepcopy(current)
+    new.setdefault("sources", {})[SOURCE] = {"name": "猛鬼兽派单网关"}
+    agents = new.setdefault("agents", {})
+    for executor, (aid, name) in AGENTS.items():
+        agents[aid] = {"name": name, "worker": WORKER, "use": executor, "access": "edit"}
+    channels = new.setdefault("channels", {})
+    if "defaultChannels" in new:
+        new["defaultChannels"] = [c for c in new["defaultChannels"] if c != "secretary"]
+    else:   # 不写时发到所有通道：先把原有的写死，新增的两个通道不收别处的卡片
+        new["defaultChannels"] = [c for c in channels if c not in NEW_CHANNELS] or ["feishu"]
+    channels["feishu"] = {"name": "飞书", "answerers": [owner_open_id]}
+    channels["secretary"] = {"name": "秘书", "answerers": [SECRETARY]}
+    rules = [r for r in new.get("rules", []) if not str(r.get("name", "")).startswith("dispatch-")]
+    rules += [dispatch_rule(repo, ex) for repo in sorted(repos) for ex in sorted(AGENTS)]
+    new["rules"] = rules
+    return new
+
+
+def dispatch_names(rules):
+    return [r["name"] for r in rules.get("rules", []) if str(r.get("name", "")).startswith("dispatch-")]
+
+
+def dumps(obj):
+    return json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+
+
+def load_current():
+    try:
+        return json.loads(rules_file().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Rejected(f"找不到中台规则文件：{rules_file()}")
+
+
+def owner_open_id():
+    import twin_state as T
+    try:
+        return T.owner_open_id()
+    except T.StateError as e:
+        raise Rejected(str(e))
+
+
+def plan():
+    current = load_current()
+    new = render(current, owner_open_id(), sandbox_repos())
+    diff = "".join(difflib.unified_diff(dumps(current).splitlines(True), dumps(new).splitlines(True),
+                                        "rules.json（现在）", "rules.json（装后）"))
+    return {"changed": new != current, "diff": diff, "dispatch_rules": dispatch_names(new)}
+
+
+# ---------- 中台 ----------
+def hub_config():
+    c = json.loads((home() / "config.json").read_text(encoding="utf-8"))
+    return c["url"].rstrip("/"), c["owner"]
+
+
+def hub(method, path, body=None):
+    url, owner = hub_config()
+    req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {owner}", "Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=15) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        raise Rejected(f"中台回 HTTP {e.code}（{method} {urllib.parse.unquote(path)}）")
+    except (OSError, ValueError) as e:
+        raise Rejected(f"连不上中台：{type(e).__name__}")
+
+
+def state():
+    return hub("GET", "/v1/state")
+
+
+def run_cli(*args):
+    env = {**os.environ, "AGENT_AUTOLOOP_HOME": str(home())}
+    try:
+        r = subprocess.run([cli(), *args], capture_output=True, text=True, timeout=60, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Rejected(f"中台命令行跑不起来：{type(e).__name__}")
+    return r.returncode, r.stdout, r.stderr
+
+
+def key_names():
+    code, out, err = run_cli("key", "list")
+    if code:
+        raise Rejected(f"列不出中台钥匙：{err.strip()[:200]}")
+    return {tuple(line.split()[:2]) for line in out.splitlines() if line.strip()}
+
+
+def lines_by_name(s):
+    return {line["name"]: line for line in s.get("lines", [])}
+
+
+def wait_loaded(names, timeout=30.0):
+    """等中台把新规则文件载入：派单规则和两个新通道都出现在状态里。"""
+    end = time.monotonic() + timeout
+    while True:
+        s = state()
+        if set(names) <= set(lines_by_name(s)) and set(NEW_CHANNELS) <= {c["id"] for c in s.get("channels", [])}:
+            return s
+        if time.monotonic() >= end:
+            raise Rejected("中台没有载入新规则（规则文件不对时中台继续用旧规则）")
+        time.sleep(0.5)
+
+
+def _atomic_write(path, text, mode):
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def install(confirm=False, now=None):
+    if not confirm:
+        raise Rejected("装进中台要常浩确认：加 --confirm")
+    current = load_current()
+    new = render(current, owner_open_id(), sandbox_repos())
+    names = dispatch_names(new)
+    loaded = lines_by_name(state())
+    added = [n for n in names if n not in loaded]
+    if added and (("source", SOURCE) in key_names()):
+        raise Rejected(f"hermes 来源钥匙已经在了，不能新增派单规则（{'、'.join(added)}）：先删钥匙或另议")
+    stamp = (now or dt.datetime.now(G.TZ)).strftime("%Y%m%d-%H%M%S")
+    ev = evidence_dir()
+    ev.mkdir(parents=True, exist_ok=True)
+    os.chmod(ev, 0o700)
+    draft = ev / f"rules-{stamp}.json"
+    _atomic_write(draft, dumps(new), 0o600)
+    code, out, err = run_cli("check", str(draft))
+    if code:
+        raise Rejected(f"新规则没通过 agent-autoloop check：{(err or out).strip()[:300]}")
+    backup = ev / f"rules-before-{stamp}.json"
+    _atomic_write(backup, rules_file().read_text(encoding="utf-8"), 0o600)
+    mode = rules_file().stat().st_mode & 0o777
+    if new != current:
+        _atomic_write(rules_file(), dumps(new), mode)
+        try:
+            wait_loaded(names)
+        except Rejected:
+            _atomic_write(rules_file(), backup.read_text(encoding="utf-8"), mode)
+            raise
+    for name in names:
+        hub("POST", f"/v1/rules/{urllib.parse.quote(name, safe='')}/pause", {"reason": PAUSE_REASON})
+    s = state()
+    not_paused = [n for n in names if not (lines_by_name(s).get(n) or {}).get("paused")]
+    if not_paused:
+        raise Rejected(f"这些派单规则没暂停住：{'、'.join(not_paused)}；hermes 来源钥匙先别签")
+    return {"ok": True, "changed": new != current, "dispatch_rules": names, "paused": names,
+            "backup": str(backup), "draft": str(draft)}
+
+
+def issue_source_key(confirm=False):
+    if not confirm:
+        raise Rejected("签 hermes 来源钥匙要常浩确认：加 --confirm")
+    f = source_key_file()
+    if f.exists() or ("source", SOURCE) in key_names():
+        raise Rejected("hermes 来源钥匙已经有了；要换先 agent-autoloop key remove source hermes 并删掉钥匙文件")
+    rules = load_current()
+    if SOURCE not in rules.get("sources", {}):
+        raise Rejected("rules.json 里还没有 hermes 来源：先 install")
+    names = dispatch_names(rules)
+    loaded = lines_by_name(state())
+    bad = [n for n in names if not (loaded.get(n) or {}).get("paused")]
+    if not names or bad:
+        raise Rejected(f"派单规则要全部载入并暂停着才签钥匙（没暂停：{'、'.join(bad) or '没有派单规则'}）")
+    code, out, err = run_cli("key", "new", "source", SOURCE)
+    key = out.strip()
+    if code or not KEY_RE.match(key):
+        raise Rejected(f"签钥匙失败：{err.strip()[:200]}")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(f.parent, 0o700)
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(key + "\n")
+    return {"ok": True, "file": str(f), "mode": "600"}
+
+
+def status():
+    rules = load_current()
+    s = state()
+    loaded = lines_by_name(s)
+    keys = key_names()
+    return {"source_hermes": {"in_rules": SOURCE in rules.get("sources", {}), "key": ("source", SOURCE) in keys,
+                              "key_file": source_key_file().exists()},
+            "channels": {c: {"in_rules": c in rules.get("channels", {}), "key": ("channel", c) in keys,
+                             "answerers": len(rules.get("channels", {}).get(c, {}).get("answerers", []))}
+                         for c in NEW_CHANNELS},
+            "dispatch_rules": {n: {"loaded": n in loaded, "paused": bool((loaded.get(n) or {}).get("paused"))}
+                               for n in dispatch_names(rules)}}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("plan")
+    sub.add_parser("status")
+    for name in ("install", "issue-source-key"):
+        sub.add_parser(name).add_argument("--confirm", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        if a.cmd == "plan":
+            out = plan()
+            print(out["diff"] or "（没有要改的）")
+            print(json.dumps({k: v for k, v in out.items() if k != "diff"}, ensure_ascii=False))
+            return 0
+        out = {"install": lambda: install(a.confirm), "issue-source-key": lambda: issue_source_key(a.confirm),
+               "status": status}[a.cmd]()
+    except Rejected as e:
+        print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))
+        return 1
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
