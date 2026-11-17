@@ -11,6 +11,7 @@ import memdaily_data as md  # noqa: E402
 import memdaily_publish as mp  # noqa: E402
 
 ME = md.ME
+md.REGISTRY = Path(tempfile.mkdtemp()) / "docs.json"   # 不读本机真实的文档登记
 D = dt.date(2026, 11, 10)   # 周二
 OLD = "## 📅 2026-11-08（周日）\n\n### 四、⚡ 行动 & 阻塞\n\n|  |  |\n|-|-|\n\n1\n\n⏩ 行动\n\n旧事项\n\n### 五、📚 方法论沉淀\n\n无\n"
 
@@ -358,6 +359,130 @@ class Pipeline(unittest.TestCase):
             return {"skip": "周末没有工作往来"}
         rec = mp.build("2026-11-08", collect=collect, gen=lambda *a: self.fail("不该写稿"))
         self.assertEqual(rec["skip"], "周末没有工作往来")
+
+
+class Docs(FakeRun):
+    """多份文档的假飞书：按 --doc 分开存正文，能建新文档，能设块数和写入时报超限。"""
+    def __init__(self, docs=None, counts=None, limit_on=()):
+        super().__init__()
+        self.docs = docs or {}            # token -> {"md": ..., "xml": ...}
+        self.counts = counts or {}        # token -> 列块接口数出来的块数
+        self.limit_on = set(limit_on)     # 往这些文档写时报飞书超限
+        self.created = []
+
+    def __call__(self, *args, **kw):
+        cmd = " ".join(args[:2])
+        doc = args[args.index("--doc") + 1] if "--doc" in args else None
+        if cmd == "docs +fetch":
+            self.calls.append((args, kw))
+            d = self.docs.setdefault(doc, {"md": "", "xml": ""})
+            return {"document": {"content": d["xml"] if "xml" in args else d["md"]}}
+        if cmd == "docs +create":
+            self.calls.append((args, kw))
+            token = f"NEW{len(self.created) + 1}"
+            self.created.append((token, args[args.index("--title") + 1]))
+            self.docs[token] = {"md": "", "xml": ""}
+            return {"document": {"document_id": token, "url": f"https://x.feishu.cn/docx/{token}"}}
+        if cmd == "docs +update":
+            self.calls.append((args, kw))
+            if doc in self.limit_on:
+                raise md.Fail('docs +update：{"code":"DOC_TOTAL_BLOCK_LIMIT","operation":"append","actual":40138,"limit":40000}.')
+            content = Path(kw["cwd"], args[args.index("--content") + 1][1:]).read_text(encoding="utf-8")
+            self.docs[doc]["xml"] = content + self.docs[doc]["xml"]
+            return {}
+        if cmd == "api GET" and '"page_size": 500' in args[args.index("--params") + 1]:
+            self.calls.append((args, kw))
+            token = args[2].split("/documents/")[1].split("/")[0]
+            return {"items": [{}] * self.counts.get(token, 0), "has_more": False}
+        return super().__call__(*args, **kw)
+
+
+class MonthlyDocs(unittest.TestCase):
+    """11-17 常浩选方案甲：旧汇总文档到了飞书 4 万块上限，按月一份新文档，写前查块数。"""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.orig = mp.DIR, md.REGISTRY
+        mp.DIR = Path(self.tmp.name)
+        md.REGISTRY = mp.DIR / "docs.json"
+        mp.build("2026-11-16", collect=lambda d: dict(facts(), work_lines=["定价"], date="2026-11-16", title="📅 2026-11-16（周一）"),
+                 gen=lambda t, w: (json.dumps(good_draft(), ensure_ascii=False), "s", "m"))
+
+    def tearDown(self):
+        mp.DIR, md.REGISTRY = self.orig
+        self.tmp.cleanup()
+
+    def updates(self, run):
+        return [a[a.index("--doc") + 1] for a, _ in run.calls if a[:2] == ("docs", "+update")]
+
+    def test_no_registry_means_only_legacy_doc(self):
+        reg = md.load_registry()
+        self.assertEqual([x["token"] for x in reg["docs"]], [md.DOC])
+        self.assertIsNone(reg["docs"][0]["month"])
+
+    def test_first_write_of_month_opens_new_doc_and_leaves_legacy_alone(self):
+        run = Docs(docs={md.DOC: {"md": "", "xml": "<h2>📅 2026-11-13（周五）</h2>"}})
+        self.assertEqual(mp.write("2026-11-16", run=run), "written")
+        self.assertEqual(run.created, [("NEW1", "常浩-记忆日报汇总 · 2026-11")])
+        self.assertEqual(self.updates(run), ["NEW1"])                     # 旧文档一个字不动
+        self.assertNotIn("2026-11-16", run.docs[md.DOC]["xml"])
+        reg = json.loads(md.REGISTRY.read_text(encoding="utf-8"))
+        self.assertEqual([(x["token"], x["month"]) for x in reg["docs"]], [(md.DOC, None), ("NEW1", "2026-11")])
+        deliv = json.loads((mp.DIR / "2026-11-16.delivery.json").read_text(encoding="utf-8"))
+        self.assertEqual((deliv["doc"], deliv["opened"]["reason"]), ("NEW1", "new_month"))
+        mp.push("2026-11-16", run=run)
+        send = [a for a, _ in run.calls if a[:2] == ("im", "+messages-send")][0]
+        text = send[send.index("--text") + 1]
+        self.assertIn("飞书文档：https://vm94j8bzy7.feishu.cn/docx/NEW1", text)
+        self.assertIn("本月第一篇，新开了文档《常浩-记忆日报汇总 · 2026-11》", text)
+
+    def test_month_doc_with_room_is_reused(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "常浩-记忆日报汇总 · 2026-11", "month": "2026-11"}]})
+        run = Docs(counts={"NOV": 20000})
+        self.assertEqual(mp.write("2026-11-16", run=run), "written")
+        self.assertEqual((run.created, self.updates(run)), ([], ["NOV"]))
+        self.assertIsNone(json.loads((mp.DIR / "2026-11-16.delivery.json").read_text(encoding="utf-8"))["opened"])
+
+    def test_nearly_full_doc_opens_continuation_before_writing(self):
+        md.save_registry({"folder": "FOLDER", "docs": [md.legacy(), {"token": "NOV", "title": "常浩-记忆日报汇总 · 2026-11", "month": "2026-11"}]})
+        run = Docs(counts={"NOV": mp.SAFE_BLOCKS - 100})
+        self.assertEqual(mp.write("2026-11-16", run=run), "written")
+        self.assertEqual(run.created, [("NEW1", "常浩-记忆日报汇总 · 2026-11（续 2）")])
+        create = [a for a, _ in run.calls if a[:2] == ("docs", "+create")][0]
+        self.assertEqual(create[create.index("--parent-token") + 1], "FOLDER")
+        self.assertEqual(self.updates(run), ["NEW1"])
+        deliv = json.loads((mp.DIR / "2026-11-16.delivery.json").read_text(encoding="utf-8"))
+        self.assertEqual(deliv["opened"]["reason"], "full")
+        self.assertIn("快到飞书单文档 4 万块上限", mp.push_text("2026-11-16", "NEW1", good_draft(), {}, deliv))
+
+    def test_feishu_limit_error_opens_continuation_and_writes_once_more(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "常浩-记忆日报汇总 · 2026-11", "month": "2026-11"}]})
+        run = Docs(counts={"NOV": 100}, limit_on={"NOV"})
+        self.assertEqual(mp.write("2026-11-16", run=run), "written")
+        self.assertEqual(self.updates(run), ["NOV", "NEW1"])
+        self.assertIn("2026-11-16", run.docs["NEW1"]["xml"])
+
+    def test_explicit_doc_reports_limit_in_plain_words(self):
+        run = Docs(limit_on={"SAMPLE"})
+        with self.assertRaises(mp.GenError) as e:
+            mp.write("2026-11-16", "SAMPLE", run=run)
+        self.assertIn("4 万块上限", str(e.exception))
+        self.assertEqual(run.created, [])
+
+    def test_collect_reads_month_doc_then_falls_back_to_legacy(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"},
+                                                 {"token": "DEC", "title": "t", "month": "2026-12"}]})
+        run = Docs(docs={"NOV": {"md": "", "xml": ""}, md.DOC: {"md": OLD, "xml": ""}})
+        f = md.collect(D, run=run, config=CONFIG)
+        self.assertEqual(f["prev"]["date"], "2026-11-08")                  # 新文档还空着，前一篇从旧文档读
+        fetched = [a[a.index("--doc") + 1] for a, _ in run.calls if a[:2] == ("docs", "+fetch")]
+        self.assertEqual(fetched, ["NOV", md.DOC])                         # 不读以后月份的文档
+        run = Docs(docs={"NOV": {"md": "## 📅 2026-11-10（周二）\n", "xml": ""}})
+        self.assertTrue(md.collect(D, run=run, config=CONFIG)["skip"])
+
+    def test_estimate_matches_feishu_block_count(self):
+        # 11-11、11-12、11-13 三篇实测：单元格 + 段落 + 标题 + 表格，正好等于列块接口数出的块数
+        xml = "<h2>t</h2><h3>a</h3><table><thead><tr><th><p>x</p></th></tr></thead><tbody><tr><td><p>y</p><p>z</p></td></tr></tbody></table>"
+        self.assertEqual(mp.estimate_blocks(xml), 2 + 1 + 2 + 3)
 
 
 if __name__ == "__main__":
