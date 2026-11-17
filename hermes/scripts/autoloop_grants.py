@@ -16,13 +16,18 @@
 事件只带单号、代次和类别（方案 5.1 第 1 条「凭证内容不进事件」）；五要素原文写在工人只读的任务单
 /Users/Shared/dt-autoloop/tasks/<单号>.md（644，不含消息号），0C 的启动脚本据此取任务。
 
-发事件（send_pending）：先记账后发。每个事件在写事务里现读凭证判定（状态、到期、作废代次、代次）后领取（在途），
-提交后才 POST；送达后条件更新为已送达。连不上中台记「结果不明」留在在途，过 60 秒、凭证仍有效才补发（中台同一 id 只记
-一次）；凭证已失效的不再发。冻结只作废还没领取的事件，不会把已送达的记录改掉。
+发事件（send_pending）：先记账后发。每个事件在一个写事务里：先按已提交的状态重写镜像（写不成就不领取、不发），
+再现读凭证判定（状态、到期、作废代次、代次）后领取（在途），提交后才 POST；送达后条件更新为已送达。所以发出去的每个事件，
+它的任务和代次在发之前已经出现在工人镜像里。连不上中台记「结果不明」留在在途，过 60 秒、凭证仍有效才补发；
+凭证已失效的不再发。冻结只作废还没领取的事件，不会把已送达的记录改掉。
   hub_events.sent：0 待发，2 在途 / 结果不明，1 已送达，-1 作废未发，-2 作废前已领取（可能已送达，靠代次拦截）。
+  中台按「同一来源、同一 id」去重（agent-autoloop kernel/decide.ts ingest，tests/events.test.ts），重复投递回原事件号和
+  duplicate: true，发送方照常记已送达；慢请求、进程暂停仍可能 POST 两次，靠这一点保证只派一次。
 
-冻结、撤销、完成是收紧方向，本机调用即可：**先写状态镜像再提交**，镜像写不成整笔回滚。批准、恢复是放宽方向：先提交再写
-镜像，镜像写不成也只会比库更严。所以镜像永远不比凭证库宽松。冻结时生成一个冻结码；恢复要常浩私聊「恢复 <单号> <冻结码>」，
+镜像只按**已提交**的状态写，写入时持有凭证库写锁（和库的变化串行），不写未提交的状态。凭证库是权威：冻结、撤销、完成
+先在库里提交（旧代次立刻作废，check() 立刻拒绝），再写镜像；镜像写不成时冻结照样生效，输出里报 mirror_error、
+命令行退出码 2，且之后任何派发都会因写不成镜像而停下，直到镜像写好。批准、恢复同样先提交后写镜像，写不成工人看到的是更严的
+旧状态。冻结时生成一个冻结码；恢复要常浩私聊「恢复 <单号> <冻结码>」，
 并且这次冻结已经由推翻流程记过更正（规格 §8 第 4 步「更正先持久记在账本」，record_resolution，0B-5 调用，本批不给命令行，
 所以本批恢复入口实际关闭）；恢复时代次 +1，被作废的旧代次永久失效。
 
@@ -194,11 +199,12 @@ def voided_of(con, task_id):
 
 # ---------- 名册 ----------
 def allowed_repos():
-    """能派写入单的仓库：名册活跃项目里 write_allowed 不为 false、有 GitHub 的，加上 inventory 里标了 sandbox 的。"""
+    """能派写入单的仓库（显式白名单）：名册活跃项目里 write_allowed 明确为 true、有 GitHub 的，加上 inventory 里标了
+    sandbox 的。缺这个字段的一律不算（PR #199 第 2 轮审查 P1-01）。"""
     r = json.loads(ROSTER.read_text(encoding="utf-8"))
     out = {}
     for p in r.get("projects", []):
-        if p.get("github") and p.get("write_allowed", True) is not False and p.get("category") == "活跃":
+        if p.get("github") and p.get("write_allowed") is True and p.get("category") == "活跃":
             out[p["github"].split("/")[-1]] = p["github"]
     for p in r.get("inventory", []):
         if p.get("sandbox") and str(p.get("path", "")).startswith("github:"):
@@ -264,9 +270,19 @@ def write_status(con, now):
 
 
 def refresh_status(path=None, now=None):
-    """放宽方向用：库已经提交，再按已落盘的状态写镜像。写不成就抛错，镜像停在更严的旧状态。"""
+    """状态变化提交之后，持写锁按已提交的状态写镜像（这个事务本身不改库）。写不成就抛 OSError。"""
     with tx(path) as con:
         write_status(con, now or now_tz())
+
+
+def _publish_after_commit(out, path, now):
+    """提交之后写镜像；写不成不撤销已提交的变化，在输出里报出（派发会因写不成镜像而停下）。"""
+    try:
+        refresh_status(path, now)
+    except OSError as e:
+        out["mirror_error"] = (f"状态镜像没写成（{type(e).__name__}）：凭证库已生效、出口按库判定；"
+                               "工人侧镜像可能是旧的，派发已停，修好后跑 send-pending 重写")
+    return out
 
 
 def write_task_file(row):
@@ -340,18 +356,18 @@ def _claim_next(con, now, seen):
 
 
 def send_pending(path=None, post=None, now=None):
-    """把记了账、还没确认送到中台的事件逐个发出去。先刷新镜像（镜像写不成就一个也不发），再逐个：
-    事务里现读凭证并领取 → 提交 → POST → 送达后条件更新。"""
+    """把记了账、还没确认送到中台的事件逐个发出去。每个：同一写事务里先按已提交状态写镜像、再现读凭证并领取 → 提交 →
+    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。"""
     post = post or post_event
-    try:
-        refresh_status(path, now)
-    except OSError as e:
-        raise Rejected(f"状态镜像写不了（{type(e).__name__}），事件先不发")
     results, seen = [], set()
     while True:
         t = now or now_tz()
-        with tx(path) as con:
-            ev, row, skipped = _claim_next(con, t, seen)
+        try:
+            with tx(path) as con:
+                write_status(con, t)          # 领取前、同一把写锁下：要发的任务和代次先进镜像
+                ev, row, skipped = _claim_next(con, t, seen)
+        except OSError as e:
+            raise Rejected(f"状态镜像写不了（{type(e).__name__}），事件先不发")
         results += skipped
         if ev is None:
             return results
@@ -511,7 +527,7 @@ def approve(message_id, now=None, path=None, post=None):
         row = grant_row(con, task_id)
         record_event(con, row, "start", f"{task_id}:g1:start", now)
         write_task_file(row)          # 写不成整笔回滚：没有任务单就没有凭证
-    return {"task_id": task_id, "send": _try_send(path, post, now)}    # 发之前先写镜像（放宽方向：先提交后写）
+    return {"task_id": task_id, "send": _try_send(path, post, now)}    # 发之前在领取的写锁下先写镜像
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
@@ -534,7 +550,7 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None):
     return {"event_key": key, "send": _try_send(path, post, now)}
 
 
-# ---------- 收紧方向：冻结、撤销、完成（先写镜像再提交） ----------
+# ---------- 收紧方向：冻结、撤销、完成（先在权威库提交，再写镜像） ----------
 def _tighten(task_id, status, what, reason, now, path):
     with tx(path) as con:
         row = grant_row(con, task_id)
@@ -551,8 +567,7 @@ def _tighten(task_id, status, what, reason, now, path):
                     (status, code, iso(now), task_id))
         con.execute("UPDATE hub_events SET sent = -1 WHERE task_id = ? AND sent = 0", (task_id,))
         log(con, task_id, what, now, reason=reason[:200], generation=row["generation"], voided=status != "done")
-        write_status(con, now)        # 先写镜像再提交：写不成就整笔回滚，镜像不会比库宽松
-    return {**out, "freeze_code": code} if code else out
+    return _publish_after_commit({**out, "freeze_code": code} if code else out, path, now)
 
 
 def freeze(task_id, reason, now=None, path=None):
@@ -615,12 +630,7 @@ def unfreeze(message_id, now=None, path=None):
         con.execute("UPDATE grants SET status = 'active', generation = ?, generation_started_at = ?, freeze_code = NULL, "
                     "updated_at = ? WHERE task_id = ?", (gen, iso(now), iso(now), row["task_id"]))
         log(con, row["task_id"], "恢复", now, message=message_id, generation=gen)
-    out = {"task_id": row["task_id"], "status": "active", "generation": gen}
-    try:
-        refresh_status(path, now)     # 放宽方向：先提交后写镜像，写不成镜像停在冻结（更严）
-    except OSError as e:
-        out["mirror_error"] = f"状态镜像没写成（{type(e).__name__}），工人仍看到冻结；下次 send-pending 会重写"
-    return out
+    return _publish_after_commit({"task_id": row["task_id"], "status": "active", "generation": gen}, path, now)
 
 
 def show(task_id=None, path=None):
@@ -690,7 +700,9 @@ def main(argv=None):
         print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))
         return 1
     print(json.dumps(out, ensure_ascii=False, indent=1))
-    return 0 if not (isinstance(out, dict) and out.get("ok") is False) else 1
+    if isinstance(out, dict) and out.get("ok") is False:
+        return 1
+    return 2 if isinstance(out, dict) and out.get("mirror_error") else 0     # 已生效，但镜像没写成
 
 
 if __name__ == "__main__":

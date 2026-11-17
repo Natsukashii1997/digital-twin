@@ -56,13 +56,16 @@ class Base(unittest.TestCase):
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted, self.notices = {}, 0, [], []
 
-    def write_roster(self, sandbox):
+    def write_roster(self, sandbox, twin_write=True):
         inv = [{"path": "github:o/old", "category": "待删"}]
         if sandbox:
             inv.insert(0, {"path": f"github:{sandbox}", "category": "沙盒", "sandbox": True})
+        twin = {"id": "digital-twin", "github": "o/digital-twin", "category": "活跃"}
+        if twin_write is not None:
+            twin["write_allowed"] = twin_write
         self.roster.write_text(json.dumps({
-            "projects": [{"id": "digital-twin", "github": "o/digital-twin", "category": "活跃", "write_allowed": True},
-                         {"id": "agent-autoloop", "github": "o/agent-autoloop", "category": "活跃", "write_allowed": False}],
+            "projects": [twin, {"id": "agent-autoloop", "github": "o/agent-autoloop", "category": "活跃", "write_allowed": False},
+                         {"id": "little-steps", "github": "o/little-steps", "category": "活跃"}],     # 没写 write_allowed
             "inventory": inv}), encoding="utf-8")
 
     def _fetch(self, mid):
@@ -80,6 +83,10 @@ class Base(unittest.TestCase):
         return mid
 
     def post(self, body):
+        d = json.loads(body["detail"])                    # 发出的每个事件，任务和代次都已在工人镜像里且有效
+        t = self.mirror().get(d["task_id"]) if self.status.exists() else None
+        self.assertTrue(t and t["status"] == "active" and t["generation"] == d["generation"],
+                        f"发出 {body['id']} 时工人镜像里查不到这一代：{t}")
         self.posted.append(body)
         return 100 + len(self.posted)
 
@@ -170,6 +177,15 @@ class Approval(Base):
             G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
         self.assertEqual(G.show(), [])
 
+    def test_missing_write_allowed_is_not_allowed(self):
+        code = G.propose("digital-twin", "codex", SCOPE, now=T0)["code"]
+        self.write_roster("o/dt-sandbox", twin_write=None)  # 字段被删掉：不再算允许写入
+        with self.assertRaisesRegex(G.Rejected, "仓库变了"):
+            G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+        with self.assertRaisesRegex(G.Rejected, "名册"):
+            G.propose("digital-twin", "codex", SCOPE, now=T0)
+        self.assertEqual(G.show(), [])
+
     def test_tampered_proposal_rejected(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         self.sql("UPDATE proposals SET scope_text = ? WHERE code = ?", (SCOPE + "\n顺便合并", code))
@@ -199,7 +215,7 @@ class Approval(Base):
         self.assertEqual(len(G.show()), 1)
 
     def test_repo_and_executor_and_hours_checked(self):
-        for repo in ("agent-autoloop", "old", "nope", "../x"):
+        for repo in ("agent-autoloop", "little-steps", "old", "nope", "../x"):
             with self.subTest(repo=repo), self.assertRaisesRegex(G.Rejected, "名册"):
                 G.propose(repo, "claude", SCOPE, now=T0)
         with self.assertRaises(G.Rejected):
@@ -255,8 +271,9 @@ class Sending(Base):
         G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=down)
 
         def post_then_freeze(body):
+            n = self.post(body)
             G.freeze(tid, "常浩推翻", now=LATER)                   # 第一个在途时冻结
-            return self.post(body)
+            return n
         out = G.send_pending(post=post_then_freeze, now=LATER)
         self.assertEqual([p["id"] for p in self.posted], [f"{tid}:g1:start"])   # 只发出已领取的那个
         self.assertEqual([o["sent"] for o in out], [True, False])
@@ -301,13 +318,62 @@ class Sending(Base):
 
 
 class Mirror(Base):
-    def test_freeze_rolls_back_if_mirror_cannot_be_written(self):
+    def test_freeze_takes_effect_even_if_mirror_cannot_be_written(self):
         tid = self.new_task()
+        G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=down)
         with mock.patch.object(G, "_write_shared", side_effect=OSError("磁盘满")):
-            with self.assertRaises(OSError):
-                G.freeze(tid, "推翻", now=T0)
-        self.assertEqual(G.show(tid)[0]["status"], "active")       # 库没变，和镜像一致
-        self.assertEqual(self.mirror()[tid]["status"], "active")
+            out = G.freeze(tid, "推翻", now=T0)
+            self.assertIn("mirror_error", out)
+            self.assertEqual(G.show(tid)[0]["status"], "frozen")         # 权威库已冻结
+            self.assertIn("冻结", G.check(tid, "edit", 1, now=T0))       # 出口按库拒绝
+            self.assertEqual(self.mirror()[tid]["status"], "active")      # 工人侧还是旧的……
+            with self.assertRaisesRegex(G.Rejected, "镜像"):
+                G.send_pending(post=self.post, now=LATER)                 # ……所以派发停下
+            with mock.patch("sys.stdout"):
+                self.assertEqual(G.main(["freeze", "--task", tid, "--reason", "再冻"]), 0)   # 已冻结的幂等返回
+        self.assertEqual(self.posted[-1]["id"], f"{tid}:g1:start")
+        G.send_pending(post=self.post, now=LATER)                         # 修好后重写镜像，旧代次事件作废
+        self.assertEqual(self.mirror()[tid]["status"], "frozen")
+        self.assertEqual(self.sent_states(tid), {"start": 1, "rework": -2})
+
+    def test_cli_reports_mirror_failure_with_exit_code_2(self):
+        tid = self.new_task()
+        with mock.patch.object(G, "_write_shared", side_effect=OSError("磁盘满")), mock.patch("sys.stdout"):
+            self.assertEqual(G.main(["revoke", "--task", tid]), 2)
+        self.assertEqual(G.show(tid)[0]["status"], "revoked")
+
+    def test_failed_freeze_commit_never_touches_mirror(self):
+        """A 已在库里恢复、但镜像没写成；随后冻结 B 的事务失败：镜像对 A、B 都不变（不发布未提交的，也不夹带别人的）。"""
+        a, b = self.new_task(), self.new_task(executor="codex")
+        code = G.freeze(a, "推翻", now=T0)["freeze_code"]
+        G.record_resolution(a, 1, "d-1", "关掉旧 PR", now=T0)
+        with mock.patch.object(G, "_write_shared", side_effect=OSError("磁盘满")):
+            self.assertIn("mirror_error", G.unfreeze(self.say(f"恢复 {a} {code}"), now=T0))
+        before = self.status.read_text(encoding="utf-8")
+        real_log = G.log
+
+        def boom(con, task_id, what, now, **kw):
+            if what == "冻结":
+                raise RuntimeError("提交前出错")
+            return real_log(con, task_id, what, now, **kw)
+        with mock.patch.object(G, "log", side_effect=boom), self.assertRaises(RuntimeError):
+            G.freeze(b, "推翻", now=T0)
+        self.assertEqual(self.status.read_text(encoding="utf-8"), before)
+        self.assertEqual((self.mirror()[a]["status"], self.mirror()[b]["status"]), ("frozen", "active"))
+        self.assertEqual(G.show(b)[0]["status"], "active")
+
+    def test_mirror_is_written_from_committed_state_only(self):
+        tid = self.new_task()
+        real, seen = G.write_status, []
+
+        def spy(con, now):
+            other = sqlite3.connect(self.db)              # 另一个连接只看得到已提交的
+            seen.append(other.execute("SELECT status FROM grants WHERE task_id = ?", (tid,)).fetchone()[0])
+            other.close()
+            return real(con, now)
+        with mock.patch.object(G, "write_status", side_effect=spy):
+            G.freeze(tid, "推翻", now=T0)
+        self.assertEqual(seen, ["frozen"])
 
     def test_approve_without_mirror_sends_nothing_and_stays_strict(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
@@ -319,6 +385,24 @@ class Mirror(Base):
         G.send_pending(post=self.post, now=T0)                     # 修好后补发：先写镜像再发
         self.assertIn(out["task_id"], self.mirror())
         self.assertEqual(len(self.posted), 1)
+
+    def test_interleaved_senders_never_send_an_unpublished_task(self):
+        """发送器 S1 正在发 Y 的事件时，另一路批准了 X 但自己的镜像没写成；S1 接着领取 X 时必须先把 X 写进镜像。"""
+        y = self.new_task(post=down)
+        x_code = G.propose("dt-sandbox", "codex", SCOPE, now=LATER)["code"]
+        box = {}
+
+        def s1_post(body):
+            n = self.post(body)
+            if not box:
+                with mock.patch.object(G, "write_status", side_effect=OSError("磁盘满")):
+                    box["x"] = G.approve(self.say(f"派单 {x_code}", LATER), now=LATER, post=self.post)
+                self.assertIn("error", box["x"]["send"])
+                self.assertNotIn(box["x"]["task_id"], self.mirror())
+            return n
+        G.send_pending(post=s1_post, now=LATER)
+        x = box["x"]["task_id"]
+        self.assertEqual([p["id"] for p in self.posted], [f"{y}:g1:start", f"{x}:g1:start"])   # post 里已核过镜像
 
 
 class Check(Base):
