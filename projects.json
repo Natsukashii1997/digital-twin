@@ -337,6 +337,46 @@
       "notes": "跨项目 UI 设计原则、资产索引、可复用模式与界面验收标准；ui-styles、excel-aura 等可执行 Skill 留在 my-skills，只做引用。2026-11-07 按《项目体系重构 V1.3》新建；write_allowed=false，常浩批准后再开放写入单。没有 CI。",
       "category": "活跃",
       "github": "Natsukashii1997/ui-system"
+    },
+    {
+      "id": "agent-autoloop",
+      "name": "agent-autoloop（执行底座引擎）",
+      "type": "infrastructure",
+      "aliases": [
+        "agent-autoloop",
+        "autoloop",
+        "中台",
+        "执行底座"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/agent-autoloop",
+      "main": "dt",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "npm test",
+      "default_worker": null,
+      "write_allowed": false,
+      "notes": "上游 KKKKhazix/agent-autoloop（MIT）的私有镜像，2026-11-15 建（digital-twin#190）。dt 分支锁 v1.8.5，零补丁：不在这里改引擎，通用改进从公开 fork 提 PR 回上游；remote upstream 只拉不推。本机中台从这里安装（~/.agent-autoloop/app）。每周检查上游、验证后才升级。",
+      "category": "活跃",
+      "github": "Natsukashii1997/agent-autoloop"
+    },
+    {
+      "id": "dt-autoloop-plugins",
+      "name": "dt-autoloop-plugins（中台插件）",
+      "type": "infrastructure",
+      "aliases": [
+        "dt-autoloop-plugins",
+        "中台插件"
+      ],
+      "path": "~/Documents/ChatGPT/个人/work/dt-autoloop-plugins",
+      "main": "main",
+      "agents": null,
+      "card": null,
+      "test": null,
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "数字分身给 agent-autoloop 写的插件（dt-feishu、dt-worktree 等），2026-11-15 建（digital-twin#190）；批 0C / 批 1 起放代码，届时补 AGENTS.md 和测试命令。",
+      "category": "活跃",
+      "github": "Natsukashii1997/dt-autoloop-plugins"
     }
   ],
   "categories": {

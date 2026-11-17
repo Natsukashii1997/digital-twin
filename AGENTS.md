@@ -38,7 +38,7 @@ hermes/
     skill_health.py    skill 月度体检推送（#151）：Hermes 无模型定时任务每月 1 号 10:30 调用，在 my-skills 下跑 node scripts/monthly-health.mjs --days 30，标题改粗体、表格改成逐条列表、末尾加「抽查 <名字>」提示，stdout 发到常浩私聊；失败退出码 1，由 Hermes 发失败通知；只读
     multica_night.py   Multica 夜跑主控（#92，DT-ORC M5 / 5.3a）：Hermes 无模型定时任务每 5 分钟经 multica_night_tick.py 调 tick（approve 记下的开跑时刻到了就先 start）；按计划文件在 DT 沙盒建父单和分 stage 子单，子单交付（in_review）后推进下一 stage，边跑边导 run-log 和消息到 DigitalTwin/runs/<夜跑>/，到上限按 5.3a 停机（禁用 Wakeup、暂停 Autopilot、取消非终态 run、回读），回读不过就冻结执行器容器；开跑前核对名册 sandbox: true；开跑和每次放 stage 前跑执行器身份闸（#174：信任基准在名册 dt-sandbox 的 executor_gate，保护基线在 hermes/baselines/，两者只读已合并的 origin/main；不通过就不放，tick 里不通过停机并冻结执行器；冻结命令只按名册生成，名册读不到就不执行任何命令、告警请人手动停）；不合并、不送审；计划样例 hermes/samples/multica-night-2026-11-08.json，执行单 docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
-    merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），在干净 worktree 跑测试，带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列；托管合并（#136）只能调 run_custody_merge，凭据在函数里从本机钥匙串取合并执行器专用令牌（#132）；托管合并被推翻后 run_custody_revert 用同一凭据开 revert PR（#133，只开不合，本机 git 配置隔离）
+    merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），要求这个版本的 CI 全部通过（主账号不执行 PR 里的代码，没 CI 的仓库不走飞书合并，#190），带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列；托管合并（#136）只能调 run_custody_merge，凭据在函数里从本机钥匙串取合并执行器专用令牌（#132）；托管合并被推翻后 run_custody_revert 用同一凭据开 revert PR（#133，只开不合，本机 git 配置隔离）
     proposal_digest.py 每周提案收口（#61）：每周一把会话复盘、牛马之家每周整理的待决提案按编号发到常浩私聊（LESSONS 升级候选默认不列，DT_LESSONS_MIN_PROJECTS 打开）；每条附 Hermes 的推荐（带模型定时任务经 proposal_digest_draft.py 取草稿、写推荐后 send --recommend），常浩回「按推荐」或逐条回复后由 proposal-digest 技能调用 apply 写回各来源的结论；期号状态在 DigitalTwin/proposals/digest.json
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/
     workshop/          车间派单（F5）
@@ -63,9 +63,12 @@ docs/托管模式-设计.md          托管模式（PRD D24，ADR-014 及修订 
 orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
-  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务，另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
+  health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务、工人账号的过滤代理和门卫规则（#190），另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
   self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
+  autoloop_isolation_check.py  0A 隔离门反向测试（#190）：在工人账号 dt-worker 里运行，逐项尝试越权（读主账号文件、改 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、GitHub 凭据、sudo、连主账号其他本机服务、连加速器代理、经过滤代理绕回本机、往主账号会执行的目录里写），每项都应被挡住；读不到监听端口判出错不判通过；结果写 /Users/Shared/dt-autoloop/results/；共享副本在 /Users/Shared/dt-autoloop/（连同 dt-worker 安装脚本 setup-dt-worker.sh（源文件 ops/dt_worker_setup.sh，可重复跑）、门卫脚本 dt_worker_pf.sh、只读引擎副本）
+  dt_worker_egress.py  工人账号的过滤代理（#190，常浩 11-17 同意装，D 档）：dt-worker 唯一的上网出口 127.0.0.1:8090，只接 CONNECT 到 443，目标解析出非公网地址就拒绝，放行的转给加速器代理 8086；普通 HTTP 一律拒绝；以主账号身份常驻（launchd cn.digital-twin.egress，配置副本 cn.digital-twin.egress.plist），安装在 ~/Library/Application Support/DigitalTwin/bin/；日志 evidence/egress/；剩余风险：DNS 重绑定且加速器直连时挡不住
+  dt_worker_pf.sh      工人账号的门卫规则（#190）：pf 规则挂在 com.apple/dt-worker 锚点，dt-worker 只准连本机 3350（中台）和 8090（过滤代理），本机其他端口、局域网一律拒绝；常浩用 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install` 装，开机和每 5 分钟由 LaunchDaemon cn.digital-twin.pf-dt-worker 重新加载并写状态文件 /Library/Application Support/DigitalTwin/pf-dt-worker.status；health_check.py 每天查过滤代理拦不拦本机、门卫状态文件新不新
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
 ```
 
