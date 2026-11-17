@@ -72,7 +72,7 @@ LIMITS = {"title": 32, "detail": 160, "owner": 10,
 SLACK = 1.5
 # 卡片三个板块（常浩 11-16 定）：信息只讲事，今日行动清单是确定能做的，思考采纳是要他想清楚的提案
 # 键 → (必填字段, 选填字段, 最少条数, 最多条数)
-LISTS = {"highlights": (("title", "detail"), (), 1, 6),
+LISTS = {"highlights": (("title", "detail"), (), 0, 6),   # 常浩 11-17：只要值得学的，一天全是资讯就可以一条没有
          "todo": (("task", "where", "done", "owner"), ("snippet",), 0, 4),
          "consider": (("idea", "why", "question", "where"), (), 0, 3)}
 EMPTY_FIELDS = {"highlights": [], "todo": [], "consider": []}
@@ -626,7 +626,7 @@ def title_of(day):
     return f"🧭 AI 前沿群学习报告 · {short_day(day)}"
 
 
-# 二 · 表格对照（常浩 11-16 第二轮选定并改：去掉原话和「这些对你的帮助」，「行动清单」改叫「今日行动清单」）。
+# 二 · 表格对照（常浩 11-16 第二轮选定并改：去掉原话和「这些对你的帮助」，「行动清单」改叫「今日行动清单」；11-17 思考采纳建议挪到今日行动清单前，派单提问放最后、浅红底加红色问号）。
 # 三个板块各用一种颜色，数字块、标题都跟着它：信息蓝、行动绿、采纳橙
 COLOR = {"info": "blue", "todo": "green", "consider": "orange"}
 ADOPT_NOTE = "<font color='grey'>提案，你想清楚、点头才落地</font>"
@@ -666,50 +666,123 @@ def table(cols, rows):
                         for k, n, w in cols], "rows": rows}
 
 
-def body(f, links, degraded=None):
-    """信息像一篇阅读稿（编号标题 → 总结和出处），今日行动清单、思考采纳建议各一张表横着看。"""
+ORIG_REFS = 3       # 每条信息的「原文与译文」面板最多放几条出处
+ORIG_CLIP = 700     # 每条出处原文最多多少字；卡片超大时逐步收紧
+CARD_MAX = 27000    # 卡片 JSON 字节上限（飞书卡片约 30KB，留余量）
+
+
+def original_md(ref, mat, n):
+    """一条出处的原文（常浩 11-17：要群里 X 卡片那种「原文与译文 · 展开」）。
+    X 卡片取「原文与译文」那段（中文 + Original），没有就取摘要；群成员发言取原话；源头取标题加开头一段。"""
+    item = next((i for i in mat["items"] if i["id"] == ref), None)
+    if item:
+        who = item.get("title") or item.get("sender") or ""
+        lines = (item.get("text") or "").splitlines()
+        start = next((k for k, l in enumerate(lines) if "原文与译文" in l), None)
+        if start is not None:
+            end = next((k for k in range(start + 1, len(lines)) if lines[k].strip() == "▲"), len(lines))
+            body = [l.strip() for l in lines[start + 1:end] if l.strip()]
+        else:
+            body = [item.get("gist") or item.get("text") or ""]
+        out, used = [], 0
+        for l in body:
+            if l in ("**中文**", "**Original**"):
+                out.append(f"**{l.strip('*')}**")
+                continue
+            if used >= n:
+                break
+            out.append(esc(clip(l, n - used)))
+            used += len(l)
+        return f"<font color='grey'>{ref} · {esc(who)}</font>\n" + "\n".join(out)
+    src = next((x for x in mat["sources"] if x["id"] == ref), None)
+    if src and src.get("ok"):
+        text = re.sub(r"\s+", " ", src.get("text") or "").strip()
+        return f"<font color='grey'>{ref} · {esc(src.get('title') or '')}</font>\n{esc(clip(text, n))}（节选，全文点原地址）"
+    return None
+
+
+def orig_panel(refs, mat, n):
+    """折叠的原文面板，默认收起；群消息在前、源头在后，最多 ORIG_REFS 条。"""
+    picked = [r for r in refs if r.startswith("M")] + [r for r in refs if r.startswith("S")]
+    blocks = [b for b in (original_md(r, mat, n) for r in picked[:ORIG_REFS]) if b]
+    if not blocks:
+        return None
+    return {"tag": "collapsible_panel", "expanded": False, "background_color": "grey-50",
+            "border": {"color": "grey", "corner_radius": "6px"}, "padding": "4px 10px 8px 10px", "vertical_spacing": "8px",
+            "header": {"title": {"tag": "plain_text", "content": "原文与译文 · 展开"}, "width": "fill", "vertical_align": "center",
+                       "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "color": "grey", "size": "16px 16px"},
+                       "icon_position": "right", "icon_expanded_angle": -180},
+            "elements": [md(b) for b in blocks]}
+
+
+def dispatch_ask(mine):
+    """结尾的派单提问（常浩 11-16 定要问；11-17 要显眼、用红色问号）：浅红底色块，问句加大加粗，下一行写怎么回。
+    他回复后猛鬼兽按 groupdigest-act 技能开单。没有标 Claude 的条目就不问。"""
+    if not mine:
+        return None
+    if len(mine) == 1:
+        q, how = f"要我把第 {mine[0]} 条写成任务派给 Claude 吗？", "回「**派**」就开单；不派就不用回。"
+    else:
+        example = f"派 {' '.join(str(n) for n in mine[:2])}" + (f"，{mine[-1]} 不做" if len(mine) > 2 else "")
+        q = f"要我把第 {'、'.join(str(n) for n in mine)} 条写成任务派给 Claude 吗？"
+        how = f"回「**都派**」，或「**{example}**」；不派就不用回。"
+    return {"tag": "column_set", "flex_mode": "none", "columns": [
+        {"tag": "column", "width": "weighted", "weight": 1, "background_style": "red-50",
+         "padding": "12px 14px 12px 14px", "vertical_spacing": "4px", "elements": [
+             md(f"❓ **{q}**", text_size="heading-4"), md(how)]}]}
+
+
+def body(f, links, degraded=None, mat=None, orig=ORIG_CLIP):
+    """信息像一篇阅读稿（编号标题 → 总结和出处），思考采纳建议、今日行动清单各一张表横着看，最后是派单提问。"""
     els = []
     if degraded:
         els.append(md(f"<font color='red'>猛鬼兽今天没写成分析（{esc(degraded)}），下面先给你昨天群里的原始内容。</font>"))
     if not f["highlights"]:
-        els.append(md("昨天群里没有新消息。"))
+        els.append(md("昨天群里的消息都是资讯，没有值得学的内容。" if mat and mat["items"] else "昨天群里没有新消息。"))
     else:
-        els.append(head("📰", "昨日信息梳理", "只讲发生了什么，按价值排", COLOR["info"]))
+        els.append(head("📰", "昨日信息梳理", "只挑值得学的方法、技巧和工具，按价值排", COLOR["info"]))
         for n, r in enumerate(f["highlights"], 1):
             tag = " <text_tag color='green'>值得精读</text_tag>" if r.get("read") else ""
             # 常浩 11-16：去掉原话后要紧凑些。标题和正文放进同一列、行距 4px，出处接在正文末尾，条与条之间只留卡片默认间距
+            # 常浩 11-17：每条下面放「原文与译文 · 展开」折叠面板，后面再跟原地址跳转
+            panel = orig_panel(r["refs"], mat, orig) if mat else None
+            parts = [md(f"<number_tag background_color='{COLOR['info']}' font_color='white'>{n}</number_tag> **{esc(r['title'])}**{tag}",
+                        text_size="heading-4"), md(esc(r["detail"]))]
+            if panel:
+                parts.append(panel)
+            parts.append(md(f"<font color='grey'>原地址</font> {refs_md(r['refs'], links)}", text_size="notation"))
             els.append({"tag": "column_set", "flex_mode": "none", "columns": [
-                {"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "4px", "elements": [
-                    md(f"<number_tag background_color='{COLOR['info']}' font_color='white'>{n}</number_tag> **{esc(r['title'])}**{tag}",
-                       text_size="heading-4"),
-                    md(f"{esc(r['detail'])}　<font color='grey'>原文</font> {refs_md(r['refs'], links)}")]}]})
-    if f["todo"]:
-        els += [{"tag": "hr"}, head("✅", "今日行动清单", "学完就能动手", COLOR["todo"]),
-                table([("t", "做什么", "42%"), ("w", "谁做 · 在哪", "18%"), ("m", "时长", "12%"), ("d", "做到什么算完", "28%")],
-                      [{"t": f"**{n}. {esc(r['task'])}** {refs_md(r['refs'], links)}" + (f"\n{inline_code(r['snippet'])}" if r.get("snippet") else ""),
-                        "w": f"{owner_tag(r)}\n{esc(r['where'])}", "m": f"{r['minutes']} 分钟", "d": esc(r["done"])}
-                       for n, r in enumerate(f["todo"], 1)])]
-        mine = [str(n) for n, r in enumerate(f["todo"], 1) if r.get("owner") == "claude"]
-        if mine:
-            # 常浩 11-16：结尾问要不要派给 Claude，他回复后猛鬼兽按 groupdigest-act 技能开单
-            if len(mine) == 1:
-                ask = f"🤖 第 {mine[0]} 条标了 Claude，要我写成任务派给 Claude 吗？回「**派**」就开单。"
-            else:
-                example = f"派 {' '.join(mine[:2])}" + (f"，{mine[-1]} 不做" if len(mine) > 2 else "")
-                ask = f"🤖 标了 Claude 的第 {'、'.join(mine)} 条，要我写成任务派给 Claude 吗？回「**都派**」，或「**{example}**」。"
-            els.append(md(ask))
+                {"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "4px", "elements": parts}]})
+    # 常浩 11-17：思考采纳建议放在今日行动清单前面，派单提问放到卡片最后、要一眼看出是在问他
+    if f["consider"] or f["todo"]:
+        els.append({"tag": "hr"})
     if f["consider"]:
         els += [head("🤔", "思考采纳建议", ADOPT_NOTE, COLOR["consider"]),
                 table([("i", "建议采纳", "36%"), ("y", "为什么", "24%"), ("q", "先想清楚", "24%"), ("w", "放哪", "16%")],
                       [{"i": f"**{esc(r['idea'])}** {refs_md(r['refs'], links)}", "y": esc(r["why"]),
                         "q": f"*{esc(r['question'])}*", "w": esc(r["where"])} for r in f["consider"]])]
+    if f["todo"]:
+        if f["consider"]:
+            els.append({"tag": "hr"})   # 常浩 11-17：思考和行动之间也要分割线
+        els += [head("✅", "今日行动清单", "学完就能动手", COLOR["todo"]),
+                table([("t", "做什么", "42%"), ("w", "谁做 · 在哪", "18%"), ("m", "时长", "12%"), ("d", "做到什么算完", "28%")],
+                      [{"t": f"**{n}. {esc(r['task'])}** {refs_md(r['refs'], links)}" + (f"\n{inline_code(r['snippet'])}" if r.get("snippet") else ""),
+                        "w": f"{owner_tag(r)}\n{esc(r['where'])}", "m": f"{r['minutes']} 分钟", "d": esc(r["done"])}
+                       for n, r in enumerate(f["todo"], 1)])]
+        ask = dispatch_ask([n for n, r in enumerate(f["todo"], 1) if r.get("owner") == "claude"])
+        if ask:
+            els.append(ask)
     return els
 
 
 def build_card(day, fields, meta, mat, doc_url=None, doc_error=None, title=None):
     links = link_of(mat)
     c = mat["coverage"]
-    els = [stats(fields, c), *body(fields, links, meta.get("degraded"))]
+    els = [stats(fields, c), *body(fields, links, meta.get("degraded"), mat)]
+    n = ORIG_CLIP
+    while n > 100 and len(json.dumps(els, ensure_ascii=False).encode()) > CARD_MAX:
+        n -= 150   # 原文太长、卡片发不出去时逐步收紧原文
+        els = [stats(fields, c), *body(fields, links, meta.get("degraded"), mat, n)]
     if doc_url:
         els.append({"tag": "button", "text": {"tag": "plain_text", "content": "查看完整报告（含路径建议、材料目录）"},
                     "type": "primary_filled", "width": "fill", "behaviors": [{"type": "open_url", "default_url": doc_url}]})
