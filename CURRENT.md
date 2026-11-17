@@ -6,14 +6,14 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
-## 主线：数字分身执行底座改为 fork agent-autoloop（#188）｜完成 2/11
+## 主线：数字分身执行底座改为 fork agent-autoloop（#188）｜完成 3/11
 
 常浩 2026-11-15 定：只有基于 agent-autoloop 框架的这一条主线；常浩会 fork 它自己开发；数字分身、驿窗等已有探索里有价值的 agent 自动化内容融合进来；新结构跑通后只保留这一套。同日先说托管暂停，后改为**秘书代批「选 B」：托管从一开始并入新框架**（猛鬼兽按常浩签的清单代批，工人仍关在 dt-worker 里）。方案 V2.4：`docs/agent-autoloop-底座-方案.md`（PR #189 已合并）；思维评审两轮已收口（决策记录 `docs/reviews/2026-11-15-执行底座改用agent-autoloop-思维评审.md`）。本机已装上游 v1.8.5（`~/.agent-autoloop`，launchd `agent-autoloop`，代理启动脚本在 `~/.agent-autoloop/bin/`），只有试跑规则。
 
 - ✅ 方案：V2.4，Fable 5.2 独立评估 + ChatGPT High 两轮评审，常浩 11-15 回「代批选 B，9 件事都按推荐」；PR #189 已合并 `832d7ca`（同时把 CI 固定到 ubuntu-24.04：ubuntu-latest 已是 26.04、没有 Python 3.9），#188 已关
 - ✅ D 档不代批：常浩 11-15 回「D档还是都不能替我批」，维持授权清单 v1
-- ▶ 批 0A 隔离门（PR #191，等常浩说「合并」）：dt-worker 已接中台、Claude / Codex 已登录；越权反向测试 22 项全挡住；过滤代理、门卫规则已装；merge_act 不再在主账号跑 PR 代码（未安装，合并后装）
-- ⏳ 批 0B 授权门（含秘书代批、汇报卡、推翻；代批规格先出、只送这一块审查）
+- ✅ 批 0A 隔离门：PR #191 已合并 `928f26b`、已安装；dt-worker 越权反向测试 22 项全挡住，`claude -p` 正常；过滤代理、门卫规则在生效；merge_act 不再在主账号跑 PR 代码
+- ▶ 批 0B 授权门（含秘书代批、汇报卡、推翻；代批规格先出、只送这一块审查）
 - ⏳ 批 0C 执行门、0D 恢复门；之后写 ADR-015
 - ⏳ 批 1 飞书拍板通道
 - ⏳ 批 2 派活（dt-sandbox 5 单）
@@ -39,13 +39,14 @@
 
 ---
 
-## 2026-11-17 · #190 批 0A 隔离门（PR #191，未合并）
+## 2026-11-17 · #190 批 0A 隔离门（PR #191 已合并 `928f26b`，已安装）
 
 - **工人账号 dt-worker**：标准账号；Node 24、Claude（浏览器登录）、Codex（`--device-auth` 验证码登录，浏览器回调方式卡了两天）已装；用接单密钥 join 中台成功、交接密钥已删。踩坑：git 不信任主账号所有的引擎副本（dubious ownership），安装脚本里给这一个副本加 `safe.directory`。安装脚本源文件 `ops/dt_worker_setup.sh`，共享副本 `/Users/Shared/dt-autoloop/setup-dt-worker.sh`，可重复跑。
 - **越权反向测试**（`ops/autoloop_isolation_check.py`）：第一次 22 项挡住 17 项，漏的是主账号家目录可列、能直连 / 经加速器代理绕回主账号的本机服务（Claude 桌面本地接口、数据库 5433、加速器控制口 8085 等）。修完重跑 **22 项全挡住**（`/Users/Shared/dt-autoloop/results/isolation-dt-worker-20261117-142548.json`）；dt-worker 里 `claude -p` 能回 OK（常浩 11-17 确认）。
 - **修法**（常浩 11-17「同意装」，D 档）：① 常浩 `chmod 700 /Users/nat`；② 过滤代理 `ops/dt_worker_egress.py`（launchd `cn.digital-twin.egress`，127.0.0.1:8090，只放行 CONNECT 到公网 443，转给加速器 8086；已装）；③ 门卫规则 `ops/dt_worker_pf.sh`（pf 锚点 `com.apple/dt-worker`，只准连 3350、8090；LaunchDaemon `cn.digital-twin.pf-dt-worker` 开机和每 5 分钟重载；常浩已用 sudo 装上）；④ 每日巡检查过滤代理拦不拦本机、门卫状态文件新不新（health_check 已装）。闪电猫只有系统代理、没有虚拟网卡，「全局模式」解决不了绕回。剩余风险：DNS 重绑定且加速器直连时过滤代理挡不住。
 - **不变量 2**（常浩 11-15 已同意）：merge_act 去掉「没 CI 在主账号干净副本跑测试」，没 CI 的仓库不走飞书合并；act.repos 七个仓库都是 ci: true，实际不受影响。merge_act、merge_rules.json、actions.py、merge-officer 技能**未安装**，PR 合并后同步并重启网关。ARCHITECTURE 5.5、托管设计 2a 仍写着「没有 CI 的仓库在干净副本跑」，代码现在更严，基线文字留到批 8 ARCHITECTURE V6 一起改。
-- **下一步**：常浩说「合并」PR #191 → 安装 merge_act 等 → 进批 0B（秘书代批规格先出、只送这一块审查）。
+- **合并与安装**（常浩 11-17 说「合并」）：本机全量测试、CI 通过后 squash 合并 `928f26b`，#190 关。merge_act.py、merge_rules.json、actions.py → `~/.hermes/scripts/`，merge-officer 技能 → `~/.hermes/skills/autonomous-ai-agents/`，已重启猛鬼兽网关、飞书已连上；旧副本备份在 `evidence/190-isolation/install-merge-act-20261117-145241/`。merge_act 安装副本原先落后 #133 的托管撤销函数，这次一并带上（只被未安装的 custody_report 调用，不生效）。自检仍报 #133 的 5 项（custody.py、twin_state.py 不同，custody_impact / ledger / report 缺）没装，和本单无关。
+- **下一步**：批 0B 授权门，先出秘书代批规格给常浩看，只送这一块审查。
 
 ---
 
