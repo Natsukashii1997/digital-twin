@@ -1,11 +1,15 @@
 """记忆日报写稿、写入、推送（亚古兽，PRD D20 2026-11-11 修订）。
 
     build --date D   取数 → 亚古兽（hermes -p agumon 单次）写内容 JSON → 核对 → 按 7/15 模板排成 XML，存 DigitalTwin/memdaily/
-    write --date D   插到《常浩-记忆日报汇总》最顶部：写前存整份文档快照，已有同一天就不重写，写后回读（标题、表格非空、列宽）
+    write --date D   插到当月《常浩-记忆日报汇总 · YYYY-MM》最顶部：写前存整份文档快照，已有同一天就不重写，写后回读（标题、表格非空、列宽）
     push  --date D   亚古兽机器人私聊常浩三段式：「📅 D 日报已写入」、文档链接、3～5 行关键摘要
     run   --date D   三步连做；定时任务用（memdaily_job.py）
 
 不覆盖主文档（Aily 07-01 覆盖过历史日报，是硬约束）。--doc 换成测试文档、--no-push 不发消息，用来出样稿。
+
+写到哪份文档（2026-11-17 常浩选方案甲）：旧汇总文档 TCG9dy7Uco… 到了飞书单文档 4 万块上限（11-14、11-16 两次被拒），
+原样归档、不再写。按日期所在月写到《常浩-记忆日报汇总 · YYYY-MM》，当月第一篇写入时自动建；写前数当前文档的块数，
+加上这篇的估算超过 SAFE_BLOCKS 就提前开「续 N」；飞书仍报超限就开续篇再写一次。各份文档登记在 DigitalTwin/memdaily/docs.json。
 """
 import argparse
 import datetime as dt
@@ -30,6 +34,9 @@ BUDGET = int(os.environ.get("DT_MEMDAILY_BUDGET", "1500"))      # 写稿最多�
 REASONING = os.environ.get("DT_MEMDAILY_REASONING", "")          # 空 = 用亚古兽配置（2026-11-11 起 xhigh）
 DOC_URL = "https://vm94j8bzy7.feishu.cn/docx/{}"
 KEEP_BACKUPS = 14
+# 飞书单文档上限 40000 块。列块接口数出的比飞书自己数的少（11-17 实测旧文档差 213 块），留一成余量。
+SAFE_BLOCKS = int(os.environ.get("DT_MEMDAILY_SAFE_BLOCKS", "36000"))
+LIMIT_CODE = "DOC_TOTAL_BLOCK_LIMIT"
 
 STATUS = ("✅ 已完成", "🔄 进行中", "⏳ 待处理", "🔴 阻塞", "⛔ 已放弃")
 ACTION_TYPES = ("⏩ 行动", "🟠 阻塞", "✅ 完成")
@@ -362,49 +369,121 @@ def verify(doc, title, tables, run):
     return issues
 
 
-def write(d, doc=md.DOC, run=md.lark):
-    """插到文档最顶部并回读。返回 'written' / 'exists'；回读不过抛 GenError（不重试，免得写两遍）。"""
+def estimate_blocks(xml):
+    """这篇写进去大约多少块：每个单元格、段落、标题、表格各一块（11-11～11-13 三篇和实际块数分毫不差）。"""
+    return len(re.findall(r"<(?:th|td|p|h[1-6]|table|li)[\s>]", xml))
+
+
+def count_blocks(doc, run):
+    """列块接口分页数文档现有多少块（2 万块约 40 页）。"""
+    n, token = 0, None
+    while True:
+        params = {"page_size": 500, **({"page_token": token} if token else {})}
+        data = run("api", "GET", f"/open-apis/docx/v1/documents/{doc}/blocks", "--params", json.dumps(params)) or {}
+        n += len(data.get("items") or [])
+        token = data.get("page_token")
+        if not data.get("has_more") or not token:
+            return n
+
+
+def open_doc(reg, month, reason, run, blocks=None):
+    """新建当月文档（满了就是「续 N」）并登记。只建一次，不重试，免得多出空文档。"""
+    n = 1 + sum(1 for x in reg["docs"] if x.get("month") == month)
+    title = f"常浩-记忆日报汇总 · {month}" + (f"（续 {n}）" if n > 1 else "")
+    parent = ["--parent-token", reg["folder"]] if reg.get("folder") else []
+    data = (run("docs", "+create", "--title", title, *parent, tries=1) or {}).get("document") or {}
+    token = data.get("document_id") or (re.findall(r"/docx/([A-Za-z0-9]+)", data.get("url") or "") or [None])[-1]
+    if not token:
+        raise GenError(f"新建文档《{title}》：返回里没有文档号")
+    entry = {"token": token, "title": title, "month": month, "created_at": now()}
+    reg["docs"].append(entry)
+    md.save_registry(reg)
+    return entry, {"reason": reason, "title": title, "token": token, "blocks": blocks}
+
+
+def pick_doc(d, need, run, reg):
+    """这一篇写到哪份文档：当月最后建的那份；没有就新建；写进去会超过 SAFE_BLOCKS 就开续篇。返回 (文档, 新开说明或 None)。"""
+    month = d[:7]
+    mine = [x for x in reg["docs"] if x.get("month") == month]
+    if not mine:
+        return open_doc(reg, month, "new_month", run)
+    have = count_blocks(mine[-1]["token"], run)
+    if have + need > SAFE_BLOCKS:
+        return open_doc(reg, month, "full", run, have)
+    return mine[-1], None
+
+
+def insert(doc, p, run):
+    run("docs", "+update", "--doc", doc, "--command", "block_insert_after", "--block-id", "0",
+        "--content", f"@{p['xml'].name}", cwd=str(DIR), tries=1)
+
+
+def write(d, doc=None, run=md.lark):
+    """插到文档最顶部并回读。doc 不给就按登记文件选当月文档。返回 'written' / 'exists'；回读不过抛 GenError（不重试，免得写两遍）。"""
     p = paths(d)
     rec = read_json(p["build.json"], {})
     if not p["xml"].exists():
         raise GenError(f"{d} 还没有排好的稿（先跑 build）")
     title = f"📅 {md.wd(dt.date.fromisoformat(d))}"
-    xml = fetch_xml(doc, run)
+    need = estimate_blocks(p["xml"].read_text(encoding="utf-8"))
+    reg, opened = None, None
+    if doc:
+        target = {"token": doc, "title": None}
+    else:
+        reg = md.load_registry()
+        target, opened = pick_doc(d, need, run, reg)
+    xml = fetch_xml(target["token"], run)
     if re.search(rf"<h2[^>]*>[^<]*{re.escape(d)}", xml):
         return "exists"
-    backup(d, doc, xml)
-    run("docs", "+update", "--doc", doc, "--command", "block_insert_after", "--block-id", "0",
-        "--content", f"@{p['xml'].name}", cwd=str(DIR), tries=1)
-    issues = verify(doc, title, rec.get("tables", 0), run)
+    backup(d, target["token"], xml)
+    try:
+        insert(target["token"], p, run)
+    except md.Fail as e:
+        if LIMIT_CODE not in str(e):
+            raise
+        if reg is None:
+            raise GenError(f"文档已到飞书单文档 4 万块上限，整篇没写进去（{e}）")
+        # 估算或数块数偏小：飞书整篇拒收，没写进去一半，开续篇再写一次
+        target, opened = open_doc(reg, d[:7], "full", run, count_blocks(target["token"], run))
+        insert(target["token"], p, run)
+    issues = verify(target["token"], title, rec.get("tables", 0), run)
     deliv = read_json(p["delivery.json"], {})
-    deliv.update({"doc": doc, "written_at": now(), "read_back": not issues, "issues": issues})
+    deliv.update({"doc": target["token"], "doc_title": target.get("title"), "opened": opened, "blocks": need,
+                  "written_at": now(), "read_back": not issues, "issues": issues})
     save_json(p["delivery.json"], deliv)
     if issues:
         raise GenError(f"写进去了但回读不对：{'；'.join(issues)}（写前快照在 memdaily/backup/）")
     return "written"
 
 
-def push_text(d, doc, draft, rec):
-    lines = [f"📅 {d} 日报已写入", f"飞书文档：{DOC_URL.format(doc)}", "今日关键摘要："]
+def push_text(d, doc, draft, rec, deliv=None):
+    lines = [f"📅 {d} 日报已写入", f"飞书文档：{DOC_URL.format(doc)}"]
+    opened = (deliv or {}).get("opened")
+    if opened and opened.get("reason") == "new_month":
+        lines.append(f"📁 本月第一篇，新开了文档《{opened['title']}》；旧的《常浩-记忆日报汇总 v4.0》已满 4 万块，原样留作归档")
+    elif opened:
+        lines.append(f"📁 上一份文档快到飞书单文档 4 万块上限（约 {opened.get('blocks') or '?'} 块），接着写到新文档《{opened['title']}》")
+    lines.append("今日关键摘要：")
     lines += [f"{EMOJI[i]} {s}" for i, s in enumerate(draft.get("summary") or [])]
     lines.append(f"生成：亚古兽（{rec.get('model') or '模型查不到'}）｜接入：Hermes 派单")
     return "\n".join(lines)
 
 
-def push(d, doc=md.DOC, run=md.lark):
-    """亚古兽机器人私聊常浩；同一天只发一次（idempotency key + delivery.json）。"""
+def push(d, doc=None, run=md.lark):
+    """亚古兽机器人私聊常浩；同一天只发一次（idempotency key + delivery.json）。doc 不给就用写入时记下的文档。"""
     p = paths(d)
     deliv = read_json(p["delivery.json"], {})
     if deliv.get("pushed_at"):
         return "pushed-before"
-    text = push_text(d, doc, read_json(p["draft.json"], {}), read_json(p["build.json"], {}))
+    doc = doc or deliv.get("doc") or md.DOC
+    text = push_text(d, doc, read_json(p["draft.json"], {}), read_json(p["build.json"], {}), deliv)
     run("im", "+messages-send", "--user-id", md.ME, "--text", text, "--idempotency-key", f"memdaily-{d}-{doc[-8:]}", identity="bot")
     deliv["pushed_at"] = now()
     save_json(p["delivery.json"], deliv)
     return "pushed"
 
 
-def run_all(d, doc=md.DOC, do_push=True):
+def run_all(d, doc=None, do_push=True):
     """返回一句话结果；失败抛 GenError / md.Fail。"""
     rec = build(d)
     if rec.get("skip"):
@@ -419,7 +498,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cmd", choices=("build", "write", "push", "run"))
     ap.add_argument("--date", required=True)
-    ap.add_argument("--doc", default=md.DOC, help="目标文档 token（出样稿时填测试文档）")
+    ap.add_argument("--doc", default=None, help="目标文档 token（出样稿时填测试文档）；不填按登记文件写当月文档")
     ap.add_argument("--no-push", action="store_true")
     a = ap.parse_args()
     try:

@@ -24,7 +24,7 @@ hermes/
     report_data.py     工作日报 / 周报取数（T7，新结构并跑；2026-11-11 常浩定从猛鬼兽撤下，定时任务已暂停，PRD D20）；report_daily.py、report_weekly.py 是定时任务入口；开跑前先等主模型通道连通，最多 300 秒，到时间照常放行交给回退（#140，记录在 evidence/reports/model-route-wait.jsonl）
     report_publish.py  把写好的日报 / 周报插到并跑文档最上面并回读
     memdaily_data.py   记忆日报取数（亚古兽，PRD D20 11-11 修订）：亚古兽应用、常浩的用户身份读 D 当天的私聊（排除机器人）、白名单群（全读）和常浩参与的群、实际参会的视频会议和妙记、日程、任务，以及《常浩-记忆日报汇总》前一篇的行动 & 阻塞；周末没有工作往来、或这天已写过就跳过；白名单群、永久不去的会议、重点人在本机 DigitalTwin/memdaily/config.json（不进仓库）
-    memdaily_publish.py 记忆日报写稿与写入：hermes -p agumon 单次写六模块内容 JSON（提示词 prompts/memdaily_report.md），脚本核对（状态、工作线、人名群名、议题时间对得上材料、私生活兜底删行），不过重写一次；按 7/15 永久模板排成 DocxXML（Aily v6.0 列宽），插到文档最顶部，写前存整份快照、已有同一天不重写、写后回读；亚古兽机器人私聊三段式推送，同一天只发一次
+    memdaily_publish.py 记忆日报写稿与写入：hermes -p agumon 单次写六模块内容 JSON（提示词 prompts/memdaily_report.md），脚本核对（状态、工作线、人名群名、议题时间对得上材料、私生活兜底删行），不过重写一次；按 7/15 永久模板排成 DocxXML（Aily v6.0 列宽），插到当月文档《常浩-记忆日报汇总 · YYYY-MM》最顶部（11-17 常浩选方案甲：旧汇总文档 TCG9dy7Uco… 满飞书 4 万块上限，原样归档；当月第一篇自动建新文档，写前数块数加本篇估算，超过 3.6 万提前开「续」，飞书仍报超限就开续篇再写一次；各份文档登记在 DigitalTwin/memdaily/docs.json），写前存整份快照、已有同一天不重写、写后回读；亚古兽机器人私聊三段式推送（新开文档时多一行说明），同一天只发一次
     memdaily_job.py    记忆日报定时任务入口（亚古兽 profile，无模型，每天 07:30 写前一天）；成功或跳过不输出，没写成输出一句原因
     twin_state.py      持久任务状态与事件底座（B1）：Goal / Task / Run / Event / Ref，SQLite 在 ~/Library/Application Support/DigitalTwin/twin-state.db；设计见 docs/B0-七层架构复核与状态底座设计.md
     twin_scheduler.py  持久调度（B2.2）：只读决策 plan、调度预留、按关联键补偿恢复、生命体征、取消建议、低噪声报告；自动开单默认关闭；设计见 docs/B2.2-调度与恢复机制设计.md
@@ -91,7 +91,7 @@ ops/
 | `hermes-aux` | Hermes 辅助任务（压缩、审批判断、后台复盘） | Hermes | Hermes 派单 | 当前会话 | Hermes 记忆和技能 |
 | `report` | 工作日报 / 周报并跑（**已暂停**：2026-11-11 从猛鬼兽撤下，PRD D20） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、群、会议妙记、日程、任务、项目进展 | 飞书并跑文档、evidence/reports |
 | `pdaily` | 个人项目日报 V2（#111、#155、#159：09:15 写稿、10:00 发私聊，带工程自检） | Hermes（主模型 Opus 5.5，思考 medium，#157），仅支持 Hermes；失败出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 事实快照 facts.json、提示词 pdaily_report.md | DigitalTwin/daily/ 的卡片、完整报告、模型原稿、build.json、delivery.json；飞书完整报告云文档；常浩私聊卡片 |
-| `memdaily` | 记忆日报（亚古兽，PRD D20 11-11 修订：每天 07:30 写前一天，接着写《常浩-记忆日报汇总》六模块） | Hermes 亚古兽（openai-codex gpt-6.1-sol，思考 xhigh），仅支持 Hermes；核对不过就不写、报原因，不换家 | Hermes 派单（`hermes -p agumon chat` 单次） | 常浩的飞书私聊、群、会议与妙记、日程、任务（亚古兽应用，用户身份）；前一篇行动 & 阻塞 | 《常浩-记忆日报汇总》顶部；DigitalTwin/memdaily/；亚古兽私聊推送 |
+| `memdaily` | 记忆日报（亚古兽，PRD D20 11-11 修订：每天 07:30 写前一天，接着写《常浩-记忆日报汇总》六模块；11-17 起按月一份新文档） | Hermes 亚古兽（openai-codex gpt-6.1-sol，思考 xhigh），仅支持 Hermes；核对不过就不写、报原因，不换家 | Hermes 派单（`hermes -p agumon chat` 单次） | 常浩的飞书私聊、群、会议与妙记、日程、任务（亚古兽应用，用户身份）；前一篇行动 & 阻塞 | 当月《常浩-记忆日报汇总 · YYYY-MM》顶部（旧汇总文档已归档）；DigitalTwin/memdaily/（含 docs.json 文档登记）；亚古兽私聊推送 |
 | `groupdigest` | AI 前沿群每日学习报告（#192，PRD D25：10:00 取数写稿、10:45 发私聊，每天发） | Hermes（主模型 Opus 5.5，思考 high），仅支持 Hermes；核对不过出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 外部群「Codex重置许愿群」前一天全部消息（猛鬼兽应用，用户身份）、外链源头正文、名册阶段目标、Vault 个人上下文（受限，用而不露） | DigitalTwin/groupdigest/；飞书完整报告云文档；常浩私聊卡片；常浩回「都派 / 派 1 3」后经车间派单交给 Claude（groupdigest-act 技能，点名 Claude，执行方和留痕按 `workshop`） |
 | `proposal-digest` | 每周待决提案的推荐 | Hermes，仅支持 Hermes | Hermes 派单 | 会话复盘提案、牛马之家每周整理 | 推荐文件、飞书卡片 |
 | `relay` | ORCA ChatGPT 送审 | ChatGPT 网页，仅支持 ChatGPT 网页（送审就是要另一家独立审） | 网页桥 | 送审包 | 回执、DigitalTwin/relay/；返工时交给 ORCA 终端里的 Claude |
