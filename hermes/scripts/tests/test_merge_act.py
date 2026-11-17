@@ -110,7 +110,7 @@ class MergeAct(unittest.TestCase):
         self.base = sh(self.main, "rev-parse", "HEAD")
         self.head = self.pr_commit(5, {"docs/a.md": "hi\n"})
         rules = json.loads((HERE.parent / "merge_rules.json").read_text(encoding="utf-8"))
-        rules["act"] = {"repos": {"app": {"test": f"{sys.executable} check.py", "timeout": 60}}}
+        rules["act"] = {"repos": {"app": {"ci": True}}}
         self.rules = t / "rules.json"
         self.rules.write_text(json.dumps(rules, ensure_ascii=False), encoding="utf-8")
         self.roster = t / "projects.json"
@@ -140,7 +140,8 @@ class MergeAct(unittest.TestCase):
     def pr(self, number, head, paths, **kw):
         p = {"number": number, "title": f"PR {number}", "state": "OPEN", "isDraft": False, "mergeable": "MERGEABLE",
              "mergeStateStatus": "CLEAN", "headRefOid": head, "baseRefOid": self.base, "baseRefName": "main",
-             "labels": [], "files": [{"path": x} for x in paths], "statusCheckRollup": [], "body": "Closes #1",
+             "labels": [], "files": [{"path": x} for x in paths], "body": "Closes #1",
+             "statusCheckRollup": [{"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}],
              "closingIssuesReferences": [], "url": "u"}
         p.update(kw)
         return p
@@ -211,14 +212,13 @@ class MergeAct(unittest.TestCase):
         self.scan()
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn(f"已合并 {self.ref}（PR 5）→ fffffff。测试通过", r.stdout)
+        self.assertIn(f"已合并 {self.ref}（PR 5）→ fffffff。CI 通过。", r.stdout)
         self.assertIn("主目录已拉齐到", r.stdout)
         merge = [c for c in self.calls() if c[:2] == ["pr", "merge"]]
         self.assertEqual(merge, [["pr", "merge", "5", "--repo", "o/app", "--squash", "--match-head-commit", self.head]])
         self.assertEqual(self.ledger()[0]["owner"], "合并")
-        self.assertEqual(len(sh(self.main, "worktree", "list").splitlines()), 1)   # 测试用的 worktree 已删
-        (log,) = (self.tmp / "runs").glob("*/test.log")
-        self.assertIn("check.py", log.read_text())
+        self.assertEqual(len(sh(self.main, "worktree", "list").splitlines()), 1)   # 没为跑测试建 worktree
+        self.assertFalse((self.tmp / "runs").exists())                    # 没在本机跑测试
         self.assertNotIn(self.ref, self.cli(ACT, "cards").stdout)
 
     def assert_four(self, text, step, why, state, todo, head="没合并"):
@@ -267,13 +267,6 @@ class MergeAct(unittest.TestCase):
             sh(self.main, "commit", "-qm", "没推的")
         self.assert_stopped("没推的提交", todo="决定推不推", before=local_commit)
 
-    def test_stop_when_tests_fail(self):
-        self.head = self.pr_commit(5, {"docs/a.md": "hi\n", "fail": "x"})
-        self.update_pr(headRefOid=self.head)
-        r = self.assert_stopped("测试没过", step="跑测试", todo="交回开这个 PR 的会话修")
-        self.assertIn("test.log", r.stdout)
-        self.assertEqual(len(sh(self.main, "worktree", "list").splitlines()), 1)
-
     # ---------- CI 关（#71） ----------
 
     def set_act(self, conf):
@@ -312,17 +305,18 @@ class MergeAct(unittest.TestCase):
         self.assert_stopped("没有任何 CI 检查结果", step="跑测试", before=lambda: self.ci_mode([]))
         self.assertFalse((self.tmp / "runs").exists())
 
-    def test_local_fallback_runs_setup_before_test(self):
-        self.set_act({"setup": f"{sys.executable} -c \"open('deps','w').write('ok')\"",
-                      "test": f"{sys.executable} -c \"import sys; sys.exit(0 if open('deps').read() == 'ok' else 1)\"",
-                      "timeout": 60})
-        self.scan()
-        r = self.cli(ACT, "merge", self.ref)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("测试通过，日志在", r.stdout)
-
-    def test_no_ci_and_no_test_stops(self):
-        self.assert_stopped("没登记 CI，也没登记测试命令", step="跑测试", before=lambda: self.set_act({"timeout": 60}))
+    def test_no_ci_never_runs_pr_code_on_host(self):
+        """#190 不变量 2：没 CI 的仓库，哪怕登记了测试命令，主账号也不跑 PR 里的代码。"""
+        marker = self.tmp / "ran"
+        self.head = self.pr_commit(5, {"docs/a.md": "hi\n", "evil.py": f"open({str(marker)!r}, 'w').write('x')\n"})
+        self.update_pr(headRefOid=self.head)
+        for conf in ({"setup": f"{sys.executable} evil.py", "test": f"{sys.executable} evil.py", "timeout": 60}, {"timeout": 60}):
+            with self.subTest(conf=conf):
+                self.assert_stopped("没有 CI", step="跑测试", todo="先给这个仓库配 GitHub CI",
+                                    before=lambda c=conf: self.set_act(c))
+                self.assertFalse(marker.exists())
+                self.assertFalse((self.tmp / "runs").exists())
+                self.assertEqual(len(sh(self.main, "worktree", "list").splitlines()), 1)
 
     def test_stop_when_merge_rejected_by_server(self):
         self.scan()

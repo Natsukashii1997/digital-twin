@@ -140,7 +140,7 @@ ChatGPT 2026-10-29 评审 F1 / F2 与返修终审 P0 的负向用例，18 项。
 
 ## 飞书一句话合并（test_merge_act.py）
 
-真 git（临时裸仓库当 GitHub，带 `refs/pull/<号>/head`；临时主目录）、假 gh、假 lark-cli。覆盖：只给 act.repos 里的仓库发卡片、同一版本不重发、L3 卡片写明飞书里不合并；合并成功时测试在干净 worktree 里跑、跑完删掉、`gh pr merge` 带完整 `--match-head-commit`、记 owner、主目录拉齐；八种停下（版本变了、落后、冲突、不是 CLEAN、草稿、L3、本机主分支有没推的提交、测试没过）都不调 `gh pr merge`；服务端拒绝合并时如实报；只认发过的卡片；仓库没开时拒绝；主目录有未提交改动时不拉、不动文件；退回在 PR 留言并记 owner。
+真 git（临时裸仓库当 GitHub，带 `refs/pull/<号>/head`；临时主目录）、假 gh、假 lark-cli。覆盖：只给 act.repos 里的仓库发卡片、同一版本不重发、L3 卡片写明飞书里不合并；合并成功时看 CI、不在本机跑测试也不建 worktree、`gh pr merge` 带完整 `--match-head-commit`、记 owner、主目录拉齐；七种停下（版本变了、落后、冲突、不是 CLEAN、草稿、L3、本机主分支有没推的提交）和 CI 没过 / 在跑 / 没结果都不调 `gh pr merge`；没 CI 的仓库哪怕登记了测试命令也停下、PR 里的代码一行都不跑（#190 不变量 2）；服务端拒绝合并时如实报；只认发过的卡片；仓库没开时拒绝；主目录有未提交改动时不拉、不动文件；退回在 PR 留言并记 owner。
 
 ## Multica 夜跑主控（test_multica_night.py，#92）
 

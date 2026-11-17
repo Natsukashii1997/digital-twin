@@ -8,8 +8,8 @@
   1. 仓库在 merge_rules.json 的 act.repos 里；风险档不是 L3（L3 不走飞书）；
   2. PR 还开着、不是草稿、HEAD 仍是卡片上的、base 是主分支、没冲突、不落后（mergeStateStatus 为 CLEAN）；
   3. 本机主目录的主分支没有没推的提交；
-  4. 登记了 ci 的仓库：这个 HEAD 的 GitHub 检查全部通过（还在跑、没过、一项都没有都停下），不在本机跑测试；
-     没登记 ci 的：在干净 worktree 里检出这个 HEAD，先跑 setup（装依赖）再跑 test，通过；
+  4. 仓库登记了 ci，且这个 HEAD 的 GitHub 检查全部通过（还在跑、没过、一项都没有都停下）；
+     主账号不执行 PR 里的代码（#190 不变量 2）：没登记 ci 的仓库不走飞书合并，也不在本机跑测试；
   5. 合并命令带 --match-head-commit（服务端再校验一次 HEAD），合并后回读确认已合并。
 连 GitHub 的只读调用（取状态、回读）碰到网络瞬断（EOF、SSL_ERROR_SYSCALL、超时、connection reset）时隔 3 秒、5 秒各重试一次；
 合并、留言这类写操作不重试，合并靠 --match-head-commit 和回读确认，不会重复合并。
@@ -23,8 +23,7 @@
   merge_act.py return <仓库#PR@HEAD前缀> 原因   在 PR 里留言退回（不关 PR）
   merge_act.py button merge|return <仓库#PR@HEAD前缀> --chat <chat_id>
                                              卡片按钮（#78）：Hermes 的 /card 插件在后台调用；进度和结果直接发到常浩私聊
-环境变量同 merge_officer.py，另有 DT_MERGE_RUNS（测试运行目录，默认 DigitalTwin/merge-runs）、
-DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）。
+环境变量同 merge_officer.py，另有 DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）。
 
 托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
 内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
@@ -47,10 +46,9 @@ import time
 from pathlib import Path
 
 import merge_officer as mo
-from tidings_weekly import SendError, send, strip_env
+from tidings_weekly import SendError, send
 
 CARDS = mo.SHADOW / "cards.json"
-RUNS = Path(os.environ.get("DT_MERGE_RUNS", "~/Library/Application Support/DigitalTwin/merge-runs")).expanduser()
 VIEW_FIELDS = mo.PR_FIELDS + ",baseRefName,mergeStateStatus,url"
 REF = re.compile(r"^([\w.-]+)#(\d+)@([0-9a-f]{7,40})$")
 COLOR = {mo.MERGE: "green", mo.RETURN: "orange", mo.ASK: "red"}
@@ -306,35 +304,6 @@ def check_pr(card, rules, main, ci=False):
     if state != "CLEAN":
         raise Stop(f"GitHub 现在的合并状态是 {state}，不是 CLEAN", "隔几分钟{again}，还不行就在电脑上看")
     return p
-
-
-def run_tests(path, card, conf):
-    cmd = " && ".join(c for c in (conf.get("setup"), conf["test"]) if c)
-    timeout = int(conf.get("timeout", 900))
-    at("跑测试")
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run = RUNS / f"{card['repo'].split('/')[-1]}-{card['pr']}-{card['head'][:7]}-{stamp}"
-    run.mkdir(parents=True, exist_ok=True)
-    wt = run / "src"
-    git(path, "worktree", "prune")
-    git(path, "fetch", "-q", "origin", f"refs/pull/{card['pr']}/head")
-    if git(path, "rev-parse", "FETCH_HEAD") != card["head"]:
-        raise Stop("从 GitHub 取到的 PR 版本和卡片上的不一致", "等新卡片再决定")
-    git(path, "worktree", "add", "-q", "--detach", str(wt), card["head"])
-    try:
-        try:
-            r = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, timeout=timeout, env=strip_env())
-            out, code = (r.stdout or "") + (r.stderr or ""), r.returncode
-        except subprocess.TimeoutExpired:
-            out, code = f"超过 {timeout} 秒没跑完", -1
-    finally:
-        subprocess.run(["git", "-C", str(path), "worktree", "remove", "--force", str(wt)], capture_output=True)
-    (run / "test.log").write_text(f"$ {cmd}\n{out}", encoding="utf-8")
-    if code != 0:
-        last = (out.strip().splitlines() or ["没有输出"])[-1]
-        raise Stop(f"测试没过（{clip(last)}）", "交回开这个 PR 的会话修，修好会有新卡片",
-                   state=f"{UNCHANGED}，测试日志在 {run / 'test.log'}")
-    return run
 
 
 def sync_main(path, main):
@@ -604,21 +573,15 @@ def cmd_merge(ref):
     if not conf:
         raise Stop("这个仓库还没开飞书合并（merge_rules.json 的 act.repos）", "在电脑上交给 Claude 会话处理")
     path, main = project_of(card["repo"].split("/")[-1])
-    ci = bool(conf.get("ci"))
-    check_pr(card, rules, main, ci)
+    if not conf.get("ci"):
+        at("跑测试")
+        raise Stop("这个仓库没有 CI；主账号不执行 PR 里的代码，飞书合并不在本机跑测试",
+                   "先给这个仓库配 GitHub CI，再在 merge_rules.json 的 act.repos 里登记 ci: true")
+    check_pr(card, rules, main, ci=True)
     git(path, "fetch", "-q", "origin")
     ahead = git(path, "rev-list", "--count", f"origin/{main}..{main}")
     if ahead != "0":
         raise Stop(f"本机主目录的 {main} 有 {ahead} 个没推的提交", "按《工程流程》第 5 节在电脑上决定推不推，处理完{again}")
-    if ci:
-        tested = "CI 通过"
-    elif not conf.get("test"):
-        at("跑测试")
-        raise Stop("这个仓库没登记 CI，也没登记测试命令（merge_rules.json 的 act.repos）", "在电脑上交给 Claude 会话登记")
-    else:
-        run = run_tests(path, card, conf)
-        tested = f"测试通过，日志在 {run / 'test.log'}"
-        check_pr(card, rules, main)                   # 测试要几分钟，合并前再读一次
     at("执行合并")
     why = run_owner_merge(card)["why"]
     at("合并后回读")
@@ -638,7 +601,7 @@ def cmd_merge(ref):
         raise stop
     record_owner(card, "合并")
     sha = ((after.get("mergeCommit") or {}).get("oid") or "")[:7]
-    print(f"已合并 {card_ref(card['repo'], card['pr'], card['head'])}（{card['title']}）→ {sha}。{tested}。")
+    print(f"已合并 {card_ref(card['repo'], card['pr'], card['head'])}（{card['title']}）→ {sha}。CI 通过。")
     print(sync_main(path, main) + "。如果要安装或写 CURRENT，交给 Claude 会话。")
     return 0
 
