@@ -415,15 +415,24 @@ def _issue_channel_key(channel):
     differ = mismatches(rules)
     if differ:
         raise Rejected(f"中台正在用的配置和 rules.json 不一致：{'、'.join(differ)}；先 install")
-    code, out, err = run_cli("key", "new", "channel", channel)
-    key = out.strip()
-    if code or not KEY_RE.match(key):
-        raise Rejected(f"签钥匙失败：{err.strip()[:200]}")
-    f.parent.mkdir(parents=True, exist_ok=True)
+    f.parent.mkdir(parents=True, exist_ok=True)       # 先占好 600 文件再签：写不了盘的问题在签之前暴露
     os.chmod(f.parent, 0o700)
     fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(key + "\n")
+    try:
+        code, out, err = run_cli("key", "new", "channel", channel)
+        key = out.strip()
+        if code or not KEY_RE.match(key):
+            raise Rejected(f"签钥匙失败：{err.strip()[:200]}")
+        os.write(fd, (key + "\n").encode())
+        os.fsync(fd)
+    except BaseException as e:
+        os.close(fd)
+        f.unlink(missing_ok=True)
+        if isinstance(e, Rejected):
+            raise
+        raise Rejected(f"中台可能已签出 {channel} 通道钥匙、但本地没写成（{type(e).__name__}）：先 agent-autoloop key list 看，"
+                       f"有就经常浩同意后 agent-autoloop key remove channel {channel} 再重签")
+    os.close(fd)
     return {"ok": True, "channel": channel, "file": str(f), "mode": "600"}
 
 

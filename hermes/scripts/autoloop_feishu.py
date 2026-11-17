@@ -9,13 +9,17 @@
 同一张卡只有一个令牌：送达报告丢了、中台再给一次时，用同一个幂等键重发，飞书回原消息，令牌也不变。
 
 卡片库 cards.db（DigitalTwin/autoloop/，600）：
-  feishu_cards  卡片号 → 令牌、送达的消息号、私聊号、种类、选项数、版本、飞书送达时间（秘书白天等 30 分钟从这里起算）
-  claims        每张卡一行：谁在答（owner 本人 / secretary 秘书）和进度。本人点击和秘书获准送达在同一个写事务里互斥
-                （规格 §7「本人点击锁」）；秘书一侧由第 4c 批接入
+  feishu_cards  卡片号 → 令牌、送达的消息号、私聊号、种类、选项数、版本、飞书送达时间（秘书白天等 30 分钟从这里起算）、
+                中台确认送达时间（报 delivered 成功后才有；没有之前本人的点击只排队，不提交，见 autoloop_answer）
+  claims        每张卡每方一行（owner 本人 / secretary 秘书）和进度；claim_log 只追加，记每次状态变化
+  和第 4c 批秘书的契约（规格 §7、§10 第 4 条「秘书获准送达前本人优先；获准后以中台先受理的为准」）：
+    - 秘书从 reserved 改成 approved（唯一的送达授权点）必须在 db(write=True) 里做，并先调 owner_holds()：
+      本人已有 queued / inflight / unknown / answered 的一行，秘书就不许获准（作废自己的预占）；
+    - 本人一侧从不改秘书的行：秘书已 approved 时本人照样提交，谁先被中台受理算谁，后到的一方收到 changed=false。
 
   autoloop_feishu.py run          常驻：长轮询领卡片、发送、报送达（装成常驻服务是 D 档，要常浩说「装」）
   autoloop_feishu.py once         只领一次（测试、手动补发）
-  autoloop_feishu.py show [--json]  只读：登记过的卡片和答卷进度
+  autoloop_feishu.py show [--json]  只读：登记过的卡片、答卷进度和最近的变化记录
 环境变量：DT_AUTOLOOP_CARDS_DB、DT_AUTOLOOP_CHANNEL_KEY_DIR（同 autoloop_config）、AGENT_AUTOLOOP_HOME、DT_LARK_CLI。
 不调用 AI。
 """
@@ -40,16 +44,38 @@ from tidings_weekly import SendError, lark  # noqa: E402
 
 CHANNEL = "feishu"
 TOKEN_RE = re.compile(r"^[0-9a-f]{16}$")
+OWNER_HOLDS = ("queued", "inflight", "unknown", "answered")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS feishu_cards (card_id INTEGER PRIMARY KEY, token TEXT NOT NULL UNIQUE, message_id TEXT,
-  chat_id TEXT NOT NULL, kind TEXT NOT NULL, options INTEGER NOT NULL, version INTEGER NOT NULL, delivered_at TEXT);
-CREATE TABLE IF NOT EXISTS claims (card_id INTEGER PRIMARY KEY, who TEXT NOT NULL CHECK (who IN ('owner', 'secretary')),
-  state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, note TEXT);
+  chat_id TEXT NOT NULL, kind TEXT NOT NULL, options INTEGER NOT NULL, version INTEGER NOT NULL, delivered_at TEXT,
+  hub_delivered_at TEXT);
+CREATE TABLE IF NOT EXISTS claims (card_id INTEGER NOT NULL, who TEXT NOT NULL CHECK (who IN ('owner', 'secretary')),
+  state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, PRIMARY KEY (card_id, who));
+CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL, who TEXT NOT NULL,
+  at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT);
 """
 
 
 class Fail(Exception):
     """说人话的原因，不带钥匙。"""
+
+
+class HubError(Fail):
+    """中台调用失败。sent=False：请求根本没发出去（钥匙、配置读不到）；status：中台回的 HTTP 码，None 表示没拿到有效回应。"""
+    def __init__(self, msg, status=None, sent=True):
+        super().__init__(msg)
+        self.status, self.sent = status, sent
+
+
+def owner_holds(con, card_id):
+    """本人对这张卡已有排队、在途、结果不明或已答上的一行（给第 4c 批秘书获准前调用，须在同一个写事务里）。"""
+    r = con.execute("SELECT state FROM claims WHERE card_id = ? AND who = 'owner'", (card_id,)).fetchone()
+    return bool(r) and r["state"] in OWNER_HOLDS
+
+
+def log_claim(con, card_id, who, state, choice=None, note=None):
+    con.execute("INSERT INTO claim_log (card_id, who, at, state, choice, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (card_id, who, now(), state, choice, note))
 
 
 def now():
@@ -104,18 +130,37 @@ def channel_key():
     return key
 
 
+def hub_target():
+    """发请求前要的东西：中台地址和通道钥匙。读不到就抛 HubError(sent=False)：请求还没发出去。"""
+    try:
+        url, _ = C.hub_config()
+    except Exception as e:                       # config.json 读不到、缺字段：一律算没发出去
+        raise HubError(f"读不到中台配置（{type(e).__name__}）", sent=False)
+    try:
+        return url, channel_key()
+    except Fail as e:
+        raise HubError(str(e), sent=False)
+
+
 def hub(method, path, body=None, timeout=20):
-    url, _ = C.hub_config()
+    url, key = hub_target()
     req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
-                                 headers={"Authorization": f"Bearer {channel_key()}", "Content-Type": "application/json"})
+                                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with opener.open(req, timeout=timeout) as r:
-            return json.loads(r.read().decode() or "{}")
+            raw = r.read().decode()
     except urllib.error.HTTPError as e:
-        raise Fail(f"中台回 HTTP {e.code}（{method} {path.split('?')[0]}）")
-    except (OSError, ValueError) as e:
-        raise Fail(f"连不上中台（{type(e).__name__}）")
+        raise HubError(f"中台回 HTTP {e.code}（{method} {path.split('?')[0]}）", status=e.code)
+    except OSError as e:
+        raise HubError(f"连不上中台或没等到回应（{type(e).__name__}）")
+    try:
+        out = json.loads(raw or "{}")
+    except ValueError:
+        raise HubError("中台的回应不是 JSON")
+    if not isinstance(out, dict):
+        raise HubError("中台的回应格式不对")
+    return out
 
 
 # ---------- 卡片样子 ----------
@@ -186,9 +231,11 @@ def deliver(card):
     """发一张卡（ref 为空）或改那条消息（ref 不为空），然后报送达；返回消息号。"""
     if card.get("ref"):
         with db() as con:
-            r = con.execute("SELECT token FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
+            r = con.execute("SELECT token, message_id FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
         if not r and card["state"] == "open":          # 开着、却不是本桥接发的卡：不改（改了按钮也对不上任何登记）
             raise Fail("这张卡不是飞书桥接发的，改不了")
+        if r and r["message_id"] and r["message_id"] != card["ref"]:   # 中台记的消息号和登记的不一致：不猜，不改
+            raise Fail(f"中台给的消息号和登记的对不上（卡片 {card['id']}）")
         content = render(card, r["token"] if r else "")
         try:
             lark(["im", "messages", "patch", "--message-id", card["ref"],
@@ -219,13 +266,27 @@ def once(wait=50):
     except (SendError, Fail) as e:
         hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
         return {"card": card["id"], "ok": False, "why": str(e)}
-    hub("POST", f"/v1/cards/{card['id']}/delivered", {"version": card["version"], "ref": ref})
+    confirm(card, ref)
     return {"card": card["id"], "ok": True, "ref": ref}
 
 
+def confirm(card, ref):
+    """报送达；中台收下后记「中台确认送达」，再把送达前点的、排着队的本人回答提交掉。"""
+    hub("POST", f"/v1/cards/{card['id']}/delivered", {"version": card["version"], "ref": ref})
+    with db(write=True) as con:
+        con.execute("UPDATE feishu_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ?",
+                    (now(), card["id"]))
+    import autoloop_answer as A
+    A.flush(card["id"])
+
+
 def run():
+    import autoloop_answer as A
     while True:
         try:
+            for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
+                print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
+                A.tell(A.identities()[1], text)
             out = once()
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
@@ -238,8 +299,9 @@ def run():
 def show():
     with db() as con:
         cards = [dict(r) for r in con.execute("SELECT card_id, message_id, kind, options, version, delivered_at FROM feishu_cards ORDER BY card_id")]
-        claims = [dict(r) for r in con.execute("SELECT * FROM claims ORDER BY card_id")]
-    return {"cards": cards, "claims": claims}
+        claims = [dict(r) for r in con.execute("SELECT * FROM claims ORDER BY card_id, who")]
+        log = [dict(r) for r in con.execute("SELECT * FROM claim_log ORDER BY id DESC LIMIT 50")]
+    return {"cards": cards, "claims": claims, "recent_log": log}
 
 
 def main(argv=None):
