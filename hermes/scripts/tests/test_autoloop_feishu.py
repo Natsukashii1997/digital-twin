@@ -16,7 +16,10 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import autoloop_answer as A  # noqa: E402
 import autoloop_config as C  # noqa: E402
+import autoloop_exits as E  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
+import autoloop_recovery as Rv  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
 CHAT = "oc_fixture_home"
@@ -49,9 +52,13 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": self.tmp.name + "/dt/autoloop/cards.db",
+                                                "DT_EXITS_DB": self.tmp.name + "/dt/autoloop/exits.db",
                                                 "DT_OWNER_OPEN_ID": OWNER, "DT_OWNER_CHAT_ID": CHAT})
         self.env.start()
         self.addCleanup(self.env.stop)
+        gate = mock.patch.object(Rv, "ensure_open")              # 恢复闸放行（闸关着的情形见 RecoveryGate）
+        gate.start()
+        self.addCleanup(gate.stop)
         self.lark = Lark()
         p = mock.patch.object(F, "lark", self.lark)
         p.start()
@@ -89,9 +96,9 @@ class Deliver(Base):
         self.assertEqual(self.register(), "om_fixture_1")
         tok = self.token()
         self.assertRegex(tok, r"^[0-9a-f]{16}$")
-        self.register()                                              # 送达报告丢了，中台再给一次（ref 仍为空）
+        self.assertEqual(self.register(), "om_fixture_1")           # 送达报告丢了，中台再给一次（ref 仍为空）
         self.assertEqual(self.token(), tok)
-        self.assertEqual(self.lark.keys(), ["autoloop-card-7", "autoloop-card-7"])       # 同一个幂等键：飞书回原消息
+        self.assertEqual(self.lark.keys(), ["autoloop-card-7"])     # 批 0D：出口账本记着已发，不再调飞书，用原消息号
         row = F.card_by_token(tok)
         self.assertEqual((row["card_id"], row["message_id"], row["chat_id"], row["options"]), (7, "om_fixture_1", CHAT, 2))
         self.assertTrue(row["delivered_at"])
@@ -126,10 +133,52 @@ class Deliver(Base):
             self.assertTrue(F.once()["ok"])
             flush.assert_called_once_with(7)                                   # 送达确认后提交排队的本人回答
             self.assertTrue(F.card_by_token(self.token())["hub_delivered_at"])
-            self.lark.mid = None                                     # 发卡没拿到消息号
-            F.once()
+            self.lark.mid = None                                     # 另一张卡发卡没拿到消息号
+            with mock.patch.object(F, "hub", lambda m, p, b=None, timeout=20: {"card": {**CARD, "id": 8}} if m == "GET"
+                                   else posts.append((p, b)) or {}):
+                F.once()
         self.assertEqual(posts[0], ("/v1/cards/7/delivered", {"version": 1, "ref": "om_fixture_1"}))
-        self.assertEqual(posts[1][0], "/v1/cards/7/failed")
+        self.assertEqual(posts[1][0], "/v1/cards/8/failed")
+
+
+class RecoveryGate(Base):
+    """批 0D：领卡前过恢复闸；发新卡走出口账本，结果不明不重发、冻结这张卡，对账按令牌在私聊里找到那条消息。"""
+    def test_closed_gate_never_takes_a_card(self):
+        with mock.patch.object(Rv, "ensure_open", side_effect=E.Refused("恢复闸关着：中台重启过，要先对账")), \
+                mock.patch.object(F, "hub") as hub:
+            out = F.once()
+        self.assertEqual((out["ok"], "中台重启过" in out["why"]), (False, True))
+        hub.assert_not_called()
+
+    def test_unknown_send_is_frozen_then_reconciled_without_resending(self):
+        import tidings_weekly as W
+
+        def timeout(args, what, cwd=None):
+            self.lark.calls.append(args)
+            raise F.SendError("发卡片：lark-cli 跑不起来（TimeoutExpired）")   # 其实飞书已经收下了
+        with mock.patch.object(F, "lark", timeout), self.assertRaises(F.SendError):
+            self.register()
+        with self.assertRaisesRegex(F.Fail, "结果不明"):
+            self.register()                                          # 中台再给：冻结，不重发
+        self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"]]), 1)
+        with F.db() as con:                                          # 取登记的令牌
+            tok = con.execute("SELECT token FROM feishu_cards WHERE card_id = 7").fetchone()[0]
+        msg = {"message_id": "om_found", "body": {"content": json.dumps({"autoloop": tok})}}
+        with E.db() as con:                                          # 让「动作开始」早于 5 分钟，列表滞后窗口已过
+            con.execute("UPDATE exits SET started_at = '2026-11-18T00:00:00+08:00'")
+        with mock.patch.object(W, "lark", return_value={"messages": [msg]}):
+            notes = E.reconcile()
+        self.assertEqual(notes[0]["state"], "done")
+        self.assertEqual(self.register(), "om_found")                # 用对账找到的消息号，不再发
+        self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"]]), 1)
+        self.assertEqual(F.card_by_token(tok)["message_id"], "om_found")
+
+    def test_definite_send_failure_can_be_retried(self):
+        def refused(args, what, cwd=None):
+            raise F.SendError("发卡片失败：机器人不在会话里")
+        with mock.patch.object(F, "lark", refused), self.assertRaises(F.SendError):
+            self.register()
+        self.assertEqual(self.register(), "om_fixture_1")
 
 
 class Answer(Base):
@@ -361,6 +410,32 @@ class Answer(Base):
         self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 2)             # 说收下了但回读对不上：结果不明
         self.assertEqual(self.claim()["state"], "unknown")
 
+    def test_closed_gate_keeps_click_queued_then_submits_once(self):
+        """批 0D：恢复闸关着时本人点击只排队，不交中台；开闸后提交一次。"""
+        with mock.patch.object(Rv, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账")):
+            code, said, _ = A.answer(self.tok, 1, CHAT, OWNER)
+            self.assertEqual(code, 3)
+            self.assertIn("睡醒", said)
+            self.assertEqual(A.flush(7)[0], 3)
+        self.assertEqual((self.answers(), self.claim()["state"]), ([], "queued"))
+        self.assertEqual(A.flush(7)[0], 0)
+        self.assertIsNone(A.flush(7))
+        self.assertEqual(len(self.answers()), 1)
+
+    def test_unknown_answer_closes_the_gate_and_gate_reconcile_skips_queued(self):
+        def dirty():
+            with E.db(write=False) as con:
+                r = con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()
+                return r[0] if r else 0
+        self.assertEqual(dirty(), 0)
+        self.unknown_claim()
+        self.assertGreater(dirty(), 0)                                          # 本人回答结果不明：恢复闸关上
+        with F.db(write=True) as con:
+            con.execute("UPDATE claims SET state = 'queued'")
+        with mock.patch.object(A, "submit") as submit:
+            A.reconcile(queued=False)                                           # 恢复闸对账：不提交排队的
+            submit.assert_not_called()
+
     def test_unknown_with_open_card_is_never_released_automatically(self):
         self.unknown_claim()
         self.hub_card = {"id": 7, "state": "open"}
@@ -568,6 +643,8 @@ class FeishuEndToEnd(HubFixture):
         super().setUp()
         root = Path(self.key_file).parents[2]
         for p in (mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(root / "dt/autoloop/cards.db"),
+                                               "DT_EXITS_DB": str(root / "dt/autoloop/exits.db"),
+                                               "DT_HUB_PIN": str(root / "dt/autoloop/hub-pin.json"),
                                                "DT_AUTOLOOP_CHANNEL_KEY_DIR": str(root / "dt/autoloop"),
                                                "DT_AUTOLOOP_LOCK": str(root / "dt/autoloop/config.lock"),
                                                "DT_OWNER_CHAT_ID": CHAT}),
@@ -578,6 +655,7 @@ class FeishuEndToEnd(HubFixture):
         p = mock.patch.object(F, "lark", self.lark)
         p.start()
         self.addCleanup(p.stop)
+        Rv.pin(Rv.healthz(), confirm=True)                       # 真的恢复闸：锁定临时中台的版本，入口自己对账开闸
 
     def wait_card(self):
         for _ in range(60):

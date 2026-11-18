@@ -23,6 +23,8 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
 卡已不开着就把排队的结算掉（从没发过）；inflight 超过 2 分钟且进程不在（或超过 10 分钟，防进程号复用）、unknown →
 只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
 回读只认中台的四种卡片状态；缺字段或认不出的状态一律当结果不明，不结算、不放开（PR #202 审查 P1-08）。
+恢复闸（批 0D，autoloop_recovery）：submit 先过 ensure_open()，开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才交中台，
+关着时回答留在排队里（退出码 3）；改成 unknown 时把闸关上；恢复闸对账只调 reconcile(queued=False)，不提交排队的。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
 
 已知局限（PR #202 审查 P1-01）：点击人、聊天号是网关传进来的命令行参数；和猛鬼兽同一个 macOS 账号的进程
@@ -120,7 +122,11 @@ def move(card_id, attempt, expect, state, note=None, pid=None):
             return False
         r = owner_row(con, card_id)
         F.log_claim(con, card_id, "owner", state, r["choice"], note, attempt)
-        return True
+    if state == "unknown":                       # 结果不明：恢复闸关上，下一个受保护动作前先对账（批 0D）
+        import autoloop_exits as E
+        with E.db() as econ:
+            E.mark_dirty(econ, f"卡片 {card_id} 的本人回答结果不明")
+    return True
 
 
 def release(card_id, attempt, expect, note):
@@ -204,6 +210,14 @@ def submit(card_id):
     """唯一的发送入口。原子领取这次尝试的发送资格（queued → inflight，且卡已有消息号、中台已确认送达），
     领到的才发请求。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，返回 None；还不能发返回 (3, …)。"""
     owner = identities()[0]
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        R.ensure_open()                          # 恢复闸（批 0D）：对账走完才交中台；关着就留在排队里
+    except E.Refused as e:
+        with F.db() as con:
+            r = owner_row(con, card_id)
+        return (3, f"已记下你的选择；{e}，对完账马上交给中台。") if r and r["state"] == "queued" else None
     with F.db(write=True) as con:
         r = owner_row(con, card_id)
         card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
@@ -250,8 +264,9 @@ def flush(card_id):
     return got
 
 
-def reconcile(card_id=None):
-    """对账。返回给常浩看的变化列表 [(卡片号, 一句话)]；读不到中台就不动；从不重答。"""
+def reconcile(card_id=None, queued=True):
+    """对账。返回给常浩看的变化列表 [(卡片号, 一句话)]；读不到中台就不动；从不重答。
+    queued=False（恢复闸对账时）：只回读结果不明、在途过久的，不碰排队的——提交排队的回答是开闸以后的动作。"""
     notes = []
     try:
         owner = identities()[0]
@@ -263,7 +278,8 @@ def reconcile(card_id=None):
     for r in rows:
         cid, attempt, age = r["card_id"], r["attempt"], _age(r["at"])
         if r["state"] == "queued":
-            notes += _reconcile_queued(cid, attempt)
+            if queued:
+                notes += _reconcile_queued(cid, attempt)
             continue
         if r["state"] == "inflight" and age < HARD_STALE and (age < STALE or pid_alive(r["pid"])):
             continue                             # 还在跑

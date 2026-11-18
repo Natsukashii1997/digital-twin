@@ -20,14 +20,17 @@ from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
+import prod_guard  # noqa: E402
 
 _ISOLATION = []
 
 
 def setUpModule():
+    prod_guard.setUpModule()                     # 批 0D：整体指到临时目录，前后核对正式环境
     tmp = tempfile.TemporaryDirectory(prefix="dt-config-test-")
     _ISOLATION.append(tmp)
     root = Path(tmp.name)
@@ -50,6 +53,7 @@ def tearDownModule():
     while _ISOLATION:
         x = _ISOLATION.pop()
         (x.cleanup if isinstance(x, tempfile.TemporaryDirectory) else x.stop)()
+    prod_guard.tearDownModule()
 
 OWNER = "ou_fixture_owner_0001"
 CURRENT = {

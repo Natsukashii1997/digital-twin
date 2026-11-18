@@ -31,6 +31,10 @@
 并且这次冻结已经由推翻流程记过更正（规格 §8 第 4 步「更正先持久记在账本」，record_resolution，0B-5 调用，本批不给命令行，
 所以本批恢复入口实际关闭）；恢复时代次 +1，被作废的旧代次永久失效。
 
+恢复闸与出口账本（批 0D）：propose（发确认消息）和 send_pending（往中台发事件）先过 autoloop_recovery.ensure_open()，
+关着就不发（事件留在账里，开闸后 send-pending 补发）；冻结、撤销照常立刻生效，输出里的 in_flight 列出冻结前已经开始的
+受保护动作（出口账本 autoloop_exits 在凭证库写锁里落盘 executing，所以和冻结有先后，见那边的头注释）。
+
 工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-autoloop/grants/status.json（状态、代次、到期、动作）和
 任务单，读不到凭证库，也改不了镜像。check() 是主账号出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
 工人侧按镜像做的检查只防正常流程误操作，不当作不可绕过的边界；权威判定在主账号的出口（方案 5.1 第 3 条）。
@@ -360,9 +364,29 @@ def _claim_next(con, now, seen):
     return None, None, skipped
 
 
+def require_recovery():
+    """恢复闸（批 0D，autoloop_recovery）：开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才往外发。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        R.ensure_open()
+    except E.Refused as e:
+        raise Rejected(f"{e}；事件已记账，开闸后 send-pending 补发")
+
+
+def in_flight(task_id):
+    """出口账本里这张任务正在进行或结果不明的动作（冻结、撤销时一并报出；这些已经开始，撤不回，结果出来照常对账）。
+    出口账本还不存在就是没有。"""
+    import autoloop_exits as E
+    if not E.db_path().exists():
+        return []
+    return E.in_flight(f"task:{task_id}")
+
+
 def send_pending(path=None, post=None, now=None):
     """把记了账、还没确认送到中台的事件逐个发出去。每个：同一写事务里先按已提交状态写镜像、再现读凭证并领取 → 提交 →
-    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。"""
+    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。恢复闸关着就一个也不发（批 0D）。"""
+    require_recovery()
     post = post or post_event
     results, seen = [], set()
     while True:
@@ -477,6 +501,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
         raise Rejected(f"有效期 1 到 {MAX_HOURS} 小时")
     valid_until = iso(now + dt.timedelta(hours=hours))
     h = content_hash(repo, github, executor, actions, valid_until, scope_text)
+    require_recovery()                         # 确认消息是往私聊发飞书：恢复闸关着就不提议
     with tx(path) as con:
         for _ in range(5):
             code = secrets.token_hex(4)
@@ -572,7 +597,11 @@ def _tighten(task_id, status, what, reason, now, path):
                     (status, code, iso(now), task_id))
         con.execute("UPDATE hub_events SET sent = -1 WHERE task_id = ? AND sent = 0", (task_id,))
         log(con, task_id, what, now, reason=reason[:200], generation=row["generation"], voided=status != "done")
-    return _publish_after_commit({**out, "freeze_code": code} if code else out, path, now)
+    out = {**out, "freeze_code": code} if code else out
+    busy = in_flight(task_id)                 # 冻结前已经开始的受保护动作（批 0D）：撤不回，结果出来照常对账
+    if busy:
+        out["in_flight"] = busy
+    return _publish_after_commit(out, path, now)
 
 
 def freeze(task_id, reason, now=None, path=None):

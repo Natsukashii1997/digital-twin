@@ -18,7 +18,11 @@ from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
+import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
+import autoloop_recovery as R  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 
 OWNER = "ou_fixture_owner_0001"
 CHAT = "oc_fixture_p2p_0001"
@@ -51,7 +55,8 @@ class Base(unittest.TestCase):
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT)
         for p in (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(G, "ROSTER", self.roster),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", side_effect=self._notify)):
+                  mock.patch.object(G, "notify_owner", side_effect=self._notify),
+                  mock.patch.object(R, "ensure_open")):                 # 恢复闸放行（闸关着的情形见 RecoveryGate）
             p.start()
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted, self.notices = {}, 0, [], []
@@ -315,6 +320,36 @@ class Sending(Base):
         ev = self.posted[-1]
         self.assertEqual(json.loads(ev["detail"]), {"task_id": tid, "generation": 1, "kind": "rework"})
         self.assertNotIn("README", json.dumps(ev, ensure_ascii=False))
+
+
+class RecoveryGate(Base):
+    """批 0D：恢复闸关着时不提议（不发确认消息）、不往中台发事件；事件留在账里，开闸后补发；冻结照常立刻生效。"""
+    def closed(self):
+        return mock.patch.object(R, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账"))
+
+    def test_closed_gate_blocks_propose_and_send_but_keeps_events(self):
+        with self.closed():
+            with self.assertRaisesRegex(G.Rejected, "睡醒"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        self.assertEqual(self.notices, [])
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        with self.closed():
+            out = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+            self.assertIn("恢复闸关着", out["send"]["error"])
+            with self.assertRaisesRegex(G.Rejected, "send-pending 补发"):
+                G.send_pending(post=self.post, now=T0)
+            self.assertEqual(G.freeze(out["task_id"], "常浩推翻", now=T0)["status"], "frozen")   # 收权不受闸影响
+        self.assertEqual(self.posted, [])
+        self.assertEqual(self.sent_states(out["task_id"]), {"start": -1})              # 冻结作废了没发的
+
+    def test_events_wait_for_the_gate_then_go_once(self):
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        with self.closed():
+            tid = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)["task_id"]
+        self.assertEqual(self.sent_states(tid), {"start": 0})
+        self.assertEqual([s["sent"] for s in G.send_pending(post=self.post, now=T0)], [True])
+        self.assertEqual(G.send_pending(post=self.post, now=LATER), [])
+        self.assertEqual(len(self.posted), 1)
 
 
 class Mirror(Base):

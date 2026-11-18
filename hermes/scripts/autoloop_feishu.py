@@ -17,6 +17,10 @@
       本人已有 queued / inflight / unknown / answered 的一行，秘书就不许获准（作废自己的预占）；
     - 本人一侧从不改秘书的行：秘书已 approved 时本人照样提交，谁先被中台受理算谁，后到的一方收到 changed=false。
 
+恢复闸（批 0D）：领卡前先过 autoloop_recovery.ensure_open()；发新卡走出口账本（autoloop_exits，幂等键
+send_feishu:card-<卡片号>、冻结范围 card:<卡片号>、对账标记就是卡片令牌）：先记要发、再发，发送结果不明不重发，对账在私聊里
+按令牌找那条消息。改卡（patch）本身幂等，不记账；结束了的卡改不了时另发的那条通知不带令牌，只过闸、不记账（重复了也只是多一条结束通知）。
+
   autoloop_feishu.py run          常驻：长轮询领卡片、发送、报送达（装成常驻服务是 D 档，要常浩说「装」）
   autoloop_feishu.py once         只领一次（测试、手动补发）
   autoloop_feishu.py show [--json]  只读：登记过的卡片、答卷进度和最近的变化记录
@@ -253,7 +257,24 @@ def deliver(card):
         return card["ref"]
     chat = owner_chat()
     token = token_for(card, chat)
-    mid = send_card(chat, render(card, token), f"autoloop-card-{card['id']}")   # 幂等键只用卡片号：报告丢了重发不出第二条
+    content = render(card, token)
+    import autoloop_exits as E
+
+    def do():
+        try:                                       # 幂等键只用卡片号：报告丢了重发不出第二条
+            return {"message_id": send_card(chat, content, f"autoloop-card-{card['id']}")}
+        except SendError as e:                     # 只有飞书明确报错、或 lark-cli 根本没跑起来，才算确定没发出去；
+            msg = str(e)                           # 超时、输出读不懂、没拿到消息号：可能已发出，结果不明
+            if "失败：" in msg or ("跑不起来" in msg and "Timeout" not in msg):
+                raise E.Definite(msg)
+            raise
+    try:                                           # 写前账本（批 0D）：先记要发，再发；结果不明不重发，对账按令牌找消息
+        mid = E.guard("send_feishu", f"send_feishu:card-{card['id']}", f"card:{card['id']}",
+                      {"chat": chat, "marker": token}, do)["message_id"]
+    except E.Definite as e:
+        raise SendError(str(e))
+    except E.Refused as e:
+        raise Fail(str(e))
     with db(write=True) as con:
         con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, delivered_at = COALESCE(delivered_at, ?) "
                     "WHERE card_id = ?", (mid, card["version"], now(), card["id"]))
@@ -261,7 +282,13 @@ def deliver(card):
 
 
 def once(wait=50):
-    """领一张、处理一张；没有卡片返回 None。"""
+    """领一张、处理一张；没有卡片返回 None。恢复闸关着（批 0D）就不领卡。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        R.ensure_open()
+    except E.Refused as e:
+        return {"ok": False, "why": str(e)}
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
@@ -304,6 +331,8 @@ def run():
             out = once()
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
+            if out and out.get("card") is None and not out.get("ok", True):   # 恢复闸关着：等一会再试
+                time.sleep(10)
         except Exception as e:                         # 常驻不因一次出错退出：记下来，10 秒后再领
             why = str(e) if isinstance(e, Fail) else f"{type(e).__name__}: {str(e)[:200]}"
             print(json.dumps({"at": now(), "ok": False, "why": why}, ensure_ascii=False), flush=True)
