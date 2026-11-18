@@ -212,25 +212,25 @@ def submit(card_id):
     owner = identities()[0]
     import autoloop_exits as E
     import autoloop_recovery as R
-    try:
-        R.ensure_open()                          # 恢复闸（批 0D）：对账走完才交中台；关着就留在排队里
-    except E.Refused as e:
+    try:                                         # 恢复闸（批 0D）：对账走完才交中台；领发送资格的同一个写事务里再核开闸资格
+        epoch = R.ensure_open()
+        with F.db(write=True) as con, R.admission(epoch):   # 锁顺序：卡片库 → 出口账本（审查 P1-03）
+            r = owner_row(con, card_id)
+            card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
+            if not r or r["state"] != "queued" or not card:
+                return None
+            if not card["message_id"] or not card["hub_delivered_at"]:
+                return 3, "已记下你的选择，卡片送达确认后马上交给中台。"
+            cur = con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner' "
+                              "AND attempt = ? AND state = 'queued'", (F.now(), os.getpid(), card_id, r["attempt"]))
+            if cur.rowcount != 1:
+                return None
+            F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
+            attempt, choice, ref = r["attempt"], r["choice"], card["message_id"]
+    except E.Refused as e:                       # 关着：回答留在排队里
         with F.db() as con:
             r = owner_row(con, card_id)
         return (3, f"已记下你的选择；{e}，对完账马上交给中台。") if r and r["state"] == "queued" else None
-    with F.db(write=True) as con:
-        r = owner_row(con, card_id)
-        card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
-        if not r or r["state"] != "queued" or not card:
-            return None
-        if not card["message_id"] or not card["hub_delivered_at"]:
-            return 3, "已记下你的选择，卡片送达确认后马上交给中台。"
-        cur = con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner' "
-                          "AND attempt = ? AND state = 'queued'", (F.now(), os.getpid(), card_id, r["attempt"]))
-        if cur.rowcount != 1:
-            return None
-        F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
-        attempt, choice, ref = r["attempt"], r["choice"], card["message_id"]
     try:
         out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": owner, "ref": ref})
     except F.HubError as e:
@@ -298,6 +298,12 @@ def reconcile(card_id=None, queued=True):
 
 
 def _reconcile_queued(cid, attempt):
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:                                         # 重报送达也是往中台写：恢复闸关着就先不动（审查 P1-04）
+        R.ensure_open()
+    except E.Refused:
+        return []
     with F.db() as con:
         card = con.execute("SELECT message_id, hub_delivered_at FROM feishu_cards WHERE card_id = ?", (cid,)).fetchone()
     if card and card["message_id"] and not card["hub_delivered_at"]:

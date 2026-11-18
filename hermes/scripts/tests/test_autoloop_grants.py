@@ -56,7 +56,7 @@ class Base(unittest.TestCase):
         for p in (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(G, "ROSTER", self.roster),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
                   mock.patch.object(G, "notify_owner", side_effect=self._notify),
-                  mock.patch.object(R, "ensure_open")):                 # 恢复闸放行（闸关着的情形见 RecoveryGate）
+                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 RecoveryGate）
             p.start()
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted, self.notices = {}, 0, [], []

@@ -365,11 +365,12 @@ def _claim_next(con, now, seen):
 
 
 def require_recovery():
-    """恢复闸（批 0D，autoloop_recovery）：开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才往外发。"""
+    """恢复闸（批 0D，autoloop_recovery）：开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才往外发。
+    返回核过的纪元；真正领发送资格时还要在领取的写事务里再核（admission）。"""
     import autoloop_exits as E
     import autoloop_recovery as R
     try:
-        R.ensure_open()
+        return R.ensure_open()
     except E.Refused as e:
         raise Rejected(f"{e}；事件已记账，开闸后 send-pending 补发")
 
@@ -385,18 +386,32 @@ def in_flight(task_id):
 
 def send_pending(path=None, post=None, now=None):
     """把记了账、还没确认送到中台的事件逐个发出去。每个：同一写事务里先按已提交状态写镜像、再现读凭证并领取 → 提交 →
-    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。恢复闸关着就一个也不发（批 0D）。"""
-    require_recovery()
+    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。恢复闸（批 0D）：每发一个之前都重新核，并且在领取的同一个
+    写事务里再核一次开闸资格（审查 P1-03），循环中途闸关了，后面的一个也不发。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
     post = post or post_event
     results, seen = [], set()
     while True:
         t = now or now_tz()
         try:
-            with tx(path) as con:
+            epoch = require_recovery()
+        except Rejected:
+            if not results:
+                raise
+            results.append({"sent": False, "why": "恢复闸中途关了，剩下的事件开闸后 send-pending 补发"})
+            return results
+        try:
+            with tx(path) as con, R.admission(epoch):     # 锁顺序：凭证库 → 出口账本
                 write_status(con, t)          # 领取前、同一把写锁下：要发的任务和代次先进镜像
                 ev, row, skipped = _claim_next(con, t, seen)
         except OSError as e:
             raise Rejected(f"状态镜像写不了（{type(e).__name__}），事件先不发")
+        except E.Refused as e:
+            if not results:
+                raise Rejected(f"{e}；事件已记账，开闸后 send-pending 补发")
+            results.append({"sent": False, "why": f"{e}；剩下的事件开闸后 send-pending 补发"})
+            return results
         results += skipped
         if ev is None:
             return results
@@ -482,6 +497,23 @@ def notice_text(code, github, executor, actions, valid_until, scope_text):
         f"同意就回：派单 {code}", f"（{int(PROPOSAL_TTL.total_seconds() // 60)} 分钟内有效，只认你本人在这个私聊里回；不同意不用回）"])
 
 
+def _notify_once(code, text):
+    """确认消息走出口账本（批 0D，审查 P1-03）：先记账、在登记的写事务里核开闸资格、再发；结果不明不重发（确认码正文里有，
+    对账按它在私聊里找那条文字消息）。发不成的提议本来就批不了，所以这里任何异常都按结果不明记、不重发。"""
+    import autoloop_exits as E
+    import twin_state as T
+    try:
+        chat = T.owner_chat_id()
+    except T.StateError as e:
+        raise Rejected(str(e))
+    try:
+        return E.guard("send_feishu", f"send_feishu:grant-{code}", f"chat:grant-{code}",
+                       {"chat": chat, "marker": f"派单 {code}", "msg_type": "text"},
+                       lambda: {"message_id": notify_owner(text, f"dt-grant-{code}")})["message_id"]
+    except E.Refused as e:
+        raise Rejected(str(e))
+
+
 def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None):
     now = now or now_tz()
     if not REPO_NAME.match(repo or ""):
@@ -515,7 +547,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
                 continue
         else:
             raise Rejected("确认码连撞 5 次，请重试")
-    notice = notify_owner(notice_text(code, github, executor, actions, valid_until, scope_text), f"dt-grant-{code}")
+    notice = _notify_once(code, notice_text(code, github, executor, actions, valid_until, scope_text))
     with tx(path) as con:
         con.execute("UPDATE proposals SET notice_message = ? WHERE code = ? AND notice_message IS NULL", (notice, code))
     return {"code": code, "repo": repo, "github": github, "executor": executor, "actions": list(actions),

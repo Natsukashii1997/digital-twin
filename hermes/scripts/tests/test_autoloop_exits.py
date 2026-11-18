@@ -30,6 +30,7 @@ def isolate(case, root, open_gate=True):
     patches = [mock.patch.dict(os.environ, env)]
     if open_gate:
         patches.append(mock.patch.object(R, "ensure_open", lambda readers=None: None))
+        patches.append(mock.patch.object(R, "admit", lambda con, epoch: None))
     for p in patches:
         p.start()
         case.addCleanup(p.stop)
@@ -127,13 +128,40 @@ class Guard(Base):
         self.assertEqual(self.row("push_branch:t1:b:h0")["state"], "unknown")
         self.assertGreater(self.dirty(), 0)
 
-    def test_other_boot_or_too_old_is_not_alive(self):
+    def test_only_confirmed_end_counts_as_dead(self):
+        """审查 P1-02：只有确认结束（换了开机、进程不在或启动时间对不上）才算死；跑得久、查不了都当还活着。"""
         now = E.now_tz()
         row = {"boot": "1", "started_at": E.iso(now), "pid": os.getpid(), "proc": E.proc_start(os.getpid())}
         self.assertFalse(E.alive(row, now, boot="2"))
         self.assertTrue(E.alive(row, now, boot="1"))
-        self.assertFalse(E.alive(row, now + E.HARD_STALE + dt.timedelta(seconds=1), boot="1"))
-        self.assertFalse(E.alive({**row, "boot": "?"}, now, boot="?"))
+        self.assertTrue(E.alive(row, now + E.HARD_STALE + dt.timedelta(seconds=1), boot="1"))   # 跑得久 ≠ 结束
+        self.assertTrue(E.alive({**row, "boot": "?"}, now, boot="?"))                             # 开机读不到：看进程
+        self.assertFalse(E.alive({**row, "proc": "Thu Jan  1 00:00:00 1970"}, now, boot="1"))
+        with mock.patch.object(E, "proc_start", return_value="?"):
+            self.assertTrue(E.alive({**row, "proc": "x"}, now, boot="1"))                         # 查不了 ≠ 不在
+
+    def test_long_running_live_action_stays_frozen_and_is_reported(self):
+        old = E.iso(E.now_tz() - E.HARD_STALE - dt.timedelta(minutes=1))
+        with E.db() as con:
+            con.execute("INSERT INTO exits (key, kind, scope, target, state, pid, proc, boot, created_at, started_at, "
+                        "updated_at) VALUES ('push_branch:t1:b:h0','push_branch','task:t1','{}','executing',?,?,?,?,?,?)",
+                        (os.getpid(), E.proc_start(os.getpid()), E.boot_id(), old, old, old))
+        with self.assertRaisesRegex(E.Refused, "正在进行"):
+            E.guard("open_pr", "open_pr:t1:b:h0", "task:t1", {}, self.act())
+        E.reconcile()
+        self.assertEqual(self.row("push_branch:t1:b:h0")["state"], "executing")       # 不扫成不明、不给重做资格
+        self.assertEqual(E.show()["stalled"], ["push_branch:t1:b:h0"])
+        self.assertEqual(self.calls, [])
+
+    def test_same_key_cannot_change_target(self):
+        with self.assertRaises(E.Definite):
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {"number": 1}, self.act(exc=E.Definite("拒")))
+        with self.assertRaisesRegex(E.Refused, "换了目标"):
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {"number": 2}, self.act())
+        E.guard("merge", "merge:o/r:1:h", "repo:o/r", {"number": 1}, self.act())
+        with self.assertRaisesRegex(E.Refused, "换了目标"):                           # 做成以后也不许换
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {"number": 3}, self.act())
+        self.assertEqual(len(self.calls), 2)
 
     def test_boot_id_falls_back_to_linux_proc(self):
         """CI 在 Linux 上跑：没有 kern.boottime 时读 /proc 的 boot_id；都没有才是 '?'（当成进程不在）。"""
@@ -177,11 +205,11 @@ class Guard(Base):
 class WithGrant(Base):
     def test_valid_grant_passes_and_frozen_grant_stops(self):
         add_grant()
-        E.guard("push_branch", f"push_branch:{TASK}:b:h1", f"task:{TASK}", {}, self.act(),
+        E.guard("push_branch", f"push_branch:{TASK}:b:h1", f"task:{TASK}", {"github": "o/dt-sandbox", "branch": f"claude/{TASK}"}, self.act(),
                 task=(TASK, "push_branch", 1))
         G.freeze(TASK, "测试")
         with self.assertRaisesRegex(E.Refused, "冻结"):
-            E.guard("open_pr", f"open_pr:{TASK}:b:h1", f"task:{TASK}", {}, self.act(), task=(TASK, "open_pr", 1))
+            E.guard("open_pr", f"open_pr:{TASK}:b:h1", f"task:{TASK}", {"github": "o/dt-sandbox", "branch": f"claude/{TASK}"}, self.act(), task=(TASK, "open_pr", 1))
         with self.assertRaisesRegex(E.Refused, "没有"):
             E.guard("open_pr", "open_pr:t-20261118-000000:b:h1", "task:t-20261118-000000", {}, self.act(),
                     task=("t-20261118-000000", "open_pr", 1))
@@ -204,9 +232,23 @@ class WithGrant(Base):
         def do():
             seen["freeze"] = G.freeze(TASK, "常浩推翻")       # 动作进行中常浩冻结（拿得到写锁，说明动手时已放锁）
             return {"ok": 1}
-        E.guard("push_branch", f"push_branch:{TASK}:b:h1", f"task:{TASK}", {}, do, task=(TASK, "push_branch", 1))
+        E.guard("push_branch", f"push_branch:{TASK}:b:h1", f"task:{TASK}", {"github": "o/dt-sandbox", "branch": f"claude/{TASK}"}, do, task=(TASK, "push_branch", 1))
         self.assertEqual(seen["freeze"]["in_flight"], [{"key": f"push_branch:{TASK}:b:h1", "state": "executing"}])
         self.assertNotIn("in_flight", G.revoke(TASK, "收尾"))     # 做完以后就没有在途的了
+
+    def test_target_must_belong_to_the_grant(self):
+        """审查 P1-07：有效凭证配上别的仓库、别的分支、别的单号，一律拒绝。"""
+        add_grant()
+        ok = {"github": "o/dt-sandbox", "branch": f"claude/{TASK}"}
+        for key, scope, target, why in (
+                (f"push_branch:{TASK}:b:h1", f"task:{TASK}", {**ok, "github": "o/other"}, "目标仓库"),
+                (f"push_branch:{TASK}:b:h1", f"task:{TASK}", {**ok, "branch": "claude/t-20261118-111111"}, "分支"),
+                (f"push_branch:{TASK}:b:h1", f"task:{TASK}", {"branch": ok["branch"]}, "目标仓库"),
+                ("push_branch:t-20261118-222222:b:h1", f"task:{TASK}", ok, "不是这张单"),
+                (f"push_branch:{TASK}:b:h1", "task:t-20261118-222222", ok, "不是这张单")):
+            with self.assertRaisesRegex(E.Refused, why):
+                E.guard("push_branch", key, scope, target, self.act(), task=(TASK, "push_branch", 1))
+        self.assertEqual(self.calls, [])
 
     def test_freeze_without_ledger_does_not_create_it(self):
         add_grant()
@@ -237,6 +279,10 @@ class Reconcile(Base):
         notes = {n["key"].split(":")[1]: n["state"] for n in E.reconcile({"push_branch": reader})}
         self.assertEqual(notes, {"t1": "done", "t2": "failed", "t3": "unreconciled", "t4": "unknown"})
         self.assertEqual(E.show()["frozen"], ["task:t3", "task:t4"])
+        E.reconcile({"push_branch": lambda t, row, now: ("failed", {})})          # 审查 P1-01：核不清的不再自动改
+        self.assertEqual(self.row("push_branch:t3:b:h1")["state"], "unreconciled")
+        with self.assertRaisesRegex(E.Refused, "结果不明或还在进行"):
+            E.guard("push_branch", "push_branch:t3:b:h1", "task:t3", {}, self.act())
         again = E.guard("push_branch", "push_branch:t1:b:h1", "task:t1", {}, self.act())
         self.assertTrue(again["again"])                                   # 对账确认做成的：不重做
         E.guard("push_branch", "push_branch:t2:b:h1", "task:t2", {}, self.act())   # 确认没做成的：可以重做
@@ -309,21 +355,49 @@ class Readers(Base):
             self.assertIsNone(E.read_merge(t, {}, None)[0])
 
     def test_read_send(self):
-        import tidings_weekly as W
         now = E.now_tz()
         row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
-        t = {"chat": "oc_x", "marker": "abcdef0123456789"}
-        msg = {"message_id": "om_1", "body": {"content": '{"autoloop":"abcdef0123456789"}'}}
-        with mock.patch.object(W, "lark", return_value={"messages": [msg]}):
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
+        msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
+               "body": {"content": json.dumps(card)}}
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg]}):
             self.assertEqual(E.read_send(t, row, now), ("done", {"message_id": "om_1"}))
-        with mock.patch.object(W, "lark", return_value={"messages": [msg, msg]}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg, msg]}):
             self.assertIsNone(E.read_send(t, row, now)[0])
-        with mock.patch.object(W, "lark", return_value={"messages": []}):
-            self.assertEqual(E.read_send(t, row, now)[0], "failed")
-            with self.assertRaises(E.Unreachable):                 # 刚发不久：列表可能滞后，先不判没发
+        with mock.patch.object(E, "lark_read", return_value={"messages": []}):
+            self.assertIsNone(E.read_send(t, row, now)[0])         # 审查 P1-05：查不到 ≠ 没发，交常浩，不给重发资格
+            with self.assertRaises(E.Unreachable):                 # 刚发不久：列表可能滞后，先保持不明
                 E.read_send(t, {"started_at": E.iso(now)}, now)
-        with mock.patch.object(W, "lark", side_effect=W.SendError("断网")), self.assertRaises(E.Unreachable):
+        with mock.patch.object(E, "lark_read", side_effect=E.Unreachable("断网")), self.assertRaises(E.Unreachable):
             E.read_send(t, row, now)
+
+    def test_only_the_real_message_counts(self):
+        """审查 P1-05：机器人发的、类型对、有消息号、令牌在按钮回调值里，才算这条；只在文字里搜到令牌不算。"""
+        t = {"marker": "abcdef0123456789", "msg_type": "interactive"}
+        card = json.dumps({"elements": [{"behaviors": [{"value": {"autoloop": "abcdef0123456789"}}]}]})
+        good = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"}, "body": {"content": card}}
+        self.assertTrue(E.is_ours(good, t))
+        for bad in ({**good, "sender": {"sender_type": "user"}}, {**good, "msg_type": "text"}, {**good, "message_id": ""},
+                    {**good, "body": {"content": json.dumps({"text": "abcdef0123456789"})}},
+                    {**good, "body": {"content": json.dumps({"autoloop": "other"})}}, {**good, "body": {"content": "{坏"}}):
+            self.assertFalse(E.is_ours(bad, t), bad)
+        text = {"message_id": "om_2", "msg_type": "text", "sender": {"sender_type": "app"},
+                "body": {"content": json.dumps({"text": "同意就回：派单 0a1b2c3d"})}}
+        self.assertTrue(E.is_ours(text, {"marker": "派单 0a1b2c3d", "msg_type": "text"}))
+        self.assertFalse(E.is_ours(text, {"marker": "派单 ffffffff", "msg_type": "text"}))
+
+    def test_lark_read_uses_the_configured_bot_profile(self):
+        """审查 P2-02：对账读飞书用哪个机器人的登录配置可配（0E 后是门卫机器人）。"""
+        seen = {}
+
+        def run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"ok": True, "data": {"messages": []}}), stderr="")
+        with mock.patch.dict(os.environ, {"DT_EXITS_LARK_PROFILE": "cli_gatekeeper"}), \
+                mock.patch.object(E.subprocess, "run", run):
+            self.assertEqual(E.lark_read(["im", "x"], "对账"), {"messages": []})
+        self.assertEqual(seen["cmd"][1:3], ["--profile", "cli_gatekeeper"])
 
 
 class Cli(Base):

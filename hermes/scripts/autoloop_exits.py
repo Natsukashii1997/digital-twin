@@ -5,24 +5,29 @@
 推分支、开 PR、发飞书、合并这几种撤不回或会重复的动作，一律「先记账、再动手、再记结果」：
   executing     已记下要做、正在做（记着进程号和进程启动时间、开机时间）
   done          确认做成（有结果或回读证据）            —— 同一幂等键再来，直接回原结果，不再做
-  failed        确认没做成（动作明确报没发出去，或回读证明没有）—— 可以重做（新的一次尝试）
-  unknown       结果不明：超时、断网、回应读不懂、进程被强杀（executing 而进程已不在 / 换了开机）
-  unreconciled  对账也核不清（UNRECONCILED）：外部系统可达，但看到的情况对不上，只有常浩能定（settle --confirm）
-不靠异常捕获判断强杀：每个入口和恢复闸都会扫「executing 而做的进程已经不在」的条目，一律改成 unknown。
+  failed        确认没做成（请求在本地就没发出去，或回读给出权威的「没有」）—— 可以重做（新的一次尝试）
+  unknown       结果不明：超时、断网、回应读不懂、进程被强杀（executing 而做的进程已确认结束 / 换了开机）
+  unreconciled  核不清（UNRECONCILED）：外部系统可达，但看到的情况对不上、或查不到也证明不了没做（飞书消息列表）。
+                **终态，只有常浩能定**（settle --confirm）；对账不再改它，后来外部情况变了也不自动解冻（审查 P1-01）
+不靠异常捕获判断强杀：每个入口和恢复闸都会扫「executing 而做的进程已确认结束」的条目，一律改成 unknown。
+进程还活着、只是跑得久（超过 30 分钟）不算结束：继续冻结，只报「疑似卡住」，不给重做资格（审查 P1-02）。
 
 **冻结**：同一冻结范围（scope：task:<单号>、repo:<owner/name>、card:<卡片号>……）只要有一条 executing（进程还在）、
 unknown 或 unreconciled，这个范围里的任何新动作都拒绝（同一时刻也只能有一个在做，这就是串行化）。范围按秘书代批规格第 7 节：
 回答结果不明冻结这张任务，合并结果不明冻结这个仓库。冻结不是一张单独的表，是账本状态推出来的，所以不会和账本不一致。
 
-**结果不明从不重做**：同一范围再有动作要做时，先只读对一次这个范围的账；只读回读外部系统（GitHub 分支 / PR / 合并、飞书私聊里的消息）对账，凭证据记成 done 或 failed；
-外部系统连不上就保持 unknown 等下次；连得上但对不上就记 unreconciled，交常浩。
+**结果不明从不重做**：同一范围再有动作要做时，先只读对一次这个范围的账；只读回读外部系统（GitHub 分支 / PR / 合并、
+飞书私聊里的消息）对账，凭权威证据记成 done 或 failed；外部系统连不上就保持 unknown 等下次；连得上但对不上记 unreconciled，交常浩。
+同一幂等键第一次登记后目标不能改（换目标一律拒绝）。
 
 **和任务凭证串行**（0C 审查 P1-07「核凭证与推分支之间的竞态」）：带 task 的动作，在凭证库的写锁里现读凭证判定、并在
 同一把锁下把 executing 落盘，才放锁动手。冻结、撤销也要这把写锁，所以两者有先后：冻结先提交 → 判定失败、不动手；
 executing 先落盘 → 这个动作已经开始（撤不回），冻结的输出里会列出它（autoloop_grants.freeze 的 in_flight），结果出来后照常对账；
-之后的步骤（例如推完分支再开 PR）重新判定，冻结后一律拒绝。
+之后的步骤（例如推完分支再开 PR）重新判定，冻结后一律拒绝。带任务的动作还要核目标落在这张凭证上：幂等键、冻结范围是这张单，
+目标仓库是凭证里的仓库，分支正好是 <执行方>/<单号>（审查 P1-07）。
 
-**恢复闸**：每个动作先过 autoloop_recovery.ensure_open()：开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才放行。
+**恢复闸**：每个动作先过 autoloop_recovery.ensure_open()（开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才放行），
+落盘 executing 的同一个写事务里再核一次开闸资格（autoloop_recovery.admit，审查 P1-03），检查和登记之间没有空隙。
 
 账本放在**运行账号自己的** DigitalTwin/autoloop/exits.db（700 / 600）；不写死主账号路径，0E-2 整体搬进 dt-gate。
 本脚本只读外部系统做对账，不做任何外部写；外部写由调用方传进来的 do() 做。
@@ -33,7 +38,7 @@ executing 先落盘 → 这个动作已经开始（撤不回），冻结的输�
 
   autoloop_exits.py show [--json]                       只读：账本、冻结的范围
   autoloop_exits.py settle --key K --result done|failed --note 说明 --confirm   常浩核实后手动结算一条核不清的
-环境变量：DT_EXITS_DB、DT_GH、DT_LARK_CLI。不调用 AI。
+环境变量：DT_EXITS_DB、DT_GH、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置）。不调用 AI。
 """
 import argparse
 import contextlib
@@ -54,8 +59,8 @@ KINDS = ("push_branch", "open_pr", "send_feishu", "merge")
 KEY = re.compile(r"^(push_branch|open_pr|send_feishu|merge):[\w./@:+-]{1,300}$")
 SCOPE = re.compile(r"^(task|repo|card|chat):[\w./@:+-]{1,200}$")
 UNSETTLED = ("executing", "unknown", "unreconciled")
-HARD_STALE = dt.timedelta(minutes=30)       # executing 超过这么久，不管进程在不在都当结果不明（防进程号复用、卡死）
-SEND_SETTLE = dt.timedelta(minutes=5)       # 飞书消息列表可能滞后：结果不明的发送这么久以后还找不到，才认定没发出去
+HARD_STALE = dt.timedelta(minutes=30)       # executing 超过这么久还活着：报「疑似卡住」，继续冻结，不改状态
+SEND_SETTLE = dt.timedelta(minutes=5)       # 飞书消息列表可能滞后：这么久以后还找不到，记核不清交常浩（不判没发）
 SCHEMA_VERSION = 1
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS exits (key TEXT PRIMARY KEY, kind TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL,
@@ -67,7 +72,10 @@ CREATE INDEX IF NOT EXISTS exits_scope ON exits (scope, state);
 CREATE TABLE IF NOT EXISTS exit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, at TEXT NOT NULL,
   state TEXT NOT NULL, note TEXT);
 CREATE TABLE IF NOT EXISTS gate (id INTEGER PRIMARY KEY CHECK (id = 1), epoch TEXT, opened_at TEXT,
-  dirty INTEGER NOT NULL DEFAULT 1, dirty_reason TEXT, report TEXT)
+  dirty INTEGER NOT NULL DEFAULT 1, dirty_reason TEXT, report TEXT, hold TEXT);
+CREATE TABLE IF NOT EXISTS recovery_points (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, hub_commit TEXT NOT NULL,
+  snapshot TEXT NOT NULL, max_card INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('held','retired','rolled_back')), closed_at TEXT, note TEXT)
 """
 
 
@@ -153,31 +161,41 @@ def boot_id():
 
 
 def proc_start(pid):
-    """进程启动时间（ps -o lstart）；进程不在返回 None。和进程号一起判断「还是不是那个进程」。"""
+    """进程启动时间（ps -o lstart）。进程确实不在返回 None；查不了（ps 跑不起来、超时）返回 '?'——查不了不等于不在。"""
     try:
         r = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return "?"
     return r.stdout.strip() or None
 
 
-def alive(row, now, boot=None):
-    """executing 的条目，做它的进程是不是还在做：同一次开机、进程号在、启动时间一致、没超过 HARD_STALE。"""
-    if row["boot"] != (boot or boot_id()) or row["boot"] == "?":
+def alive(row, now=None, boot=None):
+    """executing 的条目，做它的进程是不是可能还在做。只有**确认**它已经结束才返回 False：换了开机（两边都读得到），
+    或者进程号对应的进程不在、启动时间对不上。查不了一律当还活着（继续冻结，不给重做资格）。
+    运行时间再长也不算结束（审查 P1-02）：超过 HARD_STALE 只报「疑似卡住」（stalled），不改状态。"""
+    cur = boot or boot_id()
+    if row["boot"] not in (None, "?") and cur != "?" and row["boot"] != cur:
         return False
-    if now - G.parse_iso(row["started_at"]) > HARD_STALE:
-        return False
-    return row["proc"] is not None and proc_start(row["pid"]) == row["proc"]
+    st = proc_start(row["pid"])
+    if st == "?" or row["proc"] in (None, "?"):
+        return True
+    return st == row["proc"]
+
+
+def stalled(con, now):
+    """还活着、但运行超过 HARD_STALE 的动作：只报给常浩（疑似卡住），范围继续冻结；常浩确认进程结束后才会被扫成不明。"""
+    return [r["key"] for r in con.execute("SELECT * FROM exits WHERE state = 'executing'").fetchall()
+            if now - G.parse_iso(r["started_at"]) > HARD_STALE and alive(r, now)]
 
 
 def sweep(con, now, boot=None):
-    """把「executing 而进程已不在」的条目改成 unknown（强杀、断电、睡死）。返回改了的幂等键。"""
+    """把「executing 而做它的进程已确认结束」的条目改成 unknown（强杀、断电、重启）。返回改了的幂等键。"""
     changed = []
     for r in con.execute("SELECT * FROM exits WHERE state = 'executing'").fetchall():
         if not alive(r, now, boot):
             con.execute("UPDATE exits SET state = 'unknown', updated_at = ? WHERE key = ? AND state = 'executing'",
                         (iso(now), r["key"]))
-            log(con, r["key"], "unknown", "做它的进程已不在（强杀、重启或超时），结果不明，不重做", now)
+            log(con, r["key"], "unknown", "做它的进程已结束（强杀、重启），结果不明，不重做", now)
             changed.append(r["key"])
     if changed:
         mark_dirty(con, f"强杀后发现 {len(changed)} 条结果不明")
@@ -190,14 +208,20 @@ def frozen_scopes(con):
 
 
 # ---------- 动手 ----------
-def _begin(key, kind, scope, target, task, now):
-    """在出口账本（和凭证库，带 task 时）的写锁里判定，落盘 executing。返回 None 表示可以动手，否则返回已有结果。"""
+def _begin(key, kind, scope, target, task, now, epoch):
+    """在出口账本（和凭证库，带 task 时）的写锁里判定，落盘 executing。返回 None 表示可以动手，否则返回已有结果。
+    开闸资格也在这把写锁里核（审查 P1-03）：结果不明的登记（mark_dirty）要同一把锁，所以两者有先后——
+    不明先登记 → 这里拒绝；这里先落盘 → 这个动作在闸关之前已经开始，照常记账、照常对账。"""
+    import autoloop_recovery as R
     boot, me = boot_id(), os.getpid()
     proc = proc_start(me)
     with db() as con:                                      # 扫描单独提交：后面判定拒绝时不会把它一起回滚
         sweep(con, now, boot)
     with db() as con:
+        R.admit(con, epoch)
         row = con.execute("SELECT * FROM exits WHERE key = ?", (key,)).fetchone()
+        if row and json.loads(row["target"]) != target:
+            raise Refused(f"同一个动作（{key}）换了目标，拒绝（幂等键第一次登记后目标不能改）")
         if row and row["state"] == "done":
             return {"done": True, "again": True, **json.loads(row["outcome"] or "{}")}
         if row and row["state"] in UNSETTLED:
@@ -210,8 +234,8 @@ def _begin(key, kind, scope, target, task, now):
         t = iso(now)
         if row:                                            # 上一次确认没做成：重做，记一次新的尝试
             con.execute("UPDATE exits SET state = 'executing', pid = ?, proc = ?, boot = ?, attempts = attempts + 1, "
-                        "target = ?, outcome = NULL, evidence = NULL, started_at = ?, updated_at = ? WHERE key = ?",
-                        (me, proc, boot, json.dumps(target, sort_keys=True), t, t, key))
+                        "outcome = NULL, evidence = NULL, started_at = ?, updated_at = ? WHERE key = ?",
+                        (me, proc, boot, t, t, key))
         else:
             con.execute("INSERT INTO exits (key, kind, scope, target, task_id, generation, state, pid, proc, boot, "
                         "created_at, started_at, updated_at) VALUES (?,?,?,?,?,?, 'executing', ?,?,?,?,?,?)",
@@ -239,7 +263,7 @@ def guard(kind, key, scope, target, do, task=None, now=None):
     if not SCOPE.match(scope or ""):
         raise Refused(f"冻结范围写法不对：{scope}")
     import autoloop_recovery as R
-    R.ensure_open()
+    epoch = R.ensure_open()
     with db(write=False) as con:                           # 这个范围冻着：先只读对一次这个范围的账（网络恢复后自己解开）
         stuck = con.execute(f"SELECT 1 FROM exits WHERE scope = ? AND state IN ({','.join('?' * len(UNSETTLED))}) "
                             "LIMIT 1", (scope, *UNSETTLED)).fetchone()
@@ -249,13 +273,13 @@ def guard(kind, key, scope, target, do, task=None, now=None):
     if task:
         task_id, action, generation = task
         with G.tx() as gcon:                               # 凭证库写锁：冻结、撤销进不来
-            why = G.check_row(gcon.execute("SELECT * FROM grants WHERE task_id = ?", (task_id,)).fetchone(),
-                              action, generation, now, G.voided_of(gcon, task_id))
+            row = gcon.execute("SELECT * FROM grants WHERE task_id = ?", (task_id,)).fetchone()
+            why = G.check_row(row, action, generation, now, G.voided_of(gcon, task_id)) or bound(row, key, scope, target)
             if why:
                 raise Refused(f"{why}（{action}）")
-            again = _begin(key, kind, scope, target, task, now)    # executing 在放凭证库锁之前落盘
+            again = _begin(key, kind, scope, target, task, now, epoch)    # executing 在放凭证库锁之前落盘
     else:
-        again = _begin(key, kind, scope, target, None, now)
+        again = _begin(key, kind, scope, target, None, now, epoch)
     if again:
         return again
     try:
@@ -268,6 +292,19 @@ def guard(kind, key, scope, target, do, task=None, now=None):
         raise
     _finish(key, "done", out or {})
     return {"done": True, "again": False, **(out or {})}
+
+
+def bound(row, key, scope, target):
+    """带任务的动作，目标必须落在这张凭证上（审查 P1-07）：幂等键和冻结范围写的是这张单，目标仓库是凭证里的仓库，
+    带分支的必须正好是 <执行方>/<单号>（和 0C 受信发布同一写法）。返回 None 表示对得上，否则返回原因。"""
+    tid = row["task_id"]
+    if key.split(":")[1] != tid or scope != f"task:{tid}":
+        return "幂等键或冻结范围不是这张单"
+    if target.get("github") != row["github"]:
+        return f"目标仓库不是凭证里的 {row['github']}"
+    if "branch" in target and target["branch"] != f"{row['executor']}/{tid}":
+        return "分支不是这张单的分支"
+    return None
 
 
 def in_flight(scope):
@@ -327,25 +364,71 @@ def read_merge(t, row, now):
     return None, {"state": p.get("state"), "head": p.get("headRefOid")}
 
 
-def read_send(t, row, now):
-    """私聊里找带这次标记的机器人消息（标记是卡片令牌这类随机串）：找到一条 → 做成（记消息号）；
-    动作开始 5 分钟以后还找不到 → 没做成；更早 → 结果仍不明（消息列表可能滞后）；找到多条 → 核不清。"""
-    from tidings_weekly import SendError, lark
-    start = G.parse_iso(row["started_at"]) - dt.timedelta(minutes=1)
+def lark_read(args, what):
+    """以机器人身份只读调 lark-cli。用哪个机器人的登录配置由 DT_EXITS_LARK_PROFILE 定（默认猛鬼兽应用；0E 搬进 dt-gate 后
+    改成门卫应用——对账读的必须是**发这条消息的那个机器人**能看到的会话，不为对账把别的机器人凭据复制过来，审查 P2-02）。"""
+    import tidings_weekly as W
+    profile = os.environ.get("DT_EXITS_LARK_PROFILE") or W.PROFILE
     try:
-        data = lark(["im", "+chat-messages-list", "--chat-id", t["chat"], "--start", start.isoformat(),
-                     "--end", (now + dt.timedelta(minutes=1)).isoformat(), "--order", "asc", "--page-all"], "对账")
-    except SendError as e:
-        raise Unreachable(str(e))
-    hits = [m for m in (data.get("messages") or [])
-            if t["marker"] in json.dumps(m, ensure_ascii=False)]
+        r = subprocess.run([W.LARK, "--profile", profile, *args, "--as", "bot", "--format", "json"], capture_output=True,
+                           text=True, timeout=W.TIMEOUT, env=W.strip_env())
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Unreachable(f"{what}：lark-cli 跑不起来（{type(e).__name__}）")
+    for raw in (r.stdout, r.stderr):
+        try:
+            d = json.loads(raw)
+            break
+        except ValueError:
+            continue
+    else:
+        raise Unreachable(f"{what}：lark-cli 输出读不懂（退出码 {r.returncode}）")
+    if not isinstance(d, dict) or not d.get("ok", True):
+        raise Unreachable(f"{what}：lark-cli 报错")
+    return d.get("data") or {}
+
+
+def _walk(x):
+    if isinstance(x, dict):
+        yield x
+        for v in x.values():
+            yield from _walk(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _walk(v)
+
+
+def is_ours(m, t):
+    """这条消息是不是本次发出的那条（审查 P1-05）：机器人发的、消息类型对、有消息号，并且
+    卡片：某个按钮回调值里正好是 {"autoloop": 令牌}；文字：正文里有这次的随机标记。只在整份 JSON 里搜到令牌不算。"""
+    if (m.get("sender") or {}).get("sender_type") != "app" or not m.get("message_id"):
+        return False
+    if m.get("msg_type") != t.get("msg_type", "interactive"):
+        return False
+    raw = (m.get("body") or {}).get("content") or m.get("content") or ""
+    try:
+        content = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return False
+    if t.get("msg_type", "interactive") == "interactive":
+        return any(d.get("autoloop") == t["marker"] for d in _walk(content))
+    return isinstance(content, dict) and t["marker"] in str(content.get("text") or "")
+
+
+def read_send(t, row, now):
+    """私聊里找本次发出的那条机器人消息：结构核对后正好一条 → 做成（记消息号）；多条 → 核不清。
+    一条也找不到**不能证明没发**（列表可能滞后、可能看不到，审查 P1-05）：动作开始 5 分钟内保持不明，之后记核不清交常浩，
+    从不因为「没找到」就给重发资格。真飞书上这个读法未实测（演练用假 lark-cli），上线前实测。"""
+    start = G.parse_iso(row["started_at"]) - dt.timedelta(minutes=1)
+    data = lark_read(["im", "+chat-messages-list", "--chat-id", t["chat"], "--start", start.isoformat(),
+                      "--end", (now + dt.timedelta(minutes=1)).isoformat(), "--order", "asc", "--page-all"], "对账")
+    hits = [m for m in (data.get("messages") or []) if isinstance(m, dict) and is_ours(m, t)]
     if len(hits) == 1:
-        return "done", {"message_id": hits[0].get("message_id")}
+        return "done", {"message_id": hits[0]["message_id"]}
     if len(hits) > 1:
         return None, {"hits": len(hits)}
     if now - G.parse_iso(row["started_at"]) < SEND_SETTLE:
         raise Unreachable("消息列表可能还没更新，过几分钟再对")
-    return "failed", {"hits": 0}
+    return None, {"hits": 0, "note": "查不到不等于没发，交常浩核实"}
 
 
 READERS = {"push_branch": read_push, "open_pr": read_pr, "merge": read_merge, "send_feishu": read_send}
@@ -358,7 +441,7 @@ def reconcile(readers=None, now=None, scope=None):
     now = now or now_tz()
     with db() as con:
         sweep(con, now)
-        rows = [dict(r) for r in con.execute("SELECT * FROM exits WHERE state IN ('unknown', 'unreconciled') "
+        rows = [dict(r) for r in con.execute("SELECT * FROM exits WHERE state = 'unknown' "     # 核不清的只等常浩结算
                                              "AND (? IS NULL OR scope = ?) ORDER BY created_at", (scope, scope))]
     notes = []
     for r in rows:
@@ -371,9 +454,6 @@ def reconcile(readers=None, now=None, scope=None):
             notes.append({"key": r["key"], "state": r["state"], "note": f"回读出错，保持原状：{type(e).__name__}"})
             continue
         new = verdict or "unreconciled"
-        if new == r["state"]:
-            notes.append({"key": r["key"], "state": new, "note": "仍核不清，交常浩"})
-            continue
         with db() as con:
             cur = con.execute("UPDATE exits SET state = ?, evidence = ?, outcome = COALESCE(?, outcome), updated_at = ? "
                               "WHERE key = ? AND state = ?",
@@ -405,7 +485,7 @@ def show():
     with db(write=False) as con:
         rows = [dict(r) for r in con.execute("SELECT key, kind, scope, state, attempts, outcome, evidence, updated_at "
                                              "FROM exits ORDER BY updated_at DESC LIMIT 200")]
-        return {"frozen": frozen_scopes(con), "exits": rows}
+        return {"frozen": frozen_scopes(con), "stalled": stalled(con, now_tz()), "exits": rows}
 
 
 def main(argv=None):

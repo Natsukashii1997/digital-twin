@@ -56,9 +56,9 @@ class Base(unittest.TestCase):
                                                 "DT_OWNER_OPEN_ID": OWNER, "DT_OWNER_CHAT_ID": CHAT})
         self.env.start()
         self.addCleanup(self.env.stop)
-        gate = mock.patch.object(Rv, "ensure_open")              # 恢复闸放行（闸关着的情形见 RecoveryGate）
-        gate.start()
-        self.addCleanup(gate.stop)
+        for gate in (mock.patch.object(Rv, "ensure_open"), mock.patch.object(Rv, "admit")):   # 恢复闸放行（关着见 RecoveryGate）
+            gate.start()
+            self.addCleanup(gate.stop)
         self.lark = Lark()
         p = mock.patch.object(F, "lark", self.lark)
         p.start()

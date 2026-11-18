@@ -17,7 +17,8 @@
       本人已有 queued / inflight / unknown / answered 的一行，秘书就不许获准（作废自己的预占）；
     - 本人一侧从不改秘书的行：秘书已 approved 时本人照样提交，谁先被中台受理算谁，后到的一方收到 changed=false。
 
-恢复闸（批 0D）：领卡前先过 autoloop_recovery.ensure_open()；发新卡走出口账本（autoloop_exits，幂等键
+恢复闸（批 0D）：领卡前先过 autoloop_recovery.ensure_open()；领了卡以后闸关了、或这张卡上次发送结果不明正在冻结，算「暂缓」
+（Deferred），不向中台报 failed；发新卡走出口账本（autoloop_exits，幂等键
 send_feishu:card-<卡片号>、冻结范围 card:<卡片号>、对账标记就是卡片令牌）：先记要发、再发，发送结果不明不重发，对账在私聊里
 按令牌找那条消息。改卡（patch）本身幂等，不记账；结束了的卡改不了时另发的那条通知不带令牌，只过闸、不记账（重复了也只是多一条结束通知）。
 
@@ -62,6 +63,10 @@ CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card
 
 class Fail(Exception):
     """说人话的原因，不带钥匙。"""
+
+
+class Deferred(Fail):
+    """暂缓：恢复闸关着、或这张卡上一次发送结果不明正在冻结。不是失败，不向中台报 failed（审查 P1-04）。"""
 
 
 class HubError(Fail):
@@ -263,18 +268,18 @@ def deliver(card):
     def do():
         try:                                       # 幂等键只用卡片号：报告丢了重发不出第二条
             return {"message_id": send_card(chat, content, f"autoloop-card-{card['id']}")}
-        except SendError as e:                     # 只有飞书明确报错、或 lark-cli 根本没跑起来，才算确定没发出去；
-            msg = str(e)                           # 超时、输出读不懂、没拿到消息号：可能已发出，结果不明
-            if "失败：" in msg or ("跑不起来" in msg and "Timeout" not in msg):
+        except SendError as e:                     # 只有 lark-cli 在本机根本没跑起来，才算确定没发出去（审查 P1-05）；
+            msg = str(e)                           # 飞书报错、超时、输出读不懂、没拿到消息号：请求可能已到飞书，结果不明
+            if "跑不起来" in msg and "Timeout" not in msg:
                 raise E.Definite(msg)
             raise
     try:                                           # 写前账本（批 0D）：先记要发，再发；结果不明不重发，对账按令牌找消息
         mid = E.guard("send_feishu", f"send_feishu:card-{card['id']}", f"card:{card['id']}",
-                      {"chat": chat, "marker": token}, do)["message_id"]
+                      {"chat": chat, "marker": token, "msg_type": "interactive"}, do)["message_id"]
     except E.Definite as e:
         raise SendError(str(e))
     except E.Refused as e:
-        raise Fail(str(e))
+        raise Deferred(str(e))
     with db(write=True) as con:
         con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, delivered_at = COALESCE(delivered_at, ?) "
                     "WHERE card_id = ?", (mid, card["version"], now(), card["id"]))
@@ -294,6 +299,8 @@ def once(wait=50):
         return None
     try:
         ref = deliver(card)
+    except Deferred as e:                          # 暂缓不是失败：不报 failed，中台过一会儿会再给这张卡
+        return {"card": card["id"], "ok": False, "deferred": True, "why": str(e)}
     except (SendError, Fail) as e:
         hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
         return {"card": card["id"], "ok": False, "why": str(e)}
