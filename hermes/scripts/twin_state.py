@@ -58,7 +58,7 @@ DEFAULT_OWNER_FILE = "~/Library/Application Support/DigitalTwin/owner_open_id"  
 DEFAULT_OWNER_CHAT_FILE = "~/Library/Application Support/DigitalTwin/owner_chat_id"   # 常浩和 Hermes 私聊的 chat_id（B2.1 身份桥接判私聊用），同样 600
 OWNER_HINT = ("还没配置常浩的 open_id：设环境变量 DT_OWNER_OPEN_ID，或把 open_id 单行写进 "
               f"{DEFAULT_OWNER_FILE}（chmod 600；路径可用 DT_OWNER_FILE 改）；配置前 --by user 一律拒绝")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 GOAL_STATUSES = ("observed", "authorized", "completed", "canceled")
 TASK_STATUSES = ("observed", "ready", "running", "blocked", "review", "completed", "canceled")
@@ -205,6 +205,13 @@ MIGRATIONS = [
     " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
     "CREATE INDEX secretary_quota_count ON secretary_quota(kind, scope, state);"
     "CREATE TABLE secretary_sessions (session_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, registered_at TEXT NOT NULL)",
+    # v6（秘书代批 #195 0B-4c）：规格第 6 节「同一张卡的同一个版本最多只有一个可送达的秘书决定」做成账本唯一约束。
+    # card_id / card_version 只在对象带卡片时写（① 答提问卡必写；其余为空），部分唯一索引只管还可能送达或已送达的 ①
+    # （已出未送达、正在送达、已送达、结果不明、对账不清）；没做成、作废的不占，之后可以再记
+    "ALTER TABLE secretary_decisions ADD COLUMN card_id INTEGER;"
+    "ALTER TABLE secretary_decisions ADD COLUMN card_version INTEGER;"
+    "CREATE UNIQUE INDEX secretary_decisions_card ON secretary_decisions(card_id, card_version)"
+    " WHERE action = 'ask' AND status IN ('issued','executing','done','unknown','unreconciled')",
 ]   # 第 n 项把库从版本 n 升到 n+1；改表结构只追加，不改已有项
 
 

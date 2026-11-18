@@ -24,6 +24,8 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
 只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
 回读只认中台的四种卡片状态；缺字段或认不出的状态一律当结果不明，不结算、不放开（PR #202 审查 P1-08）。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
+秘书先答成功、常浩的点击迟到（中台回 changed=false，或对账看到别的结果）时，回话里补一句「秘书替你选了「X」，不同意可以推翻」
+（secretary_note；推翻入口在代批汇报卡上，0B-5 做）。
 
 已知局限（PR #202 审查 P1-01）：点击人、聊天号是网关传进来的命令行参数；和猛鬼兽同一个 macOS 账号的进程
 （包括有终端工具的猛鬼兽模型）既能伪造这些参数，也能直接读 feishu 通道钥匙文件，甚至自己跑 issue-channel-key 签钥匙
@@ -200,6 +202,21 @@ def describe(c):
     return f"{c.get('state')}，{who}选了第 {c.get('choice')} 项" if c.get("choice") is not None else str(c.get("state"))
 
 
+def secretary_note(c):
+    """秘书先答成功、常浩的点击迟到时补的一句（规格第 7 节「你迟到的点击会显示已选的结果，并给推翻入口」）。
+    推翻入口在代批汇报卡上（0B-5 做）；这里只把秘书选的那一项说清楚。不是秘书答的返回空串。"""
+    if not c or c.get("by") != "秘书" or c.get("choice") is None:
+        return ""
+    opts = c.get("options")
+    if isinstance(opts, str):
+        try:
+            opts = json.loads(opts)
+        except ValueError:
+            opts = None
+    label = opts[c["choice"]] if isinstance(opts, list) and 0 <= c["choice"] < len(opts) else f"第 {c['choice'] + 1} 项"  # 中台下标从 0 起，给人看从 1 起
+    return f"秘书替你选了「{label}」，不同意可以推翻（入口在秘书代批汇报卡上）。"
+
+
 def submit(card_id):
     """唯一的发送入口。原子领取这次尝试的发送资格（queued → inflight，且卡已有消息号、中台已确认送达），
     领到的才发请求。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，返回 None；还不能发返回 (3, …)。"""
@@ -230,8 +247,8 @@ def submit(card_id):
         return 2, "这次回答结果不明，我不会重答，会对账后告诉你。"
     c = read_card(card_id)
     if not out.get("changed"):
-        move(card_id, attempt, "inflight", "settled", f"中台说已有回答：{describe(c)}")
-        return 1, f"这张卡已经有了回答（{describe(c)}），中台只认第一次，你这次没有改变结果。"
+        move(card_id, attempt, "inflight", "settled", f"中台说已有回答：{describe(c)}" + secretary_note(c))
+        return 1, f"这张卡已经有了回答（{describe(c)}），中台只认第一次，你这次没有改变结果。" + secretary_note(c)
     if judge(c, choice, owner) == "answered":
         move(card_id, attempt, "inflight", "answered")
         return 0, "收到，已交给中台。"
@@ -272,7 +289,7 @@ def reconcile(card_id=None):
         if verdict == "answered" and move(cid, attempt, r["state"], "answered", "对账：中台里是你这一答"):
             notes.append((cid, "对账结果：你上次的回答中台已经收下了。"))
         elif verdict == "settled" and move(cid, attempt, r["state"], "settled", f"对账：{describe(c)}"):
-            notes.append((cid, f"对账结果：这张卡已经有了别的结果（{describe(c)}）。"))
+            notes.append((cid, f"对账结果：这张卡已经有了别的结果（{describe(c)}）。" + secretary_note(c)))
         elif r["state"] == "inflight" and move(cid, attempt, "inflight", "unknown",
                                                f"对账：发送中途进程没了，回读：{describe(c)}"):
             where = "卡片还开着" if verdict == "open" else "中台这张卡的状态读不到或认不出"

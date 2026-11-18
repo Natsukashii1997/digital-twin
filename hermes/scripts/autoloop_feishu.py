@@ -12,6 +12,8 @@
   feishu_cards  卡片号 → 令牌、送达的消息号、私聊号、种类、选项数、版本、飞书送达时间（秘书白天等 30 分钟从这里起算）、
                 中台确认送达时间（报 delivered 成功后才有；没有之前本人的点击只排队，不提交，见 autoloop_answer）
   claims        每张卡每方一行（owner 本人 / secretary 秘书）和进度；claim_log 只追加，记每次状态变化
+  secretary_cards  秘书控制面（secretary_gate.py，第 4c 批）在 secretary 通道领到的卡片：卡片号 → 版本、自己生成的 ref、
+                领到时间、中台确认送达时间（报 delivered 成功后才有；没有之前秘书不答这张卡）
   和第 4c 批秘书的契约（规格 §7、§10 第 4 条「秘书获准送达前本人优先；获准后以中台先受理的为准」）：
     - 秘书从 reserved 改成 approved（唯一的送达授权点）必须在 db(write=True) 里做，并先调 owner_holds()：
       本人已有 queued / inflight / unknown / answered 的一行，秘书就不许获准（作废自己的预占）；
@@ -53,6 +55,8 @@ CREATE TABLE IF NOT EXISTS claims (card_id INTEGER NOT NULL, who TEXT NOT NULL C
   state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, attempt TEXT, PRIMARY KEY (card_id, who));
 CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL, who TEXT NOT NULL,
   at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT, attempt TEXT);
+CREATE TABLE IF NOT EXISTS secretary_cards (card_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ref TEXT NOT NULL UNIQUE,
+  leased_at TEXT NOT NULL, hub_delivered_at TEXT);
 """
 
 
@@ -123,31 +127,32 @@ def card_by_token(token):
 
 
 # ---------- 中台（feishu 通道钥匙） ----------
-def channel_key():
-    f = C.channel_key_file(CHANNEL)
+def channel_key(channel=CHANNEL):
+    f = C.channel_key_file(channel)
     try:
         key = f.read_text(encoding="utf-8").strip()
     except OSError:
-        raise Fail("没有 feishu 通道钥匙：常浩说「签」以后 autoloop_config.py issue-channel-key feishu 才有")
+        raise Fail(f"没有 {channel} 通道钥匙：常浩说「签」以后 autoloop_config.py issue-channel-key {channel} 才有")
     if not C.KEY_RE.match(key):
-        raise Fail("feishu 通道钥匙文件格式不对")
+        raise Fail(f"{channel} 通道钥匙文件格式不对")
     return key
 
 
-def hub_target():
-    """发请求前要的东西：中台地址和通道钥匙。读不到就抛 HubError(sent=False)：请求还没发出去。"""
+def hub_target(channel=CHANNEL):
+    """发请求前要的东西：中台地址和通道钥匙。读不到就抛 HubError(sent=False)：请求还没发出去。
+    channel：用哪条通道的钥匙（飞书桥接用 feishu；秘书控制面 secretary_gate 用 secretary，同一套协议和错误分类）。"""
     try:
         url, _ = C.hub_config()
     except Exception as e:                       # config.json 读不到、缺字段：一律算没发出去
         raise HubError(f"读不到中台配置（{type(e).__name__}）", sent=False)
     try:
-        return url, channel_key()
+        return url, channel_key(channel)
     except Fail as e:
         raise HubError(str(e), sent=False)
 
 
-def hub(method, path, body=None, timeout=20):
-    url, key = hub_target()
+def hub(method, path, body=None, timeout=20, channel=CHANNEL):
+    url, key = hub_target(channel)
     req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
