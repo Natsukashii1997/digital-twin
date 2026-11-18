@@ -3,7 +3,8 @@
 
 按名册生成本机中台 rules.json 里数字分身这一块，其余原样保留：
   - 来源 hermes：只有派单网关（autoloop_grants.py）持有它的钥匙；
-  - Agent dt-claude / dt-codex：跑在工人账号 dt-worker 上的接单程序（主账号的 claude / codex 是上游试跑用的，不动）；
+  - Agent dt-claude / dt-codex：跑在工人账号 dt-worker 上的接单程序（主账号的 claude / codex 是上游试跑用的，不动），
+    program 指向工人侧启动脚本 /Users/Shared/dt-autoloop/bin/dt-worktree-<执行方>（#205 0C：建工作目录、核凭证、交接）；
   - 通道 feishu（answerers 只有常浩的 open_id）和 secretary（answerers 只有「秘书」）：两把通道钥匙分开，
     秘书的钥匙答不出 by=常浩，飞书桥接的钥匙答不出 by=秘书（中台按通道核 answerers）；
     defaultChannels 显式写成原有的通道（原来一个通道都没有时回退成 ["feishu"]：中台告警等没写通道的卡片会发到飞书），
@@ -58,6 +59,7 @@ import autoloop_grants as G  # noqa: E402
 SOURCE = "hermes"
 WORKER = "dt-worker"
 AGENTS = {"claude": ("dt-claude", "Claude Code（dt-worker）"), "codex": ("dt-codex", "Codex（dt-worker）")}
+PROGRAM_DIR = "/Users/Shared/dt-autoloop/bin"     # 工人侧启动脚本（ops/dt_worktree.py，#205 0C），归主账号所有、工人只能运行
 NEW_CHANNELS = ("feishu", "secretary")
 SECRETARY = "秘书"
 PAUSE_REASON = "0C 启动脚本就绪前暂停（#195 0B-2），由常浩决定恢复"
@@ -154,7 +156,8 @@ def render(current, owner_open_id, repos):
     new.setdefault("sources", {})[SOURCE] = {"name": "猛鬼兽派单网关"}
     agents = new.setdefault("agents", {})
     for executor, (aid, name) in AGENTS.items():
-        agents[aid] = {"name": name, "worker": WORKER, "use": executor, "access": "edit"}
+        agents[aid] = {"name": name, "worker": WORKER, "use": executor, "access": "edit",
+                       "program": f"{PROGRAM_DIR}/dt-worktree-{executor}"}
     channels = new.setdefault("channels", {})
     if "defaultChannels" in new:
         new["defaultChannels"] = [c for c in new["defaultChannels"] if c != "secretary"]

@@ -83,6 +83,7 @@ class Render(unittest.TestCase):
         self.assertIn("hermes", self.new["sources"])
         for ex, (aid, _) in C.AGENTS.items():
             self.assertEqual((self.new["agents"][aid]["worker"], self.new["agents"][aid]["use"]), ("dt-worker", ex))
+            self.assertEqual(self.new["agents"][aid]["program"], f"/Users/Shared/dt-autoloop/bin/dt-worktree-{ex}")  # 0C 启动脚本
         self.assertEqual(self.new["channels"]["feishu"]["answerers"], [OWNER])        # 飞书只认常浩
         self.assertEqual(self.new["channels"]["secretary"]["answerers"], ["秘书"])     # 秘书通道只认秘书
         self.assertEqual(self.new["defaultChannels"], ["desktop"])                    # 别处的卡片照旧只发原有通道

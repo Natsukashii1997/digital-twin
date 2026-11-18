@@ -2,7 +2,8 @@
 # 数字分身 0A（digital-twin#190）：在「工人账号」dt-worker 里运行一次。
 # 用法：登录 dt-worker 后打开「终端」，粘贴：  bash /Users/Shared/dt-autoloop/setup-dt-worker.sh
 # 做的事：装 Node 24 和 Claude 命令行、登录 Claude / Codex（浏览器里点确认）、
-#         把这个账号接到主账号的中台上（只拿接单密钥，不拿 GitHub 写凭据）。
+#         把这个账号接到主账号的中台上（只拿接单密钥，不拿 GitHub 写凭据）、建派单工作目录和交接目录（0C）。
+# 可以重复跑：已经做过的步骤会跳过。
 set -euo pipefail
 
 S=/Users/Shared/dt-autoloop
@@ -91,11 +92,23 @@ unset KEY
 rm -f "$S/handoff/worker.key"
 fi
 
+# 6b. 派单工作目录和交接目录（数字分身 0C，#205）：启动脚本在 ~/dt-work/<仓库> 里干活，交接包放 ~/dt-outbox，
+#     主账号的受信发布只读交接目录（家目录本来就允许 staff 组进入，这里只把交接目录设成可读）
+say "建派单工作目录和交接目录"
+mkdir -p ~/dt-work
+chmod 700 ~/dt-work
+for repo in dt-sandbox; do
+  mkdir -p ~/dt-work/"$repo"
+done
+mkdir -p ~/dt-outbox
+chmod 755 ~/dt-outbox
+
 # 7. 收尾核对
 say "核对"
 ~/.agent-autoloop/app/bin/agent-autoloop.ts --version || true
 claude auth status 2>/dev/null | grep -E '"loggedIn"' || true
 "$CODEX" login status 2>&1 | head -1 || true
 [ -e "$S/handoff/worker.key" ] && echo "交接密钥文件还在（没删掉）" || echo "交接密钥文件已删除"
+[ -d ~/dt-work/dt-sandbox ] && [ -d ~/dt-outbox ] && echo "派单工作目录 ~/dt-work、交接目录 ~/dt-outbox：已建"
 grep -q '127.0.0.1:8090' ~/.zprofile ~/.agent-autoloop/bin/claude-proxy.sh && echo "上网出口：过滤代理 8090"
 printf '\n全部做完了。回到 Claude 会话说「做好了」。\n'
