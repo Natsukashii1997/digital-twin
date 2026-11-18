@@ -6,6 +6,7 @@
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,6 +65,7 @@ class PfRules(unittest.TestCase):
             self.assertIn("sudo", r.stdout)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "探针用 macOS 的 stat -f、dscl、security，只在 Mac 上测")
 class Probe(unittest.TestCase):
     def run_probe(self, secret_text=None):
         d = tempfile.TemporaryDirectory()
