@@ -150,9 +150,9 @@ EXEMPT_LINES = frozenset({
 })
 
 
-def unfilled(text):
-    """还留着〔填…〕的行号（上面两行固定说明除外）。"""
-    return [n for n, line in enumerate(text.splitlines(), 1) if PLACEHOLDER in line and line.strip() not in EXEMPT_LINES]
+def unfilled(text, exempt=EXEMPT_LINES):
+    """还留着〔填…〕的行号（exempt 里的固定说明除外；默认是托管模板那两行，秘书代批清单传自己的）。"""
+    return [n for n, line in enumerate(text.splitlines(), 1) if PLACEHOLDER in line and line.strip() not in exempt]
 
 
 def sections(text):
@@ -188,26 +188,8 @@ def parse_policy(text):
     if len(one) != 1:
         errors.append("要有且只有一节「## 1. 默认托管时段」")
     body = one[0] if len(one) == 1 else []
-    m = only_one(head, r"^\|\s*版本\s*\|\s*(.*?)\s*\|\s*$", "「版本」行", errors)
-    if m:
-        if re.fullmatch(r"[1-9]\d{0,8}", m.group(1)):
-            out["version"] = int(m.group(1))
-        else:
-            errors.append("「版本」要写成一个正整数")
-    m = only_one(head, r"^\|\s*有效期\s*\|\s*(.*?)\s*\|\s*$", "「有效期」行", errors)
-    if m:
-        d = re.fullmatch(r"签署日起\s*(\d+)\s*天(?:[；;，,].*)?", m.group(1))
-        if d and 1 <= int(d.group(1)) <= MAX_VALID_DAYS:
-            out["valid_days"] = int(d.group(1))
-        else:
-            errors.append(f"「有效期」要以「签署日起 N 天」开头（N 在 1–{MAX_VALID_DAYS}）")
-    m = only_one(body, r"排空截止[：:]\s*(\d+)\s*(小时|分钟)", "「排空截止」", errors)
-    if m:
-        minutes = int(m.group(1)) * (60 if m.group(2) == "小时" else 1)
-        if 0 < minutes <= MAX_DRAIN_MINUTES:
-            out["drain_minutes"] = minutes
-        else:
-            errors.append("「排空截止」要大于 0、不超过 24 小时")
+    parse_head(head, out, errors)
+    parse_drain(body, out, errors)
     m = only_one(body, r"每晚\s*(\d{1,2})[:：](\d{2})\s*到次日\s*(\d{1,2})[:：](\d{2})", "「每晚 HH:MM 到次日 HH:MM」", errors)
     if m:
         sh, sm, eh, em = (int(g) for g in m.groups())
@@ -221,6 +203,34 @@ def parse_policy(text):
     if limits:
         out["limits"] = limits
     return out, errors
+
+
+def parse_head(head, out, errors):
+    """开头表里的「版本」「有效期」（托管策略、秘书代批清单共用）：每项恰好一处，读出来写进 out。"""
+    m = only_one(head, r"^\|\s*版本\s*\|\s*(.*?)\s*\|\s*$", "「版本」行", errors)
+    if m:
+        if re.fullmatch(r"[1-9]\d{0,8}", m.group(1)):
+            out["version"] = int(m.group(1))
+        else:
+            errors.append("「版本」要写成一个正整数")
+    m = only_one(head, r"^\|\s*有效期\s*\|\s*(.*?)\s*\|\s*$", "「有效期」行", errors)
+    if m:
+        d = re.fullmatch(r"签署日起\s*(\d+)\s*天(?:[；;，,].*)?", m.group(1))
+        if d and 1 <= int(d.group(1)) <= MAX_VALID_DAYS:
+            out["valid_days"] = int(d.group(1))
+        else:
+            errors.append(f"「有效期」要以「签署日起 N 天」开头（N 在 1–{MAX_VALID_DAYS}）")
+
+
+def parse_drain(body, out, errors):
+    """「排空截止：N 小时 / N 分钟」（托管策略、秘书代批清单共用）：恰好一处，0 < 分钟数 ≤ 24 小时，写进 out["drain_minutes"]。"""
+    m = only_one(body, r"排空截止[：:]\s*(\d+)\s*(小时|分钟)", "「排空截止」", errors)
+    if m:
+        minutes = int(m.group(1)) * (60 if m.group(2) == "小时" else 1)
+        if 0 < minutes <= MAX_DRAIN_MINUTES:
+            out["drain_minutes"] = minutes
+        else:
+            errors.append("「排空截止」要大于 0、不超过 24 小时")
 
 
 def parse_limits(sec, errors):
@@ -571,8 +581,9 @@ def marker_path(path=None):
     return p.with_name(p.name + ".initialized")
 
 
-def load(path=None):
+def load(path=None, check=check_doc, what="托管状态", empty=empty_doc):
     """读状态文件。从没写过（初始化标记也没有）算第一次用：off、空记录。
+    check / what / empty 给秘书开关（secretary.py）复用：逐字段校验函数、报错里的叫法、第一次用时的空记录；不传就是托管。
     写过以后文件不见了不当成第一次（第 1 轮审查 P1-02）：冻结、签过的版本、用过的消息都会丢，所以抛 ValueError，
     要人工从备份恢复（或确认要彻底重来时连同 custody.json.initialized 一起删）。读不了、格式不对也抛 ValueError。"""
     p = path or state_path()
@@ -580,12 +591,12 @@ def load(path=None):
         raw = p.read_text(encoding="utf-8")
     except FileNotFoundError:
         if marker_path(p).exists():
-            raise ValueError(f"{p} 不见了，但托管状态写过（有 {marker_path(p).name}）：不当成第一次用，要人工从备份恢复")
-        return empty_doc()
+            raise ValueError(f"{p} 不见了，但{what}写过（有 {marker_path(p).name}）：不当成第一次用，要人工从备份恢复")
+        return empty()
     except OSError as e:
         raise ValueError(f"读不了 {p}（{e.strerror or e}）")
     try:
-        return check_doc(json.loads(raw))
+        return check(json.loads(raw))
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"{p} 内容不对（{e}），要人工核对")
 
@@ -627,7 +638,7 @@ def save(doc, path=None):
 
 
 @contextlib.contextmanager
-def locked(path=None, wait=LOCK_WAIT):
+def locked(path=None, wait=LOCK_WAIT, what="托管状态"):
     p = path or state_path()
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(str(p.with_name(p.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
@@ -639,7 +650,7 @@ def locked(path=None, wait=LOCK_WAIT):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise Rejected(f"托管状态正被别的进程改（等锁超过 {wait:g} 秒），稍后再试", "Locked")
+                    raise Rejected(f"{what}正被别的进程改（等锁超过 {wait:g} 秒），稍后再试", "Locked")
                 time.sleep(0.05)
         yield
     finally:
@@ -729,15 +740,16 @@ def transaction(fn, now=None, path=None):
     return doc, result
 
 
-def new_session_id(now, doc):
+def new_session_id(now, doc, prefix="c", what="托管"):
     """托管会话 ID（#133 账本按它建账）：时间前缀便于人看，12 位随机十六进制保证唯一（第 2 轮审查 P1-09：只精确到秒会撞）；
-    万一和历史里的撞了就重抽，最多 10 次（正常不可能撞；连撞说明随机源有问题，拒绝开启而不是凑一个）。"""
+    万一和历史里的撞了就重抽，最多 10 次（正常不可能撞；连撞说明随机源有问题，拒绝开启而不是凑一个）。
+    prefix / what 给秘书开关复用（s-…、「秘书」）；不传就是托管。"""
     used = {h.get("id") for h in doc["history"]}
     for _ in range(10):
-        sid = "c-" + now.astimezone(TZ).strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(6)
+        sid = prefix + "-" + now.astimezone(TZ).strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(6)
         if sid not in used:
             return sid
-    raise Rejected("生成不出不重复的托管会话 ID（随机源异常），不开启", "Corrupt")
+    raise Rejected(f"生成不出不重复的{what}会话 ID（随机源异常），不开启", "Corrupt")
 
 
 def require_policy(doc, now, path=None):
