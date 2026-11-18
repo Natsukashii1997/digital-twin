@@ -535,7 +535,8 @@ class Resume(Base):
 class Cli(Base):
     def test_cli_check_and_show(self):
         tid = self.new_task()
-        with mock.patch("sys.stdout") as out, mock.patch.object(G, "now_tz", return_value=T0):   # 命令行用当前时间：固定到签发时，免得过了有效期变红
+        # 命令行用真实的当前时间；凭证在 T0 签发、12 小时有效，固定「现在」，否则过了 11-17 这项就判过期（11-18 CI 失败）
+        with mock.patch.object(G, "now_tz", return_value=T0 + dt.timedelta(minutes=1)), mock.patch("sys.stdout") as out:
             self.assertEqual(G.main(["check", "--task", tid, "--action", "edit", "--generation", "1"]), 0)
             self.assertEqual(G.main(["check", "--task", tid, "--action", "merge", "--generation", "1"]), 1)
             self.assertEqual(G.main(["show", "--task", tid]), 0)
