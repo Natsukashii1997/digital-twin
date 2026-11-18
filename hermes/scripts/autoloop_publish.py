@@ -6,21 +6,24 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 （/Users/dt-worker/dt-outbox/<单号>/handoff.json + <单号>.bundle）。本脚本是控制面的受信发布出口，按 ADR-015 归 dt-gate
 账号（「受信发布出口从第一天按归 dt-gate 写」）：取包、核对后推分支、开 PR：
 
-  0. 只在 dt-gate 账号里跑（ADR-015；按有效用户判，不认环境变量）；0D 恢复门之前只推本地裸仓库（file://），
-     真实 GitHub 发布一律拒绝（审查 P1-07：授权收紧和发布动作的串行化、结果账本在 0D，之前不启用）。
+  0. 只在 dt-gate 账号里跑（ADR-015；按有效用户判，不认环境变量）。0D 恢复门之前（REAL_PUBLISH = False）发布整体关闭：
+     推分支、开 PR 都不做；只有测试在进程内注入测试后端（TEST_BACKEND：本地裸仓库 file:// + 假 gh）时才走一遍，
+     远端和 gh 都不从环境变量取（审查第 2 轮 P1-07：授权收紧和发布动作的串行化、结果账本在 0D，之前不启用）。
   1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 <执行方>/<单号>；包先复制到私有临时目录、
      核对哈希再用；只取 Git 对象（bundle verify + fetch，打开对象校验，钩子关掉），不检出、不运行里面任何东西。
   2. 凭证以凭证库为准（autoloop_grants.check，和所有出口共用）：动手前 push_branch、open_pr 两个动作一起预检，
      推之前、开 PR 之前再各现读一次；仓库从凭证取，不信清单。
      清单里的代次不当证据（审查 P1-02）：交接包要落到中台里一轮真实的轮次（清单的 run 号，中台库只读查）——
-     这一轮属于这张单（事项、规则、Agent 对得上）、已正常结束、在当前代次开始之后才排进来、它的派单事件都是当前代次；
-     对不上就不发。工人自己写的提交内容仍不可信（它能把旧提交挂到新的一轮上），内容由 PR 审查把关。
+     这一轮属于这张单（事项、规则、Agent 对得上）、已正常结束、不是被启动脚本挡回去的（最后一条以「停下了」开头的不算）、
+     在当前代次开始之后才排进来、它的派单事件都是当前代次；还要有当前代次的正面证据（第 2 轮）：这一轮里有当前代次的
+     派单事件，或者它是回答卡片的一轮，顺着卡片找到提问的那一轮（最多 5 层），那一轮同样过这些检查、最终落到当前代次的
+     派单。只有定时复查、没有派单证据的轮次 0C 不发布（0D 记账后再放开）。对不上就不发。
+     工人自己写的提交内容仍不可信（存心作恶的工人能在当前代次里把旧内容重做一遍），内容由凭证、PR 审查、常浩合并把关。
   3. 能机械判的发布边界：包里只有本单分支一个引用、头提交对得上；基线是 main 上的提交、头提交从基线长出来；
      不收合并提交；基线到头提交之间的每一个提交、以及最终差异，都不许碰合并规则 merge_rules.json 里的高风险路径
      （.github/、ops/、密钥类……；审查 P1-01：先加后删的历史也算）——碰了就不发、交常浩。
   4. 只推非 main：推送目标写死成 refs/heads/<执行方>/<单号>，不带 --force；远端同名分支已有别的提交就不覆盖。
-     GitHub 一侧 dt-sandbox 的规则集只放行 main、agent/** 和 claude/**（常浩 11-18 放行 claude/，hermes/baselines/dt-sandbox-github.json）；
-     codex/** 还没放行，Codex 单推送会被 GitHub 拒绝。
+     GitHub 一侧 dt-sandbox 的规则集只放行 main、agent/**、claude/**、codex/**（常浩 11-18 放行，hermes/baselines/dt-sandbox-github.json）。
   5. 同一分支已有开着的 PR，核对它的目标是本仓库 main、来源是本仓库（不是同名 fork 分支）、分支和头提交正是这次的，
      才沿用（审查 P1-05）；对不上就拒绝；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
 
@@ -33,7 +36,8 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
   autoloop_publish.py publish --task t-20261118-abcdef
   autoloop_publish.py scan                 只读：列交接目录里的单和各自能不能发
 环境变量：DT_PUBLISH_OUTBOX（交接目录，默认 /Users/dt-worker/dt-outbox）、DT_PUBLISH_MIRRORS（主账号的裸仓库副本）、
-DT_PUBLISH_REMOTE（默认 https://github.com/{github}.git）、DT_PUBLISH_LOG、DT_GH，以及 autoloop_grants 的 DT_GRANTS_*。
+DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://github.com/<仓库>.git、用运行账号的 gh，
+不能用环境变量改（测试在进程内换 TEST_BACKEND）。
 """
 import argparse
 import contextlib
@@ -67,7 +71,10 @@ RULES = HERE / "merge_rules.json"
 RUN_ID = re.compile(r"^[1-9]\d{0,11}$")
 MAX_COMMITS = 500
 GATE_USER = "dt-gate"           # ADR-015 控制面账号；测试里在进程内替换，不经环境变量
-REAL_PUBLISH = False            # 0D 恢复门（串行化、结果账本）之前不往真实 GitHub 推（审查 P1-07）
+REAL_PUBLISH = False            # 0D 恢复门（串行化、结果账本）之前发布整体关闭（审查 P1-07）
+TEST_BACKEND = None             # 测试在进程内换成 {"remote": "file://…/{github}.git", "gh": 假 gh 路径}；不经环境变量
+STOPPED = "停下了"               # 启动脚本没交接的一轮，最后一条消息都以它开头（ops/dt_worktree.stop_text）
+MAX_HOPS = 5                    # 回答卡片的一轮往回追提问那一轮，最多几层
 
 
 class Rejected(Exception):
@@ -88,7 +95,9 @@ def mirrors():
 
 
 def remote_url(github):
-    return (os.environ.get("DT_PUBLISH_REMOTE") or "https://github.com/{github}.git").format(github=github)
+    if TEST_BACKEND:
+        return TEST_BACKEND["remote"].format(github=github)
+    return f"https://github.com/{github}.git"
 
 
 def log_path():
@@ -100,7 +109,7 @@ def hub_db():
 
 
 def gh_cmd():
-    return os.environ.get("DT_GH", "gh")
+    return TEST_BACKEND["gh"] if TEST_BACKEND else "gh"
 
 
 def sensitive_patterns(repo):
@@ -218,28 +227,37 @@ def require_gate():
         raise Rejected(f"受信发布只在 {GATE_USER} 账号里跑（ADR-015），现在是 {me}")
 
 
-def require_test_remote(github):
-    if not REAL_PUBLISH and not remote_url(github).startswith("file://"):
-        raise Rejected("0D 恢复门（授权收紧与发布动作的串行化、结果账本）之前不往真实 GitHub 发布")
+def require_publish_enabled():
+    """0D 之前整体关闭：不推分支、不开 PR；只认进程内注入的测试后端，而且远端必须是本地裸仓库。"""
+    if REAL_PUBLISH:
+        return
+    if not TEST_BACKEND or not str(TEST_BACKEND.get("remote", "")).startswith("file://"):
+        raise Rejected("0D 恢复门（授权收紧与发布动作的串行化、结果账本）之前受信发布整体关闭，推分支、开 PR 都不做")
+
+
+def _hub():
+    import sqlite3
+    import urllib.parse
+    con = sqlite3.connect(f"file:{urllib.parse.quote(str(hub_db()))}?mode=ro", uri=True, timeout=5)
+    con.row_factory = sqlite3.Row
+    return con
 
 
 def hub_run(run_id):
-    """中台库只读：这一轮的事项、规则、Agent、状态、排进来的时间和它的事件。查不到返回 None。"""
+    """中台库只读：这一轮的事项、规则、Agent、状态、排进来的时间、最后一条消息的首行和它的事件。查不到返回 None。"""
     import sqlite3
-    import urllib.parse
     try:
-        con = sqlite3.connect(f"file:{urllib.parse.quote(str(hub_db()))}?mode=ro", uri=True, timeout=5)
+        con = _hub()
     except sqlite3.Error:
         return None
     try:
-        con.row_factory = sqlite3.Row
-        r = con.execute("SELECT id, rule, agent, lane, state, created_at FROM runs WHERE id = ?",
+        r = con.execute("SELECT id, rule, agent, lane, state, created_at, summary FROM runs WHERE id = ?",
                         (int(run_id),)).fetchone()
         if r is None:
             return None
         events = [dict(e) for e in con.execute(
-            "SELECT e.source AS source, e.type AS type, e.subject AS subject, e.detail AS detail FROM run_events re "
-            "JOIN events e ON e.id = re.event_id WHERE re.run_id = ?", (int(run_id),))]
+            "SELECT e.source AS source, e.\"key\" AS key, e.type AS type, e.subject AS subject, e.detail AS detail "
+            "FROM run_events re JOIN events e ON e.id = re.event_id WHERE re.run_id = ?", (int(run_id),))]
         return {**dict(r), "events": events}
     except sqlite3.Error:
         return None
@@ -247,33 +265,81 @@ def hub_run(run_id):
         con.close()
 
 
-def check_run(run, row, generation):
-    """交接包落到的那一轮，必须是当前代次里这张单正常结束的一轮（审查 P1-02）。返回 None 表示通过。"""
+def hub_card(card_id):
+    """中台库只读：一张卡片的种类、事项和提问的那一轮。查不到返回 None。"""
+    import sqlite3
+    try:
+        con = _hub()
+    except sqlite3.Error:
+        return None
+    try:
+        r = con.execute("SELECT id, kind, lane, run_id FROM cards WHERE id = ?", (str(card_id),)).fetchone()
+        return dict(r) if r else None
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def _run_basics(run, row, generation):
+    """一轮本身的检查：属于这张单、正常结束、不是被挡回去的、在当前代次开始后排进来、事件来源和派单代次都对。"""
     if run is None:
-        return "中台里查不到交接包对应的那一轮"
+        return "中台里查不到这一轮"
     task_id = row["task_id"]
     if (run["lane"], run["rule"], run["agent"]) != (task_id, row["rule"], C.AGENTS[row["executor"]][0]):
-        return "交接包对应的那一轮不属于这张单"
+        return "这一轮不属于这张单"
     if run["state"] != "done":
-        return f"交接包对应的那一轮没有正常结束（{run['state']}）"
+        return f"这一轮没有正常结束（{run['state']}）"
+    if str(run.get("summary") or "").lstrip().startswith(STOPPED):
+        return "这一轮被启动脚本挡回去了（停下了），不算数"
     try:
         created = G.dt.datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
         started = G.parse_iso(row["generation_started_at"])
     except (TypeError, ValueError):
-        return "那一轮或代次的时间读不懂"
+        return "这一轮或代次的时间读不懂"
     if created < started:
-        return f"交接包对应的那一轮在第 {generation} 代开始之前就排进来了"
+        return f"这一轮在第 {generation} 代开始之前就排进来了"
     for e in run["events"]:
         if e.get("source") != C.SOURCE or e.get("subject") != task_id:
-            return "那一轮有不是派单网关为这张单发的事件"
+            return "这一轮有不是派单网关为这张单发的事件"
         if e.get("type") == G.event_type(row["repo"], row["executor"]):
             try:
                 g = json.loads(e.get("detail") or "").get("generation")
             except (ValueError, AttributeError):
-                return "那一轮的派单事件读不懂"
+                return "这一轮的派单事件读不懂"
             if g != generation:
-                return f"那一轮的派单事件是第 {g} 代，不是第 {generation} 代"
+                return f"这一轮的派单事件是第 {g} 代，不是第 {generation} 代"
     return None
+
+
+def _generation_evidence(run, row, generation, depth):
+    """当前代次的正面证据（审查第 2 轮 P1-02）：这一轮有当前代次的派单事件；或者它是回答卡片的一轮，
+    每个回答都顺着卡片追到提问的那一轮，那一轮也过 _run_basics 并最终落到当前代次的派单。"""
+    dispatch = G.event_type(row["repo"], row["executor"])
+    if any(e.get("type") == dispatch for e in run["events"]):     # 代次已在 _run_basics 里核过等于当前
+        return None
+    answers = [e for e in run["events"] if e.get("type") == "card.answered"]
+    if not answers:
+        return "这一轮没有当前代次的派单证据（只有定时复查的轮次 0C 不发布，0D 记账后再放开）"
+    if depth >= MAX_HOPS:
+        return f"顺着回答卡片往回追了 {MAX_HOPS} 层还没找到派单，不认"
+    for e in answers:
+        key = str(e.get("key") or "")
+        card = hub_card(key[len("card:"):]) if key.startswith("card:") else None
+        if not card or card.get("lane") != row["task_id"] or card.get("kind") == "notice" or not card.get("run_id"):
+            return "回答事件追溯不到这张单提问的那一轮"
+        asked = hub_run(card["run_id"])
+        reason = _run_basics(asked, row, generation) or _generation_evidence(asked, row, generation, depth + 1)
+        if reason:
+            return f"提问的那一轮：{reason}"
+    return None
+
+
+def check_run(run_id, row, generation):
+    """交接包落到的那一轮，必须是当前代次里这张单正常结束、有正面代次证据的一轮（审查 P1-02）。返回 None 表示通过。"""
+    run = hub_run(run_id)
+    reason = _run_basics(run, row, generation) or _generation_evidence(run, row, generation, 0)
+    return f"交接包对应的那一轮：{reason}" if reason else None
 
 
 def history_hits(mirror, base, head, repo):
@@ -294,6 +360,7 @@ def history_hits(mirror, base, head, repo):
 # ---------- 发布 ----------
 def publish(task_id, now=None, path=None):
     require_gate()
+    require_publish_enabled()
     now = now or G.now_tz()
     m = read_manifest(task_id)
     with task_lock(task_id):
@@ -306,8 +373,7 @@ def publish(task_id, now=None, path=None):
             raise Rejected("交接清单的仓库或执行方和凭证不一致")
         github, branch, head, base = row["github"], m["branch"], m["head"], m["base"]
         assert_not_main(branch)
-        require_test_remote(github)
-        reason = check_run(hub_run(m["run"]), row, gen)
+        reason = check_run(m["run"], row, gen)
         if reason:
             raise Rejected(reason)
         mirror = ensure_mirror(row["repo"], github)

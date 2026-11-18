@@ -17,13 +17,14 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
   3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
      ~/dt-work/.state/<单号>.log，不混进输出。CLI 在自己的进程组里跑：接单程序取消时本脚本把信号转给整组，7 秒内还没停就整组强杀
      （赶在接单程序 10 秒强杀本脚本之前）；用时到上限同样整组先停后杀；CLI 退出后再把组里剩下的后代进程清掉，确认清干净才提交。
-  4. CLI 退出后：把工作目录里的改动提交到本单分支（工作不丢）；只有正常结束（不是取消、不是超时）、后代进程清干净、
-     再核一次凭证仍有效，才打交接包（git bundle + 清单）放进
+  4. CLI 退出后：把工作目录里的改动提交到本单分支（工作不丢）；只有正常结束（不是取消、不是超时，退出时按实际用时再判一次）、
+     后代进程清干净、整轮没收到过取消（提交后、换交接包和清单前各看一次）、再核一次凭证仍有效，才打交接包（git bundle + 清单）放进
      ~/dt-outbox/<单号>/，由主账号的受信发布脚本（hermes/scripts/autoloop_publish.py）取走核对后推分支、开 PR。
      本脚本不推、不碰 GitHub 写凭据（方案第 12 节第 6 条）。
 
-准入不过、或用时到上限：输出一条 CLI 格式的最终消息（第一行「停下了：原因」，回执里一张「任务停下了」通知卡），
-退出码 0，中台按「本轮结束」处理、不自动重派。临时问题（取不到仓库、同一张单另一轮还在跑）写「没跑成」，中台过几分钟重派。
+准入不过、用时到上限、进程没清干净、交接前凭证失效、提交或交接出错：输出一条 CLI 格式的最终消息（第一行「停下了：原因」，
+回执里一张「任务停下了」通知卡），退出码 0，中台按「本轮结束」处理、不自动重派；被取消的一轮也写「停下了」（不带通知卡）。
+凡是没交接的一轮，最后一条都是「停下了」，受信发布据此不认这一轮（审查 P1-03、P1-02）。临时问题（取不到仓库、同一张单另一轮还在跑）写「没跑成」，中台过几分钟重派。
 
 这里的检查只防正常流程出错，不当作不可绕过的边界：脚本归主账号所有、工人只能运行不能改，但工人账号的进程能伪造镜像
 路径之类；真正的边界在主账号的受信发布（再按凭证库核一遍）和 GitHub 保护（方案 5.1 第 3 条）。
@@ -69,6 +70,26 @@ class Refused(Exception):
 
 class Retry(Exception):
     """临时问题：写「没跑成」，中台过几分钟重派。"""
+
+
+# 接单程序的取消信号覆盖整轮：CLI 在跑时转给它的进程组；CLI 退出后、提交和交接时收到的也记下（审查 P1-03）
+STOP = {"sig": None, "at": None, "pgid": None}
+
+
+def on_stop(sig, _frame):
+    if STOP["sig"] is None:
+        STOP["sig"], STOP["at"] = sig, time.time()
+    if STOP["pgid"]:
+        kill_group(STOP["pgid"], signal.SIGTERM)
+
+
+def install_stop_handler():
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, on_stop)
+
+
+def stopped():
+    return STOP["sig"] is not None
 
 
 # ---------- 路径 ----------
@@ -388,17 +409,6 @@ def run_cli(executor, args, admitted, place):
     结局是 finished（自己结束）、cancelled（接单程序取消）或 over_budget（用时到上限）。"""
     task_id = admitted["task_id"]
     left = budget() - admitted["used"]
-    stopping = {"sig": None, "at": None}
-    group = {}
-
-    def on_signal(sig, _frame):          # 接单程序取消：记下，转给 CLI 整组，主循环 7 秒内整组强杀
-        if stopping["sig"] is None:
-            stopping["sig"], stopping["at"] = sig, time.time()
-        if "pgid" in group:
-            kill_group(group["pgid"], signal.SIGTERM)
-
-    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(s, on_signal)
     started = time.time()
     state = dict(admitted["state"] or {})
     state.update({"task_id": task_id, "generation": admitted["generation"], "scope_hash": admitted["scope_hash"],
@@ -409,15 +419,15 @@ def run_cli(executor, args, admitted, place):
     save_state(task_id, state)
     argv = [real_cli(executor), *with_note(executor, args, task_id, place["branch"])]
     child = subprocess.Popen(argv, cwd=place["worktree"], env=task_env(task_id), start_new_session=True)
-    group["pgid"] = child.pid                                    # 新会话：进程组号就是它的进程号
-    if stopping["sig"]:
+    STOP["pgid"] = child.pid                                     # 新会话：进程组号就是它的进程号
+    if stopped():
         kill_group(child.pid, signal.SIGTERM)
     log(task_id, f"第 {admitted['generation']} 代开跑（轮次 {os.environ.get('AGENT_AUTOLOOP_RUN', '?')}，"
                  f"已用 {admitted['used']} 秒）")
     over_at, killed = None, False
     while True:
         now = time.time()
-        if stopping["sig"] or over_at:
+        if stopped() or over_at:
             timeout = 0.2
         else:
             timeout = max(0.2, min(HEARTBEAT, left - (now - started)))
@@ -430,17 +440,21 @@ def run_cli(executor, args, admitted, place):
         if now - state["running"]["last_seen"] >= HEARTBEAT:
             state["running"]["last_seen"] = int(now)
             save_state(task_id, state)
-        if not stopping["sig"] and not over_at and now - started >= left:
+        if not stopped() and not over_at and now - started >= left:
             over_at = now
             log(task_id, "累计用时到上限，停掉 CLI 整组")
             kill_group(child.pid, signal.SIGTERM)
-        due = (stopping["at"] and now - stopping["at"] >= STOP_GRACE) or (over_at and now - over_at >= KILL_GRACE)
+        due = (STOP["at"] and now - STOP["at"] >= STOP_GRACE) or (over_at and now - over_at >= KILL_GRACE)
         if due and not killed:
             killed = True
             kill_group(child.pid, signal.SIGKILL)
+    elapsed = time.time() - started
+    if over_at is None and elapsed >= left:      # 掐着上限自己退出的，也按到上限算（审查 P2-06）
+        over_at = time.time()
     clean = reap_group(child.pid, task_id)
-    outcome = "cancelled" if stopping["sig"] else "over_budget" if over_at else "finished"
-    secs = int(time.time() - started)
+    STOP["pgid"] = None
+    outcome = "cancelled" if stopped() else "over_budget" if over_at else "finished"
+    secs = int(elapsed)
     state["seconds_used"] = admitted["used"] + secs
     state["running"] = None
     state.setdefault("turns", []).append({"run": os.environ.get("AGENT_AUTOLOOP_RUN", ""), "generation":
@@ -475,6 +489,9 @@ def write_handoff(executor, repo, task_id, generation, place):
     git("bundle", "create", "--quiet", str(tmp), f"refs/heads/{branch}", f"^{base}", cwd=wt)
     os.chmod(tmp, 0o644)
     digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+    if stopped():                                # 换包前再看一次取消（审查 P1-03）
+        tmp.unlink()
+        return "cancelled"
     os.replace(tmp, bundle)
     manifest = {"schema": 1, "task_id": task_id, "generation": generation, "executor": executor, "repo": repo,
                 "branch": branch, "base": base, "head": head, "bundle": bundle.name, "bundle_sha256": digest,
@@ -482,29 +499,38 @@ def write_handoff(executor, repo, task_id, generation, place):
     mtmp = d / f".handoff.{os.getpid()}.json"
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
     os.chmod(mtmp, 0o644)
+    if stopped():                                # 换清单前最后看一次（包已换、清单没换：受信发布按哈希对不上拒收）
+        mtmp.unlink()
+        return "cancelled"
     os.replace(mtmp, d / "handoff.json")
     return manifest
 
 
 def after_run(executor, repo, context, admitted, place, outcome="finished", clean=True):
-    """CLI 退出后：先提交（工作不丢）；取消、超时或后代没清干净都不交接（审查 P1-03）；再核一次凭证，有效才交接。"""
+    """CLI 退出后：先提交（工作不丢）；取消、超时、后代没清干净、提交后收到取消、凭证失效都不交接（审查 P1-03）。
+    返回 None 表示交接了（或没有要交接的改动）；否则返回 (结局, 原因)，由 main 交一条「停下了」。"""
     task_id, gen = admitted["task_id"], admitted["generation"]
     try:
         committed = commit_changes(task_id, place, gen) if clean else False
-        if outcome != "finished" or not clean:
-            why = {"cancelled": "本轮被取消", "over_budget": "用时到上限"}.get(outcome, "CLI 的进程没清干净")
-            log(task_id, f"{why}：{'已在本地提交，' if committed else ''}不打交接包")
-            return
+        kept = "改动已在本地分支提交，" if committed else ""
+        if not clean:
+            return "stopped", "CLI 的进程没清干净，本轮没提交、没交接"
+        if outcome == "cancelled" or stopped():
+            return "cancelled", f"本轮被中台取消，{kept}没有交接"
+        if outcome == "over_budget":
+            return "stopped", f"这张单累计用时到了 {budget() // 60} 分钟上限，本轮已停，{kept}没有交接"
         try:
             admit(executor, repo, context, now_tz(), check_budget=False)
         except Refused as e:
-            log(task_id, f"已提交到本地分支，但{e.reason}，不打交接包")
-            return
+            return "stopped", f"{e.reason}，{kept}没有交接"
         m = write_handoff(executor, repo, task_id, gen, place)
+        if m == "cancelled":
+            return "cancelled", f"本轮被中台取消，{kept}没有交接"
         log(task_id, f"{'有新提交，' if committed else ''}"
                      f"{'交接包已更新：' + m['head'][:12] if m else '没有相对基线的改动，不交接'}")
+        return None
     except (OSError, subprocess.SubprocessError) as e:
-        log(task_id, f"提交或交接失败：{type(e).__name__} {str(e)[:300]}")
+        return "stopped", f"提交或交接失败（{type(e).__name__}），没有交接"
 
 
 # ---------- 给接单程序的最终消息 ----------
@@ -519,7 +545,9 @@ def final_message(executor, text):
     sys.stdout.flush()
 
 
-def stop_text(reason, task_id):
+def stop_text(reason, task_id, notice=True):
+    if not notice:
+        return f"停下了：{reason}"
     receipt = {"notice": [{"title": f"任务 {task_id or '（单号不明）'} 停下了",
                            "text": f"{reason}。工人这边没有接着做；要继续，请在私聊里处理这张单。",
                            "key": "dt-worktree-stopped"}]}
@@ -544,6 +572,7 @@ def main(argv=None):
             os.execv(real_cli(executor), [real_cli(executor), *args])
         print("dt-worktree 只在中台派的轮次里启动 CLI", file=sys.stderr)
         return 2
+    install_stop_handler()
     cwd = Path.cwd().resolve()
     repo = cwd.name
     task_id = None
@@ -561,7 +590,7 @@ def main(argv=None):
             except (OSError, subprocess.SubprocessError) as e:
                 raise Retry(f"准备工作目录失败（{type(e).__name__}）")
             code, secs, outcome, clean = run_cli(executor, args, admitted, place)
-            after_run(executor, repo, context, admitted, place, outcome, clean)
+            ended = after_run(executor, repo, context, admitted, place, outcome, clean)
         finally:
             os.close(lock)
     except Refused as e:
@@ -572,8 +601,10 @@ def main(argv=None):
         log(task_id, f"没跑成：{e}")
         final_message(executor, f"没跑成：{e}")
         return 0
-    if outcome == "over_budget":
-        final_message(executor, stop_text(f"这张单累计用时到了 {budget() // 60} 分钟上限，本轮已停", task_id))
+    if ended:                                    # 没交接的一轮都给中台一个明确结论
+        kind, reason = ended
+        log(task_id, f"停下：{reason}")
+        final_message(executor, stop_text(reason, task_id, notice=kind != "cancelled"))
         return 0
     return code if code >= 0 else 128 - code
 

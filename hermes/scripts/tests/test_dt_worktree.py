@@ -8,14 +8,17 @@ ops/dt_worktree.py（工人侧启动脚本，#205 批 0C）：凭证镜像和任
 """
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import signal
 import subprocess
 import sys
+import shutil
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
@@ -132,7 +135,15 @@ class WorkerBase(Base):
         before = self.calls()
         r = subprocess.run([PY, "-B", str(SCRIPT), executor, *args], cwd=cwd or self.cwd, capture_output=True,
                            text=True, timeout=120, env=full)
+        self.turn_runs[full["AGENT_AUTOLOOP_RUN"]]["summary"] = self.summary_of(r.stdout)
         return r, self.calls()[len(before):]
+
+    @staticmethod
+    def summary_of(stdout):
+        """像中台一样取这一轮最后一条消息的首行（claude 格式）。"""
+        texts = [json.loads(x).get("result") for x in stdout.splitlines() if x.strip().startswith("{")]
+        texts = [t for t in texts if isinstance(t, str)]
+        return next((x.strip() for x in (texts[-1] if texts else "").splitlines() if x.strip()), "")
 
     def start_turn(self, events, executor="claude", **env):
         """后台起一轮（取消测试用），等假 CLI 开跑后返回进程。"""
@@ -443,6 +454,110 @@ class CancelAndProcessTree(WorkerBase):
         self.assertFalse(self.alive(cli_pid))
         self.assertFalse(self.alive(int(pidf.read_text())))
         self.assertIsNone(self.handoff(tid))
+
+
+GIT_STOP = """#!/bin/sh
+# 假 git：参数里出现 $FAKE_GIT_STOP_ON（commit 或 bundle）时，先给调用它的启动脚本发 SIGTERM（模拟中台在提交、打包时取消）
+for a in "$@"; do
+  if [ "$a" = "$FAKE_GIT_STOP_ON" ]; then kill -TERM "$PPID"; sleep 0.2; fi
+done
+exec {git} "$@"
+"""
+
+
+class LateCancel(WorkerBase):
+    """审查第 2 轮 P1-03：CLI 已经退出、启动脚本正在提交或打交接包时才到的取消，也不交接，并给中台明确结论。"""
+
+    def setUp(self):
+        super().setUp()
+        d = self.root / "gitbin"
+        d.mkdir()
+        (d / "git").write_text(GIT_STOP.format(git=shutil.which("git")))
+        (d / "git").chmod(0o755)
+        self.late = {"PATH": f"{d}:{self.wenv['PATH']}"}
+
+    def assert_cancelled(self, r):
+        self.assertEqual(r.returncode, 0, r.stderr)
+        msg = self.final(r)["result"]
+        self.assertTrue(msg.startswith("停下了：本轮被中台取消"), msg)
+        self.assertNotIn("dt-worktree-stopped", msg)                     # 取消不发通知卡
+
+    def test_cancel_during_commit_never_hands_off(self):
+        tid = self.new_live_task()
+        r, _ = self.run_turn([self.dispatch_event(tid)], FAKE_GIT_STOP_ON="commit", **self.late)
+        self.assert_cancelled(r)
+        self.assertIsNone(self.handoff(tid))
+        self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))   # 改动照样在本地提交
+
+    def test_cancel_during_bundle_keeps_previous_handoff(self):
+        tid = self.new_live_task()
+        r, _ = self.run_turn([self.dispatch_event(tid)])
+        old = self.handoff(tid)
+        r, _ = self.run_turn([self.dispatch_event(tid, kind="rework")], FAKE_GIT_STOP_ON="bundle", **self.late)
+        self.assert_cancelled(r)
+        self.assertEqual(self.handoff(tid), old)                          # 清单没换
+        d = self.outbox / tid
+        self.assertEqual(hashlib.sha256((d / old["bundle"]).read_bytes()).hexdigest(), old["bundle_sha256"])   # 包没换
+        self.assertEqual(sorted(x.name for x in d.iterdir()), sorted(["handoff.json", old["bundle"]]))   # 没留临时文件
+
+
+class EndOfTurn(WorkerBase):
+    """审查第 2 轮 P1-03 / P2-06：在进程里直接调，覆盖不好用子进程造出来的边界。"""
+
+    def setUp(self):
+        super().setUp()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dt_worktree_inproc", SCRIPT)
+        self.w = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.w)
+        p = mock.patch.dict(os.environ, {**self.wenv, "DT_WORKTREE_BUDGET": "60"})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def admitted(self):
+        tid = self.new_live_task()
+        a = self.w.admit("claude", "dt-sandbox", {"events": [self.dispatch_event(tid)]}, self.w.now_tz())
+        return a, {"repo": "dt-sandbox", **self.w.prepare_worktree("claude", "dt-sandbox", a)}
+
+    def test_exit_right_at_budget_counts_as_over_budget(self):
+        a, place = self.admitted()
+
+        class Clock:
+            t = 1000.0
+
+            def time(self):
+                return self.t
+
+            def sleep(self, _):
+                pass
+
+        clock = Clock()
+
+        class Child:                                  # CLI 掐着上限自己退出：wait 正常返回 0，但时间已经过了上限
+            pid = 999999
+
+            def wait(self, timeout=None):
+                clock.t += 61
+                return 0
+
+        with mock.patch.object(self.w, "time", clock), mock.patch.object(self.w.subprocess, "Popen", return_value=Child()), \
+                mock.patch.object(self.w, "reap_group", return_value=True):
+            code, secs, outcome, clean = self.w.run_cli("claude", ["-p", "做事"], a, place)
+        self.assertEqual((code, outcome, clean), (0, "over_budget", True))
+        ended = self.w.after_run("claude", "dt-sandbox", {"events": [self.dispatch_event(a["task_id"])]}, a, place,
+                                 outcome, clean)
+        self.assertEqual(ended[0], "stopped")
+        self.assertIn("累计用时到了", ended[1])
+        self.assertIsNone(self.handoff(a["task_id"]))
+
+    def test_unclean_tree_gets_an_explicit_stop(self):
+        a, place = self.admitted()
+        (Path(place["worktree"]) / "README.md").write_text("改了\n")
+        ended = self.w.after_run("claude", "dt-sandbox", {"events": [self.dispatch_event(a["task_id"])]}, a, place,
+                                 "finished", False)
+        self.assertEqual(ended, ("stopped", "CLI 的进程没清干净，本轮没提交、没交接"))
+        self.assertIsNone(self.handoff(a["task_id"]))
+        self.assertTrue(self.w.stop_text(ended[1], a["task_id"]).startswith("停下了："))
 
 
 class Plumbing(WorkerBase):

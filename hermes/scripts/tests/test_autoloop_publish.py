@@ -37,15 +37,17 @@ class PublishBase(WorkerBase):
         self.gh_state = r / "gh"
         exe = fake_gh.install(r / "ghbin", self.gh_state)
         p = mock.patch.dict(os.environ, {"DT_PUBLISH_OUTBOX": str(self.outbox), "DT_PUBLISH_MIRRORS": str(r / "mirrors"),
-                                         "DT_PUBLISH_REMOTE": f"file://{r}/remote/{{github}}.git",
-                                         "DT_PUBLISH_LOG": str(r / "publish.jsonl"), "DT_GH": str(exe),
+                                         "DT_PUBLISH_LOG": str(r / "publish.jsonl"),
                                          "FAKE_GH_STATE": str(self.gh_state), **{k: v for k, v in
                                                                                   self.wenv.items() if k.startswith("GIT_")}})
         p.start()
         self.addCleanup(p.stop)
-        self.hub_override = {}
+        self.hub_override, self.hub_cards = {}, {}
+        self.backend = {"remote": f"file://{r}/remote/{{github}}.git", "gh": str(exe)}
         for q in (mock.patch.object(P, "GATE_USER", pwd.getpwuid(os.geteuid()).pw_name),
-                  mock.patch.object(P, "hub_run", side_effect=self.fake_hub_run)):
+                  mock.patch.object(P, "TEST_BACKEND", self.backend),
+                  mock.patch.object(P, "hub_run", side_effect=self.fake_hub_run),
+                  mock.patch.object(P, "hub_card", side_effect=self.fake_hub_card)):
             q.start()
             self.addCleanup(q.stop)
         self.main_before = git("rev-parse", "main", cwd=self.remote)
@@ -56,12 +58,31 @@ class PublishBase(WorkerBase):
         if meta is None or self.hub_override.get(run_id, 1) is None:
             return None
         ex = meta["executor"]
-        events = [{"source": e.get("source"), "type": e.get("type"), "subject": e.get("subject"),
+        events = [{"source": e.get("source"), "key": e.get("id"), "type": e.get("type"), "subject": e.get("subject"),
                    "detail": e.get("detail")} for e in meta["events"]]
         run = {"id": int(run_id), "rule": f"dispatch-dt-sandbox-{ex}", "agent": f"dt-{ex}",
-               "lane": meta["events"][0]["subject"], "state": "done", "created_at": meta["created_at"], "events": events}
+               "lane": meta["events"][0]["subject"], "state": "done", "created_at": meta["created_at"],
+               "summary": meta.get("summary", ""), "events": events}
         run.update(self.hub_override.get(run_id) or {})
         return run
+
+    def fake_hub_card(self, card_id):
+        """假中台的卡片：hub_cards 里登记了就用登记的；没登记的当成最近一轮派单（没被挡回去的）提的问题。"""
+        if card_id in self.hub_cards:
+            return self.hub_cards[card_id]
+        for run_id, meta in reversed(list(getattr(self, "turn_runs", {}).items())):
+            if any(e["type"].startswith("dispatch.") for e in meta["events"]) and \
+                    not meta.get("summary", "").startswith("停下了"):
+                return {"id": card_id, "kind": "ask", "lane": meta["events"][0]["subject"], "run_id": run_id}
+        return None
+
+    def fake_run(self, tid, events, summary="改好了", created_at=None):
+        """直接在假中台里登记一轮（不经启动脚本），返回轮次号。"""
+        self.turn_no = getattr(self, "turn_no", 100) + 1
+        self.turn_runs[str(self.turn_no)] = {
+            "executor": "claude", "events": events, "summary": summary,
+            "created_at": created_at or G.dt.datetime.now(G.dt.timezone.utc).isoformat().replace("+00:00", "Z")}
+        return str(self.turn_no)
 
     def legit_pr(self, tid, head, **over):
         pr = {"number": 8, "url": "u8", "state": "OPEN", "baseRefName": "main", "headRefName": f"claude/{tid}",
@@ -380,6 +401,60 @@ class RunBinding(PublishBase):
             self.rejects(tid, "交接清单的内容不合格式")
 
 
+class GenerationEvidence(PublishBase):
+    """审查第 2 轮 P1-02：这一轮要有当前代次的正面证据；被挡回去的轮次、只有复查的轮次、追不到当前派单的回答都不认。"""
+
+    def to_gen2(self, tid):
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=G.now_tz() + G.dt.timedelta(seconds=2))
+        return G.dt.datetime.now(G.dt.timezone.utc) + G.dt.timedelta(seconds=3)
+
+    def iso(self, t):
+        return t.isoformat().replace("+00:00", "Z")
+
+    def test_refused_run_cannot_relabel_old_handoff(self):
+        tid = self.worked()
+        later = self.to_gen2(tid)
+        run = self.fake_run(tid, [self.dispatch_event(tid, gen=2)], summary="停下了：凭证已冻结", created_at=self.iso(later))
+        self.rewrite_manifest(tid, generation=2, run=run)                 # 旧包挂到第 2 代被挡回去的那一轮
+        self.rejects(tid, "被启动脚本挡回去了")
+
+    def test_stopped_turn_from_worker_is_refused(self):
+        tid = self.worked()
+        r, _ = self.run_turn([self.dispatch_event(tid, kind="rework")], FAKE_MODE="revoke")   # 交接前凭证失效
+        self.assertTrue(self.final(r)["result"].startswith("停下了：凭证已撤销"), r.stdout)
+        run = list(self.turn_runs)[-1]
+        self.assertTrue(self.turn_runs[run]["summary"].startswith("停下了"))
+        with G.tx() as con:
+            row = dict(G.grant_row(con, tid))
+        self.assertIn("挡回去", P.check_run(run, row, 1))
+
+    def test_timer_only_run_is_not_publishable(self):
+        tid = self.worked()
+        run = self.fake_run(tid, [{"id": f"timer:{tid}:1", "source": "hermes", "type": "timer.due", "subject": tid}])
+        self.rewrite_manifest(tid, run=run)
+        self.rejects(tid, "没有当前代次的派单证据")
+
+    def test_answer_run_traces_back_to_current_dispatch(self):
+        tid = self.worked()
+        first = list(self.turn_runs)[-1]
+        later = self.to_gen2(tid)
+        ans = self.fake_run(tid, [self.answer_event(tid)], created_at=self.iso(later))
+        self.rewrite_manifest(tid, generation=2, run=ans)
+        self.hub_cards["9"] = {"id": "9", "kind": "ask", "lane": tid, "run_id": first}
+        self.rejects(tid, "提问的那一轮：这一轮在第 2 代开始之前就排进来了")     # 晚到的旧回答
+        for card, words in (({"id": "9", "kind": "notice", "lane": tid, "run_id": first}, "追溯不到"),
+                            ({"id": "9", "kind": "ask", "lane": "t-20260101-abcdef", "run_id": first}, "追溯不到"),
+                            (None, "追溯不到")):
+            self.hub_cards["9"] = card
+            self.rejects(tid, words)
+        self.hub_cards["9"] = {"id": "9", "kind": "ask", "lane": tid, "run_id": ans}       # 自己追自己：有层数上限
+        self.rejects(tid, "往回追了 5 层")
+        asked = self.fake_run(tid, [self.dispatch_event(tid, gen=2)], created_at=self.iso(later))
+        self.hub_cards["9"] = {"id": "9", "kind": "ask", "lane": tid, "run_id": asked}
+        self.assertTrue(P.publish(tid)["pushed"])                         # 追到第 2 代的派单才发
+
+
 class PrIdentity(PublishBase):
     """审查 P1-05：同名分支已有开着的 PR，核对目标、来源、分支、头提交都对才沿用。"""
 
@@ -408,13 +483,20 @@ class GateAndRealRemote(PublishBase):
             self.rejects(tid, "只在 dt-gate 账号里跑")
             self.assertEqual(P.scan()[0]["check"], "可以发")                 # 只读的 scan 不受限
 
-    def test_real_github_is_refused_before_0d(self):
+    def test_publish_is_off_before_0d_without_test_backend(self):
+        """审查第 2 轮 P1-07：开关关着时整体拒绝，开 PR 也不做（远端分支已经是这个头提交、不用推时同样）。"""
         tid = self.worked()
-        with mock.patch.dict(os.environ, {"DT_PUBLISH_REMOTE": "https://github.com/{github}.git"}):
-            with self.assertRaises(P.Rejected) as c:
-                P.publish(tid)
-        self.assertIn("0D 恢复门", str(c.exception))
+        git("fetch", "-q", str(self.wt(tid)), f"refs/heads/claude/{tid}:refs/heads/claude/{tid}", cwd=self.remote)  # 远端已有
+        env = {"DT_PUBLISH_REMOTE": self.backend["remote"], "DT_GH": self.backend["gh"]}   # 环境变量不算数
+        for backend in (None, {**self.backend, "remote": "https://github.com/{github}.git"}):
+            with mock.patch.object(P, "TEST_BACKEND", backend), mock.patch.dict(os.environ, env):
+                with self.assertRaises(P.Rejected) as c:
+                    P.publish(tid)
+            self.assertIn("整体关闭", str(c.exception))
         self.assertEqual(self.gh_calls(), [])
+        self.assertEqual(P.remote_url("o/x"), self.backend["remote"].format(github="o/x"))
+        with mock.patch.object(P, "TEST_BACKEND", None):
+            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", "gh"))
 
 
 def P_opt(args, name):

@@ -88,8 +88,8 @@ class ExecGateEndToEnd(HubFixture):
                "DT_WORKTREE_REAL_CLAUDE": str(fake), "DT_WORKTREE_REMOTE": f"file://{r}/remote/{{github}}.git",
                "FAKE_LOG": str(self.fake_log), "DT_OWNER_CHAT_ID": CHAT,
                "DT_PUBLISH_OUTBOX": str(self.outbox), "DT_PUBLISH_MIRRORS": str(r / "mirrors"),
-               "DT_PUBLISH_REMOTE": f"file://{r}/remote/{{github}}.git", "DT_PUBLISH_LOG": str(r / "publish.jsonl"),
-               "DT_GH": str(fake_gh.install(r / "ghbin", r / "gh")), "FAKE_GH_STATE": str(r / "gh"), **GIT_ENV}
+               "DT_PUBLISH_LOG": str(r / "publish.jsonl"), "FAKE_GH_STATE": str(r / "gh"), **GIT_ENV}
+        backend = {"remote": f"file://{r}/remote/{{github}}.git", "gh": str(fake_gh.install(r / "ghbin", r / "gh"))}
         p = mock.patch.dict(os.environ, env)          # 先放进环境：临时中台的接单程序（up 起的）要继承这些
         p.start()
         self.addCleanup(p.stop)
@@ -106,7 +106,8 @@ class ExecGateEndToEnd(HubFixture):
                   mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": GRANT_OWNER}),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
                   mock.patch.object(G, "notify_owner", return_value="om_notice0001"),
-                  mock.patch.object(P, "GATE_USER", __import__("pwd").getpwuid(os.geteuid()).pw_name)):
+                  mock.patch.object(P, "GATE_USER", __import__("pwd").getpwuid(os.geteuid()).pw_name),
+                  mock.patch.object(P, "TEST_BACKEND", backend)):
             q.start()
             self.addCleanup(q.stop)
 
@@ -206,6 +207,11 @@ class ExecGateEndToEnd(HubFixture):
         self.assertTrue(any(x["title"] == f"任务 {tid} 停下了" and "凭证已撤销" in x["text"] for x in cards), cards)
         with self.assertRaises(P.Rejected):
             P.publish(tid)
+        (stopped,) = self.hub_rows("SELECT summary FROM runs WHERE id = ?", (runs[-1]["id"],))
+        self.assertTrue(stopped["summary"].startswith("停下了"), stopped)            # 真中台记下的首行
+        with G.tx() as con:
+            row = dict(G.grant_row(con, tid))
+        self.assertIn("挡回去", P.check_run(str(runs[-1]["id"]), row, 1))           # 受信发布不认这一轮（第 2 轮 P1-02）
 
 
 NODE = shutil.which("node")
