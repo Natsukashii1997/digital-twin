@@ -14,7 +14,7 @@
 - 验证：收尾 fetch 发现 main 在第一轮后又前进 15 提交，重新变基到 `73a826c37c68701fbd1d3d6d8df760d4bbb51fdd`，三提交重放无新增冲突。下方第一轮 1127 + 48 的记录保留为历史结果，最终采用本节最新基线与计数。证据 `~/Library/Application Support/DigitalTwin/evidence/2026-11-17-refresh/`，最新全量 `hermes-latest-final.log` / `orca-latest-final.log`，首败与反证均保留。
 - 收尾同步：main 又新增 2 个仅改 CURRENT.md 的提交，已变基到 `ed442d84c41f313f4404c3d7f97284090704b777`。变基前后 hermes 与 orca 完整 Git tree 哈希相同，因此上述全量覆盖最终代码与测试；哈希证明见证据 `validated-code-trees.json`。
 - 发布与回读：更新指定审计分支与 PR #171，运行副本采用另行验收。
-- 遗留问题：ResourceWarning 原文保留；工程检查无阻断项，提交推送后继续回读最新 CI。
+- 遗留问题：本地全量通过，但 GitHub Actions 运行 `44221187547` 的 test job 没有启动，steps 为空，annotation 明确为账户付款失败或支出上限需要提高。结论改为仍有问题，需常浩在 GitHub Billing & plans 处理后重跑当前提交 CI。回执在证据 `ci-billing-block.json`。ResourceWarning 原文保留。
 - 本轮新坑：无。
 
 ## 安全审计 PR #171 刷新（2026-11-17，Codex，常浩授权变基、验证、推送；待合并）
