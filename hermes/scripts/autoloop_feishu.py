@@ -99,6 +99,9 @@ def db(write=False):
     con.row_factory = sqlite3.Row
     try:
         con.executescript(SCHEMA)
+        for table in ("claims", "claim_log"):    # CREATE IF NOT EXISTS 不改旧表：旧结构直接拒用，不自动迁移
+            if "attempt" not in {r[1] for r in con.execute(f"PRAGMA table_info({table})")}:
+                raise Fail(f"{f} 是旧结构（{table} 没有 attempt 列），拒绝使用；要迁移请单独处理")
         if write:
             con.execute("BEGIN IMMEDIATE")
         yield con

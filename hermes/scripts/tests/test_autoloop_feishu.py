@@ -383,6 +383,68 @@ class Answer(Base):
         with self.assertRaisesRegex(F.Fail, "没有结果不明"):
             A.release_unknown(7)
 
+    BAD_CARDS = ({"id": 7}, {"id": 7, "state": None}, {"id": 7, "state": "unexpected"},
+                 {"id": 7, "state": "decided", "choice": None, "by": OWNER}, {"id": 7, "state": "done", "choice": 1, "by": None})
+
+    def test_judge_only_trusts_the_four_hub_states(self):
+        for c in self.BAD_CARDS:
+            self.assertIsNone(A.judge(c, 1, OWNER), c)
+            self.assertFalse(A.ended(c), c)
+        self.assertEqual(A.judge({"state": "open"}, 1, OWNER), "open")
+        self.assertEqual(A.judge({"state": "closed"}, 1, OWNER), "settled")
+        self.assertEqual(A.judge({"state": "done", "choice": 1, "by": OWNER}, 1, OWNER), "answered")
+        self.assertEqual(A.judge({"state": "decided", "choice": 0, "by": OWNER}, 1, OWNER), "settled")
+
+    def test_unrecognised_state_never_releases_unknown(self):
+        old = self.unknown_claim()
+        self.age(10_000, pid=None)
+        for c in self.BAD_CARDS:
+            self.hub_card = c
+            with self.assertRaisesRegex(F.Fail, "认不出"):
+                A.release_unknown(7)                                            # 常浩同意了也不放：没证据说卡还开着
+            self.assertEqual(A.reconcile(), [])
+            self.assertEqual((self.claim()["attempt"], self.claim()["state"]), (old, "unknown"), c)
+        self.assertEqual(len(self.answers()), 1)                                # 从不重答
+
+    def test_unrecognised_state_turns_stale_inflight_unknown_not_released(self):
+        for c in self.BAD_CARDS:
+            with F.db(write=True) as con:
+                con.execute("DELETE FROM claims")
+            att = A.claim(F.card_by_token(self.tok), 1)[0]
+            self.age(10_000, pid=None, state="inflight")                        # 发到一半进程没了
+            self.hub_card = c
+            notes = A.reconcile()
+            self.assertEqual((self.claim()["attempt"], self.claim()["state"]), (att, "unknown"), c)
+            self.assertIn("认不出", notes[0][1])
+        self.assertEqual(self.answers(), [])
+
+    def test_unrecognised_state_never_settles_queued(self):
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
+        A.answer(self.tok, 1, CHAT, OWNER)
+        att = self.claim()["attempt"]
+        for c in self.BAD_CARDS:
+            self.hub_card = c
+            with mock.patch.object(F, "report_delivered", side_effect=F.HubError("中台回 HTTP 409", status=409)):
+                self.assertEqual(A.reconcile(), [])
+            self.assertEqual((self.claim()["attempt"], self.claim()["state"]), (att, "queued"), c)
+        self.assertEqual(self.answers(), [])
+
+    def test_old_cards_db_without_attempt_is_refused(self):
+        f = os.environ["DT_AUTOLOOP_CARDS_DB"]
+        os.remove(f)
+        import sqlite3
+        con = sqlite3.connect(f)
+        con.executescript("CREATE TABLE claims (card_id INTEGER NOT NULL, who TEXT NOT NULL, state TEXT NOT NULL, "
+                          "choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, PRIMARY KEY (card_id, who));")
+        con.close()
+        with self.assertRaisesRegex(F.Fail, "旧结构"):
+            with F.db():
+                pass
+        con = sqlite3.connect(f)
+        self.assertNotIn("attempt", [r[1] for r in con.execute("PRAGMA table_info(claims)")])  # 没有偷偷改旧库
+        con.close()
+
     def test_stale_writes_never_touch_a_newer_attempt(self):
         old = self.unknown_claim()
         self.hub_card = {"id": 7, "state": "open"}

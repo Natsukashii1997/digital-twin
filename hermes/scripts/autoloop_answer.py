@@ -11,7 +11,7 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
 本人每次点击是一次「尝试」，有一个不复用的尝试号；claims 表 who = owner 那一行的状态：
   queued    已记下选择，等发送：卡片还没拿到消息号、或中台还没确认送达，都先排队
   inflight  某个执行者已领到这次尝试唯一的发送资格（只能从 queued 原子改过来，改成功的才发请求），记着进程号
-  answered  中台受理了，回读 state、choice、by 都对上
+  answered  中台受理了，回读 state、choice、by 都对上（只说明中台最终结果和这次选择一致，中台不记尝试号）
   settled   这张卡已经有了别的结果（秘书或别处先到、卡已结束）
   unknown   结果不明：连不上、超时、HTTP 5xx、回应读不懂、回读对不上、发送中途进程没了。**不重答、不自动放开**：
             请求可能已进中台、晚些才被处理；只有回读看到「已决定 / 已结束」才能自动结算，卡还开着就交常浩决定（release）
@@ -22,6 +22,7 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
 对账（reconcile）：queued 的卡已有消息号但本地没记「中台确认送达」→ 按登记原样重报送达（中台幂等），再领发送资格；
 卡已不开着就把排队的结算掉（从没发过）；inflight 超过 2 分钟且进程不在（或超过 10 分钟，防进程号复用）、unknown →
 只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
+回读只认中台的四种卡片状态；缺字段或认不出的状态一律当结果不明，不结算、不放开（PR #202 审查 P1-08）。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
 
 已知局限（PR #202 审查 P1-01）：点击人、聊天号是网关传进来的命令行参数；和猛鬼兽同一个 macOS 账号的进程
@@ -170,12 +171,26 @@ def read_card(card_id):
 
 
 def judge(c, choice, owner):
-    """按中台里的样子判：answered / settled / open / None（读不到）。"""
+    """按中台里的样子判：answered / settled / open / None。只认中台的四种卡片状态（open、decided、done、closed，
+    见中台 host/channels.ts）；读不到、缺 state、认不出的状态、已决定却缺 choice 或 by → None（当结果不明：
+    不放开、不结算、不重答）。answered 只说明中台的最终结果和这次选择一致；中台不记尝试号，证明不了是哪一次尝试。"""
     if not c:
         return None
-    if c.get("state") in ("decided", "done"):
+    state = c.get("state")
+    if state == "open":
+        return "open"
+    if state == "closed":
+        return "settled"
+    if state in ("decided", "done"):
+        if c.get("choice") is None or not c.get("by"):
+            return None
         return "answered" if c.get("choice") == choice and c.get("by") == owner else "settled"
-    return "settled" if c.get("state") == "closed" else "open"
+    return None
+
+
+def ended(c):
+    """中台明确说这张卡已结束（decided / done 且字段齐全，或 closed）。"""
+    return judge(c, None, None) == "settled"
 
 
 def describe(c):
@@ -258,8 +273,10 @@ def reconcile(card_id=None):
             notes.append((cid, "对账结果：你上次的回答中台已经收下了。"))
         elif verdict == "settled" and move(cid, attempt, r["state"], "settled", f"对账：{describe(c)}"):
             notes.append((cid, f"对账结果：这张卡已经有了别的结果（{describe(c)}）。"))
-        elif r["state"] == "inflight" and move(cid, attempt, "inflight", "unknown", "对账：发送中途进程没了"):
-            notes.append((cid, "上次点击发送到一半中断了，结果不明，卡片还开着；我不会重答。"
+        elif r["state"] == "inflight" and move(cid, attempt, "inflight", "unknown",
+                                               f"对账：发送中途进程没了，回读：{describe(c)}"):
+            where = "卡片还开着" if verdict == "open" else "中台这张卡的状态读不到或认不出"
+            notes.append((cid, f"上次点击发送到一半中断了，结果不明，{where}；我不会重答。"
                                "要重新选，请明确告诉我放开这张卡。"))
     return notes
 
@@ -273,7 +290,7 @@ def _reconcile_queued(cid, attempt):
         except F.HubError as e:
             if e.status in DEFINITE:             # 中台不收这份送达：看看卡还开不开
                 c = read_card(cid)
-                if c and c.get("state") != "open" and move(cid, attempt, "queued", "settled", f"对账：{describe(c)}，排队的没发过"):
+                if ended(c) and move(cid, attempt, "queued", "settled", f"对账：{describe(c)}，排队的没发过"):
                     return [(cid, f"这张卡已经结束（{describe(c)}），你排队的选择没有发出去。")]
             return []
     got = submit(cid)
@@ -293,7 +310,7 @@ def release_unknown(card_id):
         move(card_id, r["attempt"], "unknown", verdict, f"放开前回读：{describe(c)}")
         return f"没放开：中台里这张卡已经是 {describe(c)}，按这个结果记了。"
     if verdict is None:
-        raise F.Fail("读不到中台，先不放开")
+        raise F.Fail(f"中台这张卡读不到或状态认不出（{describe(c)}），先不放开")
     if not release(card_id, r["attempt"], "unknown", "常浩明确同意放开（接受原请求可能晚到、仍以中台先受理的为准）"):
         raise F.Fail("状态已经变了，没放开")
     return "已放开，可以再点。注意：上次的请求万一晚到，仍以中台先受理的为准。"
