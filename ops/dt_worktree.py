@@ -506,8 +506,9 @@ def write_handoff(executor, repo, task_id, generation, place):
     mtmp = d / f".handoff.{os.getpid()}.json"
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
     os.chmod(mtmp, 0o644)
-    # 提交点（审查第 3 轮 P1-03）：最后检查和换清单之间屏蔽取消信号，取消要么在提交点之前（不换清单），要么在之后
-    # （清单已换，由 after_run 再看一次，照样给中台「停下了」）；屏蔽期间到的取消，解除前从挂起信号里记下。
+    # 提交点（审查第 3 轮 P1-03）：最后检查加换清单是一段不可打断的临界区（屏蔽取消信号）。进入前已记下的取消：不换清单；
+    # 在临界区里到的取消（哪怕早于实际替换）：清单照样换上，解除屏蔽前从挂起信号里记下，after_run 再看一次，照样给中台
+    # 「停下了」，中台把这一轮记成已取消、受信发布不认。安全靠取消不丢、取消的轮次不算 done，不靠「取消早于替换就不写清单」。
     old = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
     try:
         if stopped():                            # 包已换、清单没换：受信发布按哈希对不上拒收
