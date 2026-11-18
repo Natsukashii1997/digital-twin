@@ -176,6 +176,7 @@ class RootNeverTouchesAccountFiles(unittest.TestCase):
         fn = re.search(r"^root_dir\(\) \{\n.*?^\}", SETUP.read_text(), re.M | re.S).group(0)
         return subprocess.run(["bash", "-c", f"{fn}\nroot_dir \"$1\"", "x", str(path)]).returncode == 0
 
+    @unittest.skipUnless(sys.platform == "darwin", "root_dir 用 macOS 的 stat -f，只在 Mac 上测")
     def test_root_dir(self):
         self.assertTrue(self.root_dir("/"))            # root 的、别人不能写
         self.assertFalse(self.root_dir("/tmp"))        # 谁都能写（粘滞位也不算）
