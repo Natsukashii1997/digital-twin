@@ -3,7 +3,8 @@
 规格 docs/秘书代批-规格.md §4「发布侧」）。
 
 dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py）在 CLI 退出后把本单分支打成交接包
-（/Users/dt-worker/dt-outbox/<单号>/handoff.json + <单号>.bundle）。本脚本以主账号身份取包、核对后推分支、开 PR：
+（/Users/dt-worker/dt-outbox/<单号>/handoff.json + <单号>.bundle）。本脚本是控制面的受信发布出口，按 ADR-015 归 dt-gate
+账号（「受信发布出口从第一天按归 dt-gate 写」）：取包、核对后推分支、开 PR：
 
   1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 agent/<执行方>/<单号>；包先复制到私有临时目录、
      核对哈希再用；只取 Git 对象（bundle verify + fetch，打开对象校验，钩子关掉），不检出、不运行里面任何东西。
@@ -15,9 +16,11 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
      GitHub 一侧 dt-sandbox 的规则集也只放行 agent/**（hermes/baselines/dt-sandbox-github.json）。
   5. 同一分支已有开着的 PR 就沿用；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
 
-本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务。写前账本、结果不明冻结在 0D；接成正式出口
-（定时巡视 / 机器账号凭据，#132 的做法）在批 3。现在推送和开 PR 用的是本机 git / gh 的登录（主账号）。
-ADR-015 若定下单开门禁账号 dt-gate，本脚本连同凭证库搬去那个账号跑，代码不用改，只改路径变量和安装位置。
+本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
+测试只推本地裸仓库。推送和开 PR 用运行账号自己的 git / gh 登录：0E 在 dt-gate 里配机器账号令牌（只能推非 main、不能合并，
+#132 的做法），之前不在主账号或秘书账号里真跑（ADR-015 第 5 节第 6 条「真实特权不回流」）。
+状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；
+凭证库随 autoloop_grants 一起搬进 dt-gate。写前账本、结果不明冻结在 0D；接成正式出口在批 3。
 
   autoloop_publish.py publish --task t-20261118-abcdef
   autoloop_publish.py scan                 只读：列交接目录里的单和各自能不能发
