@@ -119,7 +119,7 @@ class Probe(unittest.TestCase):
 
 class Setup(unittest.TestCase):
     def test_syntax(self):
-        for p in (PF, PROBE, SETUP):
+        for p in (PF, PROBE, SETUP, OPS / "dt_account_init_user.sh"):
             r = subprocess.run(["bash", "-n", str(p)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, f"{p.name}: {r.stderr}")
 
@@ -137,6 +137,90 @@ class Setup(unittest.TestCase):
         self.assertIn("<key>UserName</key><string>$u</string>", s)
         self.assertIn('ACCOUNTS="dt-gate dt-secretary"', s)
         self.assertNotIn("dt-worker", re.sub(r"#.*", "", s))
+
+
+def code(path):
+    """去掉注释，只留代码行。"""
+    return "\n".join(l for l in (re.sub(r"(^|\s)#.*", "", x) for x in path.read_text().splitlines()) if l.strip())
+
+
+class RootNeverTouchesAccountFiles(unittest.TestCase):
+    """L3 P1-01：root 不按路径碰账号能改的任何文件。账号目录里的写入一律以账号身份做（sudo -u），
+    这样账号同时偷换链接、硬链接、目录，能改坏的也只有它本来就能改的东西。"""
+
+    def test_no_root_path_under_account_home(self):
+        s = code(SETUP)
+        self.assertNotIn('$home/', s)
+        self.assertNotIn('${home}/', s)
+        # 家目录本身只做核对、chown、chmod、看权限；它的上一级必须是只有 root 能改的目录
+        for line in s.splitlines():
+            if '"$home"' in line:
+                self.assertRegex(line.strip(), r'^(case|root_dir|\[ -d|\[ -n \"\$home\" \] && echo|chown "\$u:staff" "\$home"|chmod 700 "\$home"|echo|sudo -u "\$u")', line)
+        self.assertIn('root_dir "$(dirname "$home")"', s)
+        self.assertIn('sudo -u "$u" -H /bin/bash -s -- "$home" "$MARK" < "$INIT_USER"', s)
+
+    def test_result_file_read_as_account(self):
+        """探针结果在账号自己的目录里：root 只看 mtime，内容以账号身份读。"""
+        s = code(SETUP)
+        for line in s.splitlines():
+            if "result.txt" in line or '"$res"' in line:
+                self.assertRegex(line, r'stat -f %m "\$res"|sudo -u "\$1" /bin/cat "\$res"|res="\$SHARED', line)
+
+    def test_shared_dirs_checked_before_use(self):
+        s = code(SETUP)
+        self.assertIn('mkdir "$SHARED"', s)
+        self.assertLess(s.index('root_dir "$SHARED"'), s.index('chmod 755 "$SHARED"'))
+        self.assertLess(s.index('root_dir "$SHARED/probe"'), s.index('install -d -o "$u" -g staff -m 755 "$SHARED/probe/$u"'))
+
+    def root_dir(self, path):
+        fn = re.search(r"^root_dir\(\) \{\n.*?^\}", SETUP.read_text(), re.M | re.S).group(0)
+        return subprocess.run(["bash", "-c", f"{fn}\nroot_dir \"$1\"", "x", str(path)]).returncode == 0
+
+    def test_root_dir(self):
+        self.assertTrue(self.root_dir("/"))            # root 的、别人不能写
+        self.assertFalse(self.root_dir("/tmp"))        # 谁都能写（粘滞位也不算）
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        if os.geteuid() != 0:
+            self.assertFalse(self.root_dir(d.name))    # 不是 root 的目录
+        link = Path(d.name) / "l"
+        link.symlink_to("/")
+        self.assertFalse(self.root_dir(link))          # 指向 root 目录的链接也不算
+
+
+class InitAsAccount(unittest.TestCase):
+    """dt_account_init_user.sh：以账号身份经标准输入跑（和 setup 里一样），可重复跑。"""
+    MARK = "# umask（测试标记）"
+
+    def run_init(self, home):
+        with open(OPS / "dt_account_init_user.sh") as f:
+            return subprocess.run(["bash", "-s", "--", str(home), self.MARK], stdin=f,
+                                  capture_output=True, text=True, cwd="/")
+
+    def test_fresh_and_rerun(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        home = Path(d.name)
+        r = self.run_init(home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        secret = home / ".dt/probe.secret"
+        self.assertEqual((home / ".dt").stat().st_mode & 0o777, 0o700)
+        self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
+        self.assertRegex(secret.read_text(), r"^[0-9a-f]{32}\n$")
+        first = secret.read_text()
+        r = self.run_init(home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(secret.read_text(), first)                     # 已有就不换
+        self.assertEqual((home / ".zprofile").read_text().count(self.MARK), 1)
+        self.assertIn("umask 077", (home / ".zprofile").read_text())
+
+    def test_keeps_existing_zprofile(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        home = Path(d.name)
+        (home / ".zprofile").write_text("export A=1\n")
+        self.assertEqual(self.run_init(home).returncode, 0)
+        self.assertTrue((home / ".zprofile").read_text().startswith("export A=1\n"))
 
 
 if __name__ == "__main__":

@@ -9,8 +9,9 @@
 #
 # 做的事（可重复跑）：
 #   1. 核对：账号存在、是标准账号（不在 admin 组）、登录界面已隐藏、不能解锁文件保险箱；后两项只提示，不替你改
-#   2. 家目录改成 700（系统默认 750，同组 staff 的其他账号能列出里面有什么）；登录 shell 的 umask 设成 077
-#   3. 在各自家目录放一个测试值文件 ~/.dt/probe.secret（600，随机数，不是真凭据）
+#   2. 家目录改成 700（系统默认 750，同组 staff 的其他账号能列出里面有什么）
+#   3. 以账号自己的身份（ops/dt_account_init_user.sh）：登录 shell 的 umask 设成 077，放测试值文件 ~/.dt/probe.secret（600，随机数，不是真凭据）
+#      root 不按路径碰账号能改的任何文件，只动「只有 root 能改里面条目」的目录里的东西（L3 P1-01）
 #   4. 装探针：LaunchDaemon cn.digital-twin.probe.<账号>，以那个账号身份、在没人登录它时运行 ops/dt_account_probe.sh，
 #      开机和安装时各跑一次；结果写到 /Users/Shared/dt-accounts/probe/<账号>/result.txt（所有人可读，不含凭据）
 # 不建账号、不改密码、不装中台和猛鬼兽（0E-2、0E-5 再加）、不碰 dt-worker。
@@ -20,6 +21,7 @@ ACCOUNTS="dt-gate dt-secretary"
 HERE=$(cd "$(dirname "$0")" && pwd)
 DIR="/Library/Application Support/DigitalTwin"
 PROBE_SRC="$HERE/dt_account_probe.sh"
+INIT_USER="$HERE/dt_account_init_user.sh"
 PROBE="$DIR/dt_account_probe.sh"
 SHARED=/Users/Shared/dt-accounts
 MARK="# umask（数字分身 ADR-015 0E-1）"
@@ -61,25 +63,25 @@ no_link() {
   done
 }
 
+# 一个目录「只有 root 能改里面的条目」：属 root、不是链接、同组和其他人不能写。
+# 这样的目录里，账号换不掉任何一项，root 按路径操作其中的条目才安全。
+root_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $(( 0$(stat -f %Lp "$1") & 022 )) = 0 ]
+}
+
+# 家目录本身由 root 收紧（它的上一级 /Users 只有 root 能改，账号换不掉这个目录项）；
+# 家目录里面的东西一律以账号自己的身份写（ops/dt_account_init_user.sh 经标准输入交给它），
+# root 不按路径碰账号能改的任何文件：账号就算同时在偷换链接、硬链接、目录，能改坏的也只有它本来就能改的东西（L3 P1-01）。
 harden() {
   local u=$1 home
   home=$(dscl . -read "/Users/$u" NFSHomeDirectory | awk '{print $2}')
+  case "$home" in /Users/?*) ;; *) echo "  [停下] $u 的家目录不在 /Users 下：$home"; return 1 ;; esac
+  root_dir "$(dirname "$home")" || { echo "  [停下] $(dirname "$home") 不是只有 root 能改的目录"; return 1; }
   [ -d "$home" ] && no_link "$home" || { echo "  [停下] $u 的家目录 $home 不存在或不是普通目录"; return 1; }
-  no_link "$home/.zprofile" "$home/.dt" "$home/.dt/probe.secret" || return 1
   chown "$u:staff" "$home"
   chmod 700 "$home"
   echo "  家目录 $home：$(stat -f %Lp "$home")"
-  if ! grep -qF "$MARK" "$home/.zprofile" 2>/dev/null; then
-    printf '%s\numask 077\n' "$MARK" >> "$home/.zprofile"
-    chown "$u:staff" "$home/.zprofile"
-    chmod 644 "$home/.zprofile"
-  fi
-  install -d -o "$u" -g staff -m 700 "$home/.dt"
-  if [ ! -s "$home/.dt/probe.secret" ]; then
-    (umask 077; openssl rand -hex 16 > "$home/.dt/probe.secret")
-  fi
-  chown "$u:staff" "$home/.dt/probe.secret"
-  chmod 600 "$home/.dt/probe.secret"
+  sudo -u "$u" -H /bin/bash -s -- "$home" "$MARK" < "$INIT_USER" || { echo "  [停下] 以 $u 身份初始化没做完"; return 1; }
 }
 
 write_plist() {
@@ -125,14 +127,15 @@ load_probe() {
   [ "$(stat -f %m "$res" 2>/dev/null || echo 0)" -gt "$before" ] || { echo "  [停下] 40 秒没等到探针结果：$res"; return 1; }
 }
 
+# 结果文件在账号自己的目录里：以账号身份读，账号把它换成指向别处的链接也读不到它本来读不到的东西
 show_result() {
   local res="$SHARED/probe/$1/result.txt"
-  if [ -f "$res" ]; then sed 's/^/    /' "$res"; else echo "    （还没有探针结果）"; fi
+  sudo -u "$1" /bin/cat "$res" 2>/dev/null | sed 's/^/    /' | grep . || echo "    （还没有探针结果）"
 }
 
 case "${1:-install}" in
   install)
-    [ -f "$PROBE_SRC" ] || { echo "找不到 $PROBE_SRC"; exit 1; }
+    [ -f "$PROBE_SRC" ] && [ -f "$INIT_USER" ] || { echo "找不到 $PROBE_SRC 或 $INIT_USER"; exit 1; }
     stop=0
     for u in $ACCOUNTS; do
       echo "== $u"
@@ -142,14 +145,14 @@ case "${1:-install}" in
     [ "$stop" = 0 ] || { echo "有账号没过核对，先按上面提示处理，再重跑。"; exit 1; }
     mkdir -p "$DIR"; chown root:wheel "$DIR"; chmod 755 "$DIR"
     install -o root -g wheel -m 755 "$PROBE_SRC" "$PROBE"
-    # /Users/Shared 谁都能建东西：先确认这两层不是别人抢先建的链接或别人的目录
-    for p in "$SHARED" "$SHARED/probe"; do
-      no_link "$p" || exit 1
-      if [ -e "$p" ] && [ "$(stat -f %u "$p")" != 0 ]; then echo "[停下] $p 不是 root 建的，请人工查看"; exit 1; fi
-    done
-    install -d -o root -g wheel -m 755 "$SHARED" "$SHARED/probe"
+    # /Users/Shared 谁都能建东西：mkdir 不跟链接；建完（或已有）先确认是 root 的普通目录、别人不能写，
+    # 之后它在带粘滞位的 /Users/Shared 里别人删不掉、换不掉，里面的条目只有 root 能改
+    mkdir "$SHARED" 2>/dev/null || true
+    root_dir "$SHARED" || { echo "[停下] $SHARED 不是 root 的普通目录或别人能写，请人工查看"; exit 1; }
+    chmod 755 "$SHARED"
+    install -d -o root -g wheel -m 755 "$SHARED/probe"
+    root_dir "$SHARED/probe" || { echo "[停下] $SHARED/probe 不是 root 的普通目录"; exit 1; }
     for u in $ACCOUNTS; do
-      no_link "$SHARED/probe/$u" || exit 1
       install -d -o "$u" -g staff -m 755 "$SHARED/probe/$u"
       write_plist "$u"
       echo "== $u 探针"
