@@ -443,6 +443,8 @@ class Answer(Base):
                 pass
         con = sqlite3.connect(f)
         self.assertNotIn("attempt", [r[1] for r in con.execute("PRAGMA table_info(claims)")])  # 没有偷偷改旧库
+        self.assertEqual([r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")],
+                         ["claims"])                                            # 也没补建别的表
         con.close()
 
     def test_stale_writes_never_touch_a_newer_attempt(self):
