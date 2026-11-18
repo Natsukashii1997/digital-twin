@@ -504,7 +504,7 @@ class MigrationTests(Base):
         conn.commit()
         conn.close()
         with L.TS.Store(self.db, clock=lambda: T0) as s:
-            self.assertEqual(s.version(), 4)
+            self.assertEqual(s.version(), L.TS.SCHEMA_VERSION)   # 之后的版本（v5 秘书账本）照样不动 v3 数据
             self.assertEqual(L.decisions(s), [])
 
 

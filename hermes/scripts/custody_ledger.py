@@ -57,6 +57,9 @@ irrevocable（不可撤回）只许出现在挂起里——撤不回的动作一
     （见 reconcile_errors：checked 必填；合并 pr_state + merge_commit，回复 comment_found + comment_id），合并核实做成时写进 outcome。
     issue / begin 拿到写锁之后才取时间（P2-01）。
   送达闸、合并执行器开始做之前必须调 begin（它现读托管准入、核有效期，过期就作废）；结果不明一律 finish(unknown)，不重发。
+账本用途（#195 0B-4b）：秘书代批（secretary_ledger.py）复用这里的通用函数。和表名、事件前缀、对象类型、会话号格式、
+  账本身份（meta 键）、原文目录、动作和状态的叫法有关的都收在 Use 里：托管是 CUSTODY（默认值，下面各函数不传 use 就是托管，
+  行为、报错文字、事件名和原来一样），秘书是 secretary_ledger.SECRETARY（secretary_* 三张表、secretary.decision.*、s-… 会话号）。
 命令行（最后一行都是一行 JSON：{"ok", "msg", ...}）：
   custody_ledger.py show d-…             一个决定的全部字段（只读）
   custody_ledger.py list [--session c-…] 决定列表（只读）
@@ -122,6 +125,34 @@ ISSUE_ID = re.compile(r"^[A-Z][A-Z0-9]*-[1-9]\d*$")       # Multica 子单的规
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+class Use:
+    """账本用途（#195 0B-4b）：托管和秘书共用一套账本函数（甲方案，常浩 11-18 定），各用各的表、事件、会话号、账本身份和原文目录。
+    名字都从 table 推出来：<table>_decisions / _quota / _sessions，事件 <table>.decision.<动作>（对象类型 <table>_decision），
+    会话登记事件 <table>.session.register（对象类型 <table>_session），账本身份存 meta 的 <table>_ledger_id。
+    describe / reconcile_errors / status_reader 用 lambda 包着，调用时才找函数（测试打桩、两个模块互相导入都不受影响）。"""
+
+    def __init__(self, *, table, who, sid_name, session_id, raw_env, raw_default, actions, status, disposition_action,
+                 describe, reconcile_errors, status_reader):
+        self.table = table
+        self.decisions, self.quota, self.sessions = f"{table}_decisions", f"{table}_quota", f"{table}_sessions"
+        self.event, self.obj = f"{table}.decision", f"{table}_decision"
+        self.session_event, self.session_obj = f"{table}.session.register", f"{table}_session"
+        self.meta_key = f"{table}_ledger_id"
+        self.who = who                          # 报错里的叫法：托管 / 秘书
+        self.sid_name = sid_name                # 会话号的叫法：托管号 / 秘书会话号
+        self.session_id = session_id            # 会话号正则，第 1 组是日期 YYYYMMDD（原文 90 天清理按它）
+        self.raw_env, self.raw_default = raw_env, raw_default
+        self.actions, self.status = actions, status
+        self.disposition_action = disposition_action
+        self.describe, self.reconcile_errors, self.status_reader = describe, reconcile_errors, status_reader
+
+
+CUSTODY = Use(table="custody", who="托管", sid_name="托管号", session_id=SESSION_ID, raw_env="DT_CUSTODY_DIR",
+              raw_default=DEFAULT_DIR, actions=ACTIONS, status=STATUS, disposition_action=DISPOSITION_ACTION,
+              describe=lambda d: describe_target(d), reconcile_errors=lambda d, r, e: reconcile_errors(d, r, e),
+              status_reader=lambda t: C.read_status(now=t))
+
+
 class LedgerError(Exception):
     """账本拒绝的操作。code 给机器判，str 给人看。拒绝时库和原文都不改。"""
 
@@ -131,65 +162,65 @@ class LedgerError(Exception):
 
 
 # ---------- 路径、时间 ----------
-def raw_dir():
-    return Path(os.environ.get("DT_CUSTODY_DIR") or DEFAULT_DIR).expanduser()
+def raw_dir(use=CUSTODY):
+    return Path(os.environ.get(use.raw_env) or use.raw_default).expanduser()
 
 
 def db_path(path=None):
     return Path(path or os.environ.get("DT_STATE_DB") or TS.DEFAULT_DB).expanduser()
 
 
-def open_store(now=None, path=None):
+def open_store(now=None, path=None, use=CUSTODY):
     """打开 twin-state 库（DT_STATE_DB）；给了 now 就用它当事件时间（测试、回放用）。
     库文件不存在就拒绝（LedgerMissing），不隐式新建（第 1 轮审查 P0-02）：账本丢了不能被当成「一个决定都没有」。
     twin-state 库本来就由 twin_state.py init 建；托管只用已有的库。"""
     p = db_path(path)
     if not p.is_file():
-        raise LedgerError(f"托管账本所在的状态库不见了：{p}（不自动新建；要人工从备份恢复或确认后用 twin_state.py init 建）",
+        raise LedgerError(f"{use.who}账本所在的状态库不见了：{p}（不自动新建；要人工从备份恢复或确认后用 twin_state.py init 建）",
                           "LedgerMissing")
     clock = (lambda: now) if now else None
     return TS.Store(p, clock=clock)
 
 
 # ---------- 托管会话登记（P0-02）----------
-def ledger_id(store):
+def ledger_id(store, use=CUSTODY):
     """这个账本的身份：第一次登记托管时生成，存在库的 meta 里。库被换成别的（新建、旧备份前的）就对不上。"""
-    r = store.conn.execute("SELECT value FROM meta WHERE key='custody_ledger_id'").fetchone()
+    r = store.conn.execute("SELECT value FROM meta WHERE key=?", (use.meta_key,)).fetchone()
     return r[0] if r else None
 
 
-def register_session(store, session_id, now=None):
+def register_session(store, session_id, now=None, use=CUSTODY):
     """托管开启时登记（custody.do_on 调）：返回账本身份，custody 把它记进会话（session.ledger.id）。重复登记同一会话不变。"""
-    if not SESSION_ID.match(session_id or ""):
-        raise LedgerError(f"托管号不对：{session_id}", "BadInput")
+    if not use.session_id.match(session_id or ""):
+        raise LedgerError(f"{use.sid_name}不对：{session_id}", "BadInput")
     now = _now(now)
     with store._tx() as c:
-        lid = ledger_id(store)
+        lid = ledger_id(store, use)
         if not lid:
             lid = "L-" + secrets.token_hex(8)
-            c.execute("INSERT INTO meta VALUES ('custody_ledger_id', ?)", (lid,))
-        c.execute("INSERT OR IGNORE INTO custody_sessions VALUES (?,?,?)", (session_id, lid, C.iso(now)))
-        store._record("system", "custody.session.register", "system", "custody_session", session_id, {"ledger_id": lid})
+            c.execute("INSERT INTO meta VALUES (?, ?)", (use.meta_key, lid))
+        c.execute(f"INSERT OR IGNORE INTO {use.sessions} VALUES (?,?,?)", (session_id, lid, C.iso(now)))
+        store._record("system", use.session_event, "system", use.session_obj, session_id, {"ledger_id": lid})
     return lid
 
 
-def check_session(store, session_id, expected_ledger):
+def check_session(store, session_id, expected_ledger, use=CUSTODY):
     """账本和这次托管对得上：账本身份等于开启时记下的、这次托管在账本里登记过。对不上抛 LedgerMismatch。"""
-    lid = ledger_id(store)
+    lid = ledger_id(store, use)
     if not expected_ledger or lid != expected_ledger:
-        raise LedgerError(f"账本身份对不上（托管开启时记的是 {expected_ledger or '没有'}，现在的库是 {lid or '没有'}）："
+        raise LedgerError(f"账本身份对不上（{use.who}开启时记的是 {expected_ledger or '没有'}，现在的库是 {lid or '没有'}）："
                           "库可能被换成新建的或旧备份", "LedgerMismatch")
-    if not store.conn.execute("SELECT 1 FROM custody_sessions WHERE session_id=? AND ledger_id=?", (session_id, lid)).fetchone():
-        raise LedgerError(f"账本里没有托管 {session_id} 的开启登记：库可能被换成开启之前的备份", "LedgerMismatch")
+    if not store.conn.execute(f"SELECT 1 FROM {use.sessions} WHERE session_id=? AND ledger_id=?", (session_id, lid)).fetchone():
+        raise LedgerError(f"账本里没有{use.who} {session_id} 的开启登记：库可能被换成开启之前的备份", "LedgerMismatch")
 
 
-def raw_orphans(store, session_id):
+def raw_orphans(store, session_id, use=CUSTODY):
     """原文目录里有、账本里没有的决定（P0-02：库被旧备份覆盖后，之后记的决定会只剩原文）。"""
-    d = raw_dir() / session_id
+    d = raw_dir(use) / session_id
     if not d.is_dir():
         return []
     ids = {p.stem for p in d.glob("d-*.json") if DECISION_ID.match(p.stem)}
-    have = {r[0] for r in store.conn.execute("SELECT id FROM custody_decisions WHERE session_id=?", (session_id,))}
+    have = {r[0] for r in store.conn.execute(f"SELECT id FROM {use.decisions} WHERE session_id=?", (session_id,))}
     return sorted(ids - have)
 
 
@@ -241,9 +272,9 @@ def _write_private(path, data):
         raise
 
 
-def save_raw(session_id, decision_id, received, reply, now):
+def save_raw(session_id, decision_id, received, reply, now, use=CUSTODY):
     """原文另存（规格 §3.6）：收到的待决事项 + 发出的回复。先于记账写，记账失败时留下的孤儿文件 90 天后一起清。"""
-    p = raw_dir() / session_id / f"{decision_id}.json"
+    p = raw_dir(use) / session_id / f"{decision_id}.json"
     _write_private(p, json.dumps({"decision": decision_id, "session": session_id, "saved_at": C.iso(now),
                                   "received": received, "reply": reply}, ensure_ascii=False, indent=2) + "\n")
     return str(p)
@@ -257,14 +288,14 @@ def read_raw(decision):
         return None
 
 
-def prune_raw(now):
+def prune_raw(now, use=CUSTODY):
     """删掉托管号日期早于 90 天的原文目录（托管号 c-YYYYMMDD-…）。只删认得出的目录，别的不碰。返回删了哪些。"""
-    root, gone = raw_dir(), []
+    root, gone = raw_dir(use), []
     if not root.is_dir():
         return gone
     cutoff = (now.astimezone(C.TZ) - dt.timedelta(days=RAW_KEEP_DAYS)).strftime("%Y%m%d")
     for d in root.iterdir():
-        m = SESSION_ID.match(d.name)
+        m = use.session_id.match(d.name)
         if m and d.is_dir() and not d.is_symlink() and m.group(1) < cutoff:
             shutil.rmtree(d)
             gone.append(d.name)
@@ -272,42 +303,42 @@ def prune_raw(now):
 
 
 # ---------- 读 ----------
-def get(store, decision_id):
-    r = store.conn.execute("SELECT * FROM custody_decisions WHERE id=?", (decision_id,)).fetchone()
+def get(store, decision_id, use=CUSTODY):
+    r = store.conn.execute(f"SELECT * FROM {use.decisions} WHERE id=?", (decision_id,)).fetchone()
     if not r:
         raise LedgerError(f"账本里没有决定 {decision_id}", "NotFound")
     return _row(r)
 
 
-def decisions(store, session_id=None):
+def decisions(store, session_id=None, use=CUSTODY):
     if session_id:
-        rows = store.conn.execute("SELECT * FROM custody_decisions WHERE session_id=? ORDER BY created_at, rowid", (session_id,))
+        rows = store.conn.execute(f"SELECT * FROM {use.decisions} WHERE session_id=? ORDER BY created_at, rowid", (session_id,))
     else:
-        rows = store.conn.execute("SELECT * FROM custody_decisions ORDER BY created_at, rowid")
+        rows = store.conn.execute(f"SELECT * FROM {use.decisions} ORDER BY created_at, rowid")
     return [_row(r) for r in rows]
 
 
-def quotas(store, decision_id):
-    return [dict(r) for r in store.conn.execute("SELECT * FROM custody_quota WHERE decision_id=? ORDER BY id", (decision_id,))]
+def quotas(store, decision_id, use=CUSTODY):
+    return [dict(r) for r in store.conn.execute(f"SELECT * FROM {use.quota} WHERE decision_id=? ORDER BY id", (decision_id,))]
 
 
-def used(store, kind, scope):
-    return store.conn.execute("SELECT COUNT(*) FROM custody_quota WHERE kind=? AND scope=? AND state IN (?,?,?)",
+def used(store, kind, scope, use=CUSTODY):
+    return store.conn.execute(f"SELECT COUNT(*) FROM {use.quota} WHERE kind=? AND scope=? AND state IN (?,?,?)",
                               (kind, scope, *QUOTA_HELD)).fetchone()[0]
 
 
-def drain_blockers(store, session_id):
+def drain_blockers(store, session_id, use=CUSTODY):
     """只读：这次托管还有什么没收完（不作废任何东西）。issued 也算——排空时 drain 会先作废它们。"""
     out = []
-    for d in decisions(store, session_id):
+    for d in decisions(store, session_id, use):
         if d["status"] in IN_FLIGHT + UNSETTLED:
-            out.append(f"{d['id']}（{ACTIONS[d['action']]} {describe_target(d)}）{STATUS[d['status']]}")
-    held = store.conn.execute("SELECT q.decision_id, q.kind, q.state FROM custody_quota q JOIN custody_decisions d"
+            out.append(f"{d['id']}（{use.actions[d['action']]} {use.describe(d)}）{use.status[d['status']]}")
+    held = store.conn.execute(f"SELECT q.decision_id, q.kind, q.state FROM {use.quota} q JOIN {use.decisions} d"
                               " ON d.id = q.decision_id WHERE d.session_id=? AND q.state IN ('reserved','frozen')"
                               " AND d.status NOT IN (?,?,?,?,?)", (session_id, *IN_FLIGHT, *UNSETTLED)).fetchall()
     for q in held:                      # 状态已收口、额度却没跟着收口：账本自相矛盾，按没收完处理
         out.append(f"{q['decision_id']} 的 {q['kind']} 额度还是 {q['state']}（和决定状态对不上）")
-    for x in raw_orphans(store, session_id):
+    for x in raw_orphans(store, session_id, use):
         out.append(f"{x} 有原文、账本里却没有（账本可能被旧备份覆盖）")
     return out
 
@@ -320,36 +351,93 @@ def describe_target(d):
 
 
 # ---------- 写 ----------
-def _event(store, kind, by, decision_id, payload):
-    store._record(store._source(by), f"custody.decision.{kind}", by, OBJ, decision_id, payload)
+def _event(store, kind, by, decision_id, payload, use=CUSTODY):
+    store._record(store._source(by), f"{use.event}.{kind}", by, use.obj, decision_id, payload)
 
 
-def _set_status(store, d, to, by, now, **fields):
+def _set_status(store, d, to, by, now, *, use=CUSTODY, **fields):
     if to not in STATUS_MOVES.get(d["status"], ()):
-        raise LedgerError(f"决定 {d['id']} 现在是「{STATUS[d['status']]}」，不能变成「{STATUS[to]}」", "BadTransition")
+        raise LedgerError(f"决定 {d['id']} 现在是「{use.status[d['status']]}」，不能变成「{use.status[to]}」", "BadTransition")
     sets = {"status": to, "updated_at": C.iso(now), **fields}
-    store.conn.execute(f"UPDATE custody_decisions SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?", (*sets.values(), d["id"]))
+    store.conn.execute(f"UPDATE {use.decisions} SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?", (*sets.values(), d["id"]))
     q = QUOTA_OF_STATUS[to]
-    store.conn.execute("UPDATE custody_quota SET state=?, updated_at=? WHERE decision_id=? AND state != 'released'",
+    store.conn.execute(f"UPDATE {use.quota} SET state=?, updated_at=? WHERE decision_id=? AND state != 'released'",
                        (q, C.iso(now), d["id"]))
     _event(store, to, by, d["id"], {"from": d["status"], "to": to, "quota": q,
-                                    **{k: (json.loads(v) if k == "outcome" else v) for k, v in fields.items()}})
+                                    **{k: (json.loads(v) if k == "outcome" else v) for k, v in fields.items()}}, use)
 
 
-def _admitted(store, session_id, now, status_reader):
+def _admitted(store, session_id, now, status_reader, use=CUSTODY):
     """托管这一层的准入（custody.admission）+ 会话对得上 + 账本是开启时登记的那一份；不过就抛 LedgerError。返回当前有效策略。"""
     st = status_reader(now)
     if not st["admission"]["eligible"]:
-        raise LedgerError("托管不准入：" + "；".join(st["admission"]["reasons"]), "NotAdmitted")
+        raise LedgerError(f"{use.who}不准入：" + "；".join(st["admission"]["reasons"]), "NotAdmitted")
     sess = st.get("session") or {}
     if sess.get("id") != session_id:
-        raise LedgerError(f"托管会话对不上：现在开着的是 {sess.get('id')}，这个决定属于 {session_id}", "WrongSession")
-    check_session(store, session_id, (sess.get("ledger") or {}).get("id"))
+        raise LedgerError(f"{use.who}会话对不上：现在开着的是 {sess.get('id')}，这个决定属于 {session_id}", "WrongSession")
+    check_session(store, session_id, (sess.get("ledger") or {}).get("id"), use)
     return st["policy"]
+
+
+def current_session(store, session_id, now, status_reader, use=CUSTODY):
+    """不要准入的记账（托管的挂起、秘书的交常浩）也只能记进现在这次（开着、排空、冻结中都算），并核对账本身份（第 2 轮 P1-02）。
+    返回现在这次会话（秘书的交常浩要取会话绑定的清单版本）。"""
+    sess = (status_reader(now).get("session") or {})
+    if sess.get("id") != session_id:
+        raise LedgerError(f"{use.who} {session_id} 不是现在这次（已结束或没开），不能再往里记", "WrongSession")
+    check_session(store, session_id, (sess.get("ledger") or {}).get("id"), use)
+    return sess
 
 
 def new_decision_id(now):
     return "d-" + now.astimezone(C.TZ).strftime("%y%m%d") + "-" + secrets.token_hex(3)
+
+
+def record(store, *, use, session_id, row, payload, cites, exp, fixed_now, now, received, reply, by, gate):
+    """记账的通用骨架（托管 issue、秘书 issue 共用）：生成决定号 → 先存原文 → 一个 BEGIN IMMEDIATE 事务里核依据、
+    拿到写锁后才取时间（P2-01）、核有效期、gate(now) 做准入和额度检查（返回 (状态, 额度 [(kind, scope, cap, 说明)], 补充列)，
+    只数不写；补充列是只有准入时才知道的值，例如秘书决定依据的清单版本，同时写进决定行和事件）→ 写决定行、额度行、事件。
+    任何一步抛异常，库里什么都不写、原文删掉。
+    row 是决定行除 id / session_id / status / disposition / expires_at / raw_path / 时间以外的列；payload 是事件里除
+    status / quota 以外的字段。返回决定（dict）。"""
+    prune_raw(now, use)
+    for _ in range(5):
+        did = new_decision_id(now)
+        if not store.conn.execute(f"SELECT 1 FROM {use.decisions} WHERE id=?", (did,)).fetchone():
+            break
+    else:
+        raise LedgerError("生成不出不重复的决定号（随机源异常）", "Corrupt")
+    raw_path = save_raw(session_id, did, received, reply, now, use)
+    try:
+        with store._tx() as c:
+            missing = [x for x in cites if not c.execute(f"SELECT 1 FROM {use.decisions} WHERE id=?", (x,)).fetchone()]
+            if missing:
+                raise LedgerError(f"依据引用的决定不在账本里：{'、'.join(missing)}", "BadInput")
+            now = fixed_now or C.now_tz()                    # 拿到写锁之后再取时间（P2-01）
+            if exp and exp <= now:
+                raise LedgerError("有效期已经过了（拿到账本写锁时）", "BadInput")
+            status, holds, extra = gate(now)
+            ts = C.iso(now)
+            full = {"id": did, "session_id": session_id, **row, **extra, "status": status, "disposition": "open",
+                    "expires_at": C.iso(exp) if exp else None, "raw_path": raw_path, "created_at": ts, "updated_at": ts}
+            c.execute(f"INSERT INTO {use.decisions} ({', '.join(full)}) VALUES ({','.join('?' * len(full))})", tuple(full.values()))
+            for kind, scope, _, _ in holds:
+                c.execute(f"INSERT INTO {use.quota} (session_id, kind, scope, decision_id, state, created_at, updated_at)"
+                          " VALUES (?,?,?,?, 'reserved', ?, ?)", (session_id, kind, scope, did, ts, ts))
+            _event(store, "issue", by, did, {**payload, **extra, "status": status, "quota": [[k, s] for k, s, _, _ in holds]}, use)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            Path(raw_path).unlink()
+        raise
+    return get(store, did, use)
+
+
+def check_holds(store, holds, use=CUSTODY):
+    """额度检查（在 record 的写事务里调）：每项 占用 = reserved + used + frozen，到上限就拒（QuotaExhausted）。"""
+    for kind, scope, cap, what in holds:
+        n = used(store, kind, scope, use)
+        if n >= cap:
+            raise LedgerError(f"{what}已用完（{n}/{cap}）", "QuotaExhausted")
 
 
 def check_owner_text(action, fields):
@@ -408,97 +496,66 @@ def issue(store, *, session_id, project, action, target, basis, revocability, co
     cites = list(cites or ())
     if any(not DECISION_ID.match(str(c)) for c in cites):
         raise LedgerError(f"依据只能引用决定号：{cites}", "BadInput")
-    prune_raw(now)
-    for _ in range(5):
-        did = new_decision_id(now)
-        if not store.conn.execute("SELECT 1 FROM custody_decisions WHERE id=?", (did,)).fetchone():
-            break
-    else:
-        raise LedgerError("生成不出不重复的决定号（随机源异常）", "Corrupt")
-    raw_path = save_raw(session_id, did, received, reply, now)
-    try:
-        with store._tx() as c:
-            missing = [x for x in cites if not c.execute("SELECT 1 FROM custody_decisions WHERE id=?", (x,)).fetchone()]
-            if missing:
-                raise LedgerError(f"依据引用的决定不在账本里：{'、'.join(missing)}", "BadInput")
-            now = fixed_now or C.now_tz()                    # 拿到写锁之后再取时间（P2-01）
-            if exp and exp <= now:
-                raise LedgerError("有效期已经过了（拿到账本写锁时）", "BadInput")
-            holds = []
-            if action == "suspend":              # 不要准入（排空、冻结时也能记），但只能记进现在这次托管，并核对账本身份（第 2 轮 P1-02）
-                sess = (status_reader(now).get("session") or {})
-                if sess.get("id") != session_id:
-                    raise LedgerError(f"托管 {session_id} 不是现在这次（已结束或没开），不能再往里记", "WrongSession")
-                check_session(store, session_id, (sess.get("ledger") or {}).get("id"))
-            else:
-                pol = _admitted(store, session_id, now, status_reader)
-                lim = (pol.get("limits") or {}).get(action)
-                if not lim:
-                    raise LedgerError("有效策略里读不出额度上限，不记账", "NoLimits")
-                if not lim["allowed"]:
-                    raise LedgerError(f"策略没允许托管{ACTIONS[action]}", "NotAllowed")
-                holds = [(action, session_id, lim["per_session"], f"这次托管的{ACTIONS[action]}额度")]
-                if action == "reply":
-                    holds.append(("issue", issue_key, lim["per_issue"], f"子单 {target['issue']} 的托管次数"))
-                for kind, scope, cap, what in holds:
-                    n = used(store, kind, scope)
-                    if n >= cap:
-                        raise LedgerError(f"{what}已用完（{n}/{cap}）", "QuotaExhausted")
-            status = "suspended" if action == "suspend" else "issued"
-            ts = C.iso(now)
-            c.execute("INSERT INTO custody_decisions (id, session_id, project, action, target, issue_key, context, question, summary,"
-                      " ask_owner, basis, cites, revocability, status, disposition, expires_at, raw_path, created_at, updated_at)"
-                      " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)",
-                      (did, session_id, project, action, _j(target), issue_key, context.strip(), question.strip(), summary.strip(),
-                       ask_owner.strip(), basis.strip(), _j(cites), revocability, status, C.iso(exp) if exp else None, raw_path, ts, ts))
-            for kind, scope, _, _ in holds:
-                c.execute("INSERT INTO custody_quota (session_id, kind, scope, decision_id, state, created_at, updated_at)"
-                          " VALUES (?,?,?,?, 'reserved', ?, ?)", (session_id, kind, scope, did, ts, ts))
-            _event(store, "issue", by, did, {"session": session_id, "project": project, "action": action, "target": target,
-                                             "status": status, "revocability": revocability, "cites": cites,
-                                             "expires_at": C.iso(exp) if exp else None,
-                                             "quota": [[k, s] for k, s, _, _ in holds]})
-    except BaseException:
-        with contextlib.suppress(OSError):
-            Path(raw_path).unlink()
-        raise
-    return get(store, did)
+
+    def gate(t):
+        if action == "suspend":              # 不要准入（排空、冻结时也能记），但只能记进现在这次托管，并核对账本身份（第 2 轮 P1-02）
+            current_session(store, session_id, t, status_reader)
+            return "suspended", [], {}
+        pol = _admitted(store, session_id, t, status_reader)
+        lim = (pol.get("limits") or {}).get(action)
+        if not lim:
+            raise LedgerError("有效策略里读不出额度上限，不记账", "NoLimits")
+        if not lim["allowed"]:
+            raise LedgerError(f"策略没允许托管{ACTIONS[action]}", "NotAllowed")
+        holds = [(action, session_id, lim["per_session"], f"这次托管的{ACTIONS[action]}额度")]
+        if action == "reply":
+            holds.append(("issue", issue_key, lim["per_issue"], f"子单 {target['issue']} 的托管次数"))
+        check_holds(store, holds)
+        return "issued", holds, {}
+
+    row = {"project": project, "action": action, "target": _j(target), "issue_key": issue_key, "context": context.strip(),
+           "question": question.strip(), "summary": summary.strip(), "ask_owner": ask_owner.strip(), "basis": basis.strip(),
+           "cites": _j(cites), "revocability": revocability}
+    payload = {"session": session_id, "project": project, "action": action, "target": target, "revocability": revocability,
+               "cites": cites, "expires_at": C.iso(exp) if exp else None}
+    return record(store, use=CUSTODY, session_id=session_id, row=row, payload=payload, cites=cites, exp=exp,
+                  fixed_now=fixed_now, now=now, received=received, reply=reply, by=by, gate=gate)
 
 
-def begin(store, decision_id, by="hermes", now=None, status_reader=None):
+def begin(store, decision_id, by="hermes", now=None, status_reader=None, use=CUSTODY):
     """送达闸、合并执行器动手之前调：现读托管准入、核有效期，issued → executing。过期就作废并释放额度，再抛 LedgerError。"""
     fixed_now = now
-    status_reader = status_reader or (lambda t: C.read_status(now=t))
+    status_reader = status_reader or use.status_reader
     expired = None
     with store._tx():
         now = fixed_now or C.now_tz()                        # 拿到写锁之后再取时间（P2-01）
-        d = get(store, decision_id)
+        d = get(store, decision_id, use)
         if d["status"] != "issued":
-            raise LedgerError(f"决定 {decision_id} 现在是「{STATUS[d['status']]}」，不能开始送达", "BadTransition")
+            raise LedgerError(f"决定 {decision_id} 现在是「{use.status[d['status']]}」，不能开始送达", "BadTransition")
         if now >= C.parse_iso(d["expires_at"]):
-            _set_status(store, d, "void", "system", now, void_reason="过期")
+            _set_status(store, d, "void", "system", now, use=use, void_reason="过期")
             expired = d["expires_at"]
         else:
-            _admitted(store, d["session_id"], now, status_reader)
-            _set_status(store, d, "executing", by, now)
+            _admitted(store, d["session_id"], now, status_reader, use)
+            _set_status(store, d, "executing", by, now, use=use)
     if expired:
         raise LedgerError(f"决定 {decision_id} 已于 {expired} 过期，已作废、额度已释放", "Expired")
-    return get(store, decision_id)
+    return get(store, decision_id, use)
 
 
-def finish(store, decision_id, result, outcome=None, by="hermes", now=None):
+def finish(store, decision_id, result, outcome=None, by="hermes", now=None, use=CUSTODY):
     """送达 / 合并的结果：done（确认做成，额度计为已用）、failed（确认没做成，释放）、unknown（结果不明，额度冻结、不重发）。"""
     if result not in ("done", "failed", "unknown"):
         raise LedgerError(f"结果只能是 done / failed / unknown：{result}", "BadInput")
     now = _now(now)
     with store._tx():
-        d = get(store, decision_id)
+        d = get(store, decision_id, use)
         if d["status"] != "executing":
-            raise LedgerError(f"决定 {decision_id} 现在是「{STATUS[d['status']]}」，不能记结果（要先 begin）", "BadTransition")
+            raise LedgerError(f"决定 {decision_id} 现在是「{use.status[d['status']]}」，不能记结果（要先 begin）", "BadTransition")
         if d["action"] == "merge" and result == "done" and not SHA.match(str((outcome or {}).get("merge_commit"))):
             raise LedgerError("合并做成要带完整的合并提交号（outcome.merge_commit，40 位）：推翻时要靠它开撤销 PR", "BadInput")
-        _set_status(store, d, result, by, now, outcome=_j({**d["outcome"], **(outcome or {})}))
-    return get(store, decision_id)
+        _set_status(store, d, result, by, now, use=use, outcome=_j({**d["outcome"], **(outcome or {})}))
+    return get(store, decision_id, use)
 
 
 def reconcile_errors(d, result, evidence):
@@ -524,62 +581,62 @@ def reconcile_errors(d, result, evidence):
     return []
 
 
-def reconcile(store, decision_id, result, evidence, by="hermes", now=None):
+def reconcile(store, decision_id, result, evidence, by="hermes", now=None, use=CUSTODY):
     """只读对账之后记结论（7.6）：done（核实做成了）、failed（核实没做成，释放额度）、unreconciled（核不清，额度继续冻结）。
     executing（进程中途没了）也能对账。evidence 见 reconcile_errors；合并核实做成时把 merge_commit 写进 outcome。"""
     if result not in ("done", "failed", "unreconciled"):
         raise LedgerError(f"对账结论只能是 done / failed / unreconciled：{result}", "BadInput")
     now = _now(now)
     with store._tx():
-        d = get(store, decision_id)
+        d = get(store, decision_id, use)
         if d["status"] not in ("executing", "unknown", "unreconciled"):
-            raise LedgerError(f"决定 {decision_id} 现在是「{STATUS[d['status']]}」，不用对账", "BadTransition")
-        bad = reconcile_errors(d, result, evidence)
+            raise LedgerError(f"决定 {decision_id} 现在是「{use.status[d['status']]}」，不用对账", "BadTransition")
+        bad = use.reconcile_errors(d, result, evidence)
         if bad:
             raise LedgerError("对账证据不够：" + "；".join(bad), "BadEvidence")
         if d["status"] == "unreconciled" and result == "unreconciled":
-            _event(store, "reconcile", by, d["id"], {"to": "unreconciled", "evidence": evidence})
+            _event(store, "reconcile", by, d["id"], {"to": "unreconciled", "evidence": evidence}, use)
         else:
             if d["status"] == "executing":           # executing 没有直接到 done / failed 以外的路：先记成结果不明，再对账
-                _set_status(store, d, "unknown", "system", now)
-                d = get(store, decision_id)
+                _set_status(store, d, "unknown", "system", now, use=use)
+                d = get(store, decision_id, use)
             out = {**d["outcome"], "reconcile": evidence}
             if d["action"] == "merge" and result == "done":
                 out["merge_commit"] = evidence["merge_commit"]
             if d["action"] == "reply" and result == "done":
                 out["comment_id"] = evidence["comment_id"]
-            _set_status(store, d, result, by, now, outcome=_j(out))
-    return get(store, decision_id)
+            _set_status(store, d, result, by, now, use=use, outcome=_j(out))
+    return get(store, decision_id, use)
 
 
-def void(store, decision_id, reason, by="system", now=None):
+def void(store, decision_id, reason, by="system", now=None, use=CUSTODY):
     """作废（只限 issued：还没开始送达的）：释放额度。送达闸以后见到它就不发。"""
     if not (reason or "").strip():
         raise LedgerError("作废要写原因", "BadInput")
     now = _now(now)
     with store._tx():
-        d = get(store, decision_id)
+        d = get(store, decision_id, use)
         if d["status"] != "issued":
-            raise LedgerError(f"决定 {decision_id} 现在是「{STATUS[d['status']]}」，只有已出未送达的才能作废", "BadTransition")
-        _set_status(store, d, "void", by, now, void_reason=reason)
-    return get(store, decision_id)
+            raise LedgerError(f"决定 {decision_id} 现在是「{use.status[d['status']]}」，只有已出未送达的才能作废", "BadTransition")
+        _set_status(store, d, "void", by, now, use=use, void_reason=reason)
+    return get(store, decision_id, use)
 
 
-def drain(store, session_id, ledger=None, now=None):
+def drain(store, session_id, ledger=None, now=None, use=CUSTODY):
     """排空（规格 §3.8 第 2、4、5 步）：先作废这次托管里全部已出未送达的决定、释放额度，再返回还没收完的事项（空 = 排空完成）。
     作废和查询在同一个写事务里：查完之前，出口闸记不进新决定、送达闸也开始不了。
     给了 ledger（托管开启时记下的账本身份）就先核对账本是不是那一份（P0-02），对不上抛 LedgerMismatch；custody.drain_proof 必须给。"""
     now = _now(now)
     with store._tx():
         if ledger is not None:
-            check_session(store, session_id, ledger)
-        for d in decisions(store, session_id):
+            check_session(store, session_id, ledger, use)
+        for d in decisions(store, session_id, use):
             if d["status"] == "issued":
-                _set_status(store, d, "void", "system", now, void_reason="托管排空")
-        return drain_blockers(store, session_id)
+                _set_status(store, d, "void", "system", now, use=use, void_reason=f"{use.who}排空")
+        return drain_blockers(store, session_id, use)
 
 
-def set_disposition(store, decision_id, to, note, by="user", now=None):
+def set_disposition(store, decision_id, to, note, by="user", now=None, use=CUSTODY):
     """处置状态转换（规格 §3.6）。推翻（overturned）只能由常浩（by="user"，调用方先核实是常浩私聊里的点击）；
     已纠正只限回复，已回退 / 回退失败只限合并。note 必须写（推翻原因、纠正评论、revert PR、失败原因）。"""
     if to not in DISPOSITION:
@@ -588,20 +645,20 @@ def set_disposition(store, decision_id, to, note, by="user", now=None):
         raise LedgerError("处置要写说明", "BadInput")
     now = _now(now)
     with store._tx():
-        d = get(store, decision_id)
+        d = get(store, decision_id, use)
         if (d["disposition"], to) not in DISPOSITION_MOVES:
             raise LedgerError(f"决定 {decision_id} 的处置是「{DISPOSITION[d['disposition']]}」，不能变成「{DISPOSITION[to]}」",
                               "BadTransition")
         if to == "overturned":
             if by != "user":
-                raise LedgerError("只有常浩能推翻托管决定", "NotOwner")
+                raise LedgerError(f"只有常浩能推翻{use.who}决定", "NotOwner")
             if d["status"] in IN_FLIGHT:
-                raise LedgerError(f"决定 {decision_id} 还在途（{STATUS[d['status']]}），等它有结果再推翻", "InFlight")
-        if d["action"] not in DISPOSITION_ACTION.get(to, (d["action"],)):
-            raise LedgerError(f"{ACTIONS[d['action']]}类决定不能记成「{DISPOSITION[to]}」", "BadTransition")
-        store.conn.execute("UPDATE custody_decisions SET disposition=?, updated_at=? WHERE id=?", (to, C.iso(now), d["id"]))
-        _event(store, f"disposition.{to}", by, d["id"], {"from": d["disposition"], "to": to, "note": note})
-    return get(store, decision_id)
+                raise LedgerError(f"决定 {decision_id} 还在途（{use.status[d['status']]}），等它有结果再推翻", "InFlight")
+        if d["action"] not in use.disposition_action.get(to, (d["action"],)):
+            raise LedgerError(f"{use.actions[d['action']]}类决定不能记成「{DISPOSITION[to]}」", "BadTransition")
+        store.conn.execute(f"UPDATE {use.decisions} SET disposition=?, updated_at=? WHERE id=?", (to, C.iso(now), d["id"]))
+        _event(store, f"disposition.{to}", by, d["id"], {"from": d["disposition"], "to": to, "note": note}, use)
+    return get(store, decision_id, use)
 
 
 # ---------- 命令行 ----------
