@@ -12,7 +12,7 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
      读工人只读的凭证镜像（/Users/Shared/dt-autoloop/grants/status.json）和任务单（tasks/<单号>.md）：凭证有效、没过期、
      允许改文件、代次是当前的且没作废、执行方 / 仓库 / 规则名对得上、任务单五要素的哈希等于凭证记的范围哈希；
      续接时还要和第一轮钉下的范围哈希、仓库、执行方一致（续接后范围不扩大）；这张单累计用时没到上限（2 小时）。
-  2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 agent/<执行方>/<单号>，基线是第一轮时的 origin/main；
+  2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 <执行方>/<单号>（如 claude/t-…），基线是第一轮时的 origin/main；
      续接回同一目录、同一分支（会话也接得上）。每张单的缓存目录分开。
   3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
      ~/dt-work/.state/<单号>.log，不混进输出。用时到上限就停掉 CLI。
@@ -103,9 +103,9 @@ def budget():
 
 
 def branch_name(executor, task_id):
-    """本单分支。dt-sandbox 的 GitHub 规则集只放行 main 和 agent/**（《工程流程》8.5「只推 agent/ 前缀分支」），
+    """本单分支 <执行方>/<单号>（常浩 2026-11-18 选：改 dt-sandbox 规则集放行 claude/**，基线 hermes/baselines/）；
     受信发布脚本按同一写法核对（autoloop_publish.branch_name）。"""
-    return f"agent/{executor}/{task_id}"
+    return f"{executor}/{task_id}"
 
 
 def now_tz():

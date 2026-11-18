@@ -154,7 +154,7 @@ class FirstTurnAndResume(WorkerBase):
         self.assertIn(f"/.cache/{tid}/", c["npm"])
         lines = r.stdout.strip().splitlines()                                     # 输出原样，不混本脚本的话
         self.assertEqual([json.loads(x)["type"] for x in lines], ["system", "result"])
-        branch = f"agent/claude/{tid}"
+        branch = f"claude/{tid}"
         self.assertEqual(git("symbolic-ref", "HEAD", cwd=self.wt(tid)), f"refs/heads/{branch}")
         self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))
         m = self.handoff(tid)
@@ -212,7 +212,7 @@ class FirstTurnAndResume(WorkerBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(c["argv"][:-1], list(args[:-1]))
         self.assertTrue(c["argv"][-1].startswith("做事\n\n【dt-worktree 启动脚本】"))
-        self.assertIn(f"agent/codex/{tid}", c["argv"][-1])
+        self.assertIn(f"codex/{tid}", c["argv"][-1])
 
     def test_codex_wrapper_uses_codex_message_format_when_stopping(self):
         tid = self.new_live_task(executor="codex")

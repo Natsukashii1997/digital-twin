@@ -4,7 +4,7 @@ hermes/scripts/autoloop_publish.py（受信发布最小版，#205 批 0C）：�
 在临时目录里生成，凭证由真实的 0B-1 网关签；「GitHub」是临时目录里的本地裸仓库，gh 是假的（fake_gh.py）。
 不联网、不碰 ~/Library/Application Support/DigitalTwin、不碰真实仓库。
 
-验收 3（方案第 9 节 0C）：只能推非 main 分支——推送目标写死成本单 agent/ 分支，main 在每项测试后都不变。
+验收 3（方案第 9 节 0C）：只能推非 main 分支——推送目标写死成本单 <执行方>/<单号> 分支，main 在每项测试后都不变。
 """
 import contextlib
 import hashlib
@@ -46,7 +46,7 @@ class PublishBase(WorkerBase):
         self.assertEqual(git("rev-parse", "main", cwd=self.remote), self.main_before, "main 被动过")
 
     def remote_branch(self, tid, executor="claude"):
-        r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/agent/{executor}/{tid}"],
+        r = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{executor}/{tid}"],
                            cwd=self.remote, capture_output=True, text=True)
         return r.stdout.strip() or None
 
@@ -78,13 +78,13 @@ class Publish(PublishBase):
         out = P.publish(tid)
         head = self.handoff(tid)["head"]
         self.assertEqual(self.remote_branch(tid), head)
-        self.assertEqual((out["pushed"], out["pr_opened"], out["branch"]), (True, True, f"agent/claude/{tid}"))
+        self.assertEqual((out["pushed"], out["pr_opened"], out["branch"]), (True, True, f"claude/{tid}"))
         create = [c for c in self.gh_calls() if c[:2] == ["pr", "create"]]
         (c,) = create
-        self.assertEqual((P_opt(c, "-H"), P_opt(c, "-B"), P_opt(c, "-R")), (f"agent/claude/{tid}", "main", "o/dt-sandbox"))
+        self.assertEqual((P_opt(c, "-H"), P_opt(c, "-B"), P_opt(c, "-R")), (f"claude/{tid}", "main", "o/dt-sandbox"))
         self.assertTrue(P_opt(c, "-t").startswith(f"{tid}："))
         refs = git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=self.remote).split()
-        self.assertEqual(sorted(refs), sorted(["refs/heads/main", f"refs/heads/agent/claude/{tid}"]))
+        self.assertEqual(sorted(refs), sorted(["refs/heads/main", f"refs/heads/claude/{tid}"]))
         log = [json.loads(x) for x in (self.root / "publish.jsonl").read_text().splitlines()]
         self.assertEqual(log[-1]["what"], "发布")
 
@@ -119,7 +119,7 @@ class OnlyNonMain(PublishBase):
 
     def test_manifest_naming_main_or_other_branch_is_refused(self):
         tid = self.worked()
-        for branch in ("main", "agent/claude/t-20260101-abcdef", f"claude/{tid}", f"agent/codex/{tid}"):
+        for branch in ("main", "claude/t-20260101-abcdef", f"agent/claude/{tid}", f"codex/{tid}", f"claude/{tid}/x"):
             self.rewrite_manifest(tid, branch=branch)
             self.rejects(tid, "交接清单的内容不合格式")
 
@@ -129,7 +129,7 @@ class OnlyNonMain(PublishBase):
         m = self.handoff(tid)
         bundle = self.outbox / tid / m["bundle"]
         git("update-ref", "refs/heads/main", m["head"], cwd=wt)                  # 工人把 main 也指到自己的提交
-        git("bundle", "create", "-q", str(bundle), f"refs/heads/agent/claude/{tid}", "refs/heads/main", f"^{m['base']}",
+        git("bundle", "create", "-q", str(bundle), f"refs/heads/claude/{tid}", "refs/heads/main", f"^{m['base']}",
             cwd=wt)
         self.rewrite_manifest(tid, bundle_sha256=hashlib.sha256(bundle.read_bytes()).hexdigest())
         self.rejects(tid, "不只有本单分支")
@@ -164,7 +164,7 @@ class OnlyNonMain(PublishBase):
         (seed / "foreign.txt").write_text("x")
         git("add", "-A", cwd=seed)
         git("commit", "-q", "-m", "别人的提交", cwd=seed)
-        git("push", "-q", str(self.remote), f"x:refs/heads/agent/claude/{tid}", cwd=seed)
+        git("push", "-q", str(self.remote), f"x:refs/heads/claude/{tid}", cwd=seed)
         foreign = git("rev-parse", "HEAD", cwd=seed)
         with self.assertRaises(P.Rejected) as c:
             P.publish(tid)
@@ -172,10 +172,11 @@ class OnlyNonMain(PublishBase):
         self.assertEqual(self.remote_branch(tid), foreign)
 
     def test_assert_not_main(self):
-        for bad in ("main", "agent/claude/main", "claude/t-20261118-abcdef", "agent/../main"):
+        for bad in ("main", "claude/main", "agent/claude/t-20261118-abcdef", "claude/../main", "other/t-20261118-abcdef"):
             with self.assertRaises(P.Rejected):
                 P.assert_not_main(bad)
-        P.assert_not_main("agent/claude/t-20261118-abcdef")
+        P.assert_not_main("claude/t-20261118-abcdef")
+        P.assert_not_main("codex/t-20261118-abcdef")
 
     def test_sensitive_paths_are_handed_to_owner(self):
         tid = self.worked(mode="workflow")
@@ -199,7 +200,7 @@ class GrantAtPublish(PublishBase):
 
     def test_manifest_cannot_choose_repo_or_executor(self):
         tid = self.worked()
-        self.rewrite_manifest(tid, executor="codex", branch=f"agent/codex/{tid}")
+        self.rewrite_manifest(tid, executor="codex", branch=f"codex/{tid}")
         self.rejects(tid, "仓库或执行方和凭证不一致")
 
     def test_grant_without_push_or_pr_action(self):

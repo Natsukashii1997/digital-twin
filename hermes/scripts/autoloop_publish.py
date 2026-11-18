@@ -6,14 +6,15 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 （/Users/dt-worker/dt-outbox/<单号>/handoff.json + <单号>.bundle）。本脚本是控制面的受信发布出口，按 ADR-015 归 dt-gate
 账号（「受信发布出口从第一天按归 dt-gate 写」）：取包、核对后推分支、开 PR：
 
-  1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 agent/<执行方>/<单号>；包先复制到私有临时目录、
+  1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 <执行方>/<单号>；包先复制到私有临时目录、
      核对哈希再用；只取 Git 对象（bundle verify + fetch，打开对象校验，钩子关掉），不检出、不运行里面任何东西。
   2. 凭证以主账号的凭证库为准（autoloop_grants.check，和所有出口共用）：推分支前核 push_branch、开 PR 前核 open_pr，
      代次用清单里的、必须是当前代且没作废；仓库从凭证取，不信清单。
   3. 能机械判的发布边界：包里只有本单分支一个引用、头提交对得上；基线是 main 上的提交、头提交从基线长出来；
      改动不碰合并规则 merge_rules.json 里的高风险路径（.github/、ops/、密钥类……）——碰了就不发、交常浩。
-  4. 只推非 main：推送目标写死成 refs/heads/agent/<执行方>/<单号>，不带 --force；远端同名分支已有别的提交就不覆盖。
-     GitHub 一侧 dt-sandbox 的规则集也只放行 agent/**（hermes/baselines/dt-sandbox-github.json）。
+  4. 只推非 main：推送目标写死成 refs/heads/<执行方>/<单号>，不带 --force；远端同名分支已有别的提交就不覆盖。
+     GitHub 一侧 dt-sandbox 的规则集只放行 main、agent/** 和 claude/**（常浩 11-18 放行 claude/，hermes/baselines/dt-sandbox-github.json）；
+     codex/** 还没放行，Codex 单推送会被 GitHub 拒绝。
   5. 同一分支已有开着的 PR 就沿用；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
 
 本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
@@ -48,6 +49,7 @@ MAX_MANIFEST = 4096
 MAX_BUNDLE = 50 * 1024 * 1024
 SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+BRANCH = re.compile(r"^(claude|codex)/t-\d{8}-[0-9a-f]{6}$")
 KEYS = {"schema", "task_id", "generation", "executor", "repo", "branch", "base", "head", "bundle", "bundle_sha256",
         "run", "at"}
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "transfer.fsckObjects=true",
@@ -61,7 +63,7 @@ class Rejected(Exception):
 
 def branch_name(executor, task_id):
     """和工人侧 ops/dt_worktree.branch_name 同一写法（测试核对两边一致）。"""
-    return f"agent/{executor}/{task_id}"
+    return f"{executor}/{task_id}"
 
 
 def outbox():
@@ -126,7 +128,7 @@ def read_manifest(task_id):
           and m["bundle"] == f"{task_id}.bundle" and isinstance(m["bundle_sha256"], str)
           and HEX64.match(m["bundle_sha256"]))
     if not ok:
-        raise Rejected("交接清单的内容不合格式（分支名必须是 agent/<执行方>/<单号>）")
+        raise Rejected("交接清单的内容不合格式（分支名必须是 <执行方>/<单号>）")
     return m
 
 
@@ -154,8 +156,8 @@ def is_ancestor(mirror, a, b):
 
 
 def assert_not_main(branch):
-    """推送目标的最后一道写死检查：只推 agent/ 前缀的本单分支。"""
-    if not branch.startswith("agent/") or branch.split("/")[-1] in ("main", "master") or ".." in branch:
+    """推送目标的最后一道写死检查：只推 <执行方>/<单号> 形式的本单分支。"""
+    if not BRANCH.match(branch or ""):
         raise Rejected(f"不推这个分支：{branch}")
 
 

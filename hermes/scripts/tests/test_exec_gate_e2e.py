@@ -151,12 +151,12 @@ class ExecGateEndToEnd(HubFixture):
         self.assertEqual(Path(c["cwd"]).resolve(), (self.work / "dt-sandbox/wt" / tid).resolve())
         self.assertIn("【dt-worktree 启动脚本】", c["argv"][1])
         m = json.loads((self.outbox / tid / "handoff.json").read_text())
-        self.assertEqual((m["branch"], m["generation"]), (f"agent/claude/{tid}", 1))
+        self.assertEqual((m["branch"], m["generation"]), (f"claude/{tid}", 1))
 
         main_before = git("rev-parse", "main", cwd=self.remote)
         out = P.publish(tid)
         self.assertTrue(out["pushed"])
-        self.assertEqual(git("rev-parse", f"refs/heads/agent/claude/{tid}", cwd=self.remote), m["head"])
+        self.assertEqual(git("rev-parse", f"refs/heads/claude/{tid}", cwd=self.remote), m["head"])
         self.assertEqual(git("rev-parse", "main", cwd=self.remote), main_before)
 
         G.revoke(tid)
