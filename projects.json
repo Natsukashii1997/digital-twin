@@ -1,6 +1,6 @@
 {
   "version": "v1.6 · 2026-11-08",
-  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有私有远端（carvomoto 例外），默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。 2026-11-07 起 projects 每条带 type（product / capability / infrastructure，《项目体系重构 V1.3》第 2.1 节），category 仍表示存续分类。 2026-11-08 起 inventory 里可标 sandbox: true（DT-ORC 5.3：无人值守只在这类项目里跑，multica_night.py 开跑前核对），首个是 dt-sandbox（#92）。",
+  "note": "Hermes 只往 projects 里的活跃仓库派单，worktree 按所属主仓库匹配。inventory 是 M3 B1 盘点的其余仓库，只供查去留，不派单、不现查进展。GitHub 统一用 Natsukashii1997（原 abdoulaziznafiou03-creator，同一账号改名）；M3 批 3（2026-10-26）起活跃项目默认有远端（carvomoto 例外）；2026-11-18 常浩定名下仓库全部公开、新仓库默认公开（省 GitHub Actions 额度），当天 25 个仓库已转公开，默认分支 main，只允许 squash 合并。 2026-11-07 常浩全量盘点后定了去留（digital-twin #75）：删除的项目先移到 ~/Archive/repos/待删/（移入记录.tsv 记原路径），真正删除由常浩动手；GitHub 上的只归档不删。 2026-11-07 起 projects 每条带 type（product / capability / infrastructure，《项目体系重构 V1.3》第 2.1 节），category 仍表示存续分类。 2026-11-08 起 inventory 里可标 sandbox: true（DT-ORC 5.3：无人值守只在这类项目里跑，multica_night.py 开跑前核对），首个是 dt-sandbox（#92）。",
   "projects": [
     {
       "id": "work-desk",
