@@ -132,7 +132,8 @@ class RosterConflict(Exception):
 def dispatch_projects():
     """可代批的项目（和 autoloop_grants.allowed_repos 的派单范围一致，但只认已合并的 origin/main 名册，读法同
     custody_ledger.sandbox_projects）：projects 里 category 活跃、write_allowed 明确为 true、有 github 的，加上 inventory 里
-    sandbox: true、path 是 github: 的。缺字段的一律不算。返回 {项目名（仓库短名）: 完整仓库名}；读不了抛异常（调用方 fail closed）；
+    sandbox: true、path 是 github:<owner/repo> 的。缺字段、仓库名不是完整 owner/repo 写法的一律不算（两个来源同一条校验，
+    PR #207 第 2 轮 P1-05：否则签名里会存进自己的结构校验不认的仓库名，签完状态文件就读不回来）。返回 {项目名（仓库短名）: 完整仓库名}；读不了抛异常（调用方 fail closed）；
     同一个短名对应多个不同仓库抛 RosterConflict（整份名册都不用：名册本身有歧义，宁可全停也不猜）。"""
     import multica_night as MN
     d = MN.committed_json(MN.ROSTER_FILE)
@@ -143,8 +144,9 @@ def dispatch_projects():
             fulls.append(gh)
     for e in d.get("inventory", []):
         path = str((e or {}).get("path") or "") if isinstance(e, dict) else ""
-        if isinstance(e, dict) and e.get("sandbox") is True and path.startswith("github:"):
-            fulls.append(path[len("github:"):])
+        full = path[len("github:"):] if path.startswith("github:") else ""
+        if isinstance(e, dict) and e.get("sandbox") is True and re.fullmatch(REPO_FULL, full):
+            fulls.append(full)
     out, clash = {}, {}
     for full in fulls:
         short = full.split("/")[-1]
@@ -422,6 +424,10 @@ def transaction(fn, now=None, path=None):
     def commit(doc):
         prune(doc, now)
         doc["updated_at"] = C.iso(now)
+        try:
+            check_doc(doc)                       # 落盘前按读回时的结构校验再核一遍：写不进自己读不回的东西（第 2 轮 P1-05）
+        except (C.Bad, ValueError, KeyError, TypeError, AttributeError) as e:
+            raise Rejected(f"这次改动后的秘书状态不合结构（{e}），没有写入", "Corrupt")
         C.save(doc, p)
 
     try:

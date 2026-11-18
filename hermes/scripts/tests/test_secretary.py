@@ -241,6 +241,8 @@ class PolicyTemplateTests(Base):
             {"path": "github:o/sandbox", "sandbox": True},
             {"path": "github:o/strsandbox", "sandbox": "true"},
             {"path": "~/local", "sandbox": True},
+            {"path": "github:invalid", "sandbox": True},            # 不是 owner/repo：不算（第 2 轮 P1-05）
+            {"path": "github:o/bad name", "sandbox": True},
         ]}
         import multica_night as MN
         with mock.patch.object(MN, "committed_json", return_value=roster) as cj:
@@ -284,6 +286,28 @@ class SignTests(Base):
         self.rejects("VersionReuse", S.do_sign, self.say(f"签代批清单 v2 {sha2[:12]}", at(9, 3)), now=at(9, 3))
         self.sign(when=at(9, 4), version=4)
         self.assertEqual(self.doc()["signed_versions"], [3, 4])
+
+    def test_invalid_inventory_repo_name_cannot_be_signed_into_state(self):
+        """第 2 轮 P1-05：名册 inventory 里 path 是 github:invalid 的沙盒不算可代批项目，清单写它签不了，状态文件不动。"""
+        import multica_night as MN
+        roster = {"projects": [], "inventory": [{"path": "github:invalid", "sandbox": True}, {"path": "github:" + REPO, "sandbox": True}]}
+        S.dispatch_projects.side_effect = lambda: REAL_DISPATCH()
+        sha = self.write_policy(projects=("dt-sandbox", "invalid"))
+        with mock.patch.object(MN, "committed_json", return_value=roster):
+            self.rejects("RosterMismatch", S.do_sign, self.say(f"签代批清单 v3 {sha[:12]}", at(9)), now=at(9))
+        self.assertFalse(self.state.exists())
+        self.assertFalse(C.marker_path(self.state).exists())
+
+    def test_state_that_would_not_load_back_is_never_written(self):
+        """第 2 轮 P1-05 的第二道防线：fn 改出了结构不合格的状态，落盘前就拒绝，原文件不变、读得回来。"""
+        self.sign()
+        before = self.state.read_bytes()
+
+        def corrupt(doc):
+            doc["signature"]["projects"] = {"dt-sandbox": "invalid"}
+        self.rejects("Corrupt", S.transaction, corrupt, now=at(10))
+        self.assertEqual(self.state.read_bytes(), before)
+        S.load()
 
     def test_roster_mismatch_or_unreadable_blocks_signing(self):
         sha = self.write_policy(projects=("dt-sandbox", "ghost"))
