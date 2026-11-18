@@ -151,8 +151,6 @@ class RecoveryGate(Base):
         hub.assert_not_called()
 
     def test_unknown_send_is_frozen_then_reconciled_without_resending(self):
-        import tidings_weekly as W
-
         def timeout(args, what, cwd=None):
             self.lark.calls.append(args)
             raise F.SendError("发卡片：lark-cli 跑不起来（TimeoutExpired）")   # 其实飞书已经收下了
@@ -163,10 +161,10 @@ class RecoveryGate(Base):
         self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"]]), 1)
         with F.db() as con:                                          # 取登记的令牌
             tok = con.execute("SELECT token FROM feishu_cards WHERE card_id = 7").fetchone()[0]
-        msg = {"message_id": "om_found", "body": {"content": json.dumps({"autoloop": tok})}}
-        with E.db() as con:                                          # 让「动作开始」早于 5 分钟，列表滞后窗口已过
-            con.execute("UPDATE exits SET started_at = '2026-11-18T00:00:00+08:00'")
-        with mock.patch.object(W, "lark", return_value={"messages": [msg]}):
+        card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": tok, "o": 0}}]}]}}
+        msg = {"message_id": "om_found", "msg_type": "interactive", "sender": {"sender_type": "app"},
+               "body": {"content": json.dumps(card)}}
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg]}):
             notes = E.reconcile()
         self.assertEqual(notes[0]["state"], "done")
         self.assertEqual(self.register(), "om_found")                # 用对账找到的消息号，不再发
@@ -174,11 +172,23 @@ class RecoveryGate(Base):
         self.assertEqual(F.card_by_token(tok)["message_id"], "om_found")
 
     def test_definite_send_failure_can_be_retried(self):
+        """审查 P1-05：只有 lark-cli 在本机根本没跑起来才算确定没发，可以重发。"""
+        def missing(args, what, cwd=None):
+            raise F.SendError("发卡片：lark-cli 跑不起来（FileNotFoundError）")
+        with mock.patch.object(F, "lark", missing), self.assertRaises(F.SendError):
+            self.register()
+        self.assertEqual(self.register(), "om_fixture_1")
+
+    def test_feishu_error_reply_is_unknown_not_retried(self):
+        """审查 P1-05：飞书回了错误（ok=false）不能证明请求没到，记结果不明、冻结这张卡，不重发。"""
         def refused(args, what, cwd=None):
+            self.lark.calls.append(args)
             raise F.SendError("发卡片失败：机器人不在会话里")
         with mock.patch.object(F, "lark", refused), self.assertRaises(F.SendError):
             self.register()
-        self.assertEqual(self.register(), "om_fixture_1")
+        with self.assertRaisesRegex(F.Deferred, "结果不明"):
+            self.register()
+        self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"]]), 1)
 
 
 class Answer(Base):

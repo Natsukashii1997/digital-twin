@@ -36,7 +36,8 @@ elif mode == "send":
         chat = Path(p["chat_file"])
         msgs = json.loads(chat.read_text()) if chat.exists() else []
         mid = f"om_drill_{len(msgs) + 1}"
-        msgs.append({"message_id": mid, "body": {"content": args[args.index("--content") + 1]}})
+        msgs.append({"message_id": mid, "msg_type": "interactive", "sender": {"sender_type": "app"},
+                     "body": {"content": args[args.index("--content") + 1]}})
         chat.write_text(json.dumps(msgs))
         time.sleep(120)
     F.lark = lark

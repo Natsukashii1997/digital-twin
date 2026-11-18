@@ -36,7 +36,7 @@ class Base(unittest.TestCase):
             R.pin(C1, confirm=True)
 
     def unknown(self, key="merge:o/r:1:h", scope="repo:o/r"):
-        with mock.patch.object(R, "ensure_open"), self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError):                    # 闸已开：走真的 ensure_open / admit
             E.guard(key.split(":")[0], key, scope, {}, lambda: (_ for _ in ()).throw(RuntimeError("断")))
 
 
@@ -165,10 +165,15 @@ class Epoch(unittest.TestCase):
             with self.assertRaises(R.HubDown):
                 R.current_epoch()
             with mock.patch.object(R, "healthz", return_value=C1):
+                with self.assertRaisesRegex(R.HubDown, "读不到 up.pid"):          # 审查 P2-01：认不出中台进程不开闸
+                    R.current_epoch()
                 Path(d, "up.pid").write_text(str(os.getpid()))
-                ep = R.current_epoch()
-        self.assertNotEqual(ep["boot"], "?")
-        self.assertTrue(ep["hub_process"].startswith(f"{os.getpid()}@"))
+                with self.assertRaisesRegex(R.HubDown, "不是中台"):               # 进程在，但不是 agent-autoloop
+                    R.current_epoch()
+                Path(d, "up.pid").write_text("999999")
+                with self.assertRaisesRegex(R.HubDown, "不在或查不了"):
+                    R.current_epoch()
+        self.assertNotEqual(E.boot_id(), "?")                                    # 真中台的进程身份见 test_autoloop_drill
 
 
 if __name__ == "__main__":

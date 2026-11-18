@@ -25,7 +25,6 @@ import autoloop_config as C  # noqa: E402
 import autoloop_exits as E  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
-import tidings_weekly as W  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
@@ -145,9 +144,7 @@ class PushBranch(Drill):
         out = E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))   # 重启后同一个动作再来
         self.assertEqual((out["again"], out["remote_head"]), (True, t["head"]))            # 对账确认已推：不重推
         self.assertEqual(self.push_count(), 1)
-        self.assertFalse(self.gate_open())                                                  # 强杀留下的不明关过闸
-        R.ensure_open()
-        self.assertTrue(self.gate_open())
+        self.assertTrue(self.gate_open())                    # 强杀留下的不明关过闸，领资格前已整体对账、重新开闸
 
     def test_timeout_before_push_then_retry_once(self):
         bare, work, t = self.repo()
@@ -287,7 +284,7 @@ class Cards(Drill):
         p = self.child("send", {"card": card, "chat_file": str(chat_file)})
         self.kill_when(p, lambda: chat_file.exists() and len(json.loads(chat_file.read_text())) == 1, "卡片发到私聊")
         msgs = json.loads(chat_file.read_text())
-        with mock.patch.object(W, "lark", return_value={"messages": msgs}):     # 对账：在私聊里按令牌找那条
+        with mock.patch.object(E, "lark_read", return_value={"messages": msgs}):  # 对账：在私聊里按令牌找那条
             ref = F.deliver(card)
         self.assertEqual((ref, self.sent), ("om_drill_1", []))                  # 用找到的消息号，不重发
         F.confirm(card["id"])                                                  # 报送达用的也是这条

@@ -269,6 +269,7 @@ def guard(kind, key, scope, target, do, task=None, now=None):
                             "LIMIT 1", (scope, *UNSETTLED)).fetchone()
     if stuck:
         reconcile(scope=scope)
+        epoch = R.ensure_open()                            # 范围对账可能扫出强杀留下的不明、关了闸：先整体对账再领资格
     now = now or now_tz()
     if task:
         task_id, action, generation = task
