@@ -10,8 +10,10 @@ import datetime as dt
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -26,19 +28,27 @@ PY = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
 FAKE_CLI = r'''#!{py}
-import json, os, subprocess, sys, time
+import json, os, signal, subprocess, sys, time
 from pathlib import Path
 log = Path(os.environ["FAKE_LOG"])
 with log.open("a") as f:
-    f.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd(),
+    f.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd(), "pid": os.getpid(),
                         "cache": os.environ.get("XDG_CACHE_HOME"), "npm": os.environ.get("npm_config_cache")}}) + "\n")
 if sys.argv[1:3] == ["auth", "status"]:
     print(json.dumps({{"loggedIn": True}}))
     sys.exit(0)
 mode = os.environ.get("FAKE_MODE", "edit")
-if mode == "sleep":
-    time.sleep(30)
-if mode in ("edit", "revoke", "branch"):
+if mode in ("orphan", "orphan_sleep"):          # 留一个不理 SIGTERM 的后代进程，pid 写进 FAKE_PID
+    code = ("import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "open(os.environ['FAKE_PID'], 'w').write(str(os.getpid())); time.sleep(120)")
+    subprocess.Popen([sys.executable, "-c", code])
+    for _ in range(100):
+        if os.path.exists(os.environ["FAKE_PID"]):
+            break
+        time.sleep(0.05)
+if mode == "orphan_sleep":
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if mode in ("edit", "revoke", "branch", "sleep", "orphan", "orphan_sleep"):
     with open("README.md", "a") as f:
         f.write("一行改动 %d\n" % time.time_ns())
 if mode == "workflow":
@@ -52,8 +62,11 @@ if mode == "revoke":
     p.write_text(json.dumps(doc))
 if mode == "branch":
     subprocess.run(["git", "checkout", "-q", "-b", "other"], check=True)
-print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}))
-print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": "改好了"}}))
+print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}), flush=True)
+print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": "改好了"}}),
+      flush=True)
+if mode in ("sleep", "orphan_sleep"):           # 已经交了结果还没退出（中台会把本脚本追加的停下消息当最后一条）
+    time.sleep(30)
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 '''
 
@@ -71,6 +84,8 @@ class WorkerBase(Base):
         seed = r / "seed"
         git("init", "-q", "-b", "main", str(seed))
         (seed / "README.md").write_text("# dt-sandbox\n")
+        (seed / "ops").mkdir()
+        (seed / "ops/run.sh").write_text("echo hi\n")               # 高风险路径上的已有文件（发布侧历史检查用）
         git("add", "-A", cwd=seed)
         git("commit", "-q", "-m", "init", cwd=seed)
         git("clone", "-q", "--bare", str(seed), str(self.remote))
@@ -101,13 +116,36 @@ class WorkerBase(Base):
     def answer_event(self, tid):
         return {"id": "card:9", "source": "hermes", "type": "card.answered", "subject": tid}
 
-    def run_turn(self, events, executor="claude", args=("-p", "做事", "--session-id", "s-1"), cwd=None, **env):
-        ctx = self.root / f"ctx-{len(list(self.root.glob('ctx-*')))}.json"
+    def turn_env(self, events, executor, env):
+        """每一轮一个新的轮次号（像中台一样），记下它属于哪张单、什么事件、什么时候排进来（发布侧测试按它假装中台）。"""
+        self.turn_no = getattr(self, "turn_no", 100) + 1
+        ctx = self.root / f"ctx-{self.turn_no}.json"
         ctx.write_text(json.dumps({"events": events, "answers": []}))
+        run = env.pop("AGENT_AUTOLOOP_RUN", str(self.turn_no))
+        self.__dict__.setdefault("turn_runs", {})[run] = {
+            "executor": executor, "events": events,
+            "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+        return {**self.wenv, "AGENT_AUTOLOOP_CONTEXT": str(ctx), "AGENT_AUTOLOOP_RUN": run, **env}
+
+    def run_turn(self, events, executor="claude", args=("-p", "做事", "--session-id", "s-1"), cwd=None, **env):
+        full = self.turn_env(events, executor, env)
         before = self.calls()
         r = subprocess.run([PY, "-B", str(SCRIPT), executor, *args], cwd=cwd or self.cwd, capture_output=True,
-                           text=True, timeout=120, env={**self.wenv, "AGENT_AUTOLOOP_CONTEXT": str(ctx), **env})
+                           text=True, timeout=120, env=full)
         return r, self.calls()[len(before):]
+
+    def start_turn(self, events, executor="claude", **env):
+        """后台起一轮（取消测试用），等假 CLI 开跑后返回进程。"""
+        full = self.turn_env(events, executor, env)
+        n = len(self.calls())
+        proc = subprocess.Popen([PY, "-B", str(SCRIPT), executor, "-p", "做事"], cwd=self.cwd, env=full,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(300):
+            if len(self.calls()) > n and (not env.get("FAKE_PID") or Path(env["FAKE_PID"]).exists()):
+                break
+            time.sleep(0.05)
+        time.sleep(0.5)
+        return proc
 
     def calls(self):
         if not self.fake_log.exists():
@@ -340,7 +378,13 @@ class TimeBudget(WorkerBase):
         tid = self.new_live_task()
         r, calls = self.run_turn([self.dispatch_event(tid)], FAKE_MODE="sleep", DT_WORKTREE_BUDGET="5")
         self.assertEqual((r.returncode, len(calls)), (0, 1))
-        self.assertIn("累计用时到了", self.final(r)["result"])
+        lines = [json.loads(x) for x in r.stdout.strip().splitlines() if x.strip()]
+        self.assertEqual(lines[-2]["result"], "改好了")                  # CLI 已经交过结果，停下消息追加在最后
+        self.assertIn("累计用时到了", lines[-1]["result"])
+        self.assertIsNone(self.handoff(tid))                              # 超时不交接（审查 P1-03）
+        self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))   # 改动在本地提交，不丢
+        state = json.loads((self.work / ".state" / f"{tid}.json").read_text())
+        self.assertEqual(state["turns"][-1]["outcome"], "over_budget")
         state = json.loads((self.work / ".state" / f"{tid}.json").read_text())
         self.assertGreaterEqual(state["seconds_used"], 5)
         r, calls = self.run_turn([self.answer_event(tid)], DT_WORKTREE_BUDGET="5")
@@ -355,6 +399,50 @@ class TimeBudget(WorkerBase):
         p.write_text(json.dumps(s))
         r, calls = self.run_turn([self.answer_event(tid)])
         self.assert_stopped(r, calls, "上限")
+
+
+class CancelAndProcessTree(WorkerBase):
+    """审查 P1-03：取消、超时不交接；CLI 整组（含不理 SIGTERM 的后代）清干净后才提交。"""
+
+    def alive(self, pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def test_cancel_commits_locally_but_never_hands_off(self):
+        tid = self.new_live_task()
+        proc = self.start_turn([self.dispatch_event(tid)], FAKE_MODE="sleep")
+        cli_pid = self.calls()[-1]["pid"]
+        proc.send_signal(signal.SIGTERM)                                  # 接单程序取消这一轮
+        proc.communicate(timeout=30)
+        self.assertFalse(self.alive(cli_pid))
+        self.assertIsNone(self.handoff(tid))
+        self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))
+        state = json.loads((self.work / ".state" / f"{tid}.json").read_text())
+        self.assertEqual((state["turns"][-1]["outcome"], state["turns"][-1]["clean"]), ("cancelled", True))
+
+    def test_descendant_ignoring_sigterm_is_killed_before_commit(self):
+        tid = self.new_live_task()
+        pidf = self.root / "orphan.pid"
+        r, _ = self.run_turn([self.dispatch_event(tid)], FAKE_MODE="orphan", FAKE_PID=str(pidf))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.alive(int(pidf.read_text())))               # CLI 退出后整组清掉
+        self.assertIsNotNone(self.handoff(tid))                            # 正常结束照常交接
+
+    def test_cancel_with_stubborn_tree_is_killed_within_grace(self):
+        tid = self.new_live_task()
+        pidf = self.root / "orphan2.pid"
+        proc = self.start_turn([self.dispatch_event(tid)], FAKE_MODE="orphan_sleep", FAKE_PID=str(pidf))
+        cli_pid = self.calls()[-1]["pid"]
+        t0 = time.time()
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=30)
+        self.assertLess(time.time() - t0, 10)                              # 赶在接单程序 10 秒强杀之前
+        self.assertFalse(self.alive(cli_pid))
+        self.assertFalse(self.alive(int(pidf.read_text())))
+        self.assertIsNone(self.handoff(tid))
 
 
 class Plumbing(WorkerBase):

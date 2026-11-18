@@ -6,16 +6,23 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 （/Users/dt-worker/dt-outbox/<单号>/handoff.json + <单号>.bundle）。本脚本是控制面的受信发布出口，按 ADR-015 归 dt-gate
 账号（「受信发布出口从第一天按归 dt-gate 写」）：取包、核对后推分支、开 PR：
 
+  0. 只在 dt-gate 账号里跑（ADR-015；按有效用户判，不认环境变量）；0D 恢复门之前只推本地裸仓库（file://），
+     真实 GitHub 发布一律拒绝（审查 P1-07：授权收紧和发布动作的串行化、结果账本在 0D，之前不启用）。
   1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 <执行方>/<单号>；包先复制到私有临时目录、
      核对哈希再用；只取 Git 对象（bundle verify + fetch，打开对象校验，钩子关掉），不检出、不运行里面任何东西。
-  2. 凭证以主账号的凭证库为准（autoloop_grants.check，和所有出口共用）：推分支前核 push_branch、开 PR 前核 open_pr，
-     代次用清单里的、必须是当前代且没作废；仓库从凭证取，不信清单。
+  2. 凭证以凭证库为准（autoloop_grants.check，和所有出口共用）：动手前 push_branch、open_pr 两个动作一起预检，
+     推之前、开 PR 之前再各现读一次；仓库从凭证取，不信清单。
+     清单里的代次不当证据（审查 P1-02）：交接包要落到中台里一轮真实的轮次（清单的 run 号，中台库只读查）——
+     这一轮属于这张单（事项、规则、Agent 对得上）、已正常结束、在当前代次开始之后才排进来、它的派单事件都是当前代次；
+     对不上就不发。工人自己写的提交内容仍不可信（它能把旧提交挂到新的一轮上），内容由 PR 审查把关。
   3. 能机械判的发布边界：包里只有本单分支一个引用、头提交对得上；基线是 main 上的提交、头提交从基线长出来；
-     改动不碰合并规则 merge_rules.json 里的高风险路径（.github/、ops/、密钥类……）——碰了就不发、交常浩。
+     不收合并提交；基线到头提交之间的每一个提交、以及最终差异，都不许碰合并规则 merge_rules.json 里的高风险路径
+     （.github/、ops/、密钥类……；审查 P1-01：先加后删的历史也算）——碰了就不发、交常浩。
   4. 只推非 main：推送目标写死成 refs/heads/<执行方>/<单号>，不带 --force；远端同名分支已有别的提交就不覆盖。
      GitHub 一侧 dt-sandbox 的规则集只放行 main、agent/** 和 claude/**（常浩 11-18 放行 claude/，hermes/baselines/dt-sandbox-github.json）；
      codex/** 还没放行，Codex 单推送会被 GitHub 拒绝。
-  5. 同一分支已有开着的 PR 就沿用；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
+  5. 同一分支已有开着的 PR，核对它的目标是本仓库 main、来源是本仓库（不是同名 fork 分支）、分支和头提交正是这次的，
+     才沿用（审查 P1-05）；对不上就拒绝；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
 
 本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
 测试只推本地裸仓库。推送和开 PR 用运行账号自己的 git / gh 登录：0E 在 dt-gate 里配机器账号令牌（只能推非 main、不能合并，
@@ -34,6 +41,7 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -43,6 +51,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 
 MAX_MANIFEST = 4096
@@ -55,6 +64,10 @@ KEYS = {"schema", "task_id", "generation", "executor", "repo", "branch", "base",
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "transfer.fsckObjects=true",
             "-c", "fetch.fsckObjects=true"]
 RULES = HERE / "merge_rules.json"
+RUN_ID = re.compile(r"^[1-9]\d{0,11}$")
+MAX_COMMITS = 500
+GATE_USER = "dt-gate"           # ADR-015 控制面账号；测试里在进程内替换，不经环境变量
+REAL_PUBLISH = False            # 0D 恢复门（串行化、结果账本）之前不往真实 GitHub 推（审查 P1-07）
 
 
 class Rejected(Exception):
@@ -80,6 +93,10 @@ def remote_url(github):
 
 def log_path():
     return Path(os.environ.get("DT_PUBLISH_LOG") or G.SUPPORT / "autoloop/publish.jsonl").expanduser()
+
+
+def hub_db():
+    return Path(os.environ.get("AGENT_AUTOLOOP_HOME") or "~/.agent-autoloop").expanduser() / "hub.db"
 
 
 def gh_cmd():
@@ -126,7 +143,7 @@ def read_manifest(task_id):
           and m["branch"] == branch_name(m["executor"], task_id) and isinstance(m["base"], str)
           and SHA.match(m["base"]) and isinstance(m["head"], str) and SHA.match(m["head"])
           and m["bundle"] == f"{task_id}.bundle" and isinstance(m["bundle_sha256"], str)
-          and HEX64.match(m["bundle_sha256"]))
+          and HEX64.match(m["bundle_sha256"]) and isinstance(m["run"], str) and RUN_ID.match(m["run"]))
     if not ok:
         raise Rejected("交接清单的内容不合格式（分支名必须是 <执行方>/<单号>）")
     return m
@@ -190,18 +207,109 @@ def must(task_id, action, generation, now, path):
         raise Rejected(f"{reason}（{action}）")
 
 
+# ---------- 运行身份、轮次绑定、历史检查 ----------
+def require_gate():
+    """受信发布只在 dt-gate 账号里跑（ADR-015）：按有效用户判，主账号、秘书账号、工人账号一律拒绝。"""
+    try:
+        me = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        me = str(os.geteuid())
+    if me != GATE_USER:
+        raise Rejected(f"受信发布只在 {GATE_USER} 账号里跑（ADR-015），现在是 {me}")
+
+
+def require_test_remote(github):
+    if not REAL_PUBLISH and not remote_url(github).startswith("file://"):
+        raise Rejected("0D 恢复门（授权收紧与发布动作的串行化、结果账本）之前不往真实 GitHub 发布")
+
+
+def hub_run(run_id):
+    """中台库只读：这一轮的事项、规则、Agent、状态、排进来的时间和它的事件。查不到返回 None。"""
+    import sqlite3
+    import urllib.parse
+    try:
+        con = sqlite3.connect(f"file:{urllib.parse.quote(str(hub_db()))}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        con.row_factory = sqlite3.Row
+        r = con.execute("SELECT id, rule, agent, lane, state, created_at FROM runs WHERE id = ?",
+                        (int(run_id),)).fetchone()
+        if r is None:
+            return None
+        events = [dict(e) for e in con.execute(
+            "SELECT e.source AS source, e.type AS type, e.subject AS subject, e.detail AS detail FROM run_events re "
+            "JOIN events e ON e.id = re.event_id WHERE re.run_id = ?", (int(run_id),))]
+        return {**dict(r), "events": events}
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def check_run(run, row, generation):
+    """交接包落到的那一轮，必须是当前代次里这张单正常结束的一轮（审查 P1-02）。返回 None 表示通过。"""
+    if run is None:
+        return "中台里查不到交接包对应的那一轮"
+    task_id = row["task_id"]
+    if (run["lane"], run["rule"], run["agent"]) != (task_id, row["rule"], C.AGENTS[row["executor"]][0]):
+        return "交接包对应的那一轮不属于这张单"
+    if run["state"] != "done":
+        return f"交接包对应的那一轮没有正常结束（{run['state']}）"
+    try:
+        created = G.dt.datetime.fromisoformat(str(run["created_at"]).replace("Z", "+00:00"))
+        started = G.parse_iso(row["generation_started_at"])
+    except (TypeError, ValueError):
+        return "那一轮或代次的时间读不懂"
+    if created < started:
+        return f"交接包对应的那一轮在第 {generation} 代开始之前就排进来了"
+    for e in run["events"]:
+        if e.get("source") != C.SOURCE or e.get("subject") != task_id:
+            return "那一轮有不是派单网关为这张单发的事件"
+        if e.get("type") == G.event_type(row["repo"], row["executor"]):
+            try:
+                g = json.loads(e.get("detail") or "").get("generation")
+            except (ValueError, AttributeError):
+                return "那一轮的派单事件读不懂"
+            if g != generation:
+                return f"那一轮的派单事件是第 {g} 代，不是第 {generation} 代"
+    return None
+
+
+def history_hits(mirror, base, head, repo):
+    """基线到头提交之间每个提交的改动路径，加上最终差异，碰到高风险路径的都列出来；有合并提交直接拒绝。"""
+    if git("rev-list", "--min-parents=2", f"{base}..{head}", cwd=mirror).stdout.split():
+        raise Rejected("交接里有合并提交，不自动发布")
+    commits = git("rev-list", f"{base}..{head}", cwd=mirror).stdout.split()
+    if len(commits) > MAX_COMMITS:
+        raise Rejected(f"交接里提交太多（{len(commits)} 个），不自动发布")
+    paths = set(git("diff", "--name-only", "-z", "--no-renames", base, head, cwd=mirror).stdout.split("\0"))
+    for c in commits:
+        paths |= set(git("diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--no-renames", c,
+                         cwd=mirror).stdout.split("\0"))
+    pats = sensitive_patterns(repo)
+    return sorted(f for f in paths if f and any(pt.search(f) for pt in pats))
+
+
 # ---------- 发布 ----------
 def publish(task_id, now=None, path=None):
+    require_gate()
     now = now or G.now_tz()
     m = read_manifest(task_id)
     with task_lock(task_id):
-        must(task_id, "push_branch", m["generation"], now, path)
+        gen = m["generation"]
+        for action in ("push_branch", "open_pr"):            # 两个动作一起预检（审查 P2-01）
+            must(task_id, action, gen, now, path)
         with G.tx(path) as con:
             row = dict(G.grant_row(con, task_id))
         if (row["repo"], row["executor"]) != (m["repo"], m["executor"]):
             raise Rejected("交接清单的仓库或执行方和凭证不一致")
         github, branch, head, base = row["github"], m["branch"], m["head"], m["base"]
         assert_not_main(branch)
+        require_test_remote(github)
+        reason = check_run(hub_run(m["run"]), row, gen)
+        if reason:
+            raise Rejected(reason)
         mirror = ensure_mirror(row["repo"], github)
         with tempfile.TemporaryDirectory(prefix="dt-publish-") as tmp:
             data = _read_regular(outbox() / task_id / m["bundle"], MAX_BUNDLE, "交接包")
@@ -219,42 +327,55 @@ def publish(task_id, now=None, path=None):
             raise Rejected("取进来的头提交对不上")
         if not is_ancestor(mirror, base, "refs/remotes/origin/main") or not is_ancestor(mirror, base, head):
             raise Rejected("基线不是 main 上的提交，或头提交不是从基线长出来的")
-        changed = git("diff", "--name-only", "-z", "--no-renames", base, head, cwd=mirror).stdout.split("\0")
-        hits = sorted({f for f in changed if f and any(p.search(f) for p in sensitive_patterns(row["repo"]))})
+        hits = history_hits(mirror, base, head, row["repo"])
         if hits:
-            raise Rejected(f"改动碰到高风险路径（{'、'.join(hits[:5])}），不自动发布，交常浩")
+            raise Rejected(f"改动或提交历史碰到高风险路径（{'、'.join(hits[:5])}），不自动发布，交常浩")
         remote = git("ls-remote", remote_url(github), f"refs/heads/{branch}", cwd=mirror).stdout.split()
         existing = remote[0] if remote else None
         pushed = False
         if existing != head:
             if existing and not (SHA.match(existing) and is_ancestor(mirror, existing, head)):
                 raise Rejected("远端同名分支已有别的提交，不覆盖")
-            must(task_id, "push_branch", m["generation"], G.now_tz(), path)        # 推之前现读一次
+            must(task_id, "push_branch", gen, G.now_tz(), path)        # 推之前现读一次
             git("push", "--quiet", "--no-verify", remote_url(github), f"{head}:refs/heads/{branch}", cwd=mirror)
             pushed = True
-        must(task_id, "open_pr", m["generation"], G.now_tz(), path)
-        pr = open_pr(github, branch, row)
-        out = {"task_id": task_id, "generation": m["generation"], "github": github, "branch": branch, "head": head,
-               "pushed": pushed, **pr}
+        must(task_id, "open_pr", gen, G.now_tz(), path)
+        pr = open_pr(github, branch, head, row)
+        out = {"task_id": task_id, "generation": gen, "github": github, "branch": branch, "head": head,
+               "run": m["run"], "pushed": pushed, **pr}
         record({"what": "发布", **out})
         return out
 
 
-def open_pr(github, branch, row):
+PR_FIELDS = "number,url,state,baseRefName,headRefName,headRefOid,isCrossRepository,headRepository,headRepositoryOwner"
+
+
+def pr_is_ours(p, github, branch, head):
+    """已有 PR 必须正是这次的：目标本仓库 main、来源本仓库、本单分支、头提交一致（审查 P1-05）。"""
+    owner, name = github.split("/")
+    src_owner = ((p.get("headRepositoryOwner") or {}).get("login") or "").lower()
+    src_name = ((p.get("headRepository") or {}).get("name") or "").lower()
+    return (p.get("baseRefName") == "main" and p.get("headRefName") == branch and p.get("headRefOid") == head
+            and p.get("isCrossRepository") is False and src_owner == owner.lower() and src_name == name.lower())
+
+
+def open_pr(github, branch, head, row):
     r = subprocess.run([gh_cmd(), "pr", "list", "-R", github, "--head", branch, "--state", "all",
-                        "--json", "number,url,state"], capture_output=True, text=True, timeout=60)
+                        "--json", PR_FIELDS], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise Rejected(f"查 PR 失败：{r.stderr.strip()[:200]}")
     prs = json.loads(r.stdout or "[]")
     live = [p for p in prs if p.get("state") == "OPEN"]
     if live:
-        return {"pr": live[0].get("url"), "pr_opened": False}
+        if len(live) == 1 and pr_is_ours(live[0], github, branch, head):
+            return {"pr": live[0].get("url"), "pr_opened": False}
+        raise Rejected("同名分支已有开着的 PR，但目标、来源、分支或头提交对不上，不沿用")
     if prs:
         raise Rejected("这条分支的 PR 已关闭或已合并，不再开新的；要继续请常浩处理")
     first = row["scope_text"].strip().splitlines()[0][:80]
     body = "\n".join([f"任务单：{row['task_id']}（第 {row['generation']} 代）", f"执行方：{row['executor']}",
                       f"范围哈希：{row['scope_hash']}", "",
-                      "由受信发布（autoloop_publish.py）开出：提交来自工人账号 dt-worker，主账号只取 Git 对象、核过凭证。",
+                      "由受信发布（autoloop_publish.py）开出：提交来自工人账号 dt-worker，控制面只取 Git 对象、核过凭证。",
                       "合并照 B 档：常浩点合并卡片或在电脑上处理。", "", "## 五要素", "", row["scope_text"]])
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
         f.write(body)

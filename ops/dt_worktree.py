@@ -15,8 +15,10 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
   2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 <执行方>/<单号>（如 claude/t-…），基线是第一轮时的 origin/main；
      续接回同一目录、同一分支（会话也接得上）。每张单的缓存目录分开。
   3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
-     ~/dt-work/.state/<单号>.log，不混进输出。用时到上限就停掉 CLI。
-  4. CLI 退出后：把工作目录里的改动提交到本单分支；再核一次凭证，仍有效才打交接包（git bundle + 清单）放进
+     ~/dt-work/.state/<单号>.log，不混进输出。CLI 在自己的进程组里跑：接单程序取消时本脚本把信号转给整组，7 秒内还没停就整组强杀
+     （赶在接单程序 10 秒强杀本脚本之前）；用时到上限同样整组先停后杀；CLI 退出后再把组里剩下的后代进程清掉，确认清干净才提交。
+  4. CLI 退出后：把工作目录里的改动提交到本单分支（工作不丢）；只有正常结束（不是取消、不是超时）、后代进程清干净、
+     再核一次凭证仍有效，才打交接包（git bundle + 清单）放进
      ~/dt-outbox/<单号>/，由主账号的受信发布脚本（hermes/scripts/autoloop_publish.py）取走核对后推分支、开 PR。
      本脚本不推、不碰 GitHub 写凭据（方案第 12 节第 6 条）。
 
@@ -51,7 +53,8 @@ FOLLOW_TYPES = ("card.answered", "timer.due")     # 回答、复查：沿用这�
 CHECK_ARGS = {"claude": (["auth", "status"], ["--version"]), "codex": (["login", "status"], ["--version"])}
 BUDGET_SECONDS = 2 * 3600                          # 每张单跨轮累计（常浩 2026-11-18 定：一律 2 小时）
 KILL_GRACE = 10
-HEARTBEAT = 30
+STOP_GRACE = 7                                     # 接单程序取消后 10 秒强杀，本脚本 7 秒内先清掉 CLI 整组
+HEARTBEAT = 10                                     # 被强杀时最多少记这么多秒（审查 P2-05）
 TZ = dt.timezone(dt.timedelta(hours=8))
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 
@@ -351,14 +354,48 @@ def with_note(executor, args, task_id, branch):
     return out
 
 
+def kill_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def reap_group(pgid, task_id):
+    """CLI 退出后清掉它留下的后代进程（整组强杀），确认组里没有进程了才算工作目录稳定。"""
+    kill_group(pgid, signal.SIGKILL)
+    end = time.time() + 5
+    while group_alive(pgid) and time.time() < end:
+        time.sleep(0.1)
+    if group_alive(pgid):
+        log(task_id, "CLI 的进程组清不干净")
+        return False
+    return True
+
+
 def run_cli(executor, args, admitted, place):
-    """启动 CLI，标准输出直接交给接单程序。返回 (退出码, 用时秒, 是否到上限被停)。"""
+    """启动 CLI，标准输出直接交给接单程序。返回 (退出码, 用时秒, 结局, 后代是否清干净)；
+    结局是 finished（自己结束）、cancelled（接单程序取消）或 over_budget（用时到上限）。"""
     task_id = admitted["task_id"]
     left = budget() - admitted["used"]
-    stopping = {"sig": None}
+    stopping = {"sig": None, "at": None}
+    group = {}
 
-    def on_signal(sig, _frame):          # 接单程序取消时整组收到信号：CLI 自己收尾，本脚本等它退出后结账
-        stopping["sig"] = sig
+    def on_signal(sig, _frame):          # 接单程序取消：记下，转给 CLI 整组，主循环 7 秒内整组强杀
+        if stopping["sig"] is None:
+            stopping["sig"], stopping["at"] = sig, time.time()
+        if "pgid" in group:
+            kill_group(group["pgid"], signal.SIGTERM)
 
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, on_signal)
@@ -371,34 +408,46 @@ def run_cli(executor, args, admitted, place):
                               "run": os.environ.get("AGENT_AUTOLOOP_RUN", "")}})
     save_state(task_id, state)
     argv = [real_cli(executor), *with_note(executor, args, task_id, place["branch"])]
-    child = subprocess.Popen(argv, cwd=place["worktree"], env=task_env(task_id))
+    child = subprocess.Popen(argv, cwd=place["worktree"], env=task_env(task_id), start_new_session=True)
+    group["pgid"] = child.pid                                    # 新会话：进程组号就是它的进程号
+    if stopping["sig"]:
+        kill_group(child.pid, signal.SIGTERM)
     log(task_id, f"第 {admitted['generation']} 代开跑（轮次 {os.environ.get('AGENT_AUTOLOOP_RUN', '?')}，"
                  f"已用 {admitted['used']} 秒）")
-    over = False
+    over_at, killed = None, False
     while True:
+        now = time.time()
+        if stopping["sig"] or over_at:
+            timeout = 0.2
+        else:
+            timeout = max(0.2, min(HEARTBEAT, left - (now - started)))
         try:
-            code = child.wait(timeout=max(0.2, min(HEARTBEAT, left - (time.time() - started))) if not over
-                              else HEARTBEAT)
+            code = child.wait(timeout=timeout)
             break
         except subprocess.TimeoutExpired:
             pass
-        state["running"]["last_seen"] = int(time.time())
-        save_state(task_id, state)
-        if not over and time.time() - started >= left:
-            over = True
-            log(task_id, "累计用时到上限，停掉 CLI")
-            child.terminate()
-            try:
-                child.wait(timeout=KILL_GRACE)
-            except subprocess.TimeoutExpired:
-                child.kill()
+        now = time.time()
+        if now - state["running"]["last_seen"] >= HEARTBEAT:
+            state["running"]["last_seen"] = int(now)
+            save_state(task_id, state)
+        if not stopping["sig"] and not over_at and now - started >= left:
+            over_at = now
+            log(task_id, "累计用时到上限，停掉 CLI 整组")
+            kill_group(child.pid, signal.SIGTERM)
+        due = (stopping["at"] and now - stopping["at"] >= STOP_GRACE) or (over_at and now - over_at >= KILL_GRACE)
+        if due and not killed:
+            killed = True
+            kill_group(child.pid, signal.SIGKILL)
+    clean = reap_group(child.pid, task_id)
+    outcome = "cancelled" if stopping["sig"] else "over_budget" if over_at else "finished"
     secs = int(time.time() - started)
     state["seconds_used"] = admitted["used"] + secs
     state["running"] = None
     state.setdefault("turns", []).append({"run": os.environ.get("AGENT_AUTOLOOP_RUN", ""), "generation":
-                                          admitted["generation"], "seconds": secs, "exit": code, "at": iso(now_tz())})
+                                          admitted["generation"], "seconds": secs, "exit": code, "outcome": outcome,
+                                          "clean": clean, "at": iso(now_tz())})
     save_state(task_id, state)
-    return code, secs, over
+    return code, secs, outcome, clean
 
 
 def commit_changes(task_id, place, generation):
@@ -437,11 +486,15 @@ def write_handoff(executor, repo, task_id, generation, place):
     return manifest
 
 
-def after_run(executor, repo, context, admitted, place):
-    """CLI 退出后：先提交（工作不丢），再核一次凭证，有效才交接。"""
+def after_run(executor, repo, context, admitted, place, outcome="finished", clean=True):
+    """CLI 退出后：先提交（工作不丢）；取消、超时或后代没清干净都不交接（审查 P1-03）；再核一次凭证，有效才交接。"""
     task_id, gen = admitted["task_id"], admitted["generation"]
     try:
-        committed = commit_changes(task_id, place, gen)
+        committed = commit_changes(task_id, place, gen) if clean else False
+        if outcome != "finished" or not clean:
+            why = {"cancelled": "本轮被取消", "over_budget": "用时到上限"}.get(outcome, "CLI 的进程没清干净")
+            log(task_id, f"{why}：{'已在本地提交，' if committed else ''}不打交接包")
+            return
         try:
             admit(executor, repo, context, now_tz(), check_budget=False)
         except Refused as e:
@@ -507,8 +560,8 @@ def main(argv=None):
                 place = {"repo": repo, **prepare_worktree(executor, repo, admitted)}
             except (OSError, subprocess.SubprocessError) as e:
                 raise Retry(f"准备工作目录失败（{type(e).__name__}）")
-            code, secs, over = run_cli(executor, args, admitted, place)
-            after_run(executor, repo, context, admitted, place)
+            code, secs, outcome, clean = run_cli(executor, args, admitted, place)
+            after_run(executor, repo, context, admitted, place, outcome, clean)
         finally:
             os.close(lock)
     except Refused as e:
@@ -519,7 +572,7 @@ def main(argv=None):
         log(task_id, f"没跑成：{e}")
         final_message(executor, f"没跑成：{e}")
         return 0
-    if over:
+    if outcome == "over_budget":
         final_message(executor, stop_text(f"这张单累计用时到了 {budget() // 60} 分钟上限，本轮已停", task_id))
         return 0
     return code if code >= 0 else 128 - code
