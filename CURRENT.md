@@ -6,6 +6,16 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 安全审计 PR #171 二次刷新（2026-11-18，Codex，常浩授权刷新审计分支；待合并）
+
+- 时间：开工 `2026-11-18 09:43`（第二次变基与复验，精确命令过程见本轮日志）。
+- 改了哪些文件：本节；`hermes/scripts/tests/test_autoloop_grants.py` 为既有 CLI 测试统一夹具时钟，并新增 CLI 到期拒绝回归，断言退出码和准确 JSON。生产凭据校验保持当前实现。
+- 测试：最新 main 首次全量 `Ran 1157 tests in 633.495s` / `FAILED (failures=1)`，唯一失败是 CLI 测试签发时钟固定而检查使用真实时钟。修复后完整全量原样 `Ran 1158 tests in 746.262s` / `OK` / `EXIT_CODE=0`；ORCA `Ran 48 tests in 12.652s` / `OK` / `EXIT_CODE=0`。模块 40/40，临时绕过到期判定会被新回归抓到。
+- 验证：收尾 fetch 发现 main 在第一轮后又前进 15 提交，重新变基到 `73a826c37c68701fbd1d3d6d8df760d4bbb51fdd`，三提交重放无新增冲突。下方第一轮 1127 + 48 的记录保留为历史结果，最终采用本节最新基线与计数。证据 `~/Library/Application Support/DigitalTwin/evidence/2026-11-17-refresh/`，最新全量 `hermes-latest-final.log` / `orca-latest-final.log`，首败与反证均保留。
+- 发布与回读：更新指定审计分支与 PR #171，运行副本采用另行验收。
+- 遗留问题：ResourceWarning 原文保留；工程检查无阻断项，提交推送后继续回读最新 CI。
+- 本轮新坑：无。
+
 ## 安全审计 PR #171 刷新（2026-11-17，Codex，常浩授权变基、验证、推送；待合并）
 
 - 时间：开工 `2026-11-17 18:00`。
