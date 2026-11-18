@@ -79,7 +79,7 @@ class Isolation(unittest.TestCase):
     def test_env_points_into_this_runs_temp_dir(self):
         self.assertFalse(inside(ISO.ROOT, ISO.REAL_HOME))
         for k in ("HOME", "AGENT_AUTOLOOP_HOME", "HERMES_HOME", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
-                  "DT_GRANTS_STATUS", "DT_GRANTS_TASKS"):
+                  "DT_GRANTS_STATUS", "DT_GRANTS_TASKS", "DT_AUTOLOOP_SHARED", "DT_PUBLISH_OUTBOX"):
             self.assertTrue(inside(os.environ[k], ISO.ROOT), k)
         self.assertEqual(Path.home(), ISO.HOME)
         self.assertEqual(os.path.expanduser("~"), str(ISO.HOME))

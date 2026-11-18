@@ -13,7 +13,9 @@
 1. 清掉可能指向正式环境的环境变量（前缀见 SCRUB_PREFIXES，KEEP 里的测试开关除外），再把 HOME、XDG_*、
    AGENT_AUTOLOOP_HOME、HERMES_HOME、CODEX_HOME、CLAUDE_CONFIG_DIR 指到本次运行的临时目录（AGENT_AUTOLOOP_HOME 特意不放在
    临时家目录下，和默认的 ~/.agent-autoloop 不同，「--target 和实际目录不一致」这类检查才测得到）；默认路径不在家目录下的
-   DT_GRANTS_STATUS、DT_GRANTS_TASKS（默认 /Users/Shared/dt-autoloop/…）也指过去，DT_HUB 指到不监听的 127.0.0.1:9。
+   DT_GRANTS_STATUS、DT_GRANTS_TASKS、DT_AUTOLOOP_SHARED（默认 /Users/Shared/dt-autoloop/…）、DT_PUBLISH_OUTBOX
+   （默认 /Users/dt-worker/dt-outbox）也指过去，DT_HUB 指到不监听的 127.0.0.1:9。
+   要读真正的正式目录（只读核对、上游源码）用 REAL_HOME（按系统账号取），不用 ~。
    git 用临时全局配置（固定的测试身份、默认分支 main），不读本机 ~/.gitconfig。
 2. 默认禁网：本进程里连非回环地址、解析非本机域名、往非回环地址发 UDP 一律抛 BlockedNetwork（OSError 子类，
    被测脚本按「连不上」处理）；回环放行（测试自己起的假服务、临时中台要用），但本机正式服务的端口（PROD_PORTS）照样拦。
@@ -77,6 +79,8 @@ def isolated_env():
         "CODEX_HOME": str(HOME / ".codex"), "CLAUDE_CONFIG_DIR": str(HOME / ".claude"),
         "DT_GRANTS_STATUS": str(ROOT / "shared/dt-autoloop/grants/status.json"),
         "DT_GRANTS_TASKS": str(ROOT / "shared/dt-autoloop/tasks"),
+        "DT_AUTOLOOP_SHARED": str(ROOT / "shared/dt-autoloop"),
+        "DT_PUBLISH_OUTBOX": str(ROOT / "users/dt-worker/dt-outbox"),
         "DT_HUB": DEAD,
         "HTTP_PROXY": DEAD, "HTTPS_PROXY": DEAD, "ALL_PROXY": DEAD, "http_proxy": DEAD, "https_proxy": DEAD,
         "all_proxy": DEAD, "NO_PROXY": "127.0.0.1,localhost,::1", "no_proxy": "127.0.0.1,localhost,::1",

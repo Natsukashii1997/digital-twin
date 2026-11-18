@@ -8,6 +8,7 @@ hermes/scripts/autoloop_publish.py（受信发布最小版，#205 批 0C）：�
 运行身份（dt-gate）在进程内替换成当前用户；中台库查轮次（hub_run）换成按测试里每一轮记下的单号、事件、时间假装的中台，
 真中台的绑定在 test_exec_gate_e2e.py 里验。L3 第 1 轮返修：历史提交、轮次绑定、PR 身份、运行身份、真实发布闸各有一组。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import hashlib
 import importlib.util
