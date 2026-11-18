@@ -38,6 +38,9 @@ if mode == "sleep":
 if mode in ("edit", "revoke", "branch"):
     with open("README.md", "a") as f:
         f.write("一行改动 %d\n" % time.time_ns())
+if mode == "workflow":
+    Path(".github/workflows").mkdir(parents=True, exist_ok=True)
+    Path(".github/workflows/ci.yml").write_text("on: push\n")
 if mode == "revoke":
     p = Path(os.environ["DT_GRANTS_STATUS"])
     doc = json.loads(p.read_text())
