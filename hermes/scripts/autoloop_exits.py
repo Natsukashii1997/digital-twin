@@ -14,7 +14,7 @@
 unknown 或 unreconciled，这个范围里的任何新动作都拒绝（同一时刻也只能有一个在做，这就是串行化）。范围按秘书代批规格第 7 节：
 回答结果不明冻结这张任务，合并结果不明冻结这个仓库。冻结不是一张单独的表，是账本状态推出来的，所以不会和账本不一致。
 
-**结果不明从不重做**：只读回读外部系统（GitHub 分支 / PR / 合并、飞书私聊里的消息）对账，凭证据记成 done 或 failed；
+**结果不明从不重做**：同一范围再有动作要做时，先只读对一次这个范围的账；只读回读外部系统（GitHub 分支 / PR / 合并、飞书私聊里的消息）对账，凭证据记成 done 或 failed；
 外部系统连不上就保持 unknown 等下次；连得上但对不上就记 unreconciled，交常浩。
 
 **和任务凭证串行**（0C 审查 P1-07「核凭证与推分支之间的竞态」）：带 task 的动作，在凭证库的写锁里现读凭证判定、并在
@@ -235,6 +235,11 @@ def guard(kind, key, scope, target, do, task=None, now=None):
         raise Refused(f"冻结范围写法不对：{scope}")
     import autoloop_recovery as R
     R.ensure_open()
+    with db(write=False) as con:                           # 这个范围冻着：先只读对一次这个范围的账（网络恢复后自己解开）
+        stuck = con.execute(f"SELECT 1 FROM exits WHERE scope = ? AND state IN ({','.join('?' * len(UNSETTLED))}) "
+                            "LIMIT 1", (scope, *UNSETTLED)).fetchone()
+    if stuck:
+        reconcile(scope=scope)
     now = now or now_tz()
     if task:
         task_id, action, generation = task
@@ -341,13 +346,15 @@ def read_send(t, row, now):
 READERS = {"push_branch": read_push, "open_pr": read_pr, "merge": read_merge, "send_feishu": read_send}
 
 
-def reconcile(readers=None, now=None):
-    """对账：先把强杀留下的 executing 改成 unknown，再逐条只读回读外部系统。返回每条的处理。不做任何外部写。"""
+def reconcile(readers=None, now=None, scope=None):
+    """对账：先把强杀留下的 executing 改成 unknown，再逐条只读回读外部系统（scope 给了就只对这个范围）。
+    返回每条的处理。不做任何外部写。"""
     readers = {**READERS, **(readers or {})}
     now = now or now_tz()
     with db() as con:
         sweep(con, now)
-        rows = [dict(r) for r in con.execute("SELECT * FROM exits WHERE state IN ('unknown', 'unreconciled') ORDER BY created_at")]
+        rows = [dict(r) for r in con.execute("SELECT * FROM exits WHERE state IN ('unknown', 'unreconciled') "
+                                             "AND (? IS NULL OR scope = ?) ORDER BY created_at", (scope, scope))]
     notes = []
     for r in rows:
         try:
