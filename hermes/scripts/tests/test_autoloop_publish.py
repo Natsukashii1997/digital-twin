@@ -253,6 +253,32 @@ class GrantAtPublish(PublishBase):
         self.rejects(tid, "凭证不允许 open_pr")                                # 动手前两个动作一起预检，不推半截（P2-01）
         self.assertEqual(self.gh_calls(), [])
 
+    def test_revoked_after_precheck_is_not_pushed(self):
+        """预检之后、推之前凭证被撤销：推之前那次现读拦住，不推。"""
+        tid = self.worked()
+
+        def revoke_then_check(*a):
+            G.revoke(tid, now=self.now)
+            return []
+        with mock.patch.object(P, "history_hits", side_effect=revoke_then_check):
+            self.rejects(tid, "凭证已撤销（push_branch）")
+
+    def test_revoked_after_push_opens_no_pr(self):
+        """推完、开 PR 之前凭证被撤销：开 PR 之前那次现读拦住，不开 PR（0D 前推和撤销之间的窗口见审查 P1-07）。"""
+        tid = self.worked()
+        real = P.git
+
+        def git_then_revoke(*a, **k):
+            r = real(*a, **k)
+            if a[0] == "push":
+                G.revoke(tid, now=self.now)
+            return r
+        with mock.patch.object(P, "git", side_effect=git_then_revoke), self.assertRaises(P.Rejected) as c:
+            P.publish(tid)
+        self.assertIn("凭证已撤销（open_pr）", str(c.exception))
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+        self.assertEqual([x for x in self.gh_calls() if x[:2] == ["pr", "create"]], [])
+
     def test_refusals_are_logged_by_cli(self):
         tid = self.worked()
         G.revoke(tid, now=self.now)
