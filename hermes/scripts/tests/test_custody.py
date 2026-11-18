@@ -48,6 +48,8 @@ def fill(template, version=3, valid="签署日起 30 天；到期前 3 天日报
             line = line.replace("〔填：是 / 否〕", "是").replace("〔填：没有〕", "没有")
             line = re.sub(r"〔填，例：(\d+)〕", r"\1", line)
             line = re.sub(r"〔填，例：`docs/\*\*`、`CURRENT\.md`〕", "`docs/**`、`CURRENT.md`", line)
+            if line.startswith("| 〔填〕 | 〔填〕 |"):            # 第 3 节仓库表（#136：签署时也校验）
+                line = "| Natsukashii1997/dt-sandbox | CI（跑测试），没有别的 | 没有 | 2026-11-14 |"
             line = line.replace("〔填〕", "dt-sandbox（只有 CI）" if "|" in line else "x")
         out.append(line)
     return "\n".join(out) + "\n"
@@ -138,7 +140,52 @@ class PolicyTemplateTests(Base):
         self.assertEqual(fields, {"version": 3, "valid_days": 30, "drain_minutes": 120,
                                   "window": {"start": "23:30", "end": "08:00"},
                                   "limits": {"reply": {"allowed": True, "per_issue": 2, "per_session": 10},
-                                             "merge": {"allowed": True, "per_session": 5}}})
+                                             "merge": {"allowed": True, "per_session": 5}},
+                                  "merge_scope": {"repos": {"Natsukashii1997/dt-sandbox": {"effects": "CI（跑测试），没有别的",
+                                                                                         "checked": "2026-11-14"}},
+                                                  "l0_paths": ["docs/**", "CURRENT.md"]}})
+
+    def test_parse_merge_scope(self):
+        """#136（常浩 11-14 选「签署时也校验」）：第 3 节的仓库表和 L0 白名单读不出就整份无效，签不上。"""
+        filled = fill(self.template)
+        row = next(ln for ln in filled.splitlines() if ln.startswith("| Natsukashii1997/dt-sandbox"))
+        wl = next(ln for ln in filled.splitlines() if ln.startswith("L0 托管合并的路径白名单"))
+        merge = next(ln for ln in filled.splitlines() if ln.startswith("| 托管合并"))
+        cases = {
+            "仓库只写短名": filled.replace(row, row.replace("Natsukashii1997/dt-sandbox", "dt-sandbox")),
+            "有部署": filled.replace(row, row.replace("| 没有 |", "| 有发布 |")),
+            "日期不对": filled.replace(row, row.replace("2026-11-14", "11 月 14 日")),
+            "少一格": filled.replace(row, "| Natsukashii1997/dt-sandbox | 没有 | 2026-11-14 |"),
+            "同一仓库两行": filled.replace(row, row + "\n" + row),
+            "托管合并是但没仓库": filled.replace(row + "\n", ""),
+            "白名单没写": filled.replace(wl + "\n", ""),
+            "白名单不用反引号": filled.replace(wl, "L0 托管合并的路径白名单：docs/**"),
+            "白名单全放开": filled.replace(wl, "L0 托管合并的路径白名单：`**`"),
+            "白名单越界": filled.replace(wl, "L0 托管合并的路径白名单：`../x/**`"),
+            "白名单绝对路径": filled.replace(wl, "L0 托管合并的路径白名单：`/etc/**`"),
+            "白名单写两行": filled.replace(wl, wl + "\n" + wl),
+        }
+        for why, text in cases.items():
+            with self.subTest(why):
+                fields, errors = C.parse_policy(text)
+                self.assertTrue(errors, why)
+                self.assertNotIn("merge_scope", fields)
+        no_merge = filled.replace(merge, merge.replace("| 是 |", "| 否 |")).replace(row + "\n", "")
+        self.assertEqual(C.parse_policy(no_merge)[0]["merge_scope"]["repos"], {})   # 不托管合并时可以不列仓库
+
+    def test_glob_match(self):
+        for pat, path, want in (("docs/**", "docs/a.md", True), ("docs/**", "docs/x/y.md", True), ("docs/**", "docsx/a.md", False),
+                                ("CURRENT.md", "CURRENT.md", True), ("CURRENT.md", "a/CURRENT.md", False),
+                                ("*.md", "README.md", True), ("*.md", "docs/a.md", False), ("**/*.md", "a/b/c.md", True),
+                                ("**/*.md", "c.md", True), ("doc?/a.md", "docs/a.md", True), ("docs/*.md", "docs/x/a.md", False)):
+            with self.subTest(pat=pat, path=path):
+                self.assertEqual(C.glob_match(pat, path), want)
+
+    def test_sign_rejects_bad_merge_scope(self):
+        when = at(20)
+        self.policy.write_text(fill(self.template).replace("| 没有 | 2026-11-14 |", "| 有 | 2026-11-14 |"), encoding="utf-8")
+        sha = hashlib.sha256(self.policy.read_bytes()).hexdigest()
+        self.rejects("PolicyInvalid", C.do_sign, self.say(f"签托管策略 v3 {sha[:12]}", when), now=when)
 
     def test_parse_limits(self):
         """#133：额度上限从第 2 节的表里读，每行恰好一处；读不出、超范围、重复都算策略无效（签署时就拒绝）。"""

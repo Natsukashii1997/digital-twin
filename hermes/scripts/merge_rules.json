@@ -27,6 +27,15 @@
   },
   "ask_labels": ["needs-info"],
   "threshold": {"min_samples": 20, "min_rate": 0.9},
+  "custody": {
+    "note": "托管合并（#136，custody_merge.py）用的两项，不影响影子合并官的判定，改这里不用加版本号。required_checks：完整仓库名 → 待合并 HEAD 上必须真的 SUCCESS 的检查名（跳过、中立不算）；没登记的仓库托管合并一律挂起，不在宿主跑 PR 里的脚本。dt-sandbox 现在没有 CI，所以还没登记。side_effect_paths：PR 改到就挂起的工作流和副作用配置（正则）。",
+    "required_checks": {},
+    "side_effect_paths": ["^\\.github/", "(^|/)\\.gitlab-ci", "(^|/)\\.circleci/", "(^|/)Jenkinsfile$", "(^|/)CODEOWNERS$",
+                          "(^|/)\\.pre-commit-config\\.ya?ml$", "(^|/)(Dockerfile|docker-compose[^/]*\\.ya?ml|compose\\.ya?ml)$",
+                          "(^|/)(netlify\\.toml|vercel\\.json|fly\\.toml|Procfile|app\\.ya?ml|render\\.ya?ml)$",
+                          "(^|/)\\.releaserc", "(^|/)release[^/]*\\.(json|ya?ml|toml)$", "(^|/)\\.npmrc$", "(^|/)package\\.json$",
+                          "(^|/)(pyproject\\.toml|setup\\.(py|cfg))$", "(^|/)Makefile$", "(^|/)\\.env", "(^|/)scripts/"]
+  },
   "act": {
     "note": "飞书一句话合并（#67）覆盖的仓库。只收 ci: true 的仓库，以 GitHub 检查全部通过为合并条件（#71）；主账号不执行 PR 里的代码，没有 CI 的仓库不走飞书合并（#190 不变量 2）。postpane 按项目约定停用了 GitHub Actions，没有 CI，不走飞书合并（#73）。不影响判定，改这里不用加版本号",
     "repos": {

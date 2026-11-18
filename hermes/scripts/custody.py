@@ -178,8 +178,9 @@ def only_one(lines, pattern, what, errors):
 
 
 def parse_policy(text):
-    """读出托管要用的五项，位置固定：版本、有效期在开头的表里（第一个「## 」之前），默认时段和排空截止在「## 1. 默认托管时段」里，
-    额度上限在「## 2. 托管期间允许的动作」的表里（#133）；引用块不参与；每项恰好一处。其余条款归出口闸、合并执行器（#134、#136）。
+    """读出托管要用的六项，位置固定：版本、有效期在开头的表里（第一个「## 」之前），默认时段和排空截止在「## 1. 默认托管时段」里，
+    额度上限在「## 2. 托管期间允许的动作」的表里（#133），可托管合并的仓库和 L0 路径白名单在「## 3. 可托管合并的仓库」里（#136）；
+    引用块不参与；每项恰好一处。其余条款归出口闸（#134）。
     返回 (字段, 错误列表)。"""
     errors, out = [], {}
     sec = sections(text)
@@ -220,7 +221,87 @@ def parse_policy(text):
     limits = parse_limits(sec, errors)
     if limits:
         out["limits"] = limits
+    merge = parse_merge_scope(sec, errors, (limits or {}).get("merge", {}).get("allowed"))
+    if merge:
+        out["merge_scope"] = merge
     return out, errors
+
+
+MERGE_REPO = re.compile(r"^[A-Za-z0-9][\w.-]*/[\w.-]+$")
+L0_GLOB = re.compile(r"^[\w.*?/-]+$")
+
+
+def _cells(line):
+    return [c.strip().strip("`").strip() for c in line.strip().strip("|").split("|")]
+
+
+def parse_merge_scope(sec, errors, merge_allowed):
+    """策略第 3 节（#136，常浩 11-14 选「签署时也校验」）：可托管合并的仓库表和 L0 路径白名单。读不出就记错误（整份策略无效）。
+    仓库表每行四格：完整仓库名（owner/name）| 合并到 main 触发的工作流 / 外部动作 | 有没有部署、发布、外部通知、数据迁移 | 核实日期；
+    第三格只能是「没有」（有就不能列进来），日期写 YYYY-MM-DD，同一仓库只能一行；托管合并写了「是」时至少一行。
+    白名单是一行「L0 托管合并的路径白名单：」后面反引号里的路径（`docs/**`、`CURRENT.md`；** 跨目录，* 和 ? 不跨 /），至少一条，
+    不许绝对路径、..、只写 ** 这种全放开的。返回 {"repos": {仓库: {...}}, "l0_paths": [...]}。"""
+    three = [v for k, v in sec.items() if k.startswith("## 3. 可托管合并的仓库")]
+    if len(three) != 1:
+        errors.append("要有且只有一节「## 3. 可托管合并的仓库」")
+        return None
+    body, bad_before = three[0], len(errors)
+    rows = [ln for ln in body if ln.strip().startswith("|")]
+    if len(rows) < 2 or not _cells(rows[0])[0].startswith("仓库") or not set(rows[1].replace("|", "").strip()) <= set("-: "):
+        errors.append("第 3 节要有「| 仓库 | … |」表头的表格")
+        return None
+    repos = {}
+    for ln in rows[2:]:
+        c = _cells(ln)
+        if len(c) != 4:
+            errors.append(f"第 3 节仓库表每行要四格：{ln.strip()[:60]}")
+            continue
+        repo, effects, risky, checked = c
+        if not MERGE_REPO.match(repo):
+            errors.append(f"第 3 节仓库要写完整仓库名（owner/name）：{repo[:40]}")
+        elif repo in repos:
+            errors.append(f"第 3 节 {repo} 写了不止一行")
+        if not effects:
+            errors.append(f"第 3 节 {repo} 没写合并到 main 会触发什么")
+        if risky != "没有":
+            errors.append(f"第 3 节 {repo} 的部署 / 发布 / 外部通知 / 数据迁移要写「没有」（有的仓库不能托管合并）")
+        try:
+            dt.date.fromisoformat(checked)
+        except ValueError:
+            errors.append(f"第 3 节 {repo} 的核实日期要写成 YYYY-MM-DD")
+        repos[repo] = {"effects": effects, "checked": checked}
+    if merge_allowed and not repos:
+        errors.append("托管合并写了「是」，第 3 节却没列仓库")
+    m = only_one(body, r"^\s*L0 托管合并的路径白名单[：:]\s*(.*?)\s*$", "第 3 节「L0 托管合并的路径白名单」", errors)
+    paths = []
+    if m:
+        paths = re.findall(r"`([^`]+)`", m.group(1))
+        if not paths:
+            errors.append("L0 路径白名单要用反引号写路径，例：`docs/**`、`CURRENT.md`")
+        for p in paths:
+            if (not L0_GLOB.match(p) or p.startswith("/") or ".." in p.split("/") or "//" in p
+                    or not p.strip("*/?")):
+                errors.append(f"L0 路径白名单里的「{p}」不行（要相对路径，不许 ..、不许只写 **）")
+    if len(errors) > bad_before:
+        return None
+    return {"repos": repos, "l0_paths": paths}
+
+
+def glob_match(pattern, path):
+    """L0 白名单的匹配：** 跨目录（含零层），* 和 ? 不跨 /，其余字符原样比较。"""
+    rx, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            rx, i = rx + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            rx, i = rx + ".*", i + 2
+        elif pattern[i] == "*":
+            rx, i = rx + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            rx, i = rx + "[^/]", i + 1
+        else:
+            rx, i = rx + re.escape(pattern[i]), i + 1
+    return re.fullmatch(rx, path) is not None
 
 
 def parse_limits(sec, errors):
@@ -287,7 +368,7 @@ def verify_policy(doc, now=None, path=None):
         return {**base, "code": "expired", "reason": f"托管策略 v{sig['version']} 已于 {sig['expires_at']} 过期，要续签（换版本）"}
     return {"ok": True, "code": "valid", "path": base["path"], "version": sig["version"], "sha256": sha,
             "signed_at": sig["signed_at"], "expires_at": sig["expires_at"], "drain_minutes": fields["drain_minutes"],
-            "window": fields["window"], "limits": fields["limits"]}
+            "window": fields["window"], "limits": fields["limits"], "merge_scope": fields["merge_scope"]}
 
 
 # ---------- 默认时段 ----------

@@ -167,8 +167,12 @@ def judge(suggestion, head, outcome, outcome_head):
     return "是" if (suggestion == MERGE) == (outcome == MERGED) else "否"
 
 
+CUSTODY = "custody"   # owner=custody：托管合并（#136），不计入影子一致率、不作为升档证据（ARCHITECTURE 5.5）
+
+
 def rates(rows, threshold):
-    """rows 里每条要有 source、tier、agree。按档算 live 与 backfill 的一致率和是否达标。"""
+    """rows 里每条要有 source、tier、agree。按档算 live 与 backfill 的一致率和是否达标。托管合并的行（owner=custody）不算。"""
+    rows = [r for r in rows if r.get("owner") != CUSTODY]
     out = {}
     for t in TIERS:
         d = {"tier": t}
@@ -347,7 +351,7 @@ def _pct(x):
     return "—" if x is None else f"{x * 100:.0f}%"
 
 
-def format_report(rs, rules, total):
+def format_report(rs, rules, total, custody=0):
     th = rules["threshold"]
     lines = [f"影子合并官一致率（规则 v{rules['version']}；门槛：同类 {th['min_samples']} 次、一致率 ≥{th['min_rate'] * 100:.0f}%；只报告，不自动放权）",
              "", "| 档 | 计入 | 一致 | 一致率 | 其中退回且一致 | 达标 | 问常浩 | 待结局 | 被新提交取代 | 回填（不计入门槛） |",
@@ -359,7 +363,7 @@ def format_report(rs, rules, total):
                      f"{'达标' if d['qualified'] else '未达标'} | {lv['ask']} | {lv['pending']} | {lv['superseded']} | "
                      f"{bf['agree']}/{bf['n']}（{_pct(bf['rate'])}） |")
     lines += ["", "「其中退回且一致」很少时，一致率主要来自「建议合并 ↔ 合并」；PR 绝大多数会被合并，这时高一致率不说明会拦。",
-              f"共 {total} 条判定；记录：{LEDGER}"]
+              f"共 {total} 条判定" + (f"（其中托管合并 {custody} 条，不计入）" if custody else "") + f"；记录：{LEDGER}"]
     return "\n".join(lines)
 
 
@@ -367,10 +371,12 @@ def cmd_report(as_json=False):
     rules = load_rules()
     rows = read_rows()
     rs = rates(rows, rules["threshold"])
+    custody = sum(1 for r in rows if r.get("owner") == CUSTODY)
     if as_json:
-        print(json.dumps({"rules_version": rules["version"], "tiers": rs, "total": len(rows)}, ensure_ascii=False, indent=2))
+        print(json.dumps({"rules_version": rules["version"], "tiers": rs, "total": len(rows), "custody": custody},
+                         ensure_ascii=False, indent=2))
     else:
-        print(format_report(rs, rules, len(rows)))
+        print(format_report(rs, rules, len(rows), custody))
     return 0
 
 
@@ -379,7 +385,7 @@ def replay(rows, facts, old, new):
     before, after, changed = [], [], []
     for r in rows:
         f = facts.get((r["repo"], r["pr"], r["head_sha"]))
-        if f is None:
+        if f is None or r.get("owner") == CUSTODY:
             continue
         pair = []
         for rules, bucket in ((old, before), (new, after)):
