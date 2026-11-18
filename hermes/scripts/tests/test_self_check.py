@@ -3,6 +3,7 @@
 漂移检查用临时 git 仓库当 DT_REPO、临时目录当 HERMES_HOME 和 DT_BIN，HOME 也换成临时目录；git 用临时全局配置。
 仓库自检的子进程打桩或用空名册跑真的 check_repos.py。Tidings 的 node 换成当前 python、health.js 换成临时脚本。不联网，不碰真实仓库、~/.hermes、安装副本和 Vault。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import io
 import json

@@ -1,4 +1,5 @@
 """actions.py 自测：临时目录假造六个来源，不读真实数据。统计日 D = 2026-11-08（04:00 到 11-09 04:00，北京时间）。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import csv
 import datetime as dt
 import json

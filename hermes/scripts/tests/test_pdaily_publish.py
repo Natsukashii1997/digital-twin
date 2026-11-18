@@ -3,6 +3,7 @@
 
 事实快照用手造的小样（结构同 pdaily_facts.build 的输出）；Hermes 用临时目录里的假命令，不调模型；会话库用临时 SQLite。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import copy
 import json
 import os

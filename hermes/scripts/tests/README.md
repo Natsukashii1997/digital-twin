@@ -2,6 +2,36 @@
 
 名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`python3 -B -m unittest discover -s hermes/scripts/tests`。
 
+## 统一测试隔离（_isolation，#212）
+
+测试碰不到本机正式环境，不靠每个测试自己记得隔离（来由：11-17 反向验证误装进正式中台、10-27 假模型名写进正式凭证 G-13、11-11 覆盖正式配置）：
+
+- **每个测试模块第一句（文档字符串之后）写 `import _isolation`**，在导入任何被测脚本之前。`test_isolation_guard.py` 扫描本目录，漏写或写在别的 import 后面就失败。按上面的命令跑时 `_isolation` 包排在所有 `test_*.py` 前面先被导入，漏写的模块也已在隔离里；单跑一个文件靠第一句。
+- 导入时：清掉 `DT_*`、`HERMES_*`、`FEISHU_*` 等可能指向正式环境的变量（`DT_HUB_E2E`、`DT_AUTOLOOP_CLI` 两个开关保留），把 `HOME`、`XDG_*`、`AGENT_AUTOLOOP_HOME`、`HERMES_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS` 指到本次运行的临时目录，`DT_HUB` 指到不监听的 127.0.0.1:9；git 用临时全局配置。
+- 默认禁网：本进程连非回环地址、解析外部域名抛 `_isolation.BlockedNetwork`（`OSError` 子类）；回环放行，但本机正式服务端口（3350、3352、5433、8085、8086、8090）也拦。子进程拿到指向死端口的 `HTTP(S)_PROXY`。
+- `PATH` 最前面放拦截桩：`launchctl`、`security`、`sudo`、`crontab`、`osascript`、`pfctl`、`lark-cli`、`hermes`、`claude`、`codex`、`gh`、`multica`、`docker` 调到就退出码 97。测试要用假命令，照旧把自己的目录放在 `PATH` 更前面或用 `DT_*_CLI` 指定。
+- 进程退出时把拦下的连接和命令汇总打到 stderr。缺口：测试给子进程拼全新环境（如 `PATH` 只写 `/usr/bin:/bin`、不带 `HOME`）时桩和代理管不到那个子进程，这种写法要自己指好临时目录。
+
+## 反向验证核对正式目录（prod_snapshot.py，#212）
+
+「故意改坏」类验证和全量测试的前后，用它核对本机正式目录没被动过。只读：只取路径、类型、大小、修改时间，不打开文件；家目录按系统账号取（不受 `HOME` 影响）。默认核对 `~/.agent-autoloop`、`~/.hermes`、`~/Library/LaunchAgents`、`~/Library/Application Support/DigitalTwin`、`/Users/Shared/dt-autoloop`，变了退出码 3 并逐条列出新增 / 删除 / 变了的路径。
+
+```sh
+python3 -B hermes/scripts/tests/prod_snapshot.py run --out-dir <证据目录> -- python3 -B -m unittest discover -s hermes/scripts/tests
+python3 -B hermes/scripts/tests/prod_snapshot.py take 前.json     # 之后 check 前.json 再比；diff 前.json 后.json 比两份
+```
+
+改坏脚本里每改坏一处、跑完测试就核一次，变了立刻停：
+
+```python
+import prod_snapshot as ps          # sys.path 加上 hermes/scripts/tests
+base = ps.take()
+...                                 # 改坏一处、跑测试、还原
+ps.assert_unchanged(base)           # 变了抛 ps.ProdChanged，消息里写明哪些路径变了
+```
+
+Hermes 网关一直在写心跳和运行状态（`~/.hermes/state/`、`gateway_state.json`、`*.db-wal` 等），空闲时也会变；要排除就加 `--exclude '<绝对路径通配>'`，排除了什么写进证据。
+
 ## 派单续跑回执（test_dispatch_followup.py）
 
 只需要 Python 3.8 或以上版本的标准库，无需安装依赖。在仓库根目录执行：

@@ -1,4 +1,5 @@
 """每周提案收口（#61）自测：回复解析、三类来源汇总、卡片发送（假 lark-cli）和写回；全部用临时目录，不碰真实提案和飞书。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

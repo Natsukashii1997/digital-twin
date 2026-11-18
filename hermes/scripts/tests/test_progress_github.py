@@ -2,6 +2,7 @@
 
 PATH 最前面放假 gh（fake_gh.py）喂固定数据；时区固定北京时间，检查按北京时间算“当天”。不联网。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

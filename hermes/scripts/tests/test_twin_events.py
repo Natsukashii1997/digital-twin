@@ -5,6 +5,7 @@
 被拒绝的动作不消耗消息、迟到与回退不覆盖已确认事实、order.sync 用内容哈希键（同秒连写不漏）、没有 order.json 的目录只计 ignored。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_events.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import os
