@@ -167,7 +167,7 @@ class Epoch(unittest.TestCase):
             with mock.patch.object(R, "healthz", return_value=C1):
                 Path(d, "up.pid").write_text(str(os.getpid()))
                 ep = R.current_epoch()
-        self.assertTrue(ep["boot"].isdigit())
+        self.assertNotEqual(ep["boot"], "?")
         self.assertTrue(ep["hub_process"].startswith(f"{os.getpid()}@"))
 
 

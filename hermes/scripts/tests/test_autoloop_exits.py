@@ -135,6 +135,15 @@ class Guard(Base):
         self.assertFalse(E.alive(row, now + E.HARD_STALE + dt.timedelta(seconds=1), boot="1"))
         self.assertFalse(E.alive({**row, "boot": "?"}, now, boot="?"))
 
+    def test_boot_id_falls_back_to_linux_proc(self):
+        """CI 在 Linux 上跑：没有 kern.boottime 时读 /proc 的 boot_id；都没有才是 '?'（当成进程不在）。"""
+        with mock.patch.object(E.subprocess, "run", side_effect=OSError), \
+                mock.patch.object(E.Path, "read_text", return_value="3f2a-boot\n"):
+            self.assertEqual(E.boot_id(), "3f2a-boot")
+        with mock.patch.object(E.subprocess, "run", side_effect=OSError), \
+                mock.patch.object(E.Path, "read_text", side_effect=OSError):
+            self.assertEqual(E.boot_id(), "?")
+
     def test_bad_key_or_scope_is_refused(self):
         for kind, key, scope in (("push_branch", "open_pr:x", "task:t"), ("nuke", "nuke:x", "task:t"),
                                  ("merge", "merge:x y", "task:t"), ("merge", "merge:x", "everything")):

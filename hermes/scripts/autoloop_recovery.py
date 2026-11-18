@@ -6,7 +6,7 @@
 回答卡片、往中台发派单）动手前都过 ensure_open()：
 
 **闸什么时候关**（任一变化都关，记的「纪元」对不上就关）：
-  - 开机（kern.boottime 变了）、睡醒（kern.waketime 变了）；
+  - 开机（kern.boottime 变了；Linux 上读 boot_id）、睡醒（kern.waketime 变了）；
   - 中台重启或换版本（中台 up.pid 的进程号或进程启动时间变了、/healthz 的提交号变了）；中台连不上也算关着；
   - 任何账本里出现「结果不明」（出口账本 exits、本人点击 claims 的 unknown）——断网、超时、强杀都会走到这里。
 
@@ -98,7 +98,7 @@ def hub_process():
 
 def current_epoch():
     """开机、睡醒、中台进程、中台版本；中台连不上抛 HubDown。"""
-    return {"boot": _sysctl_sec("kern.boottime"), "wake": _sysctl_sec("kern.waketime"),
+    return {"boot": E.boot_id(), "wake": _sysctl_sec("kern.waketime"),
             "hub_commit": healthz(), "hub_process": hub_process()}
 
 

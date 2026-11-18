@@ -138,13 +138,18 @@ def mark_dirty(con, reason):
 
 # ---------- 进程与开机 ----------
 def boot_id():
-    """这次开机的标识（kern.boottime）；读不到返回 '?'（换不了开机的判断就靠 HARD_STALE 兜底）。"""
+    """这次开机的标识：macOS 读 kern.boottime，Linux（CI）读 /proc 的 boot_id；都读不到返回 '?'（当成进程不在）。"""
     try:
         out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"sec = (\d+)", out)
+        if m:
+            return m.group(1)
     except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or "?"
+    except OSError:
         return "?"
-    m = re.search(r"sec = (\d+)", out)
-    return m.group(1) if m else "?"
 
 
 def proc_start(pid):
