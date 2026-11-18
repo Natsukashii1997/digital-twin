@@ -17,7 +17,10 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
      这一轮属于这张单（事项、规则、Agent 对得上）、已正常结束、不是被启动脚本挡回去的（最后一条以「停下了」开头的不算）、
      在当前代次开始之后才排进来、它的派单事件都是当前代次；还要有当前代次的正面证据（第 2 轮）：这一轮里有当前代次的
      派单事件，或者它是回答卡片的一轮，顺着卡片找到提问的那一轮（最多 5 层），那一轮同样过这些检查、最终落到当前代次的
-     派单。只有定时复查、没有派单证据的轮次 0C 不发布（0D 记账后再放开）。对不上就不发。
+     派单；一轮里派单和回答合在一起时，每个回答照样要追溯（第 3 轮）。只有定时复查、没有派单证据的轮次 0C 不发布
+     （0D 记账后再放开）。对不上就不发。
+     剩余风险（常浩 11-18 定，记在这里）：正常结束、只是没有改动的轮次（如只向常浩提问）不写「停下了」（补了会盖掉 CLI 的
+     回执），它在中台里也是正常结束；改写清单把旧包挂上去，本脚本分辨不出。和下一条同类，0D 结果账本补上。
      工人自己写的提交内容仍不可信（存心作恶的工人能在当前代次里把旧内容重做一遍），内容由凭证、PR 审查、常浩合并把关。
   3. 能机械判的发布边界：包里只有本单分支一个引用、头提交对得上；基线是 main 上的提交、头提交从基线长出来；
      不收合并提交；基线到头提交之间的每一个提交、以及最终差异，都不许碰合并规则 merge_rules.json 里的高风险路径
@@ -73,7 +76,7 @@ MAX_COMMITS = 500
 GATE_USER = "dt-gate"           # ADR-015 控制面账号；测试里在进程内替换，不经环境变量
 REAL_PUBLISH = False            # 0D 恢复门（串行化、结果账本）之前发布整体关闭（审查 P1-07）
 TEST_BACKEND = None             # 测试在进程内换成 {"remote": "file://…/{github}.git", "gh": 假 gh 路径}；不经环境变量
-STOPPED = "停下了"               # 启动脚本没交接的一轮，最后一条消息都以它开头（ops/dt_worktree.stop_text）
+STOPPED = "停下了"               # 启动脚本出了问题没交接的一轮，最后一条消息以它开头（ops/dt_worktree.stop_text）
 MAX_HOPS = 5                    # 回答卡片的一轮往回追提问那一轮，最多几层
 
 
@@ -313,15 +316,15 @@ def _run_basics(run, row, generation):
 
 
 def _generation_evidence(run, row, generation, depth):
-    """当前代次的正面证据（审查第 2 轮 P1-02）：这一轮有当前代次的派单事件；或者它是回答卡片的一轮，
-    每个回答都顺着卡片追到提问的那一轮，那一轮也过 _run_basics 并最终落到当前代次的派单。"""
+    """当前代次的正面证据（审查第 2 轮 P1-02）：这一轮有当前代次的派单事件，或者有回答卡片的事件；
+    不管有没有派单，每个回答都要顺着卡片追到提问的那一轮，那一轮也过 _run_basics 并最终落到当前代次的派单
+    （第 3 轮：派单和旧回答合在同一轮时，不许因为有派单就跳过回答）。"""
     dispatch = G.event_type(row["repo"], row["executor"])
-    if any(e.get("type") == dispatch for e in run["events"]):     # 代次已在 _run_basics 里核过等于当前
-        return None
+    has_dispatch = any(e.get("type") == dispatch for e in run["events"])   # 代次已在 _run_basics 里核过等于当前
     answers = [e for e in run["events"] if e.get("type") == "card.answered"]
-    if not answers:
+    if not has_dispatch and not answers:
         return "这一轮没有当前代次的派单证据（只有定时复查的轮次 0C 不发布，0D 记账后再放开）"
-    if depth >= MAX_HOPS:
+    if answers and depth >= MAX_HOPS:
         return f"顺着回答卡片往回追了 {MAX_HOPS} 层还没找到派单，不认"
     for e in answers:
         key = str(e.get("key") or "")

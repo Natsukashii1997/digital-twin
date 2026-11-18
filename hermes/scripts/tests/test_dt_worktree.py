@@ -550,6 +550,30 @@ class EndOfTurn(WorkerBase):
         self.assertIn("累计用时到了", ended[1])
         self.assertIsNone(self.handoff(a["task_id"]))
 
+    def test_cancel_at_manifest_commit_point_still_ends_stopped(self):
+        """审查第 3 轮 P1-03：取消正好落在换清单那一下。换清单时取消信号是屏蔽的（挂起），换上后照样给中台「停下了」。"""
+        a, place = self.admitted()
+        (Path(place["worktree"]) / "README.md").write_text("改了\n")
+        saved = {s: signal.getsignal(s) for s in self.w.STOP_SIGNALS}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in saved.items()])
+        self.w.install_stop_handler()
+        real_replace, seen = os.replace, {}
+
+        def replace(src, dst):
+            if Path(dst).name == "handoff.json":
+                seen["blocked"] = signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+                os.kill(os.getpid(), signal.SIGTERM)          # 中台的取消在换清单这一下到达
+                seen["stopped_inside"] = self.w.stopped()
+            return real_replace(src, dst)
+
+        with mock.patch.object(self.w.os, "replace", side_effect=replace):
+            ended = self.w.after_run("claude", "dt-sandbox", {"events": [self.dispatch_event(a["task_id"])]}, a, place)
+        self.assertEqual(seen, {"blocked": True, "stopped_inside": False})   # 换清单时取消被挂起，没插进来
+        self.assertEqual(ended, ("cancelled", "本轮被中台取消；交接清单在取消前已写出，这一轮不算交接"))
+        self.assertIsNotNone(self.handoff(a["task_id"]))                    # 清单换上了，但这一轮结论是停下了
+        self.assertTrue(self.w.stopped())
+        self.assertNotIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, []))   # 屏蔽已解除
+
     def test_unclean_tree_gets_an_explicit_stop(self):
         a, place = self.admitted()
         (Path(place["worktree"]) / "README.md").write_text("改了\n")

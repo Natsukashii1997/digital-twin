@@ -455,6 +455,22 @@ class GenerationEvidence(PublishBase):
         self.assertTrue(P.publish(tid)["pushed"])                         # 追到第 2 代的派单才发
 
 
+    def test_dispatch_does_not_excuse_old_answer_in_same_run(self):
+        """审查第 3 轮 P1-02：当前代次的派单和旧回答合在同一轮，旧回答照样要追溯。"""
+        tid = self.worked()
+        first = list(self.turn_runs)[-1]
+        later = self.to_gen2(tid)
+        mixed = self.fake_run(tid, [self.dispatch_event(tid, gen=2), self.answer_event(tid)], created_at=self.iso(later))
+        self.rewrite_manifest(tid, generation=2, run=mixed)
+        self.hub_cards["9"] = {"id": "9", "kind": "ask", "lane": tid, "run_id": first}        # 第 1 代提的问题
+        self.rejects(tid, "提问的那一轮：这一轮在第 2 代开始之前就排进来了")
+        self.hub_cards["9"] = None
+        self.rejects(tid, "追溯不到")
+        asked = self.fake_run(tid, [self.dispatch_event(tid, gen=2)], created_at=self.iso(later))
+        self.hub_cards["9"] = {"id": "9", "kind": "ask", "lane": tid, "run_id": asked}
+        self.assertTrue(P.publish(tid)["pushed"])
+
+
 class PrIdentity(PublishBase):
     """审查 P1-05：同名分支已有开着的 PR，核对目标、来源、分支、头提交都对才沿用。"""
 

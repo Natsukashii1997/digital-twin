@@ -24,7 +24,11 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
 
 准入不过、用时到上限、进程没清干净、交接前凭证失效、提交或交接出错：输出一条 CLI 格式的最终消息（第一行「停下了：原因」，
 回执里一张「任务停下了」通知卡），退出码 0，中台按「本轮结束」处理、不自动重派；被取消的一轮也写「停下了」（不带通知卡）。
-凡是没交接的一轮，最后一条都是「停下了」，受信发布据此不认这一轮（审查 P1-03、P1-02）。临时问题（取不到仓库、同一张单另一轮还在跑）写「没跑成」，中台过几分钟重派。
+出了问题而没交接的一轮（上面这些情况，含取消落在换清单之后），最后一条都是「停下了」，受信发布据此不认这一轮（审查 P1-03、P1-02）。
+例外如实说明：正常结束、只是没有相对基线的改动（比如这一轮只向常浩提问）的一轮，不打交接包，结论照旧是 CLI 自己的话——
+补一句「停下了」会盖掉 CLI 的回执（中台只读最后一条消息的回执），提的问题卡片就丢了（常浩 11-18 定：不补，记成剩余风险）。
+所以这种轮次在中台里也是「正常结束」；改写交接清单把旧包挂到它上面，和工人在当前代次重做旧内容是同一类剩余风险，由凭证、
+PR 审查、常浩合并兜底，0D 的结果账本记「轮次 × 交接头提交」后补上。临时问题（取不到仓库、同一张单另一轮还在跑）写「没跑成」，中台过几分钟重派。
 
 这里的检查只防正常流程出错，不当作不可绕过的边界：脚本归主账号所有、工人只能运行不能改，但工人账号的进程能伪造镜像
 路径之类；真正的边界在主账号的受信发布（再按凭证库核一遍）和 GitHub 保护（方案 5.1 第 3 条）。
@@ -83,8 +87,11 @@ def on_stop(sig, _frame):
         kill_group(STOP["pgid"], signal.SIGTERM)
 
 
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
 def install_stop_handler():
-    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    for s in STOP_SIGNALS:
         signal.signal(s, on_stop)
 
 
@@ -499,10 +506,19 @@ def write_handoff(executor, repo, task_id, generation, place):
     mtmp = d / f".handoff.{os.getpid()}.json"
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
     os.chmod(mtmp, 0o644)
-    if stopped():                                # 换清单前最后看一次（包已换、清单没换：受信发布按哈希对不上拒收）
-        mtmp.unlink()
-        return "cancelled"
-    os.replace(mtmp, d / "handoff.json")
+    # 提交点（审查第 3 轮 P1-03）：最后检查和换清单之间屏蔽取消信号，取消要么在提交点之前（不换清单），要么在之后
+    # （清单已换，由 after_run 再看一次，照样给中台「停下了」）；屏蔽期间到的取消，解除前从挂起信号里记下。
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, STOP_SIGNALS)
+    try:
+        if stopped():                            # 包已换、清单没换：受信发布按哈希对不上拒收
+            mtmp.unlink()
+            return "cancelled"
+        os.replace(mtmp, d / "handoff.json")
+    finally:
+        pending = signal.sigpending() & set(STOP_SIGNALS)
+        if pending and STOP["sig"] is None:
+            STOP["sig"], STOP["at"] = min(pending), time.time()
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
     return manifest
 
 
@@ -526,6 +542,8 @@ def after_run(executor, repo, context, admitted, place, outcome="finished", clea
         m = write_handoff(executor, repo, task_id, gen, place)
         if m == "cancelled":
             return "cancelled", f"本轮被中台取消，{kept}没有交接"
+        if m and stopped():                      # 取消落在提交点之后：清单已换，结论照样是停下了，中台记这一轮已取消
+            return "cancelled", "本轮被中台取消；交接清单在取消前已写出，这一轮不算交接"
         log(task_id, f"{'有新提交，' if committed else ''}"
                      f"{'交接包已更新：' + m['head'][:12] if m else '没有相对基线的改动，不交接'}")
         return None
@@ -601,7 +619,7 @@ def main(argv=None):
         log(task_id, f"没跑成：{e}")
         final_message(executor, f"没跑成：{e}")
         return 0
-    if ended:                                    # 没交接的一轮都给中台一个明确结论
+    if ended:                                    # 出了问题没交接的一轮，给中台一个明确结论
         kind, reason = ended
         log(task_id, f"停下：{reason}")
         final_message(executor, stop_text(reason, task_id, notice=kind != "cancelled"))
