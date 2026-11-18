@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """每周提案收口（#61，《工程流程》第 8 节第 2 条）：把待决提案打包成选择题发到常浩私聊，常浩回复后写回结论。
 
-三类来源，各自的结论写回它原来的位置：
+四类来源，各自的结论写回它原来的位置：
   会话复盘   ~/session-retro/*/提案.md 里的「### A1 …」条目；结论写成条目标题下一行「- 结论：采纳（日期，说明）」
   牛马之家   每周整理目录里最新一期（YYYY-MM-DD.md）的「### W…」条目和「上次未决」；结论按该目录 decisions.md
              自己的约定追加一行「- 编号　采纳/否决/待定　日期　说明」。被新条目「取代」的旧编号不单列，新条目定了一并记上
   LESSONS    默认不列（常浩 2026-11-07：hook 命中只是关键词匹配，太吵）。设 DT_LESSONS_MIN_PROJECTS=N 才列：agent-kit
              LESSONS.md 里「升级：未升级」、近 7 天被 hook 在 N 个以上名册项目碰到的全局坑（只是候选）；
              结论记在影子目录 lessons-decisions.md（同上格式）
+  再犯与待提升（#216，常浩 2026-11-18 定）：调 agent-kit 每周汇总 `node tools/weekly-review.mjs --json`（agent-kit#80，
+             从 agent-kit 主目录跑；怎么认条目只在那边做一份，这里只消费结果），只列两种：写了「再犯：G-xx」的全局坑
+             （按坑汇总，〔文字〕〔提醒〕层又再犯的「升级首选」最前）和升级行明确写了「提议提升」的项目坑（〔提议〕）；
+             每期最多 7 条，超出的在卡片上写「另有 N 条」，全部记在期号状态里、`list` 打印。取不到（没有 node、
+             脚本不在、出错、超时、格式不对）时卡片照常发其他来源，并写一句这一类本期没取到及原因；只有这句也照发。
+             结论记在影子目录 guards-decisions.md（同上格式），不替常浩落地、不改各项目的坑记录
 「延期」记成「待定」，下周一还会再列；没提到的编号保持待决。采纳只记结论，不替常浩落地那条规则。
 
 用法：
@@ -24,13 +30,18 @@
 环境变量：DT_RETRO_ROOT、DT_NIUMA_REVIEW、DT_LESSONS、AGENT_KIT_STATE_DIR（读 lessons-hits.jsonl）、DT_ROSTER、
 DT_PROPOSAL_DIR（期号状态）、DT_SHADOW_DIR（lessons-decisions.md）、FEISHU_HOME_CHANNEL（私聊 chat_id；没有时只从
 DT_HERMES_ENV，默认 ~/.hermes/.env，读这一项）、
-DT_LARK_CLI（换 lark-cli，自测用）、DT_NOW（ISO 时间），DT_LESSONS_MIN_PROJECTS（默认 0 = 不列 LESSONS 候选）。
+DT_LARK_CLI（换 lark-cli，自测用）、DT_NOW（ISO 时间），DT_LESSONS_MIN_PROJECTS（默认 0 = 不列 LESSONS 候选）、
+DT_WEEKLY_REVIEW（agent-kit 每周汇总脚本；node 先找 PATH，再找 /opt/homebrew/bin、/usr/local/bin、~/.nvm，
+Hermes 定时任务的 PATH 里没有 nvm）。
 """
 import argparse
 import datetime as dt
+import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -49,6 +60,13 @@ SHADOW = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/Dig
 STATE = STATE_DIR / "digest.json"
 LESSONS_LEDGER = SHADOW / "lessons-decisions.md"
 MIN_PROJECTS = int(os.environ.get("DT_LESSONS_MIN_PROJECTS", "0"))   # 0 = 不列
+WEEKLY_REVIEW = Path(os.environ.get("DT_WEEKLY_REVIEW",
+                                    "~/Documents/ChatGPT/个人/work/agent-kit/tools/weekly-review.mjs")).expanduser()
+GUARDS_LEDGER = SHADOW / "guards-decisions.md"
+GUARDS_MAX = 7          # 常浩 2026-11-18 定：再犯与待提升每期最多 7 条
+GUARDS_SCHEMA = 1       # agent-kit weekly-review.mjs --json 的 schema
+GUARDS_TIMEOUT = 60
+GUARDS_GROUP = "再犯与待提升"
 BJ = dt.timezone(dt.timedelta(hours=8))
 OVERDUE_DAYS = 7
 TITLE_MAX = 48
@@ -244,8 +262,91 @@ def collect_lessons(now):
     return out
 
 
+def find_node():
+    extra = ["/opt/homebrew/bin", "/usr/local/bin", *sorted(glob.glob(str(HOME / ".nvm/versions/node/*/bin")), reverse=True)]
+    return shutil.which("node", path=os.pathsep.join([*os.environ.get("PATH", "").split(os.pathsep), *extra]))
+
+
+def weekly_review():
+    """跑 agent-kit 每周汇总的 --json，返回 (数据, 取不到的原因)。"""
+    if not WEEKLY_REVIEW.is_file():
+        return None, f"找不到 agent-kit 每周汇总脚本 {WEEKLY_REVIEW}"
+    node = find_node()
+    if not node:
+        return None, "找不到 node"
+    try:
+        r = subprocess.run([node, str(WEEKLY_REVIEW), "--json"], cwd=WEEKLY_REVIEW.parent, capture_output=True,
+                           text=True, timeout=GUARDS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"每周汇总超过 {GUARDS_TIMEOUT} 秒没跑完"
+    except OSError as e:
+        return None, f"每周汇总启动不了（{e.strerror or e}）"
+    if r.returncode != 0:
+        why = (r.stderr.strip().splitlines() or ["没有说明"])[-1][:80]
+        return None, f"每周汇总出错（退出码 {r.returncode}：{why}）"
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None, "每周汇总的输出不是 JSON（agent-kit 主目录可能还没有 --json，见 agent-kit#80）"
+    if not isinstance(data, dict) or data.get("schema") != GUARDS_SCHEMA:
+        return None, f"每周汇总的 schema 不是 {GUARDS_SCHEMA}（{data.get('schema') if isinstance(data, dict) else '不是对象'}），两边要一起改"
+    if not isinstance(data.get("recurrences"), list) or not isinstance(data.get("promotions"), list):
+        return None, "每周汇总的输出缺 recurrences / promotions"
+    return data, None
+
+
+def collect_guards(now):
+    """再犯与待提升：返回 (列进卡片的, 超出 7 条没列的, 取不到的原因)。"""
+    data, err = weekly_review()
+    if err:
+        return [], [], err
+    decided = read_decisions(GUARDS_LEDGER)
+    day = now.date().isoformat()
+    items = []
+    try:
+        # 升级首选（〔文字〕〔提醒〕层又再犯）最前，其余按再犯条目数；agent-kit 那边已这样排，这里再排一次不依赖顺序
+        for r in sorted(data["recurrences"], key=lambda r: (not r.get("prime"), -int(r.get("count") or 0), r["id"])):
+            gid = r["id"]
+            if decided.get(gid) in (ADOPT, REJECT):
+                continue
+            level = f"〔{r['level']}〕" if r.get("level") else "层级未标"
+            projects = "、".join(r.get("projects") or [])
+            title = (f"{short(r.get('title') or '')} · {level}又再犯 {r.get('count')} 次（{projects}）"
+                     + (" · 升级首选" if r.get("prime") else ""))
+            items.append({"key": f"recur:{gid}", "source": "guards", "group": GUARDS_GROUP, "id": gid, "title": title,
+                          "date": day, "file": str(GUARDS_LEDGER), "body": [
+                              f"再犯：{gid} {r.get('title') or ''}",
+                              f"现在的层级：{level}，状态：{r.get('status') or '未知'}",
+                              f"项目坑记录 / 交接里写了「再犯：{gid}」的条目 {r.get('count')} 处，项目：{projects}",
+                              "升级首选：是（〔文字〕〔提醒〕层又再犯，按 LESSONS「怎么升级」从〔结构〕往下找第一个做得到的层）"
+                              if r.get("prime") else "升级首选：否（〔结构〕〔机检〕〔体检〕层还在再犯，说明那一层没拦住，要改检查或换层）"]})
+        for p in data["promotions"]:
+            if not p.get("proposed"):
+                continue                                   # 只写「未升级」没提议的不列（常浩 11-18 定的口径）
+            pid = re.sub(r"\s+", "_", f"{p['project']}/{p['id']}")
+            if decided.get(pid) in (ADOPT, REJECT):
+                continue
+            items.append({"key": f"promo:{pid}", "source": "guards", "group": GUARDS_GROUP, "id": pid,
+                          "title": f"{short(p.get('title') or '')} · 提议提升为全局坑", "date": day,
+                          "file": str(GUARDS_LEDGER), "body": [
+                              f"项目 {p['project']} 的 {p.get('file') or 'LESSONS'}：{p['id']} {p.get('title') or ''}",
+                              f"升级行：{p.get('upgrade') or '（没带原文）'}",
+                              "还没提升为全局 G-xx。采纳 = 同意提议提升，落地另开单。"]})
+    except (KeyError, TypeError, ValueError) as e:
+        return [], [], f"每周汇总的条目格式不对（{type(e).__name__}：{e}）"
+    return items[:GUARDS_MAX], items[GUARDS_MAX:], None
+
+
 def collect(now):
-    return collect_retro() + collect_niuma() + collect_lessons(now)
+    """返回 (待决提案, 再犯与待提升超出没列的, 卡片上的提示)。"""
+    guards, more, err = collect_guards(now)
+    notes = []
+    if err:
+        notes.append(f"⚠️ {GUARDS_GROUP}本期没取到：{err}。其他来源照常。")
+    elif more:
+        notes.append(f"{GUARDS_GROUP}另有 {len(more)} 条没列（每期最多 {GUARDS_MAX} 条），清单在 DigitalTwin/proposals/digest.json "
+                     "本期的 more，问 Hermes「其余待提升」可列出；前面的定了，下期往上补。")
+    return collect_retro() + collect_niuma() + collect_lessons(now) + guards, more, notes
 
 
 # ---------- 卡片 ----------
@@ -261,7 +362,15 @@ def overdue(item, now):
         return False
 
 
-def build_card(issue_no, items, now):
+def build_card(issue_no, items, now, notes=()):
+    lines = ["本期没有待决提案。", "", *notes] if not items else card_lines(items, now, notes)   # 只有提示也照发，不悄悄少一类
+    return {"schema": "2.0",
+            "header": {"title": {"tag": "plain_text", "content": f"📮 待决提案 · 第 {issue_no} 期（{now:%m/%d}）"},
+                       "template": "blue"},
+            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines).strip()}]}}
+
+
+def card_lines(items, now, notes):
     n_over = sum(1 for i in items if overdue(i, now))
     lines = [f"共 {len(items)} 条{f'，其中 {n_over} 条已超过 7 天（⏰）' if n_over else ''}。《工程流程》第 8 节第 2 条：提案 7 天内要有结论。"]
     group = None
@@ -272,15 +381,14 @@ def build_card(issue_no, items, now):
         lines.append(f"{i['n']}. {'⏰ ' if overdue(i, now) else ''}{i['id']} {i['title']}")
         if i.get("rec"):
             lines.append(f"　→ 推荐**{verb_label(i['rec'])}**：{i.get('why', '')}")
+    if notes:
+        lines += ["", *notes]
     if any(i.get("rec") for i in items):
         lines += ["", "**直接回「按推荐」**就全部照推荐记；要改个别的：「按推荐，2 改否」；也可以逐条：「采纳 1 3，否 2，延期 其余」。"]
     else:
         lines += ["", "回复写法：**采纳 1 3，否 2，延期 4**（可写范围 4-6、「其余」）。"]
     lines.append("请长按这张卡片选「回复」，Hermes 才知道你在回哪一期。没提到的编号下周一再列；采纳只记结论，落地另开单。")
-    return {"schema": "2.0",
-            "header": {"title": {"tag": "plain_text", "content": f"📮 待决提案 · 第 {issue_no} 期（{now:%m/%d}）"},
-                       "template": "blue"},
-            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines).strip()}]}}
+    return lines
 
 
 # ---------- 状态 ----------
@@ -428,6 +536,10 @@ def write_item(item, verdict, day, note):
         append_decision(path, item["id"], verdict, day, note)
         for old in item.get("absorbs") or []:
             append_decision(path, old, verdict, day, f"随 {item['id']}（已被它取代）")
+    elif item["source"] == "guards":
+        append_decision(Path(item["file"]), item["id"], verdict, day, note,
+                        header="# 再犯与待提升的结论\n\n由 proposal_digest.py 按常浩私聊回复写入，格式同牛马之家 decisions.md。"
+                               "编号：G-xx 是再犯的全局坑，<项目>/L-xx 是提议提升的项目坑。只记结论，不改 LESSONS。\n\n")
     else:
         append_decision(Path(item["file"]), item["id"], verdict, day, note,
                         header="# LESSONS 升级候选的结论\n\n由 proposal_digest.py 按常浩私聊回复写入，格式同牛马之家 decisions.md。\n\n")
@@ -436,14 +548,16 @@ def write_item(item, verdict, day, note):
 # ---------- 命令 ----------
 
 def cmd_draft():
-    """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）的 JSON；没有待决提案时不输出。"""
+    """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）和卡片提示的 JSON；两样都没有时不输出。"""
     now = today()
-    items = number(collect(now))
-    if not items:
+    items, more, notes = collect(now)
+    items = number(items)
+    if not items and not notes:
         return 0
     print(json.dumps({"date": now.date().isoformat(), "items": [
         {"n": i["n"], "key": i["key"], "group": i["group"], "id": i["id"], "title": i["title"],
-         "overdue": overdue(i, now), "body": "\n".join(i.get("body") or [])[:1500]} for i in items]},
+         "overdue": overdue(i, now), "body": "\n".join(i.get("body") or [])[:1500]} for i in items],
+        "more": len(more), "notes": notes},
         ensure_ascii=False, indent=2))
     return 0
 
@@ -455,8 +569,9 @@ def cmd_send(dry_run=False, force=False, recommend=None):
     issues = state.setdefault("issues", [])
     if issues and issues[-1]["date"] == day and issues[-1].get("message_id") and not (force or dry_run):
         return 0
-    items = number(collect(now))
-    if not items:
+    items, more, notes = collect(now)
+    items = number(items)
+    if not items and not notes:
         if dry_run:
             print("没有待决提案，这周不发。")
         return 0
@@ -468,7 +583,7 @@ def cmd_send(dry_run=False, force=False, recommend=None):
             return 1
     items = [{k: v for k, v in i.items() if k != "body"} for i in items]
     no = issues[-1]["no"] if issues and issues[-1]["date"] == day else len(issues) + 1
-    card = build_card(no, items, now)
+    card = build_card(no, items, now, notes)
     if dry_run:
         print(json.dumps({"msg_type": "interactive", "content": card}, ensure_ascii=False, indent=2))
         return 0
@@ -482,7 +597,8 @@ def cmd_send(dry_run=False, force=False, recommend=None):
     except SendError as e:
         print(f"待决提案没发出：{e}")
         return 1
-    issue = {"no": no, "date": day, "message_id": mid, "items": items, "answers": []}
+    issue = {"no": no, "date": day, "message_id": mid, "items": items, "answers": [],
+             "more": [{"key": i["key"], "id": i["id"], "title": i["title"]} for i in more], "notes": notes}
     if issues and issues[-1]["date"] == day:
         issues[-1] = {**issue, "answers": issues[-1].get("answers", [])}
     else:
@@ -509,6 +625,12 @@ def cmd_list():
     for i in issue["items"]:
         print(f"{i['n']}. [{i['source']}] {i['id']} {i['title']}"
               + (f"  → 推荐{verb_label(i['rec'])}：{i.get('why', '')}" if i.get("rec") else ""))
+    for note in issue.get("notes") or []:
+        print(note)
+    if issue.get("more"):
+        print(f"{GUARDS_GROUP}超出没列的 {len(issue['more'])} 条（不带编号，下期定了前面的再往上补）：")
+        for i in issue["more"]:
+            print(f"- {i['id']} {i['title']}")
     answers = issue.get("answers") or []
     print(f"已回复 {len(answers)} 次" + (f"，最近一次：{answers[-1]['reply']}" if answers else "") + "。")
     return 0
