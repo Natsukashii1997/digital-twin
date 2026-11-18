@@ -3,6 +3,10 @@ on:
   pull_request:
   push:
     branches: [main]
+    # 只改 CURRENT.md 的推送不跑（2026-11-18 常浩定：11 月私有仓库 Actions 免费 2000 分钟用完，
+    # digital-twin 推 main 的 157 次里 89 次只改 CURRENT.md，约 400 分钟）。同一次推送还改了别的文件照跑；
+    # PR 不受影响：飞书卡片合并要求 PR 有 CI 结果。
+    paths-ignore: ['CURRENT.md']
 permissions:
   contents: read
 concurrency:
@@ -10,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
-    runs-on: ubuntu-24.04   # ubuntu-latest 11-15 起是 26.04，setup-python 没有 3.9（只有 22.04、24.04）
+    runs-on: ubuntu-24.04   # ubuntu-latest 已是 26.04，setup-python 没有 3.9；固定在还有 3.9 的版本
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

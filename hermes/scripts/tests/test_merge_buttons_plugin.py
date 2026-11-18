@@ -1,6 +1,7 @@
 """PR 卡片按钮插件（#78）自测：只认合并官的按钮、参数原样转给 merge_act.py button、不回复。
 不起网关：直接加载插件模块，Popen 换成记录器。"""
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -20,8 +21,10 @@ def load():
 class MergeButtonsPlugin(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_MERGE_PYTHON": "/x/python3",
-               "HERMES_SESSION_CHAT_ID": "oc_home"}
+        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_AUTOLOOP_ANSWER": "/x/autoloop_answer.py", "DT_MERGE_PYTHON": "/x/python3",
+               "HERMES_SESSION_CHAT_ID": "oc_home", "DT_PROBE_DIR": self.tmp.name + "/probe",
+               "HERMES_SESSION_USER_ID": "ou_owner", "HERMES_SESSION_USER_ID_ALT": "on_owner", "HERMES_SESSION_USER_NAME": "常浩",
+               "HERMES_SESSION_CHAT_TYPE": "dm", "HERMES_SESSION_PLATFORM": "feishu", "HERMES_SESSION_MESSAGE_ID": "c-callbacktoken123"}
         self.env = mock.patch.dict(os.environ, env)
         self.env.start()
         self.mod = load()
@@ -73,6 +76,46 @@ class MergeButtonsPlugin(unittest.TestCase):
         for raw in ("", "button", "button not-json", 'button ["x"]', 'select {"merge_officer": "merge", "ref": "a#1@abcdef1"}',
                     'button {"hermes_action": "deny"}', 'button {"merge_officer": "delete", "ref": "a#1@abcdef1"}',
                     'button {"merge_officer": "merge", "ref": "a#1@abc; rm -rf /"}'):
+            out, popen = self.click(raw)
+            self.assertIsNone(out)
+            popen.assert_not_called()
+
+    def test_probe_records_session_without_running_anything(self):
+        out, popen = self.click('button {"probe": "0123456789abcdef"}')
+        self.assertIsNone(out)
+        popen.assert_not_called()
+        path = Path(self.tmp.name) / "probe" / "clicks.jsonl"
+        rec = json.loads(path.read_text().splitlines()[0])
+        self.assertEqual((rec["token"], rec["operator"], rec["operator_alt"], rec["chat_id"], rec["chat_type"]),
+                         ("0123456789abcdef", "ou_owner", "on_owner", "oc_home", "dm"))
+        self.assertEqual((rec["message_id_prefix"], rec["message_id_len"]), ("c-c", 18))
+        self.assertNotIn("callbacktoken", path.read_text())          # 回调 token 不落原文
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_probe_rejects_bad_tokens_and_extra_keys(self):
+        for raw in ('button {"probe": "0123"}', 'button {"probe": "0123456789ABCDEF"}', 'button {"probe": 12}',
+                    'button {"probe": "0123456789abcdef", "merge_officer": "merge", "ref": "a#1@abcdef1"}',
+                    'select {"probe": "0123456789abcdef"}'):
+            out, popen = self.click(raw)
+            self.assertIsNone(out)
+            popen.assert_not_called()
+        self.assertFalse((Path(self.tmp.name) / "probe" / "clicks.jsonl").exists())
+
+    def test_autoloop_click_forwards_token_option_chat_and_operator(self):
+        out, popen = self.click('button {"autoloop": "0123456789abcdef", "o": 1}')
+        self.assertIsNone(out)
+        self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/autoloop_answer.py", "0123456789abcdef", "1",
+                                                 "--chat", "oc_home", "--operator", "ou_owner"])
+        self.assertTrue(popen.call_args[1]["start_new_session"])
+        self.assertNotIn("0123456789abcdef", (Path(self.tmp.name) / "buttons.log").read_text())   # 日志不记令牌
+
+    def test_autoloop_rejects_bad_values(self):
+        for raw in ('button {"autoloop": "0123", "o": 1}', 'button {"autoloop": "0123456789abcdef", "o": "1"}',
+                    'button {"autoloop": "0123456789abcdef", "o": true}', 'button {"autoloop": "0123456789abcdef", "o": -1}',
+                    'button {"autoloop": "0123456789abcdef", "o": 100}', 'button {"autoloop": "0123456789abcdef"}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "by": "ou_x"}',
+                    'button {"autoloop": "0123456789abcdef --x", "o": 1}'):
             out, popen = self.click(raw)
             self.assertIsNone(out)
             popen.assert_not_called()
