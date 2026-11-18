@@ -316,15 +316,25 @@ class WorkerIsolation(unittest.TestCase):
         s.close()
         self.assertIn("没在运行", hc.check_egress(port)[0])
 
-    def status(self, text, age_min=1):
+    def status(self, text, age_min=1, accounts=("dt-worker",)):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         p = Path(d.name) / "pf.status"
         p.write_text(text)
-        return hc.check_pf(p, now=p.stat().st_mtime + age_min * 60)
+        return hc.check_pf(p, now=p.stat().st_mtime + age_min * 60, accounts=list(accounts))
 
     def test_pf_ok(self):
         self.assertEqual(self.status("at=x enabled=yes rules=6\n"), [])
+        both = ("dt-worker", "dt-secretary")
+        self.assertEqual(self.status("at=x enabled=yes rules=13 users=dt-worker,dt-secretary\n", accounts=both), [])
+
+    def test_pf_secretary_not_managed(self):
+        """秘书账号建了，门卫规则还是 0A 旧版（没有 users）或没管上秘书：要报。"""
+        both = ("dt-worker", "dt-secretary")
+        for text in ("at=x enabled=yes rules=6\n", "at=x enabled=yes rules=6 users=dt-worker\n"):
+            issues = self.status(text, accounts=both)
+            self.assertEqual(len(issues), 1)
+            self.assertIn("没管上 dt-secretary", issues[0])
 
     def test_pf_missing_disabled_or_stale(self):
         self.assertIn("没装", hc.check_pf(Path("/nonexistent/pf.status"))[0])

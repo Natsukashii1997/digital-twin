@@ -10,6 +10,7 @@ launchd 起的 python 读不了 ~/Documents，沙盒和仓库自检已搬到 sel
 import datetime as dt
 import json
 import os
+import pwd
 import socket
 import sqlite3
 import subprocess
@@ -29,6 +30,7 @@ BOTS = (("猛鬼兽", "ai.hermes.gateway", ""), ("亚古兽", "ai.hermes.gateway
 EGRESS_PORT = 8090                       # 工人账号的过滤代理（ops/dt_worker_egress.py，#190）
 PF_STATUS = Path("/Library/Application Support/DigitalTwin/pf-dt-worker.status")   # 门卫规则每 5 分钟刷新一次
 PF_STALE_MIN = 20
+PF_USERS = ("dt-worker", "dt-secretary")   # 门卫规则要管的账号：本机有哪个就要管上哪个（ADR-015 0E-1）
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
 
@@ -214,19 +216,34 @@ def check_egress(port=EGRESS_PORT):
     return []
 
 
-def check_pf(path=PF_STATUS, now=None):
-    """门卫规则的状态文件由 root 每 5 分钟写一次：在生效、规则数对、没过期。"""
+def _account_exists(name):
+    try:
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        return False
+
+
+def check_pf(path=PF_STATUS, now=None, accounts=None):
+    """门卫规则的状态文件由 root 每 5 分钟写一次：在生效、规则数对、没过期、本机有的工人 / 秘书账号都管上了。"""
+    install = "主账号终端运行 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install`"
     try:
         text = path.read_text()
         age_min = ((now or time.time()) - path.stat().st_mtime) / 60
     except OSError:
-        return ["工人账号的门卫规则没装（没有状态文件）；主账号终端运行 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install`"]
+        return [f"工人账号的门卫规则没装（没有状态文件）；{install}"]
     fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
     rules = int(fields["rules"]) if fields.get("rules", "").isdigit() else 0
     if fields.get("enabled") != "yes" or rules < 3:
         return [f"工人账号的门卫规则没在生效（{text.strip()[:80]}）"]
     if age_min > PF_STALE_MIN:
         return [f"工人账号的门卫规则 {int(age_min)} 分钟没刷新，开机任务 cn.digital-twin.pf-dt-worker 可能停了"]
+    if accounts is None:
+        accounts = [u for u in PF_USERS if _account_exists(u)]
+    managed = set(fields.get("users", "dt-worker").split(","))   # 0A 版状态文件没有 users，只管工人
+    missing = [u for u in accounts if u not in managed]
+    if missing:
+        return [f"门卫规则没管上 {'、'.join(missing)}（账号已建，规则是旧版或没加载上）；{install}"]
     return []
 
 
