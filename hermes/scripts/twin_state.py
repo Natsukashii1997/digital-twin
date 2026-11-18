@@ -58,7 +58,7 @@ DEFAULT_OWNER_FILE = "~/Library/Application Support/DigitalTwin/owner_open_id"  
 DEFAULT_OWNER_CHAT_FILE = "~/Library/Application Support/DigitalTwin/owner_chat_id"   # 常浩和 Hermes 私聊的 chat_id（B2.1 身份桥接判私聊用），同样 600
 OWNER_HINT = ("还没配置常浩的 open_id：设环境变量 DT_OWNER_OPEN_ID，或把 open_id 单行写进 "
               f"{DEFAULT_OWNER_FILE}（chmod 600；路径可用 DT_OWNER_FILE 改）；配置前 --by user 一律拒绝")
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 GOAL_STATUSES = ("observed", "authorized", "completed", "canceled")
 TASK_STATUSES = ("observed", "ready", "running", "blocked", "review", "completed", "canceled")
@@ -182,6 +182,29 @@ MIGRATIONS = [
     "CREATE INDEX custody_quota_count ON custody_quota(kind, session_id, scope, state);"
     # 托管开启时在这里登记（custody.do_on），账本丢失或被旧备份覆盖时排空证明靠它发现（#133 第 1 轮审查 P0-02）
     "CREATE TABLE custody_sessions (session_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, registered_at TEXT NOT NULL)",
+    # v5（秘书代批 #195 0B-4b）：秘书账本，结构仿 v4，和托管账本分表、分账本身份（meta 的 secretary_ledger_id）。
+    # 每次变化另在 events 记一条 secretary.decision.*（object_type = secretary_decision）。读写逻辑在 secretary_ledger.py
+    # （通用部分复用 custody_ledger 的「账本用途」）。category 是这件事属于哪一类（交常浩的也记，给统计用），reason 是交常浩的原因代号；
+    # policy_version / policy_sha256 是这个决定依据的代批清单（代批取准入时核验过的，交常浩取当前会话绑定的）
+    "CREATE TABLE secretary_decisions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project TEXT NOT NULL,"
+    " action TEXT NOT NULL CHECK (action IN ('ask','redispatch','reject','merge','handoff')),"
+    " category TEXT NOT NULL CHECK (category IN ('ask','redispatch','reject','merge')), target TEXT NOT NULL DEFAULT '{}',"
+    " task_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', policy_version INTEGER NOT NULL, policy_sha256 TEXT NOT NULL,"
+    " context TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',"
+    " ask_owner TEXT NOT NULL DEFAULT '', basis TEXT NOT NULL, cites TEXT NOT NULL DEFAULT '[]',"
+    " revocability TEXT NOT NULL CHECK (revocability IN ('correctable','revertible','irrevocable')),"
+    " status TEXT NOT NULL CHECK (status IN ('issued','executing','done','failed','unknown','unreconciled','void','handoff')),"
+    " disposition TEXT NOT NULL DEFAULT 'open' CHECK (disposition IN ('open','overturned','corrected','reverted','revert_failed')),"
+    " expires_at TEXT, void_reason TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '{}',"
+    " raw_path TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    "CREATE INDEX secretary_decisions_session ON secretary_decisions(session_id);"
+    "CREATE TABLE secretary_quota (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,"
+    " kind TEXT NOT NULL CHECK (kind IN ('day','task','merge_day','redispatch')), scope TEXT NOT NULL DEFAULT '',"
+    " decision_id TEXT NOT NULL REFERENCES secretary_decisions(id),"
+    " state TEXT NOT NULL CHECK (state IN ('reserved','used','released','frozen')),"
+    " created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+    "CREATE INDEX secretary_quota_count ON secretary_quota(kind, scope, state);"
+    "CREATE TABLE secretary_sessions (session_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, registered_at TEXT NOT NULL)",
 ]   # 第 n 项把库从版本 n 升到 n+1；改表结构只追加，不改已有项
 
 
