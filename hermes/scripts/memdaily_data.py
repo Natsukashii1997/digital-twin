@@ -31,6 +31,9 @@ DT_HOME = Path(os.environ.get("DT_HOME", "~/Library/Application Support/DigitalT
 CONFIG = Path(os.environ.get("DT_MEMDAILY_CONFIG", DT_HOME / "memdaily" / "config.json"))
 VOCAB = Path(os.environ.get("DT_VOCAB", Path(__file__).parents[1] / "prompts" / "project_vocab.md")).expanduser()
 HEAD = re.compile(r"^## 📅 (\d{4}-\d{2}-\d{2})", re.M)
+# 写到哪几份文档（2026-11-17 常浩选方案甲）：旧汇总文档到了飞书单文档 4 万块上限，原样归档、不再写；
+# 从 11-14 起每月一份《常浩-记忆日报汇总 · YYYY-MM》，写满提前开「续」。登记文件只由 memdaily_publish 写。
+REGISTRY = Path(os.environ.get("DT_MEMDAILY_DOCS", DT_HOME / "memdaily" / "docs.json"))
 
 
 class Fail(Exception):
@@ -69,6 +72,36 @@ def lark(*args, identity="user", cwd=None, tries=len(DELAYS) + 1, sleep=time.sle
         if not (err.get("retryable") or NETWORK.search(msg)) or i == tries - 1:
             raise Fail(f"{args[0]} {args[1]}：{msg[:200]}")
         sleep(DELAYS[min(i, len(DELAYS) - 1)])
+
+
+def legacy():
+    return {"token": DOC, "title": "常浩-记忆日报汇总 v4.0", "month": None, "note": "2026-04-27～2026-11-13 的归档，不再写入"}
+
+
+def load_registry():
+    """{"folder": 新文档放哪个文件夹（空 = 不指定，飞书放到常浩云空间的默认位置）, "docs": [{token, title, month}, …]}，按建的先后。
+
+    没有登记文件 = 只有旧汇总文档（month 为 None）。"""
+    try:
+        reg = json.loads(REGISTRY.read_text(encoding="utf-8"))
+        docs = [x for x in reg.get("docs") or [] if isinstance(x, dict) and x.get("token")]
+        return {"folder": str(reg.get("folder") or ""), "docs": docs or [legacy()]}
+    except (OSError, ValueError, AttributeError):
+        return {"folder": "", "docs": [legacy()]}
+
+
+def save_registry(reg):
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    tmp = REGISTRY.with_suffix(".tmp")
+    tmp.write_text(json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(REGISTRY)
+
+
+def read_order(reg, d):
+    """找「已写过」和「前一篇」要读的文档，新的在前：d 所在月及以前的月文档（同月后建的在前），最后是旧汇总文档。"""
+    month = d.isoformat()[:7]
+    monthly = [(x["month"], i, x) for i, x in enumerate(reg["docs"]) if x.get("month") and x["month"] <= month]
+    return [x for *_, x in sorted(monthly, key=lambda t: t[:2], reverse=True)] + [x for x in reg["docs"] if not x.get("month")]
 
 
 def load_config(path=CONFIG):
@@ -139,12 +172,16 @@ def collect(d, run=lark, config=None):
     """取 D 当天的全部材料，返回 dict。skip 不为空表示不写（已写过 / 周末没有工作往来）。"""
     config = load_config() if config is None else config
     s, e = day_range(d)
-    content = (run("docs", "+fetch", "--doc", DOC, "--doc-format", "markdown") or {}).get("document", {}).get("content", "")
-    state, prev = prior_block(content, d)
     facts = {"date": d.isoformat(), "title": f"📅 {wd(d)}", "skip": None, "prev": None}
-    if state == "done":
-        facts["skip"] = f"{d.isoformat()} 已经写在记忆日报里，不重写"
-        return facts
+    prev = None
+    for doc in read_order(load_registry(), d):   # 新文档还空着时，前一篇从更早的文档读
+        content = (run("docs", "+fetch", "--doc", doc["token"], "--doc-format", "markdown") or {}).get("document", {}).get("content", "")
+        state, prev = prior_block(content, d)
+        if state == "done":
+            facts["skip"] = f"{d.isoformat()} 已经写在记忆日报里，不重写"
+            return facts
+        if prev:
+            break
     if prev:
         facts["prev"] = {"date": prev[0], "actions": tidy(section(prev[1], "四、"))}
 

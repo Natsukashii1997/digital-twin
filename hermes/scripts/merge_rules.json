@@ -37,10 +37,10 @@
                           "(^|/)(pyproject\\.toml|setup\\.(py|cfg))$", "(^|/)Makefile$", "(^|/)\\.env", "(^|/)scripts/"]
   },
   "act": {
-    "note": "飞书一句话合并（#67）覆盖的仓库。ci: true 的以 GitHub 检查全部通过为合并条件，不在本机跑测试（#71）；没有 CI 的在干净副本里先跑 setup（装依赖）再跑 test。postpane 按项目约定停用了 GitHub Actions，没有 CI，不走飞书合并（#73）。不影响判定，改这里不用加版本号",
+    "note": "飞书一句话合并（#67）覆盖的仓库。只收 ci: true 的仓库，以 GitHub 检查全部通过为合并条件（#71）；主账号不执行 PR 里的代码，没有 CI 的仓库不走飞书合并（#190 不变量 2）。postpane 按项目约定停用了 GitHub Actions，没有 CI，不走飞书合并（#73）。不影响判定，改这里不用加版本号",
     "repos": {
-      "digital-twin": {"ci": true, "test": "python3 -B -m unittest discover -s hermes/scripts/tests", "timeout": 1200},
-      "agent-kit": {"ci": true, "test": "node --test tests/*.test.mjs", "timeout": 600},
+      "digital-twin": {"ci": true},
+      "agent-kit": {"ci": true},
       "my-skills": {"ci": true},
       "github-center": {"ci": true},
       "trainee-hub": {"ci": true},

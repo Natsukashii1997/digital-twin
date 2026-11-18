@@ -287,7 +287,7 @@ RUN_DIR = re.compile(r"^(.+)-(\d+)-([0-9a-f]{7})-(\d{8}-\d{6})$")
 
 
 def merge_runs(w, notes):
-    """merge_act 合并前在干净 worktree 跑的测试（merge-runs/<仓库>-<PR>-<版本>-<时间>/test.log），记 supervise：
+    """merge_act 合并前在干净 worktree 跑的测试（merge-runs/<仓库>-<PR>-<版本>-<时间>/test.log；#190 起不再在本机跑，只读历史），记 supervise：
     合并本身看 owner 那条，这里不再算一次合并。test.log 不记退出码，结果记「不明」，摘最后一行。"""
     if not MERGE_RUNS.exists():
         raise Fail(f"找不到 {MERGE_RUNS}")

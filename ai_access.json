@@ -79,15 +79,31 @@
       "executor": "hermes",
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
       "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；10:00 以猛鬼兽机器人发常浩私聊卡片（#155、#159；原 09:45）",
-      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 medium（#157，DT_PDAILY_REASONING 可改）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+      "note": "仅支持 Hermes（写稿走 Hermes 单次会话，留痕取会话实际模型含回退）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 medium（#157，DT_PDAILY_REASONING 可改）。模型失败或核对不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。卡片「今日行动清单」每条标谁做（Claude / 你）；常浩回「都派」「派 1 3」后，groupdigest-act 技能把选中的写成任务说明、经车间派单开单（常浩 11-16 点名 Claude，一律 --tool claude），派单的执行方、留痕按 workshop。"
     },
     {
       "id": "memdaily",
       "name": "记忆日报（亚古兽，PRD D20 2026-11-11 修订；memdaily_publish.py 调 hermes -p agumon chat 单次写六模块内容，脚本核对后按 7/15 模板排版写入）",
       "executor": "hermes",
-      "reads": "常浩的飞书私聊、白名单群和常浩参与的群、视频会议与妙记、日程、飞书任务（亚古兽应用、常浩的用户身份，memdaily_data.py）；《常浩-记忆日报汇总》前一篇的行动 & 阻塞；提示词 hermes/prompts/memdaily_report.md；本机配置和模板样例 DigitalTwin/memdaily/config.json、template-0715.md",
-      "writes": "《常浩-记忆日报汇总》TCG9dy7Uco… 最顶部插入一篇（写前快照 DigitalTwin/memdaily/backup/）；DigitalTwin/memdaily/<日期>.draft.json、.xml、.build.json、.delivery.json；亚古兽机器人私聊常浩三段式推送",
+      "reads": "常浩的飞书私聊、白名单群和常浩参与的群、视频会议与妙记、日程、飞书任务（亚古兽应用、常浩的用户身份，memdaily_data.py）；前一篇的行动 & 阻塞（先读当月文档，空着再往前读，最后是旧汇总文档）；提示词 hermes/prompts/memdaily_report.md；本机配置和模板样例 DigitalTwin/memdaily/config.json、template-0715.md",
+      "writes": "当月《常浩-记忆日报汇总 · YYYY-MM》最顶部插入一篇（2026-11-17 常浩选方案甲：旧汇总文档 TCG9dy7Uco… 满 4 万块，原样归档；当月第一篇自动建新文档，写前数块数，快满开「续」；各份文档登记在 DigitalTwin/memdaily/docs.json；写前快照 DigitalTwin/memdaily/backup/）；DigitalTwin/memdaily/<日期>.draft.json、.xml、.build.json、.delivery.json；亚古兽机器人私聊常浩三段式推送",
       "note": "仅支持 Hermes（亚古兽 profile 的主模型，2026-11-11 起 openai-codex gpt-6.1-sol、思考 xhigh；DT_MEMDAILY_REASONING 可改）。核对不过重写一次，再不过就不写，定时任务把原因发到亚古兽私聊，不换执行方。每篇标题下一行写「生成：亚古兽（实际模型）｜接入：Hermes 派单｜时间」。"
+    },
+    {
+      "id": "groupdigest",
+      "name": "AI 前沿群每日学习报告（#192，常浩 2026-11-16 定；groupdigest.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后发卡片）",
+      "executor": "hermes",
+      "reads": "飞书外部群「Codex重置许愿群」前一天全部消息（猛鬼兽应用、常浩的用户身份）；消息里外链的源头正文（直接抓，抓不到经 agent-reach read）；项目名册各项目阶段目标、Vault 个人上下文三篇（受限，只给模型读）、全局 CLAUDE.md 的标题；提示词 hermes/prompts/groupdigest_report.md",
+      "writes": "DigitalTwin/groupdigest/<日期>.material.json（600）、.query.md、.reply1/2.md、.card-fields.json、.report.md、.build.json、.card.sent.json、.delivery.json、.dispatch.json（回复即派单的记账）；飞书完整报告云文档；10:45 以猛鬼兽机器人发常浩私聊卡片",
+      "note": "仅支持 Hermes（常浩点名这是猛鬼兽的任务）。模型跟随 Hermes 主模型（Opus 5.5），思考强度 high（DT_GD_REASONING 可改）。模型只写材料编号，链接由脚本填；核对不过带着问题重写一次，再不过出脚本事实版，留痕写「脚本事实版（原因）｜接入：本机脚本」，不换执行方。"
+    },
+    {
+      "id": "secretary",
+      "name": "秘书代批（#195 批 0B：猛鬼兽按常浩签的清单代批中台卡片；0B-4 才有判断和送达，现在只有中台里的 secretary 通道和只读窗口）",
+      "executor": "hermes",
+      "reads": "中台只读窗口 autoloop_readonly.py 的卡片快照（不含本人密钥、卡片链接、回答原文）、任务凭证（autoloop_grants.py）",
+      "writes": "0B-4 起：中台 secretary 通道的回答（by=秘书）、托管账本；现在不写任何东西",
+      "note": "仅支持 Hermes（规格 docs/秘书代批-规格.md §6：判断用 hermes chat 单次、最小工具集，模型不持通道钥匙）。0B-4 上线前不生效。"
     },
     {
       "id": "proposal-digest",
@@ -112,7 +128,8 @@
     "AI HOT 热点榜推送 aihot_hot.py：取 aihot.news 热点榜排版，概括按整句截取、话题标签按标题关键词，不经模型改写",
     "工程自检 self_check.py、每日巡检 health_check.py、仓库自检 check_repos.py：纯脚本",
     "skill 月度体检推送 skill_health.py：纯脚本，转发 my-skills 的 monthly-health.mjs 统计",
-    "晨报取数 brief_data.py：挂起中，不在运行"
+    "晨报取数 brief_data.py：挂起中，不在运行",
+    "任务凭证与派单网关 autoloop_grants.py、中台配置 autoloop_config.py、中台只读窗口 autoloop_readonly.py（#195 批 0B）、按钮实测探针 button_probe.py（0B-3）：纯脚本"
   ],
   "exceptions": [
     {

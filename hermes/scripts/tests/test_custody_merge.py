@@ -88,7 +88,8 @@ class Base(unittest.TestCase):
         self.result = {"status": "merged", "merge_commit": "c" * 40, "why": ""}
         self.patch(mock.patch.object(MA, "run_custody_merge", side_effect=self.run_merge))
         self.patch(mock.patch.object(MA.subprocess, "run", side_effect=AssertionError("托管合并不许在宿主跑命令")))
-        self.patch(mock.patch.object(MA, "run_tests", side_effect=AssertionError("托管合并不许跑 PR 里的测试")))
+        if hasattr(MA, "run_tests"):                      # main 已按「不变量 2」删掉了主账号跑 PR 测试的函数；还在就拦住
+            self.patch(mock.patch.object(MA, "run_tests", side_effect=AssertionError("托管合并不许跑 PR 里的测试")))
 
     def patch(self, p):
         p.start()

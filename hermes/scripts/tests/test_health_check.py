@@ -223,7 +223,8 @@ class DailySendTest(unittest.TestCase):
         self.logs = Path(tmp.name) / "health"
         self.patch(hc, "LOG_DIR", self.logs)
         self.gateway = self.patch(hc, "check_gateway", return_value=[])
-        for name in ("check_fallback", "check_aux_errors", "check_cron", "check_unclean_exits", "check_skill_sync"):
+        for name in ("check_fallback", "check_aux_errors", "check_cron", "check_unclean_exits", "check_skill_sync",
+                     "check_egress", "check_pf"):
             self.patch(hc, name, return_value=[])
         self.sent = []
         # 保留真实 run()/send()，在最底层拦住所有子进程；意外命令立即让测试失败。
@@ -278,6 +279,58 @@ class DailySendTest(unittest.TestCase):
         self.process.assert_not_called()
         self.assertEqual(output.strip(), "2000-01-01 09:45 巡检正常")
         self.assertFalse(hasattr(hc, "check_sandbox") or hasattr(hc, "check_repos"))
+
+
+
+class WorkerIsolation(unittest.TestCase):
+    """工人账号的过滤代理和门卫规则（#190）：在临时端口起假代理、在临时目录写假状态文件。"""
+
+    def serve_once(self, reply):
+        import socket
+        import threading
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+
+        def answer():
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(200)
+                conn.sendall(reply)
+        threading.Thread(target=answer, daemon=True).start()
+        return srv.getsockname()[1]
+
+    def test_egress_refusing_loopback_is_ok(self):
+        self.assertEqual(hc.check_egress(self.serve_once(b"HTTP/1.1 403 Forbidden\r\n\r\n")), [])
+
+    def test_egress_letting_loopback_through_is_reported(self):
+        out = hc.check_egress(self.serve_once(b"HTTP/1.1 200 Connection established\r\n\r\n"))
+        self.assertIn("没拦住", out[0])
+
+    def test_egress_not_running_is_reported(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.assertIn("没在运行", hc.check_egress(port)[0])
+
+    def status(self, text, age_min=1):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "pf.status"
+        p.write_text(text)
+        return hc.check_pf(p, now=p.stat().st_mtime + age_min * 60)
+
+    def test_pf_ok(self):
+        self.assertEqual(self.status("at=x enabled=yes rules=6\n"), [])
+
+    def test_pf_missing_disabled_or_stale(self):
+        self.assertIn("没装", hc.check_pf(Path("/nonexistent/pf.status"))[0])
+        self.assertIn("没在生效", self.status("at=x enabled=no rules=6\n")[0])
+        self.assertIn("没在生效", self.status("没有 dt-worker 这个账号\n")[0])
+        self.assertIn("没刷新", self.status("at=x enabled=yes rules=6\n", age_min=60)[0])
 
 
 if __name__ == "__main__":

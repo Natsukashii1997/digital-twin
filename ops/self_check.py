@@ -25,7 +25,7 @@ HOME = Path.home()
 REPO = Path(os.environ.get("DT_REPO", "~/Documents/ChatGPT/个人/work/digital-twin")).expanduser()
 HERMES = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 BIN = Path(os.environ.get("DT_BIN", "~/Library/Application Support/DigitalTwin/bin")).expanduser()
-OPS_TARGETS = {"ops/health_check.py": [BIN], "ops/check_repos.py": [BIN, HERMES / "scripts"],
+OPS_TARGETS = {"ops/health_check.py": [BIN], "ops/dt_worker_egress.py": [BIN], "ops/check_repos.py": [BIN, HERMES / "scripts"],
                "ops/self_check.py": [HERMES / "scripts"]}
 SANDBOX_DIRS = [HOME / "Sandbox", HOME / "Documents/Codex"]   # M3-Q3：沙盒和 Codex 按日期建的旧目录
 SANDBOX_STALE_DAYS = 30
