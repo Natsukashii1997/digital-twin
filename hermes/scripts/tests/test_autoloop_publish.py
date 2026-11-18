@@ -207,6 +207,15 @@ class GrantAtPublish(PublishBase):
         self.sql("UPDATE grants SET actions = ? WHERE task_id = ?", (json.dumps(["edit"]), tid))
         self.rejects(tid, "凭证不允许 push_branch")
 
+    def test_push_allowed_but_not_open_pr(self):
+        tid = self.worked()
+        self.sql("UPDATE grants SET actions = ? WHERE task_id = ?", (json.dumps(["edit", "push_branch"]), tid))
+        with self.assertRaises(P.Rejected) as c:
+            P.publish(tid)
+        self.assertIn("凭证不允许 open_pr", str(c.exception))
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])      # 分支推了，PR 没开
+        self.assertEqual([x for x in self.gh_calls() if x[:2] == ["pr", "create"]], [])
+
     def test_refusals_are_logged_by_cli(self):
         tid = self.worked()
         G.revoke(tid, now=self.now)

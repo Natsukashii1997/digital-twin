@@ -14,7 +14,7 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
      续接时还要和第一轮钉下的范围哈希、仓库、执行方一致（续接后范围不扩大）；这张单累计用时没到上限（2 小时）。
   2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 agent/<执行方>/<单号>，基线是第一轮时的 origin/main；
      续接回同一目录、同一分支（会话也接得上）。每张单的缓存目录分开。
-  3. 启动 CLI：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
+  3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
      ~/dt-work/.state/<单号>.log，不混进输出。用时到上限就停掉 CLI。
   4. CLI 退出后：把工作目录里的改动提交到本单分支；再核一次凭证，仍有效才打交接包（git bundle + 清单）放进
      ~/dt-outbox/<单号>/，由主账号的受信发布脚本（hermes/scripts/autoloop_publish.py）取走核对后推分支、开 PR。
@@ -336,6 +336,21 @@ def task_env(task_id):
 
 
 # ---------- 运行 ----------
+def with_note(executor, args, task_id, branch):
+    """在交给 CLI 的提示词末尾补一段启动脚本的说明（中台派单规则的提示词在 hermes 钥匙签发后不能改，0B-2）。
+    claude：-p 后面那个参数；codex：exec 的最后一个参数。认不出位置就原样不动。"""
+    note = (f"\n\n【dt-worktree 启动脚本】你在任务单 {task_id} 的独立工作目录里，当前分支 {branch}。只改文件；"
+            "不要 git push、不要开 PR、不要切换或新建分支——本轮结束后启动脚本会把改动提交到本单分支，"
+            "交给主账号的受信发布核对凭证后推分支、开 PR。")
+    out = list(args)
+    if executor == "claude" and "-p" in out[:-1]:
+        i = out.index("-p") + 1
+        out[i] += note
+    elif executor == "codex" and len(out) > 1 and out[0] == "exec" and not out[-1].startswith("-"):
+        out[-1] += note
+    return out
+
+
 def run_cli(executor, args, admitted, place):
     """启动 CLI，标准输出直接交给接单程序。返回 (退出码, 用时秒, 是否到上限被停)。"""
     task_id = admitted["task_id"]
@@ -355,7 +370,8 @@ def run_cli(executor, args, admitted, place):
                   "running": {"started": int(started), "last_seen": int(started),
                               "run": os.environ.get("AGENT_AUTOLOOP_RUN", "")}})
     save_state(task_id, state)
-    child = subprocess.Popen([real_cli(executor), *args], cwd=place["worktree"], env=task_env(task_id))
+    argv = [real_cli(executor), *with_note(executor, args, task_id, place["branch"])]
+    child = subprocess.Popen(argv, cwd=place["worktree"], env=task_env(task_id))
     log(task_id, f"第 {admitted['generation']} 代开跑（轮次 {os.environ.get('AGENT_AUTOLOOP_RUN', '?')}，"
                  f"已用 {admitted['used']} 秒）")
     over = False

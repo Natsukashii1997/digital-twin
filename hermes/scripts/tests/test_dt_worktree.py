@@ -32,6 +32,9 @@ log = Path(os.environ["FAKE_LOG"])
 with log.open("a") as f:
     f.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd(),
                         "cache": os.environ.get("XDG_CACHE_HOME"), "npm": os.environ.get("npm_config_cache")}}) + "\n")
+if sys.argv[1:3] == ["auth", "status"]:
+    print(json.dumps({{"loggedIn": True}}))
+    sys.exit(0)
 mode = os.environ.get("FAKE_MODE", "edit")
 if mode == "sleep":
     time.sleep(30)
@@ -143,7 +146,10 @@ class FirstTurnAndResume(WorkerBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         (c,) = calls
         self.assertEqual(Path(c["cwd"]).resolve(), self.wt(tid).resolve())
-        self.assertEqual(c["argv"], ["-p", "做事", "--session-id", "s-1"])        # 参数原样交给 CLI
+        self.assertEqual(c["argv"][0], "-p")                                       # 参数原样交给 CLI，提示词末尾补说明
+        self.assertTrue(c["argv"][1].startswith("做事\n\n【dt-worktree 启动脚本】"))
+        self.assertIn("不要 git push", c["argv"][1])
+        self.assertEqual(c["argv"][2:], ["--session-id", "s-1"])
         self.assertIn(f"/.cache/{tid}/", c["cache"])                               # 每张单缓存分开
         self.assertIn(f"/.cache/{tid}/", c["npm"])
         lines = r.stdout.strip().splitlines()                                     # 输出原样，不混本脚本的话
@@ -198,6 +204,15 @@ class FirstTurnAndResume(WorkerBase):
         r, _ = self.run_turn([self.dispatch_event(tid)], FAKE_MODE="none")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIsNone(self.handoff(tid))
+
+    def test_codex_prompt_note_goes_to_last_argument(self):
+        tid = self.new_live_task(executor="codex")
+        args = ("exec", "--json", "-c", 'sandbox_mode="workspace-write"', "做事")
+        r, (c,) = self.run_turn([self.dispatch_event(tid, executor="codex")], executor="codex", args=args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(c["argv"][:-1], list(args[:-1]))
+        self.assertTrue(c["argv"][-1].startswith("做事\n\n【dt-worktree 启动脚本】"))
+        self.assertIn(f"agent/codex/{tid}", c["argv"][-1])
 
     def test_codex_wrapper_uses_codex_message_format_when_stopping(self):
         tid = self.new_live_task(executor="codex")
