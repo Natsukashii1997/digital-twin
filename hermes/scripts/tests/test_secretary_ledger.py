@@ -37,6 +37,8 @@ TASK2 = "t-20261118-123456"
 HEAD = "a" * 40
 LIMITS = {"day": 10, "task": 3, "merge_day": 2, "redispatch": 1}
 CATS = {"ask": True, "redispatch": True, "reject": True, "merge": True}
+PSHA = "e" * 64                                   # 桩里的清单哈希
+RECEIVED = {"card": 7, "question": "工人问：超时调多少？", "options": ["30 秒", "60 秒"]}
 TEXT = dict(context="给示例服务加超时", question="超时设 30 秒还是 60 秒", summary="超时 30 秒", basis="只影响沙盒里的示例服务，和现有配置一致")
 
 
@@ -69,8 +71,9 @@ class Base(unittest.TestCase):
     def status(self, now=None, eligible=None):
         """secretary.read_status 的形状（只取账本用到的字段）。"""
         ok = self.state == "on" if eligible is None else eligible
-        return {"state": self.state, "session": {"id": self.session, "ledger": {"id": self.lid}} if self.session else None,
-                "policy": {"ok": True, "categories": self.cats, "projects": ["dt-sandbox"], "repos": {"dt-sandbox": REPO},
+        return {"state": self.state,
+                "session": {"id": self.session, "ledger": {"id": self.lid}, "policy": {"version": 3, "sha256": PSHA}} if self.session else None,
+                "policy": {"ok": True, "version": 3, "sha256": PSHA, "categories": self.cats, "projects": ["dt-sandbox"], "repos": {"dt-sandbox": REPO},
                            "limits": self.limits, "whitelist": {REPO: "只有 CI"}},
                 "admission": {"eligible": ok, "reasons": [] if ok else [f"秘书不是开着（{self.state}）"]}}
 
@@ -86,8 +89,10 @@ class Base(unittest.TestCase):
         text.update({k: kw.pop(k) for k in list(kw) if k in ("context", "question", "summary", "basis", "ask_owner")})
         rev = kw.pop("revocability", {"merge": "revertible", "handoff": "irrevocable"}.get(action, "correctable"))
         exp = kw.pop("expires_at", None if action == "handoff" else now + dt.timedelta(minutes=30))
+        kw.setdefault("received", dict(RECEIVED))
+        kw.setdefault("reply", None if action == "handoff" else {"choice": 1})
         return SL.issue(self.st, session_id=session, project=kw.pop("project", "dt-sandbox"), action=action, target=target,
-                        revocability=rev, expires_at=exp, now=now, received={"card": "工人问：超时调多少？"}, reply="选 1", **text, **kw)
+                        revocability=rev, expires_at=exp, now=now, **text, **kw)
 
     def rejects(self, code, fn, *a, **kw):
         with self.assertRaises(L.LedgerError) as cm:
@@ -118,7 +123,11 @@ class IssueTests(Base):
         raw = Path(d["raw_path"])
         self.assertEqual(raw.parent, self.raw / SID)
         self.assertEqual(oct(raw.stat().st_mode & 0o777), "0o600")
-        self.assertEqual(json.loads(raw.read_text(encoding="utf-8"))["reply"], "选 1")
+        self.assertEqual(json.loads(raw.read_text(encoding="utf-8"))["reply"], {"choice": 1})
+        self.assertEqual((d["policy_version"], d["policy_sha256"]), (3, PSHA))
+        ev = self.st.events(object_type="secretary_decision", object_id=d["id"])[0]
+        payload = ev["payload"] if isinstance(ev["payload"], dict) else json.loads(ev["payload"])
+        self.assertEqual((payload["policy_version"], payload["policy_sha256"]), (3, PSHA))
 
     def test_each_action_reserves_its_quota_kinds(self):
         r = self.issue("redispatch")
@@ -199,7 +208,8 @@ class IssueTests(Base):
                 start.wait()
                 try:
                     d = SL.issue(st, session_id=SID, project="dt-sandbox", action="ask", target={"card": 10 + i, "task": TASK, "generation": 1},
-                                 revocability="correctable", expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=self.reader, **TEXT)
+                                 revocability="correctable", expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=self.reader,
+                                 received=dict(RECEIVED), reply={"choice": 1}, **TEXT)
                     out.append(("ok", d["id"]))
                 except L.LedgerError as e:
                     out.append((e.code, str(e)))
@@ -267,7 +277,7 @@ class GateTests(Base):
         self.cats = dict(CATS)
         self.assertIn("第 2 节", self.rejects("NotAllowed", self.issue, "ask", project="niuma-home",
                                               target={"card": 7, "task": TASK, "generation": 1}))
-        self.rejects("BadInput", self.issue, "ask", project="ghost")                    # 不在名册
+        self.assertIn("第 2 节", self.rejects("NotAllowed", self.issue, "ask", project="ghost"))       # 不在清单
         orig = self.status
 
         def no_whitelist(now=None):
@@ -323,6 +333,87 @@ class GateTests(Base):
             self.assertEqual(self.issue(action, question="")["status"], "issued")
         self.rejects("BadText", self.issue, "handoff", category="ask", reason="unsure", ask_owner="")
         self.rejects("BadText", self.issue, "ask", context="x" * 41)
+
+
+class RosterAndRawTests(Base):
+    """P1-02 / P1-03 / P1-04。"""
+
+    def test_roster_drift_blocks_decisions_not_handoff(self):
+        S.dispatch_projects.return_value = {}                                  # 项目被移出名册
+        before = self.counts()
+        self.assertIn("现在名册里是 没有", self.rejects("RosterChanged", self.issue, "ask"))
+        S.dispatch_projects.return_value = {"dt-sandbox": "someone/dt-sandbox"}   # 改指向
+        self.rejects("RosterChanged", self.issue, "merge")
+        S.dispatch_projects.side_effect = S.RosterConflict("名册里短名冲突")
+        self.rejects("RosterUnavailable", self.issue, "ask")
+        self.assertEqual(self.counts(), before)
+        h = self.issue("handoff", category="ask", reason="gate")                # 名册坏了照样能交常浩
+        self.assertEqual((h["status"], SL.quotas(self.st, h["id"])), ("handoff", []))
+        S.dispatch_projects.side_effect = None
+        S.dispatch_projects.return_value = dict(ROSTER)
+
+    def test_handoff_still_checks_format_session_and_ledger(self):
+        S.dispatch_projects.side_effect = RuntimeError("git 不在")
+        bad = {
+            "任务号": {"card": 7, "task": "DTS-9", "generation": 1},
+            "卡片 0": {"card": 0, "task": TASK, "generation": 1},
+            "仓库名": {"task": TASK, "repo": "dt-sandbox", "pr": 7, "head": HEAD},
+            "PR 号": {"task": TASK, "repo": REPO, "pr": "7", "head": HEAD},
+            "head": {"task": TASK, "repo": REPO, "pr": 7, "head": "abc"},
+        }
+        before = self.counts()
+        for name, target in bad.items():
+            with self.subTest(name):
+                cat = "ask" if "card" in target else "merge"
+                self.rejects("BadInput", self.issue, "handoff", category=cat, reason="unsure", target=target)
+        self.rejects("BadInput", self.issue, "handoff", category="ask", reason="unsure", project="dt sandbox!")
+        self.rejects("BadInput", self.issue, "handoff", category="ask", reason="unsure", received=None)
+        self.session = SID2
+        self.rejects("WrongSession", self.issue, "handoff", category="ask", reason="unsure")
+        self.session, self.lid = SID, "L-" + "0" * 16
+        self.rejects("LedgerMismatch", self.issue, "handoff", category="ask", reason="unsure")
+        self.assertEqual(self.counts(), before)
+
+    def test_reject_repo_must_match_signed_mapping(self):
+        self.assertIn("签署时", self.rejects("BadInput", self.issue, "reject",
+                                            target={"task": TASK, "repo": "someone/dt-sandbox", "pr": 7, "head": HEAD}))
+
+    def test_policy_version_recorded(self):
+        d = self.issue("ask")
+        self.assertEqual((d["policy_version"], d["policy_sha256"]), (3, PSHA))
+        orig = self.status
+
+        def bound_v2(now=None):                       # 交常浩取会话绑定的清单，不取当前有效清单
+            st = orig(now)
+            st["session"]["policy"] = {"version": 2, "sha256": "d" * 64}
+            return st
+
+        h = self.issue("handoff", category="ask", reason="unsure", status_reader=bound_v2)
+        self.assertEqual((h["policy_version"], h["policy_sha256"]), (2, "d" * 64))
+
+        def no_bound(now=None):
+            st = orig(now)
+            st["session"].pop("policy")
+            return st
+
+        self.rejects("WrongSession", self.issue, "handoff", category="ask", reason="unsure", status_reader=no_bound)
+
+    def test_raw_text_required_per_action(self):
+        before = self.counts()
+        for action in ("ask", "redispatch", "reject", "merge"):
+            for name, kw in {"received 没写": dict(received=None), "received 空": dict(received={}),
+                             "received 是字符串": dict(received="工人问"), "reply 没写": dict(reply=None),
+                             "reply 空": dict(reply={}), "reply 是字符串": dict(reply="选 1")}.items():
+                with self.subTest(action=action, case=name):
+                    self.assertIn("原文不合格", self.rejects("BadInput", self.issue, action, **kw))
+        for reply in ({"answer": "30 秒"}, {"choice": 0}, {"choice": True}, {"choice": "1"}):
+            with self.subTest(reply=reply):
+                self.assertIn("选项号", self.rejects("BadInput", self.issue, "ask", reply=reply))
+        self.rejects("BadInput", self.issue, "handoff", category="ask", reason="unsure", received={})
+        self.rejects("BadInput", self.issue, "handoff", category="ask", reason="unsure", reply="不选")
+        self.assertEqual(self.counts(), before)
+        self.issue("handoff", category="ask", reason="unsure", reply={})        # 交常浩的 reply 可以不写或空
+        self.issue("redispatch", reply={"redispatch": 1})                       # ②③④ 不要求选项号
 
 
 class FlowTests(Base):
@@ -457,8 +548,11 @@ class CliTests(Base):
         code, out, _ = self.run_cli("show", d["id"])
         self.assertEqual((code, out["ok"]), (0, True))
         self.assertIn("答提问卡", out["msg"])
+        self.assertEqual((out["policy_version"], out["policy_sha256"]), (3, PSHA))
+        self.assertIn("依据清单 v3", out["msg"])
         code, out, text = self.run_cli("list", "--session", SID)
         self.assertEqual((code, out["msg"]), (0, "共 1 个决定"))
+        self.assertIn(f"清单 v3（{PSHA[:12]}）", text)
         code, out, _ = self.run_cli("drain-check", "--session", SID)
         self.assertEqual((code, len(out["blockers"])), (1, 1))
         code, out, _ = self.run_cli("stats", "--day", "2026-11-18")

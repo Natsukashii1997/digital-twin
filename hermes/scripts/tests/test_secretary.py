@@ -301,7 +301,7 @@ class SignTests(Base):
         self.policy.write_bytes(original)
         self.assertTrue(S.verify_policy(S.load(), at(11))["ok"])
         self.roster.pop("dt-sandbox")
-        self.assertEqual(S.verify_policy(S.load(), at(11))["code"], "roster")
+        self.assertEqual(S.verify_policy(S.load(), at(11))["code"], "roster_changed")      # 项目被移出名册
         self.roster["dt-sandbox"] = REPO
         S.dispatch_projects.side_effect = RuntimeError("git 不在")
         self.assertEqual(S.verify_policy(S.load(), at(11))["code"], "roster")
@@ -325,6 +325,98 @@ class SignTests(Base):
         self.rejects("BadTransition", S.do_sign, self.say(f"签代批清单 v4 {sha[:12]}", at(11)), now=at(11))
 
 
+class ProjectPinTests(Base):
+    """P1-01：签署时固定项目 → 仓库，之后名册改指向、短名冲突都让清单失效。"""
+
+    def test_signature_records_project_repos(self):
+        self.sign(projects=("dt-sandbox", "niuma-home"))
+        self.assertEqual(self.doc()["signature"]["projects"], {"dt-sandbox": REPO, "niuma-home": "Natsukashii1997/niuma-home"})
+        v = S.verify_policy(S.load(), at(11))
+        self.assertEqual(v["repos"], {"dt-sandbox": REPO, "niuma-home": "Natsukashii1997/niuma-home"})
+
+    def test_repointed_project_invalidates_until_resigned(self):
+        self.sign()
+        self.roster["dt-sandbox"] = "someone-else/dt-sandbox"
+        v = S.verify_policy(S.load(), at(11))
+        self.assertEqual(v["code"], "roster_changed")
+        self.assertIn("someone-else/dt-sandbox", v["reason"])
+        self.roster["dt-sandbox"] = REPO
+        self.assertTrue(S.verify_policy(S.load(), at(11))["ok"])
+        self.roster["dt-sandbox"] = "someone-else/dt-sandbox"     # 改指向后要换版本重签，重签记下新的映射
+        self.sign(when=at(12), version=4, whitelist=(("someone-else/dt-sandbox", "只有 CI"),))
+        self.assertEqual(self.doc()["signature"]["projects"], {"dt-sandbox": "someone-else/dt-sandbox"})
+        self.assertTrue(S.verify_policy(S.load(), at(12, 1))["ok"])
+
+    def test_short_name_conflict_cannot_sign_nor_verify(self):
+        import multica_night as MN
+        roster = {"projects": [{"github": "a/dt-sandbox", "write_allowed": True, "category": "活跃"}],
+                  "inventory": [{"path": "github:" + REPO, "sandbox": True}]}
+        with mock.patch.object(MN, "committed_json", return_value=roster):
+            with self.assertRaises(S.RosterConflict) as cm:
+                REAL_DISPATCH()
+        self.assertIn("dt-sandbox → Natsukashii1997/dt-sandbox、a/dt-sandbox", str(cm.exception))
+        same = {"projects": [{"github": REPO, "write_allowed": True, "category": "活跃"}], "inventory": [{"path": "github:" + REPO, "sandbox": True}]}
+        with mock.patch.object(MN, "committed_json", return_value=same):
+            self.assertEqual(REAL_DISPATCH(), {"dt-sandbox": REPO})            # 同一个仓库登记两次不算冲突
+        sha = self.write_policy()
+        S.dispatch_projects.side_effect = S.RosterConflict("名册里短名冲突：dt-sandbox → a、b")
+        self.rejects("RosterConflict", S.do_sign, self.say(f"签代批清单 v3 {sha[:12]}", at(9)), now=at(9))
+        self.assertFalse(self.state.exists())
+        S.dispatch_projects.side_effect = lambda: dict(self.roster)
+        self.sign(when=at(9, 1))
+        S.dispatch_projects.side_effect = S.RosterConflict("名册里短名冲突：dt-sandbox → a、b")
+        v = S.verify_policy(S.load(), at(11))
+        self.assertEqual(v["code"], "roster")
+        self.assertIn("短名冲突", v["reason"])
+
+    def test_whitelist_checked_against_signed_mapping(self):
+        self.sign()
+        doc = self.doc()                                   # 签署记录里的映射被改成别的仓库（格式合法）：白名单对不上 → 无效
+        doc["signature"]["projects"] = {"dt-sandbox": "other/dt-sandbox"}
+        self.state.write_text(json.dumps(doc), encoding="utf-8")
+        self.roster["dt-sandbox"] = "other/dt-sandbox"
+        v = S.verify_policy(S.load(), at(11))
+        self.assertEqual(v["code"], "invalid")
+        self.assertIn("不是签署时第 2 节项目的仓库", v["reason"])
+        fields = S.parse_policy(fill(self.template))[0]
+        self.assertEqual(S.check_signed_projects(fields, {"dt-sandbox": REPO}, {"dt-sandbox": REPO}), (None, []))
+        self.assertEqual(S.check_signed_projects(fields, {"dt-sandbox": REPO, "niuma-home": "N/niuma-home"}, ROSTER)[0], "invalid")
+
+    def test_signature_projects_structure_is_checked(self):
+        self.sign()
+        good = self.doc()
+        for name, value in {"没有": None, "空": {}, "值和键对不上": {"dt-sandbox": "o/other"}, "值不是仓库": {"dt-sandbox": "dt-sandbox"}}.items():
+            with self.subTest(name):
+                d = json.loads(json.dumps(good))
+                if value is None:
+                    d["signature"].pop("projects")
+                else:
+                    d["signature"]["projects"] = value
+                with self.assertRaises((ValueError, KeyError, TypeError)):
+                    S.check_doc(d)
+
+    def test_removed_project_blocks_decisions_but_handoff_still_records(self):
+        """P1-02 端到端：项目被移出名册 → 准入不过、普通代批被拒；同一事项交常浩能记下、不占额度。"""
+        self.sign()
+        s = self.turn_on()
+        self.roster.pop("dt-sandbox")
+        st = S.read_status(at(10, 1))
+        self.assertFalse(st["admission"]["eligible"])
+        target = {"card": 7, "task": "t-20261118-abcdef", "generation": 1}
+        with SL.open_store() as led:
+            with self.assertRaises(SL.LedgerError) as cm:
+                SL.issue(led, session_id=s["id"], project="dt-sandbox", action="ask", target=target, context="示例服务加超时",
+                         question="超时 30 秒还是 60 秒", summary="选 30 秒", basis="和现有配置一致", revocability="correctable",
+                         expires_at=at(11), now=at(10, 2), received={"card": 7, "question": "超时调多少"}, reply={"choice": 1})
+            self.assertEqual(cm.exception.code, "NotAdmitted")
+            h = SL.issue(led, session_id=s["id"], project="dt-sandbox", action="handoff", category="ask", reason="gate", target=target,
+                         context="示例服务加超时", question="超时 30 秒还是 60 秒", ask_owner="回复我选哪个",
+                         basis="这个项目的仓库在名册里变了，清单要重签", revocability="irrevocable", now=at(10, 3),
+                         received={"card": 7, "question": "超时调多少"})
+            self.assertEqual((h["status"], SL.quotas(led, h["id"])), ("handoff", []))
+            self.assertEqual((h["policy_version"], h["policy_sha256"]), (3, s["policy"]["sha256"]))
+
+
 class StateMachineTests(Base):
     def test_on_records_session_and_registers_ledger(self):
         sha = self.sign()
@@ -343,6 +435,7 @@ class StateMachineTests(Base):
         self.sign()
         cases = [
             ("BadCommand", self.say("开启秘书", at(10))), ("BadCommand", self.say("托管", at(10))),
+            ("BadCommand", self.say("开一下秘书", at(10))), ("BadCommand", self.say("开 秘书", at(10))),
             ("BadCommand", self.say("签代批清单 v3 000000000000", at(10))),
             ("NotAuthorized", self.say("开秘书", at(10), sender="ou_someone_else")),
             ("NotAuthorized", self.say("开秘书", at(10), chat="oc_some_group")),
@@ -354,6 +447,12 @@ class StateMachineTests(Base):
                 self.rejects(code, S.do_on, mid, now=at(10))
                 self.assertEqual(self.state.read_bytes(), before)
         self.rejects("NotAuthorized", S.do_on, None, now=at(10))
+
+    def test_on_text_strips_only_surrounding_blank_and_punctuation(self):
+        """P2-01：和托管 custody.parse_on_text 同一处理（clean_text）：首尾空白和句号、感叹号去掉后恰好是「开秘书」。"""
+        self.sign()
+        S.do_on(self.say("  开秘书！\n", at(10)), now=at(10))
+        self.assertEqual(self.doc()["state"], "on")
 
     def test_on_replay_and_on_when_not_off(self):
         self.sign()
@@ -395,7 +494,7 @@ class StateMachineTests(Base):
             d = SL.issue(st, session_id=s["id"], project="dt-sandbox", action="ask",
                          target={"card": 7, "task": "t-20261118-abcdef", "generation": 1},
                          context="示例服务加超时", question="超时 30 秒还是 60 秒", summary="选 30 秒", basis="和现有配置一致，只影响沙盒",
-                         revocability="correctable", expires_at=at(11), now=at(10, 2))
+                         revocability="correctable", expires_at=at(11), now=at(10, 2), received={"card": 7, "question": "超时调多少", "options": ["30 秒", "60 秒"]}, reply={"choice": 1})
             SL.begin(st, d["id"], now=at(10, 3))
         S.do_off("feishu", now=at(10, 4))
         msg = self.rejects("DrainUnverified", S.do_off, "feishu", drained=True, now=at(10, 5))
@@ -479,7 +578,7 @@ class StateMachineTests(Base):
             d = SL.issue(st, session_id=s["id"], project="dt-sandbox", action="redispatch",
                          target={"task": "t-20261118-abcdef", "generation": 1}, context="示例服务加超时",
                          question="中台停掉了这件事，要不要再派一次", summary="再派一次", basis="第一次是网络超时，再派一次不影响别的",
-                         revocability="correctable", expires_at=at(11), now=at(10, 1))
+                         revocability="correctable", expires_at=at(11), now=at(10, 1), received={"task": "t-20261118-abcdef", "stopped": "连续 10 次没跑成"}, reply={"redispatch": 1})
         S.do_off("feishu", now=at(10, 2))
         with SL.open_store() as st:
             self.assertEqual(SL.get(st, d["id"])["status"], "void")
@@ -549,7 +648,7 @@ class EndToEndTests(Base):
         kw.setdefault("target", {"card": 7, "task": "t-20261118-abcdef", "generation": 1})
         return SL.issue(st, project="dt-sandbox", action="ask", context="示例服务加超时", question="超时 30 秒还是 60 秒",
                         summary="选 30 秒", basis="和现有配置一致，只影响沙盒", revocability="correctable",
-                        expires_at=now + dt.timedelta(minutes=30), now=now, **kw)
+                        expires_at=now + dt.timedelta(minutes=30), now=now, received={"card": 7, "question": "超时调多少", "options": ["30 秒", "60 秒"]}, reply={"choice": 1}, **kw)
 
     def test_real_admission_gates_the_ledger(self):
         self.sign(cats=("是", "否", "是", "是"))
@@ -560,7 +659,7 @@ class EndToEndTests(Base):
                 SL.issue(st, session_id=s["id"], project="dt-sandbox", action="redispatch",
                          target={"task": "t-20261118-abcdef", "generation": 1}, context="示例服务加超时",
                          question="要不要再派一次", summary="再派一次", basis="网络超时", revocability="correctable",
-                         expires_at=at(11), now=at(10, 2))
+                         expires_at=at(11), now=at(10, 2), received={"task": "t-20261118-abcdef", "stopped": "连续 10 次没跑成"}, reply={"redispatch": 1})
             self.assertEqual(cm.exception.code, "NotAllowed")
         S.do_off("feishu", now=at(10, 3))
         with SL.open_store() as st:
@@ -570,7 +669,7 @@ class EndToEndTests(Base):
             h = SL.issue(st, session_id=s["id"], project="dt-sandbox", action="handoff", category="ask", reason="gate",
                          target={"card": 8, "task": "t-20261118-abcdef", "generation": 1}, context="示例服务加超时",
                          question="超时 30 秒还是 60 秒", ask_owner="回复我选哪个", basis="秘书已经关了，交给你",
-                         revocability="irrevocable", now=at(10, 5))
+                         revocability="irrevocable", now=at(10, 5), received={"card": 8, "question": "超时调多少"})
             self.assertEqual(h["status"], "handoff")
         S.do_off("feishu", drained=True, now=at(10, 6))
         with SL.open_store() as st:                          # 会话结束后不能再往里记
@@ -578,7 +677,7 @@ class EndToEndTests(Base):
                 SL.issue(st, session_id=s["id"], project="dt-sandbox", action="handoff", category="ask", reason="gate",
                          target={"card": 9, "task": "t-20261118-abcdef", "generation": 1}, context="示例服务加超时",
                          question="超时 30 秒还是 60 秒", ask_owner="回复我选哪个", basis="秘书已经关了，交给你",
-                         revocability="irrevocable", now=at(10, 7))
+                         revocability="irrevocable", now=at(10, 7), received={"card": 8, "question": "超时调多少"})
             self.assertEqual(cm.exception.code, "WrongSession")
 
     def test_policy_swap_with_new_signature_does_not_admit_old_session(self):

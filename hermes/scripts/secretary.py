@@ -9,7 +9,8 @@
 用法（最后一行都是一行 JSON：{"ok", "msg", ...}；通过退出码 0，拒绝退出码 1）：
   secretary.py status [--json]               现在的秘书状态 + 清单核验 + 准入判定（只读；--json 给机器读，不带 open_id）
   secretary.py verify                         重算清单全文 SHA-256、重核名册，和签署记录比对（只读）
-  secretary.py on --message-id om_x           常浩私聊说「开秘书」开启（回读原文 + 本人 + 私聊 + 10 分钟内 + 消息没用过 + 清单有效）；
+  secretary.py on --message-id om_x           常浩私聊说「开秘书」开启（回读原文去掉首尾空白和标点后恰好是「开秘书」+ 本人 + 私聊 +
+                                              10 分钟内 + 消息没用过 + 清单有效）；
                                               开启时在秘书账本登记这次（secretary_ledger.register_session），账本身份记进 session.ledger.id；
                                               账本所在的库不在、打不开就不开启（LedgerUnavailable）
   secretary.py off --source <标签>            关闭：on → draining；任何来源都可以（常浩私聊「关秘书」由 Hermes 调；关是安全方向）
@@ -21,7 +22,8 @@
 Hermes 会话里 --message-id 可以省略，读 HERMES_SESSION_MESSAGE_ID（只是“去飞书查哪条”的指针，真值从飞书回读）。
 
 状态机（state = off | on | draining | frozen，同 custody.STATES）：
-  off      → on        只有 on：飞书私聊回读原文恰好是「开秘书」+ 常浩本人 + 私聊 + 10 分钟内 + 消息没用过 + 清单核验通过。
+  off      → on        只有 on：飞书私聊回读原文去掉首尾空白和标点（custody.clean_text，和托管 custody.parse_on_text 同一处理）后
+                       恰好是「开秘书」（中间夹字如「开一下秘书」不算）+ 常浩本人 + 私聊 + 10 分钟内 + 消息没用过 + 清单核验通过。
                        没有结束时刻、没有默认时段：开着直到关、冻结；清单失效（过期、被改、撤销、名册变了）时状态仍是 on，
                        但准入（admission）不过，任何代批都不放行
   on       → draining  off / revoke（任何来源）；排空截止 = 转入时刻 + 清单第 5 节的「排空截止」
@@ -29,7 +31,7 @@ Hermes 会话里 --message-id 可以省略，读 HERMES_SESSION_MESSAGE_ID（只
                        核没有在途、结果不明、对账不清、有原文没账本的）
   draining → frozen    freeze；或到了排空截止还没 --drained，自动转（读的时候按时钟算，同 custody.advance）
   on       → frozen    freeze（冻结是收紧方向，允许）
-  frozen   → off       只有 unfreeze（常浩私聊「解除冻结」，规格第 8 节原话）；frozen 时 on / off / off --drained 一律拒绝
+  frozen   → off       只有 unfreeze（常浩私聊「解除冻结」，规格第 8 节原话；同样去掉首尾空白和标点后恰好是这四个字）；frozen 时 on / off / off --drained 一律拒绝
   每次进入 draining / frozen（关、撤销、冻结、到点自动冻结），释放状态锁之后尽力清账（ledger_cleanup：作废这次已出未送达的决定、
   释放额度）；账本出错不挡关闭，也不盖掉原来的拒绝原因。
 
@@ -38,7 +40,8 @@ Hermes 会话里 --message-id 可以省略，读 HERMES_SESSION_MESSAGE_ID（只
   session（当前这次，off 时为 null）：id（s-YYYYMMDD-HHMMSS-12 位随机十六进制，和历史不重复，账本按它建账）、started_at、
           source{message_id, open_id}、ledger{id}（秘书账本身份 L-16 位十六进制）、policy{version, sha256}、drain_minutes、
           drain{started_at, deadline, source}、frozen{at, reason, items, source}、events[]；
-  signature（当前签署，结构同 custody）；signed_versions（严格递增、不复用）；used_messages{message_id: {at, purpose}}（防重放）；
+  signature（当前签署，结构同 custody，另加 projects{项目名: 完整仓库名}：签署时清单第 2 节每个项目在已合并名册里的仓库，
+          固定项目 → 仓库的身份，之后名册改指向别的仓库就失效）；signed_versions（严格递增、不复用）；used_messages{message_id: {at, purpose}}（防重放）；
   history（结束了的，留最近 30 次）。
   读的时候逐字段校验，任何一处不对都算坏；写是同目录临时文件 → fsync → rename，持 secretary.json.lock 排他锁（最多等 10 秒）；
   第一次写之前先落初始化标记 secretary.json.initialized，之后状态文件不见了不当成第一次用（全部复用 custody 的 load / save / locked）。
@@ -49,19 +52,21 @@ docs/代批清单-模板.md 填。字段位置固定、每项恰好一处、引�
   开头表：版本（正整数）、有效期（签署日起 N 天，1–366）；
   ## 1. 能批的类：四行「| ① 提问卡 | 是/否 |」「| ② 放弃后重派一次 | 是/否 |」「| ③ 退回 PR | 是/否 |」「| ④ 合并 PR | 是/否 |」；
   ## 2. 项目：「- 项目：<名字>」一行一个、至少一个、不重复；名字必须在已合并 origin/main 名册里，是 inventory 里 sandbox: true 的
-          沙盒，或 projects 里 write_allowed 明确为 true 的活跃项目（和 autoloop_grants 派单范围一致）；
+          沙盒，或 projects 里 write_allowed 明确为 true 的活跃项目（和 autoloop_grants 派单范围一致）；名册里可代批范围内同一个
+          短名对应多个仓库（短名冲突）一律拒绝，不靠字典覆盖挑一个；
   ## 3. 额度：每天代批总数 N 次、每张任务最多代批 N 次、每天合并 N 个（N 在 1–100）、放弃后重派：每张任务 1 次（只能是 1）；
           「每天」按 Asia/Shanghai 自然日；
   ## 4. 合并白名单：表「| owner/仓库 | 触发的工作流 / 外部动作 |」，④ 关时可以空表，④ 开时至少一行；仓库不重复，
-          每个都要是第 2 节某个项目在名册里的完整仓库名（触发条件指纹 0B-4d 再加）；
+          每个都要是第 2 节某个项目签署时在名册里的完整仓库名（触发条件指纹 0B-4d 再加）；
   ## 5. 等待与排空：「白天先等：30 分钟」（只能是 30：常浩 11-17 定，规格第 10 节；要改先改规格）、「排空截止：N 小时 / N 分钟」（大于 0、不超过 24 小时）。
   签署时：除模板里两行固定说明（EXEMPT_LINES，逐字相同才豁免）外不许有〔填…〕；文件版本 = 口令版本；版本比签过的都大；
-  全文 SHA-256 前 12 位 = 口令；名册核对通过。verify 每次重算：没签、撤销、文件不见、内容和签署时不同、字段读不出、
-  名册读不了或对不上、过期 → 无清单。签署只能在 off 时（一次开启只按一份清单走）。
+  全文 SHA-256 前 12 位 = 口令；名册核对通过，并把项目 → 仓库的映射记进签署（signature.projects）。verify 每次重算：没签、撤销、
+  文件不见、内容和签署时不同、字段读不出、过期、名册读不了或短名冲突（roster）、名册里的项目 → 仓库和签署时不同（roster_changed，
+  要换版本重签）→ 无清单。签署只能在 off 时（一次开启只按一份清单走）。
 
 给 0B-4c 的接口：
   python 里 import secretary：read_status(now) 只读，返回 {"state", "error", "session", "policy", "admission", ...}；
-  policy 有效时带清单解析出的字段：categories{ask, redispatch, reject, merge}、projects、repos{项目: 完整仓库名}、
+  policy 有效时带清单解析出的字段：categories{ask, redispatch, reject, merge}、projects、repos{项目: 完整仓库名（签署时固定的）}、
   limits{day, task, merge_day, redispatch}、whitelist{仓库: 说明}、wait_minutes、drain_minutes。
   admission = {"eligible", "reasons"}：状态能读、是 on、清单有效、会话开启时的清单就是现在这份有效清单才 eligible。
   下游不得只看 state=="on"，要看 admission；它只管开关这一层，凭证、绑定、额度各闸自己核；每次执行前现读，不缓存。
@@ -120,22 +125,33 @@ def policy_path():
 
 
 # ---------- 名册 ----------
+class RosterConflict(Exception):
+    """名册里可代批范围内同一个短名对应多个仓库：分不清清单里的项目指哪个，一律拒绝（不靠字典覆盖挑一个）。"""
+
+
 def dispatch_projects():
     """可代批的项目（和 autoloop_grants.allowed_repos 的派单范围一致，但只认已合并的 origin/main 名册，读法同
     custody_ledger.sandbox_projects）：projects 里 category 活跃、write_allowed 明确为 true、有 github 的，加上 inventory 里
-    sandbox: true、path 是 github: 的。缺字段的一律不算。返回 {项目名（仓库短名）: 完整仓库名}；读不了抛异常（调用方 fail closed）。"""
+    sandbox: true、path 是 github: 的。缺字段的一律不算。返回 {项目名（仓库短名）: 完整仓库名}；读不了抛异常（调用方 fail closed）；
+    同一个短名对应多个不同仓库抛 RosterConflict（整份名册都不用：名册本身有歧义，宁可全停也不猜）。"""
     import multica_night as MN
     d = MN.committed_json(MN.ROSTER_FILE)
-    out = {}
+    fulls = []
     for e in d.get("projects", []):
         gh = e.get("github") if isinstance(e, dict) else None
         if isinstance(gh, str) and re.fullmatch(REPO_FULL, gh) and e.get("write_allowed") is True and e.get("category") == "活跃":
-            out[gh.split("/")[-1]] = gh
+            fulls.append(gh)
     for e in d.get("inventory", []):
         path = str((e or {}).get("path") or "") if isinstance(e, dict) else ""
         if isinstance(e, dict) and e.get("sandbox") is True and path.startswith("github:"):
-            full = path[len("github:"):]
-            out[full.split("/")[-1]] = full
+            fulls.append(path[len("github:"):])
+    out, clash = {}, {}
+    for full in fulls:
+        short = full.split("/")[-1]
+        if out.setdefault(short, full) != full:
+            clash.setdefault(short, {out[short]}).add(full)
+    if clash:
+        raise RosterConflict("名册里短名冲突：" + "；".join(f"{k} → {'、'.join(sorted(v))}" for k, v in sorted(clash.items())))
     return out
 
 
@@ -225,12 +241,25 @@ def parse_policy(text):
 
 
 def check_roster(fields, roster):
-    """清单里的项目都在名册的可代批范围里、白名单的每个仓库都是清单项目在名册里的完整仓库名。返回错误列表。"""
+    """签署时用：清单里的项目都在名册的可代批范围里、白名单的每个仓库都是清单项目在名册里的完整仓库名。返回错误列表。"""
     errors = [f"项目「{p}」不在名册的可代批范围里（要是沙盒，或活跃项目里 write_allowed 为 true 的）"
               for p in fields["projects"] if p not in roster]
     mine = {roster[p] for p in fields["projects"] if p in roster}
     errors += [f"合并白名单里的 {r} 不是第 2 节项目的仓库" for r in fields["whitelist"] if r not in mine]
     return errors
+
+
+def check_signed_projects(fields, signed, roster):
+    """verify 时用：签署时固定的项目 → 仓库（signature.projects）要和清单第 2 节一一对上、白名单仓库都在里面，
+    而且现在名册里每个项目还指向同一个仓库。返回 (code, 错误列表)；没问题 code 为 None。"""
+    errors = []
+    if sorted(signed) != sorted(fields["projects"]):
+        errors.append("签署记录里的项目和清单第 2 节对不上")
+    errors += [f"合并白名单里的 {r} 不是签署时第 2 节项目的仓库" for r in fields["whitelist"] if r not in set(signed.values())]
+    if errors:
+        return "invalid", errors
+    moved = [f"项目「{p}」签署时是 {r}，现在名册里是 {roster.get(p) or '没有'}" for p, r in sorted(signed.items()) if roster.get(p) != r]
+    return ("roster_changed", moved) if moved else (None, [])
 
 
 def read_policy(path=None):
@@ -263,14 +292,16 @@ def verify_policy(doc, now=None, path=None):
         return {**base, "code": "expired", "reason": f"代批清单 v{sig['version']} 已于 {sig['expires_at']} 过期，要续签（换版本）"}
     try:
         roster = dispatch_projects()
-    except Exception as e:                   # noqa: BLE001  名册读不了一律当无清单（fail closed）
-        return {**base, "code": "roster", "reason": f"名册读不了，核不了清单里的项目（{type(e).__name__}：{e}）"}
-    bad = check_roster(fields, roster)
-    if bad:
-        return {**base, "code": "roster", "reason": "名册对不上：" + "；".join(bad)}
+    except Exception as e:                   # noqa: BLE001  名册读不了、短名冲突一律当无清单（fail closed）
+        return {**base, "code": "roster", "reason": f"名册读不了或有歧义，核不了清单里的项目（{type(e).__name__}：{e}）"}
+    code, bad = check_signed_projects(fields, sig["projects"], roster)
+    if code == "invalid":
+        return {**base, "code": "invalid", "reason": "签署记录和清单对不上：" + "；".join(bad)}
+    if code:
+        return {**base, "code": "roster_changed", "reason": "名册里的项目改指向了别的仓库，要换版本重签：" + "；".join(bad)}
     return {"ok": True, "code": "valid", "path": base["path"], "version": sig["version"], "sha256": sha,
             "signed_at": sig["signed_at"], "expires_at": sig["expires_at"], "categories": fields["categories"],
-            "projects": fields["projects"], "repos": {p: roster[p] for p in fields["projects"]}, "limits": fields["limits"],
+            "projects": fields["projects"], "repos": dict(sig["projects"]), "limits": fields["limits"],
             "whitelist": fields["whitelist"], "wait_minutes": fields["wait_minutes"], "drain_minutes": fields["drain_minutes"]}
 
 
@@ -319,6 +350,16 @@ def check_session(s, state):
             C._need((s[key] is not None) == need, f"状态 {state} 和 session.{key} 对不上")
 
 
+def check_signature(sig):
+    """签署记录：custody 的结构 + projects{项目名: 完整仓库名}（必填、非空，键是仓库短名、值的最后一段就是键）。"""
+    C._need(isinstance(sig, dict), "signature 不是对象")
+    C.check_signature({k: v for k, v in sig.items() if k != "projects"})
+    projects = sig.get("projects")
+    C._need(isinstance(projects, dict) and projects and all(
+        isinstance(k, str) and re.fullmatch(PROJECT_NAME, k) and isinstance(v, str) and re.fullmatch(REPO_FULL, v)
+        and v.split("/")[-1] == k for k, v in projects.items()), "signature.projects 格式不对（要是 {项目名: owner/项目名}）")
+
+
 def check_doc(doc):
     """完整结构校验（同 custody.check_doc）：任何关键字段缺失、类型不对、时间不合法都算坏，读接口给 state=None、写接口全拒。"""
     C._keys(doc, "状态文件", ("schema", "state", "updated_at", "session", "signature", "signed_versions", "used_messages", "history"))
@@ -334,7 +375,7 @@ def check_doc(doc):
     C._need(isinstance(vs, list) and all(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in vs)
             and all(a < b for a, b in zip(vs, vs[1:])), "signed_versions 要是严格递增的正整数")
     if doc["signature"] is not None:
-        C.check_signature(doc["signature"])
+        check_signature(doc["signature"])
         C._need(vs and doc["signature"]["version"] == vs[-1], "signature 版本不是签过的最大版本")
     C._need(isinstance(doc["used_messages"], dict), "used_messages 不是对象")
     for k, v in doc["used_messages"].items():
@@ -466,6 +507,7 @@ def end_session(doc, now, source, how, **extra):
 
 
 def do_on(message_id, now=None, path=None, policy=None):
+    """off → on：私聊回读原文去掉首尾空白和标点（custody.clean_text）后恰好是「开秘书」，其余见头注释。"""
     now = now or C.now_tz()
     if not message_id:
         raise Rejected("开秘书必须带 --message-id（常浩在私聊说「开秘书」的那条消息）", "NotAuthorized")
@@ -477,7 +519,7 @@ def do_on(message_id, now=None, path=None, policy=None):
                     "draining": "秘书正在排空，排空完成前不能重新开启", "on": "秘书已经开着"}[doc["state"]]
             raise Rejected(hint, "BadTransition")
         C.claim(doc, message_id, "开秘书", now)
-        if C.clean_text(m.get("text")) != ON_TEXT:
+        if C.clean_text(m.get("text")) != ON_TEXT:        # 去掉首尾空白和标点后恰好是「开秘书」（同 custody.parse_on_text）
             raise Rejected(f"这条消息不是「{ON_TEXT}」", "BadCommand")
         pol = require_policy(doc, now, policy)
         sid = C.new_session_id(now, doc, prefix="s", what="秘书")
@@ -550,7 +592,7 @@ def do_unfreeze(message_id, now=None, path=None):
         if doc["state"] != "frozen":
             raise Rejected(f"只有冻结（frozen）才需要解除，现在是 {doc['state']}", "BadTransition")
         C.claim(doc, message_id, "解除秘书冻结", now)
-        if C.clean_text(m.get("text")) != UNFREEZE_TEXT:
+        if C.clean_text(m.get("text")) != UNFREEZE_TEXT:  # 去掉首尾空白和标点后恰好是「解除冻结」（同托管）
             raise Rejected(f"这条消息不是「{UNFREEZE_TEXT}」", "BadCommand")
         end_session(doc, now, "feishu", "解除冻结", message_id=message_id, open_id=m["sender_open_id"])
         return {"result": "off"}
@@ -614,16 +656,20 @@ def do_sign(message_id, now=None, path=None, policy=None):
                            "HashMismatch")
         try:
             roster = dispatch_projects()
+        except RosterConflict as e:
+            raise Rejected(f"{e}：分不清清单里的项目指哪个仓库，先改名册", "RosterConflict")
         except Exception as e:               # noqa: BLE001
             raise Rejected(f"名册读不了，核不了清单里的项目（{type(e).__name__}：{e}）", "RosterUnavailable")
         bad = check_roster(fields, roster)
         if bad:
             raise Rejected("名册对不上：" + "；".join(bad), "RosterMismatch")
+        projects = {p: roster[p] for p in fields["projects"]}          # 固定项目 → 仓库（P1-01）：之后名册改指向就失效
         expires = now + dt.timedelta(days=fields["valid_days"])
         doc["signature"] = {"version": want_ver, "sha256": sha, "message_id": message_id, "open_id": m["sender_open_id"],
-                            "signed_at": C.iso(now), "expires_at": C.iso(expires), "valid_days": fields["valid_days"]}
+                            "signed_at": C.iso(now), "expires_at": C.iso(expires), "valid_days": fields["valid_days"],
+                            "projects": projects}
         doc["signed_versions"].append(want_ver)
-        return {"version": want_ver, "sha256": sha, "expires_at": C.iso(expires)}
+        return {"version": want_ver, "sha256": sha, "expires_at": C.iso(expires), "projects": projects}
 
     return transaction(fn, now, path)
 

@@ -380,11 +380,13 @@ def _admitted(store, session_id, now, status_reader, use=CUSTODY):
 
 
 def current_session(store, session_id, now, status_reader, use=CUSTODY):
-    """不要准入的记账（托管的挂起、秘书的交常浩）也只能记进现在这次（开着、排空、冻结中都算），并核对账本身份（第 2 轮 P1-02）。"""
+    """不要准入的记账（托管的挂起、秘书的交常浩）也只能记进现在这次（开着、排空、冻结中都算），并核对账本身份（第 2 轮 P1-02）。
+    返回现在这次会话（秘书的交常浩要取会话绑定的清单版本）。"""
     sess = (status_reader(now).get("session") or {})
     if sess.get("id") != session_id:
         raise LedgerError(f"{use.who} {session_id} 不是现在这次（已结束或没开），不能再往里记", "WrongSession")
     check_session(store, session_id, (sess.get("ledger") or {}).get("id"), use)
+    return sess
 
 
 def new_decision_id(now):
@@ -393,8 +395,9 @@ def new_decision_id(now):
 
 def record(store, *, use, session_id, row, payload, cites, exp, fixed_now, now, received, reply, by, gate):
     """记账的通用骨架（托管 issue、秘书 issue 共用）：生成决定号 → 先存原文 → 一个 BEGIN IMMEDIATE 事务里核依据、
-    拿到写锁后才取时间（P2-01）、核有效期、gate(now) 做准入和额度检查（返回 (状态, 额外的额度 [(kind, scope, cap, 说明)])，
-    只数不写）→ 写决定行、额度行、事件。任何一步抛异常，库里什么都不写、原文删掉。
+    拿到写锁后才取时间（P2-01）、核有效期、gate(now) 做准入和额度检查（返回 (状态, 额度 [(kind, scope, cap, 说明)], 补充列)，
+    只数不写；补充列是只有准入时才知道的值，例如秘书决定依据的清单版本，同时写进决定行和事件）→ 写决定行、额度行、事件。
+    任何一步抛异常，库里什么都不写、原文删掉。
     row 是决定行除 id / session_id / status / disposition / expires_at / raw_path / 时间以外的列；payload 是事件里除
     status / quota 以外的字段。返回决定（dict）。"""
     prune_raw(now, use)
@@ -413,15 +416,15 @@ def record(store, *, use, session_id, row, payload, cites, exp, fixed_now, now, 
             now = fixed_now or C.now_tz()                    # 拿到写锁之后再取时间（P2-01）
             if exp and exp <= now:
                 raise LedgerError("有效期已经过了（拿到账本写锁时）", "BadInput")
-            status, holds = gate(now)
+            status, holds, extra = gate(now)
             ts = C.iso(now)
-            full = {"id": did, "session_id": session_id, **row, "status": status, "disposition": "open",
+            full = {"id": did, "session_id": session_id, **row, **extra, "status": status, "disposition": "open",
                     "expires_at": C.iso(exp) if exp else None, "raw_path": raw_path, "created_at": ts, "updated_at": ts}
             c.execute(f"INSERT INTO {use.decisions} ({', '.join(full)}) VALUES ({','.join('?' * len(full))})", tuple(full.values()))
             for kind, scope, _, _ in holds:
                 c.execute(f"INSERT INTO {use.quota} (session_id, kind, scope, decision_id, state, created_at, updated_at)"
                           " VALUES (?,?,?,?, 'reserved', ?, ?)", (session_id, kind, scope, did, ts, ts))
-            _event(store, "issue", by, did, {**payload, "status": status, "quota": [[k, s] for k, s, _, _ in holds]}, use)
+            _event(store, "issue", by, did, {**payload, **extra, "status": status, "quota": [[k, s] for k, s, _, _ in holds]}, use)
     except BaseException:
         with contextlib.suppress(OSError):
             Path(raw_path).unlink()
@@ -497,7 +500,7 @@ def issue(store, *, session_id, project, action, target, basis, revocability, co
     def gate(t):
         if action == "suspend":              # 不要准入（排空、冻结时也能记），但只能记进现在这次托管，并核对账本身份（第 2 轮 P1-02）
             current_session(store, session_id, t, status_reader)
-            return "suspended", []
+            return "suspended", [], {}
         pol = _admitted(store, session_id, t, status_reader)
         lim = (pol.get("limits") or {}).get(action)
         if not lim:
@@ -508,7 +511,7 @@ def issue(store, *, session_id, project, action, target, basis, revocability, co
         if action == "reply":
             holds.append(("issue", issue_key, lim["per_issue"], f"子单 {target['issue']} 的托管次数"))
         check_holds(store, holds)
-        return "issued", holds
+        return "issued", holds, {}
 
     row = {"project": project, "action": action, "target": _j(target), "issue_key": issue_key, "context": context.strip(),
            "question": question.strip(), "summary": summary.strip(), "ask_owner": ask_owner.strip(), "basis": basis.strip(),

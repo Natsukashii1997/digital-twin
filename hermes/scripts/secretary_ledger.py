@@ -18,7 +18,12 @@ SECRETARY 这个「账本用途」调用它们，另写秘书自己的入口检�
 撤回能力：ask / redispatch / reject 只能 correctable，merge 只能 revertible，irrevocable 只许 handoff。
 对象（target）：ask {"card": 正整数, "task": 任务号, "generation": 正整数}；redispatch {"task", "generation"}；
   reject / merge {"task", "repo": 名册里这个项目的完整仓库名, "pr": 正整数, "head": 40 位小写十六进制}；handoff 按 category 用上面的形状。
-  任务号用 autoloop_grants.TASK_ID 校验（t-YYYYMMDD-6 位十六进制）。项目必须在名册的可代批范围里（secretary.dispatch_projects）。
+  任务号用 autoloop_grants.TASK_ID 校验（t-YYYYMMDD-6 位十六进制）。入口只核格式（项目名、对象各项）；四类在准入分支再核名册：
+  项目现在在名册里指向的仓库要等于签署时固定的（secretary signature.projects），reject / merge 的 repo 要等于它。
+  handoff 不核名册（项目被移出名册、清单失效时也要能交常浩），只核格式、category、reason、当前会话和账本身份。
+原文（received / reply，P1-04）：四类都要 received（可信侧取的事项快照，非空字典）和 reply（明确的决定，非空字典；① 要带选项号
+  choice）；handoff 要 received，reply 可以不写。不合格 BadInput，什么都不写。
+清单版本（policy_version / policy_sha256）：四类取准入时核验过的清单，handoff 取当前会话绑定的清单；写进决定行和 issue 事件。
 准入（非 handoff，持账本写锁时现读 secretary.read_status）：admission eligible、会话对得上、账本身份对得上；清单里这一类是「是」；
   项目在清单第 2 节；合并的仓库在清单第 4 节白名单里。
 额度（同一个 BEGIN IMMEDIATE 事务里原子预占，占用 = reserved + used + frozen，状态跟着走同 custody_ledger）：
@@ -184,8 +189,8 @@ def _pos_int(v):
     return isinstance(v, int) and not isinstance(v, bool) and v > 0
 
 
-def target_errors(category, target, repo):
-    """对象的形状（见头注释）；repo 是这个项目在名册里的完整仓库名。返回错误列表。"""
+def target_errors(category, target, repo=None):
+    """对象的形状（见头注释），只看格式、不看名册；给了 repo（这个项目签署时固定的完整仓库名）再核仓库对不对。返回错误列表。"""
     want = TARGET_KEYS[category]
     if not isinstance(target, dict) or set(target) != set(want):
         return [f"{CATEGORIES[category]}的对象要正好有 {'、'.join(want)} 这几项"]
@@ -197,8 +202,26 @@ def target_errors(category, target, repo):
             errors.append(f"{key} 要是正整数：{target[key]!r}")
     if "head" in want and not L.SHA.match(str(target["head"])):
         errors.append("head 要是完整的 40 位小写十六进制")
-    if "repo" in want and target["repo"] != repo:
-        errors.append(f"仓库要写这个项目在名册里的完整仓库名（{repo}）：{target['repo']!r}")
+    if "repo" in want and not (isinstance(target["repo"], str) and re.fullmatch(S.REPO_FULL, target["repo"])):
+        errors.append(f"仓库要写完整仓库名 owner/仓库：{target['repo']!r}")
+    elif "repo" in want and repo is not None and target["repo"] != repo:
+        errors.append(f"仓库要写这个项目签署时在名册里的完整仓库名（{repo}）：{target['repo']!r}")
+    return errors
+
+
+def raw_errors(action, received, reply):
+    """原文（规格第 2 节：哪张卡 / 哪个 PR、选了什么都要能复查）：四类都要 received（可信侧取的事项快照，非空字典）和
+    reply（明确的决定，非空字典；① 要带选中的选项号 choice，正整数）；交常浩要 received（触发弃权的事项），reply 可以不写。"""
+    errors = []
+    if not (isinstance(received, dict) and received):
+        errors.append("received（收到的事项快照）要是非空字典")
+    if action == "handoff":
+        if reply is not None and not isinstance(reply, dict):
+            errors.append("交常浩的 reply 要么不写，要么是字典")
+    elif not (isinstance(reply, dict) and reply):
+        errors.append("reply（明确的决定）要是非空字典")
+    elif action == "ask" and not _pos_int(reply.get("choice")):
+        errors.append("① 答提问卡的 reply 要带选中的选项号 choice（正整数）")
     return errors
 
 
@@ -228,17 +251,16 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
                           "（撤不回的一律交常浩）", "BadInput")
     if not SESSION_ID.match(session_id or ""):
         raise LedgerError(f"秘书会话号不对：{session_id}", "BadInput")
-    try:
-        repos = S.dispatch_projects()
-    except Exception as e:                   # noqa: BLE001  名册读不了就不记账（fail closed）
-        raise LedgerError(f"名册读不了，不记账（{type(e).__name__}：{e}）", "RosterUnavailable")
-    if project not in repos:
-        raise LedgerError(f"项目「{project}」不在名册的可代批范围里（{'、'.join(repos) or '名册里没有'}）", "BadInput")
+    if not (isinstance(project, str) and re.fullmatch(S.PROJECT_NAME, project)):
+        raise LedgerError(f"项目名看不懂：{project!r}", "BadInput")
+    bad = raw_errors(action, received, reply)
+    if bad:
+        raise LedgerError("原文不合格：" + "；".join(bad), "BadInput")
     bad = L.check_owner_text(OWNER_RULE[action], {"context": context, "question": question, "summary": summary, "basis": basis,
                                                   "ask_owner": ask_owner})
     if bad:
         raise LedgerError("写给常浩的字不合格：" + "；".join(bad), "BadText")
-    bad = target_errors(category, target, repos[project])
+    bad = target_errors(category, target)                # 只看格式；仓库对不对在准入分支按签署时的映射核（handoff 不核名册，P1-02）
     if bad:
         raise LedgerError("对象不对：" + "；".join(bad), "BadInput")
     exp = None
@@ -252,14 +274,27 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
     task = target["task"]
 
     def gate(t):
-        if action == "handoff":              # 不要准入（排空、冻结时也能记），但只能记进现在这次，并核对账本身份
-            L.current_session(store, session_id, t, status_reader, SECRETARY)
-            return "handoff", []
+        if action == "handoff":              # 不要准入、不核名册（名册或清单失效时也要能交常浩），但只能记进现在这次，并核对账本身份
+            sess = L.current_session(store, session_id, t, status_reader, SECRETARY)
+            pol = sess.get("policy") or {}
+            if not (_pos_int(pol.get("version")) and re.fullmatch(r"[0-9a-f]{64}", str(pol.get("sha256")))):
+                raise LedgerError("现在这次秘书会话没有绑定清单版本，记不了", "WrongSession")
+            return "handoff", [], {"policy_version": pol["version"], "policy_sha256": pol["sha256"]}
         pol = L._admitted(store, session_id, t, status_reader, SECRETARY)
         if (pol.get("categories") or {}).get(action) is not True:
             raise LedgerError(f"代批清单没允许「{CATEGORIES[action]}」", "NotAllowed")
         if project not in (pol.get("projects") or ()):
             raise LedgerError(f"项目「{project}」不在代批清单第 2 节里", "NotAllowed")
+        signed = (pol.get("repos") or {}).get(project)
+        try:
+            now_repo = S.dispatch_projects().get(project)
+        except Exception as e:               # noqa: BLE001  名册读不了、短名冲突就不记账（fail closed）
+            raise LedgerError(f"名册读不了，不记账（{type(e).__name__}：{e}）", "RosterUnavailable")
+        if not signed or now_repo != signed:
+            raise LedgerError(f"项目「{project}」签署时是 {signed or '没有'}，现在名册里是 {now_repo or '没有'}，不记账", "RosterChanged")
+        bad = target_errors(category, target, signed)
+        if bad:
+            raise LedgerError("对象不对：" + "；".join(bad), "BadInput")
         if action == "merge" and target["repo"] not in (pol.get("whitelist") or {}):
             raise LedgerError(f"{target['repo']} 不在代批清单的合并白名单里", "NotAllowed")
         lim = pol.get("limits") or {}
@@ -272,7 +307,7 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
         if action == "redispatch":
             holds.append(("redispatch", task, lim["redispatch"], f"任务 {task} 的放弃后重派"))
         L.check_holds(store, holds, SECRETARY)
-        return "issued", holds
+        return "issued", holds, {"policy_version": pol["version"], "policy_sha256": pol["sha256"]}
 
     row = {"project": project, "action": action, "category": category, "target": L._j(target), "task_id": task,
            "reason": reason or "", "context": context.strip(), "question": question.strip(), "summary": summary.strip(),
@@ -325,12 +360,14 @@ def main(argv=None):
                 d["quota"] = quotas(st, a.decision)
                 print(json.dumps(d, ensure_ascii=False, indent=2))
                 done(True, f"{d['id']}：{ACTIONS[d['action']]}（{CATEGORIES[d['category']]}），{STATUS[d['status']]}，"
-                           f"{L.DISPOSITION[d['disposition']]}")
+                           f"{L.DISPOSITION[d['disposition']]}，依据清单 v{d['policy_version']}（{d['policy_sha256'][:12]}）",
+                     policy_version=d["policy_version"], policy_sha256=d["policy_sha256"])
             if a.cmd == "list":
                 rows = decisions(st, a.session)
                 for d in rows:
                     print(f"{d['id']}  {d['session_id']}  {d['project']}  {ACTIONS[d['action']]}  {describe_target(d)}  "
-                          f"{STATUS[d['status']]}  {L.DISPOSITION[d['disposition']]}")
+                          f"{STATUS[d['status']]}  {L.DISPOSITION[d['disposition']]}  清单 v{d['policy_version']}"
+                          f"（{d['policy_sha256'][:12]}）")
                 done(True, f"共 {len(rows)} 个决定")
             if a.cmd == "drain-check":
                 b = drain_blockers(st, a.session)

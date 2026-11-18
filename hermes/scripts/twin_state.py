@@ -184,11 +184,12 @@ MIGRATIONS = [
     "CREATE TABLE custody_sessions (session_id TEXT PRIMARY KEY, ledger_id TEXT NOT NULL, registered_at TEXT NOT NULL)",
     # v5（秘书代批 #195 0B-4b）：秘书账本，结构仿 v4，和托管账本分表、分账本身份（meta 的 secretary_ledger_id）。
     # 每次变化另在 events 记一条 secretary.decision.*（object_type = secretary_decision）。读写逻辑在 secretary_ledger.py
-    # （通用部分复用 custody_ledger 的「账本用途」）。category 是这件事属于哪一类（交常浩的也记，给统计用），reason 是交常浩的原因代号
+    # （通用部分复用 custody_ledger 的「账本用途」）。category 是这件事属于哪一类（交常浩的也记，给统计用），reason 是交常浩的原因代号；
+    # policy_version / policy_sha256 是这个决定依据的代批清单（代批取准入时核验过的，交常浩取当前会话绑定的）
     "CREATE TABLE secretary_decisions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project TEXT NOT NULL,"
     " action TEXT NOT NULL CHECK (action IN ('ask','redispatch','reject','merge','handoff')),"
     " category TEXT NOT NULL CHECK (category IN ('ask','redispatch','reject','merge')), target TEXT NOT NULL DEFAULT '{}',"
-    " task_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',"
+    " task_id TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', policy_version INTEGER NOT NULL, policy_sha256 TEXT NOT NULL,"
     " context TEXT NOT NULL DEFAULT '', question TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',"
     " ask_owner TEXT NOT NULL DEFAULT '', basis TEXT NOT NULL, cites TEXT NOT NULL DEFAULT '[]',"
     " revocability TEXT NOT NULL CHECK (revocability IN ('correctable','revertible','irrevocable')),"
