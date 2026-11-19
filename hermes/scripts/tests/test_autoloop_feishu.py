@@ -108,6 +108,40 @@ class Deliver(Base):
         F.deliver({**CARD, "ref": "om_fixture_1", "version": 4, "state": "closed", "result": "不用了"})
         self.assertEqual(self.lark.keys()[-1], "autoloop-card-7-v4")
 
+    def test_delivered_at_follows_the_version_that_reached_the_owner(self):
+        """#218 审查 P1-02：送达时间按版本记——开着的卡改版成功才换成新版本的送达时刻，改不了就留在旧版本；同一版重送不变。"""
+        def row():
+            with F.db() as con:
+                return dict(con.execute("SELECT version, delivered_at FROM feishu_cards WHERE card_id = 7").fetchone())
+        times = iter(["2026-11-19T10:00:00+08:00", "2026-11-19T10:05:00+08:00", "2026-11-19T10:40:00+08:00",
+                      "2026-11-19T10:50:00+08:00", "2026-11-19T11:00:00+08:00"])
+        with mock.patch.object(F, "now", lambda: next(times)):
+            self.register()
+            self.assertEqual(row(), {"version": 1, "delivered_at": "2026-11-19T10:00:00+08:00"})
+            self.register()                                          # 同一版重送（送达报告丢了）：不重算
+            self.assertEqual(row()["delivered_at"], "2026-11-19T10:00:00+08:00")
+            self.lark.fail_patch = True
+            with self.assertRaises(F.SendError):                     # 改版没送到：仍是第 1 版和它的时刻
+                F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})
+            self.assertEqual(row(), {"version": 1, "delivered_at": "2026-11-19T10:00:00+08:00"})
+            self.lark.fail_patch = False
+            F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})  # 改版送到：从这一版的送达起算
+            self.assertEqual(row(), {"version": 2, "delivered_at": "2026-11-19T10:40:00+08:00"})
+            F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})  # 同一版再改一次：不重算
+            self.assertEqual(row()["delivered_at"], "2026-11-19T10:40:00+08:00")
+            F.deliver({**CARD, "ref": "om_fixture_1", "version": 3, "state": "decided", "choice": 1, "by": OWNER})
+            self.assertEqual(row(), {"version": 3, "delivered_at": "2026-11-19T10:40:00+08:00"})   # 结束的卡不再计时
+
+    def test_first_send_of_a_newer_version_restarts_the_clock(self):
+        """第 1 版的送达报告没被中台收下，中台再给时已是第 2 版（ref 仍为空）：送达时间按第 2 版重算。"""
+        times = iter(["2026-11-19T10:00:00+08:00", "2026-11-19T10:30:00+08:00"])
+        with mock.patch.object(F, "now", lambda: next(times)):
+            self.register()
+            self.register({**CARD, "version": 2})
+        with F.db() as con:
+            r = con.execute("SELECT version, delivered_at FROM feishu_cards WHERE card_id = 7").fetchone()
+        self.assertEqual((r["version"], r["delivered_at"]), (2, "2026-11-19T10:30:00+08:00"))
+
     def test_ref_mismatch_refuses_to_patch(self):
         self.register()
         with self.assertRaisesRegex(F.Fail, "对不上"):

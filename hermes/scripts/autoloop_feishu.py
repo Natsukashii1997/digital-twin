@@ -9,7 +9,8 @@
 同一张卡只有一个令牌：送达报告丢了、中台再给一次时，用同一个幂等键重发，飞书回原消息，令牌也不变。
 
 卡片库 cards.db（DigitalTwin/autoloop/，600）：
-  feishu_cards  卡片号 → 令牌、送达的消息号、私聊号、种类、选项数、版本、飞书送达时间（秘书白天等 30 分钟从这里起算）、
+  feishu_cards  卡片号 → 令牌、送达的消息号、私聊号、种类、选项数、版本、飞书送达时间（秘书白天等 30 分钟从这里起算；按版本：
+                version 是最后送到常浩那里的版本，delivered_at 是它送到的时刻，开着的卡改版成功后两者一起换，#218 审查 P1-02）、
                 中台确认送达时间（报 delivered 成功后才有；没有之前本人的点击只排队，不提交，见 autoloop_answer）
   claims        每张卡每方一行（owner 本人 / secretary 秘书）和进度；claim_log 只追加，记每次状态变化
   secretary_cards  秘书控制面（secretary_gate.py，第 4c 批）在 secretary 通道领到的卡片：卡片号 → 版本、自己生成的 ref、
@@ -253,15 +254,18 @@ def deliver(card):
             if card["state"] == "open":                # 开着的卡：原消息的按钮还能用，不另发
                 raise
             send_card(owner_chat(), content, f"autoloop-card-{card['id']}-v{card['version']}")
-        with db(write=True) as con:
-            con.execute("UPDATE feishu_cards SET version = ? WHERE card_id = ?", (card["version"], card["id"]))
+        with db(write=True) as con:                    # 开着的卡改版送到了：送达时间从这一版起算（结束的卡不再计时）
+            con.execute("UPDATE feishu_cards SET delivered_at = CASE WHEN ? AND version != ? THEN ? ELSE delivered_at END, "
+                        "version = ? WHERE card_id = ?",
+                        (card["state"] == "open", card["version"], now(), card["version"], card["id"]))
         return card["ref"]
     chat = owner_chat()
     token = token_for(card, chat)
     mid = send_card(chat, render(card, token), f"autoloop-card-{card['id']}")   # 幂等键只用卡片号：报告丢了重发不出第二条
     with db(write=True) as con:
-        con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, delivered_at = COALESCE(delivered_at, ?) "
-                    "WHERE card_id = ?", (mid, card["version"], now(), card["id"]))
+        con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, "
+                    "delivered_at = CASE WHEN delivered_at IS NULL OR version != ? THEN ? ELSE delivered_at END "
+                    "WHERE card_id = ?", (mid, card["version"], card["version"], now(), card["id"]))
     return mid
 
 

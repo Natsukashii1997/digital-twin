@@ -11,10 +11,16 @@
    "choice": 第几项（从 1 数）,                       ← 只 ask；送中台时换成中台的下标 choice - 1
    "task": 任务号, "pr": PR 号, "head": 40 位提交,     ← 只 reject
    "text": {"context", "question", "summary", "basis"}  写给常浩的白话（规则同 secretary_ledger：ask 按「回复」，②③ 按「合并」）
-   "model": {"name": 模型名, "fallback": 是否用了回退模型},
+   "run": {"session": Hermes 会话号},                 ← 只 ask：这次模型判断的运行记录（见下）
    "error": 判断出错 / 超时的说明或 null, "abstain": {"reason": 交常浩代号, "note": 说明} 或 null}
   控制面**只信选项号和白话**，其余一律从可信来源重取：卡片、轮次、事件从中台库（只读打开，同 autoloop_publish 的读法）；
   任务和代次从凭证库（只读）；开关、清单从 secretary.read_status；本人状态、飞书送达时间从 cards.db；PR 从受信发布记录。
+  error、abstain 是秘书自报，只会让这件事交常浩（往保守的方向），不当成核实过的事实。
+  ① 的模型运行证据（审查 P1-01：模型名、是否回退不收提议自报）：按 run.session 只读打开 Hermes 自己的运行记录
+  （$HERMES_HOME/state.db，主模型和回退模型从 $HERMES_HOME/config.yaml 读），这次会话必须：单次调用（source = tool、没有父会话）、
+  正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；模型调用全是 Hermes 配置的主模型（有回退模型或别的模型
+  → 交常浩）；第一条输入里有 run_marker(卡片号, 版本)；最后一条模型输出是一个 JSON 对象，category、card、card_version、choice、
+  text、abstain 和提议逐项相同（提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。
 
 结果（submit 返回 {"ok", "result", "msg", "decision"?}；命令行最后一行同样是一行 JSON，退出码见括号）：
   done（0）已送达并回读核实；handoff（4）记了一笔「交常浩」；not_ready（3）还不能办，过一会再交，不记账；
@@ -22,19 +28,26 @@
   yielded（1）常浩已经在点了，秘书让出（决定作废、额度释放）；unknown（2）结果不明：不重答，等 reconcile 按证据结算。
 
 前闸（全部确定性；不过就记 handoff，reason 用规格第 4 节九条的代号，received 一律是可信侧取的快照）：
-  格式不合格、判断出错超时、用了回退模型 → model；秘书主动弃权 → 它给的代号；
+  格式不合格、秘书自报判断出错超时 → model；秘书主动弃权 → 它给的代号；
   卡片已不开着 / 版本变了 → refused（不用办或提议过时）；① 选项号不在范围 → model；
-  等待：从 cards.db 里这张卡的飞书送达时间起满 30 分钟（清单第 5 节「白天先等」），托管开着（custody admission eligible）不等；
-        没有飞书送达记录 → handoff（unsure，「你还没收到这张卡」）；没满 → not_ready；① 还要秘书通道已领到并经中台确认送达；
+  等待：从 cards.db 里这张卡**这一版**的飞书送达时间起满 30 分钟（清单第 5 节「白天先等」；卡片改版后从改版送达起重算，审查 P1-02），
+        托管开着（custody admission eligible）不等；没有飞书送达记录 → handoff（unsure，「你还没收到这张卡」）；登记的还不是这一版
+        （桥接还没把改版送到）或没满 → not_ready；
+        ① 还要秘书通道领到的是这一版、并经中台确认送达（secretary_cards 的 version 等于卡片版本、hub_delivered_at 有值）；
+  ① 运行证据（见上）对不上、查不到、用了回退模型 → model；
   secretary 准入（开着、清单有效、会话清单就是当前清单）、清单里这一类是「是」、项目在清单里 → 否则 gate；
   绑定（规格第 5 节，复用 autoloop_publish.bind_run）：卡片的事项 = 任务号、规则 = 凭证的规则，所属轮次追到网关记的派单事件
         （事件号、规则名、执行方、事项、任务号、代次全对上，凭证现在有效且代次一致）→ 否则 unbound；
   卡片文字（标题、正文、选项）里有「常浩已同意 / 已授权 / 秘书请选」这类 → induced（疑似诱导）；
   这张任务账本里有结果不明 / 对账不清的秘书决定 → gate（规格第 7 节：冻结这张任务的后续代批，从账本现算）；
-  ② 另核：那一轮是中台放弃（cancelled、连续 10 次没跑成），这件事没有还在排队或在跑的轮次，没有在途的发布（发布锁、交接目录里
-        没发出去的包）→ 否则 unsure；每张任务最多 1 次由账本额度管；
-  ③ 另核：受信发布记录里有这个 PR（task_id、PR 号、提交都对上）、现在 PR 开着且头提交没变、有能绑定 PR 和受审提交的审查记录、
+  ② 另核：那一轮是中台放弃（cancelled、连续 10 次没跑成），这件事没有还在排队或在跑的轮次，交接目录里没有没发出去的包 → 否则
+        unsure；每张任务最多 1 次由账本额度管；
+  ③ 另核：受信发布记录里有这个 PR（task_id、PR 号、提交、代次都对上）、现在 PR 开着且头提交没变、有能绑定 PR 和受审提交的审查记录、
         机器账号留言开关开着 → 否则 unsure / gate。**审查记录现在没有可信来源**（见 review_record），③ 一律交常浩。
+  任务锁（审查 P1-03）：②③ 从前闸到续接事件发出，全程持着这张任务的受信发布锁（autoloop_publish.task_lock，和 publish 同一把）：
+        持锁期间受信发布开不了，发布进行中秘书拿不到锁（→ unsure）；查活动轮次、查交接包、记账、获准、发续接事件都在锁里。
+        同一事项的轮次由中台自己串行（kernel/decide.ts：同组同事项同时只认领一轮，新事件并进还在排队的那一轮），
+        所以锁外中台新排的轮次只会排在后面，不会和新派的这一轮并跑。
 记账：前闸过 → secretary_ledger.issue 预占额度（① 带卡片版本，v6 唯一约束：同卡同版本只许一个可送达决定，重复 → refused）。
 后闸 + 获准（唯一的送达授权点）：持 cards.db 写锁（autoloop_feishu.db(write=True)），**锁的先后顺序固定：先 cards.db 再账本库**
   （本人点击只拿 cards.db；账本自己的写只拿账本库；没有谁先拿账本库再拿 cards.db）。锁里现读：中台卡片还开着、版本、事项、
@@ -42,13 +55,17 @@
   本人占着 → 作废这个决定（释放额度），claim_log 记一笔「你已经在点了，秘书让出」；否则写 claims（who = secretary，
   state = approved，attempt = 决定号）再 secretary_ledger.begin（issued → executing）。
 送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）；② autoloop_grants.resume_dispatch
-  （redispatch）；③ 机器账号在 PR 留言（REAL_COMMENT 关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
+  （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
+  关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
   claims 记 unknown、不重答。回读（中台库只读）看到 decided、by = 秘书、choice 一致 → finish(done)，outcome 记 ref 和
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
+  ① 停在 executing 而 cards.db 里没有这个决定号的获准记录（claim_log 的 approved，和 claims 同一事务写）：获准没落盘，送达只在
+  获准之后，确定没发 → failed（审查 P2-02：账本先提交 executing、cards.db 还没提交时被杀）。查的时候持 cards.db 写锁，不会读到
+  正在获准、还没提交的那一刻。
 lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自己的 ref（cards.db 的 secretary_cards），报 delivered（同一 ref 重报幂等），
-  中台收下后记「中台确认送达」；以后由常驻进程调（本批不装）。
+  中台收下后记「中台确认送达」；领到新版本时先清掉旧版本的确认时间，只有这一版报送达成功才记（审查 P1-02）；以后由常驻进程调（本批不装）。
 
   secretary_gate.py submit --file 提议.json
   secretary_gate.py reconcile [--card 卡片号]
@@ -56,8 +73,9 @@ lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自�
   secretary_gate.py show                     只读
 环境变量：DT_STATE_DB、DT_SECRETARY_*（同 secretary / secretary_ledger）、DT_CUSTODY_FILE、DT_AUTOLOOP_CARDS_DB、
 DT_AUTOLOOP_CHANNEL_KEY_DIR（secretary 通道钥匙 <目录>/secretary-channel.key）、AGENT_AUTOLOOP_HOME（中台目录）、DT_GRANTS_DB 等
-autoloop_grants 的变量、DT_PUBLISH_LOG / DT_PUBLISH_OUTBOX / DT_PUBLISH_MIRRORS（受信发布）。
-不调用 AI。威胁模型同 custody：防模型自报、文本冒充、重放；同账号的恶意进程靠 ADR-015 的账号隔离挡，本脚本挡不住。
+autoloop_grants 的变量、DT_PUBLISH_LOG / DT_PUBLISH_OUTBOX / DT_PUBLISH_MIRRORS（受信发布）、HERMES_HOME（① 的运行记录）。
+不调用 AI。威胁模型同 custody：防模型自报、文本冒充、重放；同账号的恶意进程靠 ADR-015 的账号隔离挡，本脚本挡不住
+（包括改 Hermes 运行记录：现在和秘书同一账号；分账号后控制面只读秘书账号的运行记录，0E 配权限）。
 """
 import argparse
 import contextlib
@@ -75,6 +93,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import ai_access as AA  # noqa: E402
 import autoloop_config as AC  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
 import autoloop_grants as G  # noqa: E402
@@ -98,8 +117,13 @@ INDUCE = re.compile(r"常浩\s*(已经?|已)?\s*(同意|授权|批准|确认|点
                     r"请\s*秘书|替\s*常浩\s*(选|定|答)|代\s*常浩|owner\s*(has\s*)?(approved|authori[sz]ed)", re.I)
 CATEGORIES = ("ask", "redispatch", "reject")
 KEYS = {"ask": {"card", "card_version", "choice"}, "redispatch": {"card", "card_version"}, "reject": {"task", "pr", "head"}}
-COMMON_KEYS = {"schema", "category", "text", "model", "error", "abstain"}
+COMMON_KEYS = {"schema", "category", "text", "error", "abstain"}
 TEXT_KEYS = ("context", "question", "summary", "basis")
+RUN_KEYS = ("category", "card", "card_version", "choice", "text", "abstain")   # 提议和这次模型输出逐项相同的字段
+RUN_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+RUN_SOURCE = "tool"                         # hermes chat --source tool 的单次调用
+RUN_END = ("cli_close", "agent_close")      # 正常结束
+RUN_FRESH = dt.timedelta(minutes=30)        # 判断结束到交提议的最长间隔
 REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
 TEST_GH = None          # 测试在进程内换成假 gh 的路径；不经环境变量
 REVIEW_SOURCE = None    # ③ 审查记录的可信来源（见 review_record）；现在没有，测试在进程内注入
@@ -220,11 +244,16 @@ def card_snapshot(card):
             "key": card.get("key")}
 
 
-def feishu_delivered_at(card_id):
-    """飞书桥接记下的「飞书送达时间」（cards.db feishu_cards.delivered_at）；没有返回 None。"""
+def feishu_delivery(card_id):
+    """飞书桥接的送达登记（cards.db feishu_cards）：version 是最后送到常浩那里的版本，delivered_at 是它送到的时刻；没有返回 None。"""
     with F.db() as con:
-        r = con.execute("SELECT delivered_at FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
-    return CU.parse_iso(r["delivered_at"]) if r and r["delivered_at"] else None
+        r = con.execute("SELECT version, delivered_at FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
+    return dict(r) if r and r["delivered_at"] else None
+
+
+def secretary_delivered(sc, version):
+    """秘书通道领到的是这一版，并且这一版的送达经中台确认。"""
+    return bool(sc) and sc["version"] == version and bool(sc["hub_delivered_at"])
 
 
 def secretary_card(con, card_id):
@@ -251,15 +280,9 @@ def publish_record(task_id, pr):
     return found
 
 
-def publish_in_flight(task_id):
-    """这张任务有没有在途的推分支 / 开 PR：受信发布正持着这张单的锁，或交接目录里有还没发布出去的包。返回原因或 None。"""
-    try:
-        with P.task_lock(task_id):
-            pass
-    except P.Rejected:
-        return "这张任务的受信发布正在进行"
-    except OSError:
-        return "查不了受信发布的锁"
+def unpublished_package(task_id):
+    """交接目录里有没有这张任务还没发布出去的包。返回原因或 None。调用方必须持着这张任务的发布锁（task_locked），
+    否则查完到续接之间受信发布可能开始（审查 P1-03）。"""
     try:
         m = P.read_manifest(task_id)
     except P.Rejected:
@@ -300,8 +323,11 @@ def gh_cmd():
 
 def pr_now(github, pr):
     """PR 现在的状态和头提交（gh pr view）。查不了抛 Refused。"""
-    r = subprocess.run([gh_cmd(), "pr", "view", str(pr), "-R", github, "--json", "state,headRefOid"],
-                       capture_output=True, text=True, timeout=60)
+    try:
+        r = subprocess.run([gh_cmd(), "pr", "view", str(pr), "-R", github, "--json", "state,headRefOid"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Refused(f"查 PR 失败：{type(e).__name__}")
     if r.returncode != 0:
         raise Refused(f"查 PR 失败：{r.stderr.strip()[:200]}")
     try:
@@ -361,7 +387,7 @@ def _pos_int(v):
 def format_errors(p, cat):
     """提议格式（头注释）：字段白名单、类型；做决定的提议还要五项白话合格。返回错误列表。"""
     errs = []
-    want = COMMON_KEYS | KEYS[cat]
+    want = COMMON_KEYS | KEYS[cat] | ({"run"} if cat == "ask" else set())
     if set(p) - want:
         errs.append(f"多了不认识的字段：{'、'.join(sorted(set(p) - want))}")
     if p.get("schema") != 1:
@@ -372,15 +398,18 @@ def format_errors(p, cat):
             (isinstance(v, str) and G.TASK_ID.match(v)) if k == "task" else _pos_int(v)
         if not ok:
             errs.append(f"{k} 格式不对")
-    m = p.get("model")
-    if not (isinstance(m, dict) and set(m) == {"name", "fallback"} and isinstance(m["name"], str) and m["name"].strip()
-            and isinstance(m["fallback"], bool)):
-        errs.append("model 要写 {name, fallback}")
     if p.get("error") is not None and not (isinstance(p["error"], str) and p["error"].strip()):
         errs.append("error 要么是 null，要么写明")
     ab = p.get("abstain")
     if ab is not None and not (isinstance(ab, dict) and set(ab) <= {"reason", "note"} and ab.get("reason") in SL.HANDOFF_REASONS):
         errs.append("abstain 要写交常浩的原因代号")
+    if "run" in p and cat != "ask":
+        errs.append("只有选选项（①）带模型运行记录")
+    if cat == "ask" and ab is None and p.get("error") is None:
+        r = p.get("run")
+        if not (isinstance(r, dict) and set(r) == {"session"} and isinstance(r["session"], str)
+                and RUN_SESSION.match(r["session"])):
+            errs.append("run 要写 {session: Hermes 会话号}")
     if ab is None and p.get("error") is None:
         t = p.get("text")
         if not (isinstance(t, dict) and set(t) <= set(TEXT_KEYS) and all(isinstance(v, str) for v in t.values())):
@@ -388,6 +417,86 @@ def format_errors(p, cat):
         else:
             errs += L.check_owner_text(SL.OWNER_RULE[cat], t)
     return errs
+
+
+# ---------- ① 的模型运行证据（审查 P1-01） ----------
+def hermes_home():
+    return Path(os.environ.get("HERMES_HOME") or "~/.hermes").expanduser()
+
+
+def run_marker(card_id, version):
+    """秘书侧给模型的输入里必须原样带这一行：运行记录据此绑到这张卡的这一版（第 2 小批的秘书侧照此写）。"""
+    return f"dt-secretary-card {int(card_id)} v{int(version)}"
+
+
+def _json_object(text):
+    text = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", str(text or "").strip())
+    try:
+        out = json.loads(text)
+    except ValueError:
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def run_evidence(session, card, since, t):
+    """按 Hermes 自己的运行记录核这次判断（头注释「① 的模型运行证据」）。返回 (证据, 模型输出的 JSON 对象)；不过抛 Handoff(model)。"""
+    def no(why):
+        raise Handoff("model", f"这次判断的运行记录{why}，不代批")
+    home = hermes_home()
+    cfg = AA.hermes_models(home)
+    main = cfg.get("model") or {}
+    if cfg.get("error") or not main.get("default") or not main.get("provider"):
+        no("核不了（读不到 Hermes 主模型配置）")
+    try:
+        con = _ro(home / "state.db")
+    except sqlite3.Error:
+        no("查不到（Hermes 运行库读不了）")
+    try:
+        s = con.execute("SELECT * FROM sessions WHERE id = ?", (session,)).fetchone()
+        if s is None:
+            no("查不到")
+        usage = con.execute("SELECT model, billing_provider, api_call_count FROM session_model_usage "
+                            "WHERE session_id = ? AND task = ''", (session,)).fetchall()
+        first = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id LIMIT 1",
+                            (session,)).fetchone()
+        last = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 "
+                           "AND content IS NOT NULL AND content != '' ORDER BY id DESC LIMIT 1", (session,)).fetchone()
+    except sqlite3.Error:
+        no("读不全")
+    finally:
+        con.close()
+    if s["source"] != RUN_SOURCE or s["parent_session_id"]:
+        no("不是一次单独的判断调用")
+    if s["ended_at"] is None or s["end_reason"] not in RUN_END:
+        no("显示没有正常结束")
+    if s["tool_call_count"]:
+        no("显示判断时调用了工具")
+    try:
+        started = dt.datetime.fromtimestamp(float(s["started_at"]), tz=t.tzinfo)
+        ended = dt.datetime.fromtimestamp(float(s["ended_at"]), tz=t.tzinfo)
+    except (TypeError, ValueError, OverflowError):
+        no("时间读不懂")
+    if started < since:
+        no("早于这一版卡片送到你那里")
+    if t - ended > RUN_FRESH:
+        no(f"是 {int(RUN_FRESH.total_seconds() // 60)} 分钟以前的")
+    if not usage or any((r["model"], r["billing_provider"]) != (main["default"], main["provider"]) or not r["api_call_count"]
+                        for r in usage):
+        no("显示用了回退模型或别的模型")
+    if not first or run_marker(card["id"], card["version"]) not in str(first["content"] or ""):
+        no("的输入不是这张卡的这一版")
+    out = _json_object(last["content"]) if last else None
+    if out is None:
+        no("里没有判断结果")
+    return {"session": session, "model": main["default"], "provider": main["provider"],
+            "started_at": CU.iso(started), "ended_at": CU.iso(ended)}, out
+
+
+def run_gate(p, ctx, t):
+    ev, out = run_evidence(p["run"]["session"], ctx["card"], ctx["feishu_at"], t)
+    if any(out.get(k) != p.get(k) for k in RUN_KEYS):
+        raise Handoff("model", "提议和这次判断的实际输出对不上，不代批")
+    ctx["received"] = {**ctx["received"], "run": ev}
 
 
 # ---------- 前闸 ----------
@@ -434,11 +543,14 @@ def locate(p):
 
 
 def wait_gate(ctx, t):
-    """白天先等 30 分钟（从飞书成功送达起），托管开着不等。返回飞书送达时间。"""
+    """白天先等 30 分钟（从这一版在飞书成功送达起），托管开着不等。返回这一版的飞书送达时间。"""
     card = ctx["card"]
-    sent = feishu_delivered_at(card["id"])
-    if sent is None:
+    got = feishu_delivery(card["id"])
+    if got is None:
         raise Handoff("unsure", "你还没收到这张卡（飞书桥接没有送达记录），秘书不替你答")
+    if got["version"] != card["version"]:                    # 改版了、桥接还没把新版本送到你那里：等它送到再从头等
+        raise NotReady("这张卡改版了，飞书上还没换成这一版，过一会再交")
+    sent = CU.parse_iso(got["delivered_at"])
     custody_on = CU.read_status(now=t)["admission"]["eligible"]
     if not custody_on and t - sent < dt.timedelta(minutes=S.WAIT_MINUTES):
         left = dt.timedelta(minutes=S.WAIT_MINUTES) - (t - sent)
@@ -446,8 +558,8 @@ def wait_gate(ctx, t):
     if ctx["category"] == "ask":
         with F.db() as con:
             sc = secretary_card(con, card["id"])
-        if not sc or not sc["hub_delivered_at"]:
-            raise NotReady("秘书通道还没领到这张卡（或中台还没确认送达），过一会再交")
+        if not secretary_delivered(sc, card["version"]):
+            raise NotReady("秘书通道还没领到这张卡的这一版（或中台还没确认送达），过一会再交")
     return sent
 
 
@@ -503,7 +615,7 @@ def redispatch_gate(ctx):
     live = hub_runs(row["task_id"], row["rule"], ("queued", "claimed", "unknown"))
     if live is None or live:
         raise Handoff("unsure", "这件事还有排着或在跑的轮次，不用重派")
-    why = publish_in_flight(row["task_id"])
+    why = unpublished_package(row["task_id"])
     if why:
         raise Handoff("unsure", why)
     ctx["received"] = {**ctx["received"], "run": {"id": run["id"], "state": run["state"], "summary": run.get("summary"),
@@ -528,6 +640,8 @@ def reject_gate(ctx, p):
     rec = ctx["rec"]
     if p.get("head") != rec["head"]:
         raise Handoff("unsure", "提议里的提交和受信发布开出的不一致")
+    if rec.get("generation") != ctx["row"]["generation"]:              # 审查 P2-01：发布记录要是当前代次发的
+        raise Handoff("unsure", "这个 PR 是这张任务以前的代次开出的，退不退回由你定")
     review = review_record(rec["github"], p["pr"], rec["head"])
     if not (isinstance(review, dict) and review.get("verdict") == "REWORK" and review.get("head") == rec["head"]
             and review.get("pr") == p["pr"] and review.get("repo") == rec["github"]):
@@ -548,12 +662,10 @@ def front_gates(p, ctx, st_status, t, st):
     errs += format_errors(p, cat)
     if errs:
         raise Handoff("model", "秘书交来的提议格式不对：" + "；".join(errs)[:80])
-    if p.get("error"):
-        raise Handoff("model", "秘书判断时出错或超时")
-    if p["model"]["fallback"]:
-        raise Handoff("model", "秘书在用回退模型，不代批")
+    if p.get("error"):                                      # 秘书自报：只会交常浩
+        raise Handoff("model", "秘书说它判断时出错或超时")
     if p.get("abstain"):
-        raise Handoff(p["abstain"]["reason"], "秘书自己没把握，交给你定")
+        raise Handoff(p["abstain"]["reason"], "秘书说自己没把握，交给你定")
     card = ctx.get("card")
     if card is not None:
         if card["state"] != "open":
@@ -565,6 +677,8 @@ def front_gates(p, ctx, st_status, t, st):
             if not opts or not 1 <= p["choice"] <= len(opts):
                 raise Handoff("model", "秘书选的选项不在卡片的选项里")
         ctx["feishu_at"] = wait_gate(ctx, t)
+        if cat == "ask":
+            run_gate(p, ctx, t)
     admission_gate(ctx, st_status)
     bind_gate(ctx, t)
     induce_gate(ctx)
@@ -578,7 +692,22 @@ def front_gates(p, ctx, st_status, t, st):
         gh_cmd()                                             # 留言开关关着就到此为止（Refused → 交常浩，见 submit）
 
 
-# ---------- 获准（唯一的送达授权点）与送达 ----------
+# ---------- 任务锁、获准（唯一的送达授权点）与送达 ----------
+@contextlib.contextmanager
+def task_locked(task_id):
+    """这张任务的受信发布锁（和 autoloop_publish.publish 同一把，不等待）：持着时发布开不了；发布正持着就交常浩。"""
+    try:
+        lock = P.task_lock(task_id)
+        lock.__enter__()
+    except P.Rejected:
+        raise Handoff("unsure", "这张任务的受信发布正在进行，秘书不同时续接")
+    except OSError:
+        raise Handoff("gate", "查不了这张任务的受信发布锁")
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
+
 def _yield(st, d, con, card_id, choice, note, now):
     SL.void(st, d["id"], note, now=now)
     F.log_claim(con, card_id, "secretary", "yielded", choice, note, d["id"])
@@ -607,14 +736,14 @@ def approve(st, d, ctx, now):
             why = "获准前现读：这件事有一次代批结果还不明"
         if not why and ctx["category"] == "redispatch":
             live = hub_runs(ctx["task"], ctx["row"]["rule"], ("queued", "claimed", "unknown"))
-            if live is None or live or publish_in_flight(ctx["task"]):
+            if live is None or live or unpublished_package(ctx["task"]):
                 why = "获准前现读：这件事又有轮次在跑，或有在途的发布"
         ask = ctx["category"] == "ask"
         if not why and ask:
             sc = secretary_card(con, card_id)
             live = con.execute("SELECT state FROM claims WHERE card_id = ? AND who = 'secretary'", (card_id,)).fetchone()
-            if not sc or not sc["hub_delivered_at"]:
-                why = "获准前现读：秘书通道还没领到这张卡"
+            if not secretary_delivered(sc, card["version"]):
+                why = "获准前现读：秘书通道还没领到这张卡的这一版"
             elif F.owner_holds(con, card_id):              # 本人点击已到本机：秘书让出（规格第 7 节、第 10 节第 4 条）
                 _yield(st, d, con, card_id, choice, "你已经在点了，秘书让出", now)
                 return "yielded", "你已经在点这张卡了，秘书让出，以你的为准"
@@ -719,6 +848,14 @@ def _resume(st, d, kind, reason, now, partial=False):
 
 def deliver_reject(st, d, ctx, now):
     rec, pr = ctx["rec"], ctx["target"]["pr"]
+    try:                                                     # 留言前再读一次 PR（审查 P2-01）：关了或推了新提交就不留言
+        state, head = pr_now(rec["github"], pr)
+    except Refused as e:
+        SL.finish(st, d["id"], "failed", {"error": str(e)[:200]}, now=now)
+        return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"留言前查不了 PR，没留言：{e}"}
+    if state != "OPEN" or head != rec["head"]:
+        SL.finish(st, d["id"], "failed", {"note": f"留言前现读：PR {state}，头提交 {str(head)[:12]}"}, now=now)
+        return {"ok": False, "result": "failed", "decision": d["id"], "msg": "留言前现读：PR 已经不开着或有了新提交，没留言"}
     body = (f"秘书按常浩签的代批清单退回这个 PR，派工人返修一轮。\n\n{d['summary']}\n\n{d['basis']}\n\n"
             f"<!-- dt-secretary {d['id']} -->")
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -754,8 +891,10 @@ def submit(proposal, now=None):
     except Refused as e:
         return {"ok": False, "result": "refused", "msg": str(e)}
     try:
-        with SL.open_store(now) as st:
+        with SL.open_store(now) as st, contextlib.ExitStack() as held:
             try:
+                if ctx["category"] in ("redispatch", "reject"):     # 从前闸到续接发出全程持锁（审查 P1-03）
+                    held.enter_context(task_locked(ctx["task"]))
                 front_gates(proposal, ctx, st_status, t, st)
             except Handoff as h:
                 return record_handoff(st, ctx, h.reason, h.why, now)
@@ -823,6 +962,13 @@ def reconcile(card=None, now=None):
 def _verdict(st, d):
     """按回读证据给结论：(结论, 证据)；读不到返回 None（不动）。"""
     if d["action"] == "ask":
+        if d["status"] == "executing":                       # 审查 P2-02：获准记录没落盘就确定没发（持写锁读，见头注释）
+            with F.db(write=True) as con:
+                approved = con.execute("SELECT 1 FROM claim_log WHERE card_id = ? AND who = 'secretary' AND attempt = ? "
+                                       "AND state = 'approved'", (d["card_id"], d["id"])).fetchone()
+            if not approved:
+                return "failed", {"checked": "cards.db 里没有这个决定的获准记录：获准没落盘，送达只在获准之后，确定没发",
+                                  "found": False}
         raw = L.read_raw(d) or {}
         choice = (raw.get("reply") or {}).get("choice")
         c = P.hub_card(d["card_id"])
@@ -868,8 +1014,10 @@ def lease(wait=50):
         if r:
             if card.get("ref") and card["ref"] != r["ref"]:
                 why = "中台记的秘书 ref 和本地登记的对不上"
-            else:
-                con.execute("UPDATE secretary_cards SET version = MAX(version, ?) WHERE card_id = ?", (card["version"], cid))
+            else:                                            # 新版本：旧版本的确认不代表新版本（审查 P1-02）
+                if card["version"] > r["version"]:
+                    con.execute("UPDATE secretary_cards SET version = ?, hub_delivered_at = NULL WHERE card_id = ?",
+                                (card["version"], cid))
                 ref = r["ref"]
         elif card.get("ref"):
             why = "中台说这张卡已经送达过秘书通道，本地却没有登记"
@@ -881,8 +1029,9 @@ def lease(wait=50):
         F.hub("POST", f"/v1/cards/{cid}/failed", {"version": card["version"], "error": why}, channel=CHANNEL)
         return {"card": cid, "ok": False, "why": why}
     F.hub("POST", f"/v1/cards/{cid}/delivered", {"version": card["version"], "ref": ref}, channel=CHANNEL)
-    with F.db(write=True) as con:
-        con.execute("UPDATE secretary_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ?", (F.now(), cid))
+    with F.db(write=True) as con:                            # 只给报过的这一版记确认；其间又领到更新的版本就不记
+        con.execute("UPDATE secretary_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ? AND version = ?",
+                    (F.now(), cid, card["version"]))
     return {"card": cid, "ok": True, "ref": ref}
 
 

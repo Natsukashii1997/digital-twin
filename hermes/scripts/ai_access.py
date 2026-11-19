@@ -115,10 +115,10 @@ def unavailable_msg(st, fid="workshop"):
 
 # ---------- Hermes 自己的模型（只读） ----------
 
-def hermes_models():
-    """从 ~/.hermes/config.yaml 读主模型、辅助模型、回退模型（只认这几段的两层缩进，不引第三方 YAML 库）。"""
+def hermes_models(home=None):
+    """从 ~/.hermes/config.yaml（或 home 下的）读主模型、辅助模型、回退模型（只认这几段的两层缩进，不引第三方 YAML 库）。"""
     try:
-        lines = (HERMES / "config.yaml").read_text(encoding="utf-8").splitlines()
+        lines = ((home or HERMES) / "config.yaml").read_text(encoding="utf-8").splitlines()
     except OSError as e:
         return {"error": f"读不了 Hermes 配置（{e}）"}
     out, top, sub = {}, None, None

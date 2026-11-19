@@ -97,6 +97,45 @@ def utc(t):
     return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+# ---------- 假 Hermes 运行记录（① 的模型运行证据，审查 P1-01） ----------
+MAIN, MAIN_PROVIDER = "claude-opus-5-5[1m]", "claude-subscription-directsdk-experimental"
+HERMES_SCHEMA = """
+CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, parent_session_id TEXT, started_at REAL NOT NULL,
+  ended_at REAL, end_reason TEXT, tool_call_count INTEGER DEFAULT 0);
+CREATE TABLE session_model_usage (session_id TEXT NOT NULL, model TEXT NOT NULL, billing_provider TEXT NOT NULL DEFAULT '',
+  task TEXT NOT NULL DEFAULT '', api_call_count INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
+  active INTEGER NOT NULL DEFAULT 1);
+"""
+
+
+def make_hermes(home):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(f"model:\n  default: {MAIN}\n  provider: {MAIN_PROVIDER}\nfallback_model:\n"
+                                      "  provider: deepseek\n  model: deepseek-flash\n", encoding="utf-8")
+    with contextlib.closing(sqlite3.connect(home / "state.db")) as con, con:
+        con.executescript(HERMES_SCHEMA)
+
+
+def write_run(home, p, started, ended, sid=None, source="tool", end_reason="cli_close", tools=0, usage=None, marker=None,
+              output=None):
+    """按提议写一次「秘书判断」的运行记录：输入带这张卡的标记，最后一条输出就是提议里的决定字段。返回会话号。"""
+    sid = sid or f"run-{os.urandom(4).hex()}"
+    if marker is None:
+        marker = SG.run_marker(int(p.get("card") or 0), int(p.get("card_version") or 0))
+    if output is None:
+        output = json.dumps({k: p[k] for k in SG.RUN_KEYS if p.get(k) is not None}, ensure_ascii=False)
+    with contextlib.closing(sqlite3.connect(home / "state.db")) as con, con:
+        con.execute("INSERT INTO sessions VALUES (?, ?, NULL, ?, ?, ?, ?)",
+                    (sid, source, started.timestamp(), ended.timestamp() if ended else None, end_reason, tools))
+        for model, provider, task, n in usage or ((MAIN, MAIN_PROVIDER, "", 1), (MAIN, MAIN_PROVIDER, "title_generation", 1)):
+            con.execute("INSERT INTO session_model_usage VALUES (?, ?, ?, ?, ?)", (sid, model, provider, task, n))
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (sid, f"{marker}\n卡片文字……"))
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)", (sid, "想一想"))
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)", (sid, output))
+    return sid
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="dt-secretary-gate-")
@@ -115,11 +154,15 @@ class Base(unittest.TestCase):
                    DT_PUBLISH_OUTBOX=str(root / "outbox"), DT_PUBLISH_MIRRORS=str(root / "mirrors"),
                    DT_HUB="http://127.0.0.1:9", DT_HERMES_SOURCE_KEY_FILE=str(root / "dt/autoloop/hermes-source.key"),
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT, DT_AUTOLOOP_EVIDENCE=str(root / "evidence"),
-                   DT_AUTOLOOP_LOCK=str(root / "dt/autoloop/config.lock"), DT_READONLY_TOKEN_FILE=str(root / "ro.token"))
+                   DT_AUTOLOOP_LOCK=str(root / "dt/autoloop/config.lock"), DT_READONLY_TOKEN_FILE=str(root / "ro.token"),
+                   HERMES_HOME=str(root / "hermes"))
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)
         self.assertTrue(str(L.db_path()).startswith(str(root)))
+        self.hermes = root / "hermes"
+        make_hermes(self.hermes)
+        self.assertEqual(SG.hermes_home(), self.hermes)
         with contextlib.closing(sqlite3.connect(self.hubdb)) as con, con:
             con.executescript(HUB_SCHEMA)
         st = L.TS.Store(L.db_path(), clock=lambda: T).open()
@@ -229,14 +272,20 @@ class Base(unittest.TestCase):
 
     # ----- 提议、断言 -----
     def prop(self, **kw):
+        """① 的提议默认附一次合格的运行记录（5 分钟前开始、4 分钟前结束、主模型、输出就是提议）；kw 里写了 run 就不附。"""
         p = {"schema": 1, "category": "ask", "card": 7, "card_version": 1, "choice": 1, "text": dict(TEXT),
-             "model": {"name": "claude-opus-5-5", "fallback": False}, "error": None, "abstain": None}
+             "error": None, "abstain": None}
         for k, v in kw.items():
             if v is DEL:
                 p.pop(k, None)
             else:
                 p[k] = v
+        if "run" not in kw and p.get("category") == "ask" and not p.get("error") and not p.get("abstain"):
+            p["run"] = {"session": self.make_run(p)}
         return p
+
+    def make_run(self, p, started=None, ended=None, **kw):
+        return write_run(self.hermes, p, started or T - dt.timedelta(minutes=5), ended or T - dt.timedelta(minutes=4), **kw)
 
     def submit(self, p=None, now=T):
         return SG.submit(p or self.prop(), now=now)
@@ -300,17 +349,20 @@ class AskTests(Base):
         self.assertEqual((stats["delivered"], stats["waited_seconds"], stats["waited_count"]), (1, 2400, 1))
 
     def test_bad_format_hands_off_as_model(self):
-        for p in (self.prop(extra=1), self.prop(choice="1"), self.prop(model={"name": "x"}), self.prop(schema=2),
+        for p in (self.prop(extra=1), self.prop(choice="1"), self.prop(model={"name": "x", "fallback": False}),
+                  self.prop(schema=2), self.prop(run=DEL), self.prop(run={"session": ""}), self.prop(run={"session": "a b"}),
+                  self.prop(run={"session": "x", "model": MAIN}),
                   self.prop(text={**TEXT, "summary": ""}), self.prop(text={**TEXT, "basis": "按 HEAD 合并"})):
             with self.subTest(p=p):
                 self.setUp()
                 self.handoff(self.submit(p), "model")
 
-    def test_model_error_fallback_and_abstain(self):
-        for p, reason in ((self.prop(error="超时"), "model"), (self.prop(model={"name": "deepseek", "fallback": True}), "model"),
-                          (self.prop(abstain={"reason": "scope", "note": "要换仓库"}), "scope")):
+    def test_self_reported_error_and_abstain_only_hand_off(self):
+        """error、abstain 是秘书自报：只会交常浩，不需要运行记录。"""
+        for p, reason in ((self.prop(error="超时"), "model"), (self.prop(abstain={"reason": "scope", "note": "要换仓库"}), "scope")):
             with self.subTest(reason=reason):
                 self.setUp()
+                self.assertNotIn("run", p)
                 self.handoff(self.submit(p), reason)
 
     def test_wrong_category_claim_is_format_error(self):
@@ -637,6 +689,26 @@ class RedispatchTests(Base):
         self.assertEqual(out["reason"], "unsure")
         self.assertIn("受信发布正在进行", self.get(out["decision"])["basis"])
 
+    def test_unpublished_package_hands_off(self):
+        """交接目录里有这张任务还没发布出去的包：不重派（前闸、后闸各查一次）。"""
+        with mock.patch.object(P, "read_manifest", return_value={"head": "f" * 40}):
+            out = self.submit()
+        self.assertEqual((out["result"], out["reason"]), ("handoff", "unsure"), out["msg"])
+        self.assertIn("还没发布出去", self.get(out["decision"])["basis"])
+        self.assertEqual(self.posted, [])
+        Base.setUp(self)
+        self.stop_card()
+        real, calls = SG.unpublished_package, []
+
+        def late(task_id):                                                       # 前闸时还没有，获准前出现了
+            calls.append(task_id)
+            return None if len(calls) == 1 else "交接目录里有这张任务还没发布出去的改动"
+        with mock.patch.object(SG, "unpublished_package", late):
+            out = self.submit()
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertEqual((len(calls), self.posted), (2, []))
+        self.assertTrue(real)
+
     def test_gateway_refuses_is_failed(self):
         with mock.patch.object(G, "resume_dispatch", side_effect=G.Rejected("不能续接：凭证已冻结")):
             out = self.submit()
@@ -656,10 +728,7 @@ class RedispatchTests(Base):
 class RejectTests(Base):
     def setUp(self):
         super().setUp()
-        rec = {"at": G.iso(T), "what": "发布", "task_id": TASK, "generation": 1, "github": REPO, "branch": f"claude/{TASK}",
-               "head": HEAD, "run": "5", "pushed": True, "pr": f"https://github.com/{REPO}/pull/3", "pr_opened": True}
-        Path(os.environ["DT_PUBLISH_LOG"]).parent.mkdir(parents=True, exist_ok=True)
-        Path(os.environ["DT_PUBLISH_LOG"]).write_text("坏行\n" + json.dumps(rec) + "\n", encoding="utf-8")
+        self.publish_record()
         gh = self.root / "gh"
         self.ghlog = self.root / "gh.log"
         gh.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(self.ghlog)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
@@ -667,10 +736,17 @@ class RejectTests(Base):
         gh.chmod(0o755)
         self.gh = str(gh)
 
+    def publish_record(self, generation=1):
+        rec = {"at": G.iso(T), "what": "发布", "task_id": TASK, "generation": generation, "github": REPO,
+               "branch": f"claude/{TASK}", "head": HEAD, "run": "5", "pushed": True, "pr": f"https://github.com/{REPO}/pull/3",
+               "pr_opened": True}
+        Path(os.environ["DT_PUBLISH_LOG"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(os.environ["DT_PUBLISH_LOG"]).write_text("坏行\n" + json.dumps(rec) + "\n", encoding="utf-8")
+
     def prop(self, **kw):
         p = {"schema": 1, "category": "reject", "task": TASK, "pr": 3, "head": HEAD,
              "text": {"context": "给示例服务加超时", "summary": "退回返修", "basis": "审查说超时没加测试，返修一轮补上"},
-             "model": {"name": "claude-opus-5-5", "fallback": False}, "error": None, "abstain": None}
+             "error": None, "abstain": None}
         p.update(kw)
         return p
 
@@ -695,7 +771,7 @@ class RejectTests(Base):
             out = self.submit()
         self.assertEqual(out["result"], "done", out["msg"])
         calls = [json.loads(x) for x in self.ghlog.read_text().splitlines()]
-        self.assertEqual([c[:2] for c in calls], [["pr", "view"], ["pr", "comment"]])
+        self.assertEqual([c[:2] for c in calls], [["pr", "view"], ["pr", "view"], ["pr", "comment"]])   # 留言前再读一次
         self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["rework"])
 
     def test_head_moved_or_not_ours(self):
@@ -704,6 +780,33 @@ class RejectTests(Base):
             self.setUp()
             with mock.patch.object(SG, "pr_now", return_value=("OPEN", "d" * 40)):
                 self.handoff(self.submit(), "unsure")
+
+    def test_publish_record_of_old_generation_hands_off(self):
+        """审查 P2-01：发布记录的代次要等于凭证现在的代次。"""
+        self.publish_record(generation=2)
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh):
+            self.assertIn("以前的代次", self.handoff(self.submit(), "unsure")["basis"])
+
+    def test_pr_changed_between_gate_and_comment_is_not_commented(self):
+        """审查 P2-01：留言前再读一次 PR；前闸之后被推了新提交或关掉，就不留言、记没做成。"""
+        for state, head in (("OPEN", "d" * 40), ("CLOSED", HEAD)):
+            with self.subTest(state=state):
+                self.setUp()
+                seq = self.root / "seq"
+                gh = self.root / "gh2"
+                gh.write_text(f"#!{sys.executable}\nimport json, os, sys\nopen({str(self.ghlog)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                              f"n = int(open({str(seq)!r}).read()) if os.path.exists({str(seq)!r}) else 0\n"
+                              f"open({str(seq)!r}, 'w').write(str(n + 1))\n"
+                              f"if sys.argv[1:3] == ['pr', 'view']:\n"
+                              f"    print(json.dumps({{'state': 'OPEN' if n == 0 else {state!r}, 'headRefOid': {HEAD!r} if n == 0 else {head!r}}}))\n")
+                gh.chmod(0o755)
+                with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=str(gh)):
+                    out = self.submit()
+                self.assertEqual(out["result"], "failed", out["msg"])
+                calls = [json.loads(x)[:2] for x in self.ghlog.read_text().splitlines()]
+                self.assertEqual(calls, [["pr", "view"], ["pr", "view"]])          # 没有 pr comment
+                self.assertEqual(self.posted, [])
+                self.assertEqual(self.held(), [])
 
     def test_comment_sent_but_rework_refused_is_unknown(self):
         with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
@@ -722,6 +825,252 @@ class RejectTests(Base):
         self.assertEqual(out["result"], "unknown")
         self.assertEqual(self.posted, [])
         self.assertEqual(SG.reconcile(now=T), [(out["decision"], "unreconciled")])
+
+
+class RunEvidenceTests(Base):
+    """审查 P1-01：模型名、是否回退、判断结果不收提议自报，按 Hermes 自己的运行记录核。"""
+    def base(self):
+        return self.prop(run={"session": "placeholder"})
+
+    def test_good_run_is_recorded_in_received(self):
+        out = self.submit()
+        self.assertEqual(out["result"], "done", out["msg"])
+        run = L.read_raw(self.get(out["decision"]))["received"]["run"]
+        self.assertEqual((run["model"], run["provider"]), (MAIN, MAIN_PROVIDER))
+
+    def test_bad_runs_hand_off_as_model(self):
+        p = self.base()
+        five = T - dt.timedelta(minutes=5)
+        cases = {
+            "查不到": dict(sid=None, skip=True),
+            "回退模型": dict(usage=((MAIN, MAIN_PROVIDER, "", 1), ("deepseek-flash", "deepseek", "", 2))),
+            "全是回退": dict(usage=(("deepseek-flash", "deepseek", "", 1),)),
+            "同名别家": dict(usage=((MAIN, "openrouter", "", 1),)),
+            "没有模型调用": dict(usage=((MAIN, MAIN_PROVIDER, "title_generation", 1),)),
+            "调了工具": dict(tools=2),
+            "没正常结束": dict(end_reason="error"),
+            "还没结束": dict(ended=False),
+            "不是单次调用": dict(source="feishu"),
+            "早于送达": dict(started=T - dt.timedelta(minutes=50)),
+            "太久以前": dict(started=T - dt.timedelta(minutes=39), ended=T - dt.timedelta(minutes=31)),
+            "别的卡": dict(marker=SG.run_marker(70, 1)),
+            "别的版本": dict(marker=SG.run_marker(7, 2)),
+            "输出选了别的": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "card_version", "text")}, "choice": 2},
+                                              ensure_ascii=False)),
+            "输出其实弃权": dict(output=json.dumps({k: p[k] for k in ("category", "card", "card_version")} |
+                                              {"abstain": {"reason": "unsure"}}, ensure_ascii=False)),
+            "输出不是 JSON": dict(output="选第一个"),
+            "白话被改了": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "card_version", "choice")},
+                                             "text": {**TEXT, "basis": "别的理由"}}, ensure_ascii=False)),
+        }
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                p = self.base()
+                if not kw.pop("skip", False):
+                    started, ended = kw.pop("started", five), kw.pop("ended", T - dt.timedelta(minutes=4))
+                    p["run"]["session"] = write_run(self.hermes, p, started, None if ended is False else ended,
+                                                    **{k: v for k, v in kw.items() if k != "sid"})
+                d = self.handoff(self.submit(p), "model")
+                self.assertIn("实际输出" if name in ("输出选了别的", "白话被改了", "输出其实弃权") else "运行记录", d["basis"])
+
+    def test_forged_fallback_claim_in_proposal_is_not_a_field(self):
+        """以前能在提议里写 model.fallback=false 骗过去；现在多一个字段就是格式不合格，交常浩。"""
+        p = self.prop(model={"name": MAIN, "fallback": False})
+        self.handoff(self.submit(p), "model")
+
+    def test_missing_config_or_db_hands_off(self):
+        for breaker in (lambda: (self.hermes / "config.yaml").unlink(), lambda: (self.hermes / "state.db").unlink()):
+            with self.subTest():
+                self.setUp()
+                p = self.prop()
+                breaker()
+                self.handoff(self.submit(p), "model")
+
+    def test_redispatch_and_reject_carry_no_run(self):
+        self.stop_card()
+        p = {"schema": 1, "category": "redispatch", "card": 8, "card_version": 1, "run": {"session": "x"},
+             "text": {"context": "给示例服务加超时", "summary": "重派一次", "basis": "中台连续没跑成，重派一次试试"},
+             "error": None, "abstain": None}
+        self.assertIn("只有选选项", self.handoff(self.submit(p), "model")["basis"])
+
+
+class VersionTests(Base):
+    """审查 P1-02：送达证据按版本——改版后要这一版送到飞书、秘书通道确认的是这一版，并从这一版送达起重新等 30 分钟。"""
+    def bump(self):
+        self.hub("UPDATE cards SET version = 2 WHERE id = 7")
+
+    def test_feishu_still_on_old_version_is_not_ready(self):
+        self.bump()
+        out = self.submit(self.prop(card_version=2))
+        self.nothing(out, "not_ready")
+        self.assertIn("改版", out["msg"])
+
+    def test_new_version_waits_thirty_minutes_again(self):
+        self.bump()
+        with F.db(write=True) as con:                                           # 第 1 版 40 分钟前送达，第 2 版 5 分钟前改到飞书上
+            con.execute("UPDATE feishu_cards SET version = 2, delivered_at = ? WHERE card_id = 7",
+                        ((T - dt.timedelta(minutes=5)).isoformat(),))
+            con.execute("UPDATE secretary_cards SET version = 2")
+        p = self.prop(card_version=2, run={"session": "later"})
+        p["run"]["session"] = self.make_run(p, started=T - dt.timedelta(minutes=3), ended=T - dt.timedelta(minutes=2))
+        out = self.submit(p)
+        self.nothing(out, "not_ready")
+        self.assertIn("还差约 25 分钟", out["msg"])
+        later = T + dt.timedelta(minutes=26)
+        p["run"]["session"] = self.make_run(p, started=later - dt.timedelta(minutes=3), ended=later - dt.timedelta(minutes=2))
+        self.assertEqual(self.submit(p, now=later)["result"], "done")
+
+    def test_secretary_confirmation_of_old_version_does_not_count(self):
+        self.bump()
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET version = 2 WHERE card_id = 7")    # 飞书已是第 2 版（40 分钟前）
+        out = self.submit(self.prop(card_version=2))                             # 秘书通道只确认过第 1 版
+        self.nothing(out, "not_ready")
+        self.assertIn("这一版", out["msg"])
+
+    def test_post_gate_rereads_secretary_version(self):
+        real = SL.issue
+
+        def issue(*a, **kw):
+            d = real(*a, **kw)
+            with F.db(write=True) as con:                                        # 记账之后秘书通道领到了更新的版本，也确认了
+                con.execute("UPDATE secretary_cards SET version = 2")
+            return d
+        with mock.patch.object(SL, "issue", issue):
+            out = self.submit()
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertIn("这一版", out["msg"])
+        self.assertEqual(self.answers(), [])
+
+    def test_lease_new_version_clears_old_confirmation(self):
+        card = {"id": 7, "version": 2, "ref": "sec-0123456789abcdef", "state": "open"}
+        posts = []
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            if method == "GET":
+                return {"card": dict(card)}
+            posts.append(path)
+            raise F.HubError("超时")                                             # 第 2 版的送达报告没被确认
+        with mock.patch.object(F, "hub", hub), self.assertRaises(F.HubError):
+            SG.lease(wait=1)
+        with F.db() as con:
+            r = con.execute("SELECT version, hub_delivered_at FROM secretary_cards WHERE card_id = 7").fetchone()
+        self.assertEqual((r["version"], r["hub_delivered_at"]), (2, None))
+        self.assertEqual(posts, ["/v1/cards/7/delivered"])
+
+    def test_confirmation_only_for_the_version_reported(self):
+        """报第 2 版送达期间又领到第 3 版：第 2 版的确认不能记到第 3 版头上。"""
+        card = {"id": 7, "version": 2, "ref": "sec-0123456789abcdef", "state": "open"}
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            if method == "GET":
+                return {"card": dict(card)}
+            with F.db(write=True) as con:                                        # 另一个领取进程已领到第 3 版
+                con.execute("UPDATE secretary_cards SET version = 3, hub_delivered_at = NULL WHERE card_id = 7")
+            return {}
+        with mock.patch.object(F, "hub", hub):
+            self.assertTrue(SG.lease(wait=1)["ok"])
+        with F.db() as con:
+            r = con.execute("SELECT version, hub_delivered_at FROM secretary_cards WHERE card_id = 7").fetchone()
+        self.assertEqual((r["version"], r["hub_delivered_at"]), (3, None))
+
+
+class TaskLockTests(Base):
+    """审查 P1-03：②③ 从前闸到续接事件发出全程持着这张任务的发布锁；发布持锁时秘书不续接。"""
+    def setUp(self):
+        super().setUp()
+        self.stop_card()
+
+    def redispatch(self):
+        return {"schema": 1, "category": "redispatch", "card": 8, "card_version": 1, "error": None, "abstain": None,
+                "text": {"context": "给示例服务加超时", "summary": "重派一次", "basis": "中台连续没跑成，重派一次试试"}}
+
+    def test_publish_cannot_start_while_secretary_redispatches(self):
+        seen = {}
+        real = G.resume_dispatch
+
+        def resume(*a, **kw):
+            try:
+                with P.task_lock(TASK):
+                    seen["publish"] = "拿到了锁"
+            except P.Rejected as e:
+                seen["publish"] = str(e)
+            return real(*a, **kw)
+        for at in ("hub_runs", "unpublished_package", "approve", "resume"):  # 查轮次、查交接包、获准、续接：每一步都在锁里
+            with self.subTest(at):
+                self.setUp()
+                seen.clear()
+                probes = []
+
+                def probe(fn):
+                    def inner(*a, **kw):
+                        try:
+                            with P.task_lock(TASK):
+                                probes.append("没锁")
+                        except P.Rejected:
+                            probes.append("锁着")
+                        return fn(*a, **kw)
+                    return inner
+                target = {"hub_runs": (SG, "hub_runs"), "unpublished_package": (SG, "unpublished_package"),
+                          "approve": (SG, "approve")}.get(at)
+                patches = [mock.patch.object(G, "resume_dispatch", resume)]
+                if target:
+                    patches.append(mock.patch.object(*target, probe(getattr(*target))))
+                with contextlib.ExitStack() as es:
+                    for x in patches:
+                        es.enter_context(x)
+                    out = SG.submit(self.redispatch(), now=T)
+                self.assertEqual(out["result"], "done", out["msg"])
+                self.assertEqual(seen["publish"], "这张单另一个发布还在进行")
+                self.assertTrue(probes == [] if not target else probes and set(probes) == {"锁着"}, probes)
+        with P.task_lock(TASK):                                                  # 秘书做完就放锁
+            pass
+
+    def test_publish_holding_lock_hands_off(self):
+        with P.task_lock(TASK):
+            out = SG.submit(self.redispatch(), now=T)
+        self.assertEqual((out["result"], out["reason"]), ("handoff", "unsure"))
+        self.assertEqual(self.posted, [])
+
+    def test_ask_does_not_take_the_lock(self):
+        with P.task_lock(TASK):
+            self.assertEqual(self.submit()["result"], "done")
+
+
+class KillRecoveryTests(Base):
+    """审查 P2-02：账本已提交 executing、cards.db 的获准还没提交时被杀——确定没发，对账记没做成，不冻结。"""
+    def test_killed_between_ledger_begin_and_cards_commit(self):
+        real = SL.begin
+
+        def begin(*a, **kw):
+            real(*a, **kw)
+            raise KeyboardInterrupt                                              # 账本已提交，cards.db 事务还开着
+        with mock.patch.object(SL, "begin", begin), self.assertRaises(KeyboardInterrupt):
+            self.submit()
+        self.assertEqual(self.decisions()[0][3], "executing")
+        self.assertIsNone(self.claim())                                          # cards.db 回滚了
+        with mock.patch.object(SG, "STALE", -1):
+            self.assertEqual([r for _, r in SG.reconcile(now=T)], ["failed"])
+        self.assertEqual(self.held(), [])                                        # 额度释放
+        self.assertEqual(self.answers(), [])
+        self.assertEqual(self.submit()["result"], "done")                        # 不冻结：这张卡还能正常代批
+
+    def test_killed_after_approval_is_still_unknown_while_card_open(self):
+        real = F.log_claim
+
+        def log_claim(con, card_id, who, state, *a, **kw):
+            real(con, card_id, who, state, *a, **kw)
+            if state == "approved":
+                con.execute("COMMIT")                                            # 获准已落盘
+                con.execute("BEGIN IMMEDIATE")
+                raise KeyboardInterrupt
+        with mock.patch.object(F, "log_claim", log_claim), self.assertRaises(KeyboardInterrupt):
+            self.submit()
+        self.assertEqual(self.claim()["state"], "approved")
+        with mock.patch.object(SG, "STALE", -1):
+            self.assertEqual([r for _, r in SG.reconcile(now=T)], ["unreconciled"])   # 可能已发：照旧核不清、不重答
+        self.assertEqual(self.answers(), [])
 
 
 class LateOwnerNoteTests(unittest.TestCase):
@@ -805,6 +1154,11 @@ class SecretaryEndToEnd(HubFixture):
         st = L.TS.Store(L.db_path()).open()
         self.lid = SL.register_session(st, SID)
         st.close()
+        self.hermes = root / "hermes"
+        make_hermes(self.hermes)
+        p = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.hermes)})
+        p.start()
+        self.addCleanup(p.stop)
         self.workdir = root / "work"
         self.workdir.mkdir()
         self.prepare_hub()
@@ -824,7 +1178,10 @@ class SecretaryEndToEnd(HubFixture):
         AC.issue_channel_key("feishu", True, str(self.home))
         AC.issue_channel_key("secretary", True, str(self.home))
         rules = json.loads(AC.rules_file().read_text(encoding="utf-8"))           # 工人换成假接单命令，跑在本机
-        rules["agents"]["dt-claude"] = {"name": "假工人", "worker": "this-machine", "use": "command",
+        # 本机工人名由中台 init 按主机名起（主机名随网络变，如 bogon），不能写死 this-machine：沿用 init 给自己 Agent 起的工人名
+        local = sorted({a.get("worker") for k, a in rules["agents"].items() if not k.startswith("dt-") and a.get("worker")})
+        self.assertEqual(len(local), 1, rules["agents"])
+        rules["agents"]["dt-claude"] = {"name": "假工人", "worker": local[0], "use": "command",
                                         "command": [sys.executable, str(HERE / "fixtures" / "ask_receipt.py"), "{prompt}"]}
         for r in rules["rules"]:
             if r["name"] == RULE:
@@ -868,9 +1225,12 @@ class SecretaryEndToEnd(HubFixture):
         return P.hub_card(self.card)
 
     def prop(self, choice=2):
-        return {"schema": 1, "category": "ask", "card": self.card, "card_version": self.hub_card()["version"], "choice": choice,
-                "text": {"context": "试跑选颜色", "question": "选蓝色还是绿色", "summary": "选绿色", "basis": "试跑，选哪个都行"},
-                "model": {"name": "claude-opus-5-5", "fallback": False}, "error": None, "abstain": None}
+        p = {"schema": 1, "category": "ask", "card": self.card, "card_version": self.hub_card()["version"], "choice": choice,
+             "text": {"context": "试跑选颜色", "question": "选蓝色还是绿色", "summary": "选绿色", "basis": "试跑，选哪个都行"},
+             "error": None, "abstain": None}
+        now = dt.datetime.now().astimezone()
+        p["run"] = {"session": write_run(self.hermes, p, now - dt.timedelta(minutes=2), now - dt.timedelta(minutes=1))}
+        return p
 
     def test_secretary_answers_then_owner_click_is_told(self):
         out = SG.submit(self.prop())
