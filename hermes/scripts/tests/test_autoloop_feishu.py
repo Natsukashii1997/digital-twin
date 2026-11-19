@@ -2,6 +2,7 @@
 单元部分不起中台、不发飞书；端到端部分在临时目录起真中台（同 test_autoloop_hub_e2e，本机没有命令行时跳过），
 走「中台出卡 → 桥接领卡、发卡、报送达 → 常浩点击 → 核对、本人在途、答中台 → 只读回读 → 桥接改卡」。
 飞书发送一律换成记录器；不碰 ~/.agent-autoloop 和正式中台。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import sys

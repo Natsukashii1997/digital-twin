@@ -1,5 +1,6 @@
 """飞书一句话合并（#67）自测：发卡片、合并前的每一种停下、测试关、CI 关（#71）、HEAD 绑定、退回留言。
 真 git（临时裸仓库当 GitHub、临时主目录）、假 gh、假 lark-cli，不联网、不碰真实仓库和记录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import csv
 import json
 import os

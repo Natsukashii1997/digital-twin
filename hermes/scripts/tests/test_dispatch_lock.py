@@ -4,6 +4,7 @@
 车间是 fake_worker_proc.py。不碰 ~/.hermes、真实工单、Git 远端或外部服务。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_dispatch_lock.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import fcntl
 import json
 import os

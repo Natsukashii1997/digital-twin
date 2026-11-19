@@ -1,5 +1,6 @@
 """Multica 夜跑主控（#92，DT-ORC M5 / 5.3a）自测：假 multica 用一个 JSON 世界模拟 issue、run、消息、Wakeup、Autopilot，
 不联网、不碰真实 Multica、容器和 ~/Library。每次调用脚本都是新进程，等于每次都“重启”，计数只能从持久状态恢复。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

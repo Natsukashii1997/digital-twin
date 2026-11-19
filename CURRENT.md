@@ -42,6 +42,16 @@
 
 ---
 
+## 2026-11-18 · #212 测试统一隔离与反向验证核对工具（PR 待审，未合并）
+
+- **为什么**：11-17 那次误装的修法只隔离了 `test_autoloop_config.py` 一个模块；`hermes/scripts/tests/` 44 个测试模块没有统一隔离（同类还有 10-27 G-13、11-11 `8e3890a`）。常浩已批准做这一批。
+- **统一隔离** `hermes/scripts/tests/_isolation/`：每个测试模块第一句 `import _isolation`（47 个都加了，含 #209 新进来的 3 个）；按仓库测试命令跑时这个包排在所有 `test_*.py` 前面先导入，漏写的模块也在隔离里。导入时清掉 `DT_*`、`HERMES_*`、`FEISHU_*` 等变量，`HOME`、`XDG_*`、`AGENT_AUTOLOOP_HOME`、`HERMES_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS`、`DT_AUTOLOOP_SHARED`、`DT_PUBLISH_OUTBOX` 指到临时目录，`DT_HUB` 指到 127.0.0.1:9；本进程禁网（回环放行，本机正式服务端口照拦），子进程拿死代理；`PATH` 最前面放 `launchctl`、`security`、`lark-cli`、`hermes`、`claude`、`codex`、`gh` 等拦截桩。`test_isolation_guard.py` 扫描目录，第一句不是它就失败（夹具 `fixtures/isolation_bypass/` 证明会判失败）。`test_autoloop_config.py` 里 #200 的环境变量隔离并入统一机制，只留名册、命令行、中台请求三个桩。
+- **反向验证工具** `hermes/scripts/tests/prod_snapshot.py`：只取路径、类型、大小、修改时间，不打开文件；默认核对 `~/.agent-autoloop`、`~/.hermes`、`~/Library/LaunchAgents`、`DigitalTwin`、`/Users/Shared/dt-autoloop`，变了退出码 3 并列出路径；用法写在 `hermes/scripts/tests/README.md`。#200 和之后各批的改坏脚本在证据目录里（不在仓库），没改；以后的改坏验证用它。
+- **验证**：变基到 `e047ccb` 后 `/usr/bin/python3`（3.9）全量 1288 + orca 48 通过、0 跳过（变基前 3.14 全量 1214 通过），都在外层临时 `HOME` 保护下跑；最终那次用 `prod_snapshot.py run` 包住，前后摘要按排除规则 0 处变化（排除的是 Hermes 网关和中台自己一直在写的心跳、缓存、cron、日志、`hub.db-wal`，空闲对照里也会变）。证据 `evidence/212-test-isolation/`。顺带发现：`test_autoloop_hub_e2e` 用的真 `agent-autoloop` 命令行会调 `launchctl print gui/501`，现在被桩拦下，测试照常通过。`test_exec_gate_e2e`（#209）原来用 `~/.agent-autoloop` 找正式中台和上游源码，隔离后会指到空目录、`UpstreamParser` 2 项会被悄悄跳过，改成按系统账号取（`_isolation.REAL_HOME`），它的前后核对也从读文件内容算哈希改成只看大小和修改时间（`config.json` 里有钥匙）。
+- **下一步**：常浩安排审查（路径规则判 L3）后决定合并；开着的 PR 新加的测试文件（#207、#210、#211、#187、#102）合并到这之后要各加第一句 `import _isolation`，否则守护测试失败；#211 的 `prod_guard.py` 宜改用本机制（它的核对会读 `master.key`、`secrets.env` 内容算哈希）。
+
+---
+
 ## 2026-11-18 · #205 批 0C 执行门：0C PR #209 已合并（未安装）
 
 - **做了什么**：工人侧启动脚本 `ops/dt_worktree.py`（挂在中台 Agent dt-claude / dt-codex 的 program 上：每轮按凭证镜像和任务单准入，单号固定工作目录、分支 `<执行方>/<单号>`，每单累计 2 小时，取消和超时整组停进程、不交接，CLI 退出后提交并打交接包）；受信发布最小版 `hermes/scripts/autoloop_publish.py`（按 ADR-015 归 dt-gate：交接包只当资料，按凭证库核动作和代次，交接包要落到中台里当前代次、有正面派单证据的一轮，逐个提交查高风险路径，只推 `<执行方>/<单号>`、不 force）；autoloop_config 给两个 Agent 挂 program；dt_worker_setup.sh 建工作和交接目录。dt-sandbox 规则集放行 `claude/**`、`codex/**`（常浩 11-18 定，基线同步）。

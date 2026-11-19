@@ -6,6 +6,7 @@ ops/dt_worktree.py（工人侧启动脚本，#205 批 0C）：凭证镜像和任
 
 验收（方案第 9 节 0C）：续接后范围不扩大；凭证失效不再继续；只交本单分支（推分支在受信发布，test_autoloop_publish.py）。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import fcntl
 import hashlib

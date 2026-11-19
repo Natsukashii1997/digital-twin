@@ -1,4 +1,5 @@
 """记忆日报（亚古兽）：memdaily_data / memdaily_publish。全部用假的 run，不联网、不碰真实文档和数据目录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import sys
