@@ -54,6 +54,8 @@ hermes/
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/（亚古兽的技能见 self_check 的 AGUMON_SKILLS，装在 ~/.hermes/profiles/agumon/skills/productivity/<名>/）
     workshop/          车间派单（F5）
     sales-sidebar/     亚古兽：销售 AI 侧边栏的需求反馈、进度卡片、功能同步通知和项目问答（2026-11-19）；项目档案在亚古兽工作目录（不进仓库）；两个定时任务挂这个技能
+    thinking-mainline/ 亚古兽：思考主线（2026-11-19）：项目诊断、梳理分析、方案、调研先按常浩的五个思考模型走六步（问、铺、抓、挖和破、立、落），定出主要矛盾再列核验清单；回答里要看得到目标、主要矛盾及排除理由、根因、取舍
+    evidence-check/    亚古兽：证据核验（2026-11-19，前身是亚古兽自建的 business-analysis-coaching）：只回答「某个说法能不能成立」，由思考主线交来核验清单，或常浩直接要盘点、核对、设计调研、整理诉求时用；两份技能都不许亚古兽自己改，改源文件
     progress/          项目进展现查（F6）
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
