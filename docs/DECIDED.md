@@ -28,10 +28,38 @@
 
 ---
 
+## 2026-11-19 · 工作台汇报页（重做）
+
+- **在哪定的**：Claude 会话（数字分身工作台｜侧边栏划分），常浩 11-19 三轮选稿：第一轮点名保留数字条、时间轴、等我拍板三块，其余「分类机械、分得碎」；第二轮「我喜欢乙的这样的叙述形式，尤其是高亮处理和下划线处理」，要求删掉开头总述和侧边决定梳理；第三轮「选甲」；issue #232。
+- **定稿文件**：[docs/design/workbench.html](design/workbench.html)（由 `workbench-v4.html` 改名，以后不再随版本改名；首页和汇报两页）；线上预览 https://claude.ai/artifact/8WPph1wTB6pkScV3sR8vLs （版本号 `1795091764-b753`）。选稿过程页 https://claude.ai/artifact/Mfgn7wfvr11YmkW4cVZ7p5 。页面数据是示例，不是实况。
+- **基线截图**：`~/Library/Application Support/DigitalTwin/evidence/2026-11-19-workbench-report/`
+  - `workbench-home-1440.png`、`workbench-home-fullpage-1440.png`：首页首屏和整页
+  - `workbench-report-fullpage-1440.png`：汇报页整页（截图时临时放开了外壳的固定高度）
+
+**定了什么**（修订下面第 4 版的第 3 条里汇报页的顺序、第 5 条交班报告；第 4 版其余各条不变）
+
+1. **目的**：这一页给常浩自己看。第二天能快速知道前一段托管时间里 AI 替他做了什么、成果是什么、要他做什么。要一个人能通读下来，不要机械的分类。
+2. **从上到下的顺序**：报告页签（每次托管、每晚一份）→ 六个数字 → 一夜时间轴 → 等我拍板 → 昨晚的经过 → 花了多少额度。
+3. **六个数字**：派了单、提交 PR、完成合并、秘书替你定、等你处理（橙色）、工人用时。
+4. **一夜时间轴**：横轴是托管时段；每单一行，分「在做」（按执行方上色）、「审查」（斜线）、「等你」（橙色虚线框）；下面两行是「秘书替你定」和「完成的动作」的时刻；带图例。
+5. **等我拍板**：黑底横条、四张一排、每张六层，和第 4 版一样；来自这次托管的卡排在前面。
+6. **昨晚的经过**（版式甲）：
+   - 一件事一件事往下说。每件一个标题行：序号、白话标题、状态、执行方和单号、用时。标题用白话，不用工程里的叫法。
+   - 每件四段，左边小标签：这件事（是什么、为什么做）、经过、现在的结果。第四段「要你做」在右边单独一栏：要动的是橙色、带按钮（跳到上面对应的拍板卡），不用动的写「不用做什么」；栏里附三行事实（PR、改动、用时）。
+   - 句子里三种标记：橙底加橙线是秘书替我定的，后面跟「推翻」；橙色虚线是没定、留给我的，后面跟「去定」；黑色下划线是做完的动作（推了哪个分支、开了哪个 PR）。
+   - 不要开头的总述；不要单独的「决定梳理」板块；不单列「撤不回的动作」，做完的动作直接写在经过里。
+7. **花了多少额度**：最后一条横条，只算 Claude Code 和 Codex 在这次托管期间用掉的本周额度（托管前 → 托管后）；GPT 网页取不到，不计。
+8. **示例数据**：等我拍板从 4 条变成 6 条（多了来自 11-18 夜间的两张），首页的清单行、刊头数字跟着变成 6。
+
+**实现时要补的**（设计稿里没有，常浩已知）：白话由猛鬼兽写，是新的 AI 功能，上线时登记进 AI 接入，写完由脚本核对数字；额度差值要在托管开始和结束各记一次读数，现在没有这个记录点。
+
+---
+
 ## 2026-11-19 · 工作台第 4 版：侧栏、首页拍板、汇报页
 
 - **在哪定的**：Claude 会话（数字分身工作台｜侧边栏划分），常浩 11-19 逐条定：「我来明确侧边栏结构…」「等我拍板在首页要有，在汇报页也要有…把现在首页等我拍板的形式给到汇报页，首页形式简化」「选乙清单行，然后确认生效改为确认两个字」；issue #227。
-- **定稿文件**：[docs/design/workbench-v4.html](design/workbench-v4.html)（首页和汇报两页，点侧栏切换）；线上预览 https://claude.ai/artifact/8WPph1wTB6pkScV3sR8vLs （版本号 `1795083587-21e6`）。选稿过程页 https://claude.ai/artifact/AYsXqgtz1fbuJdLXz89KRh 。页面数据是示例，不是实况。
+- **后来的修订**：汇报页同日重做（见上一节），第 3 条里汇报页的排法、第 5 条交班报告以上一节为准；其余各条仍有效。
+- **定稿文件**：`docs/design/workbench-v4.html`（提交 `ab31a89`；后来改名为 [workbench.html](design/workbench.html) 并重做了汇报页）；线上预览 https://claude.ai/artifact/8WPph1wTB6pkScV3sR8vLs （版本号 `1795083587-21e6`）。选稿过程页 https://claude.ai/artifact/AYsXqgtz1fbuJdLXz89KRh 。页面数据是示例，不是实况。
 - **基线截图**：`~/Library/Application Support/DigitalTwin/evidence/2026-11-19-workbench-v4/`
   - `workbench-v4-home-1440.png`：首页 1440×900 首屏
   - `workbench-v4-home-fullpage-1440.png`、`workbench-v4-report-fullpage-1440.png`：首页、汇报页整页（截图时临时放开了外壳的固定高度，实际页面侧栏固定、主区滚动）
@@ -60,7 +88,7 @@
 
 - **在哪定的**：Claude 会话（数字分身工作台｜首页UI风格定稿），常浩 11-19 回复「定稿并登记」；issue #223。
 - **后来的修订**：第 1、4、6 条在同日的第 4 版里改了（见上一节）；其余各条仍有效。
-- **定稿文件**：`docs/design/workbench-home-v3.html`（提交 `ed4e6a6`；第 4 版在它上面改成了 [workbench-v4.html](design/workbench-v4.html)，要看第 3 版原件用 `git show ed4e6a6:docs/design/workbench-home-v3.html`）；线上预览 https://claude.ai/artifact/R9htJPArf1Zku1XA7MbUH4 第 3 版（版本号 `1795075288-7b22`）。页面数据是示例，不是实况。
+- **定稿文件**：`docs/design/workbench-home-v3.html`（提交 `ed4e6a6`；第 4 版在它上面改成了 `workbench-v4.html`（现名 [workbench.html](design/workbench.html)），要看第 3 版原件用 `git show ed4e6a6:docs/design/workbench-home-v3.html`）；线上预览 https://claude.ai/artifact/R9htJPArf1Zku1XA7MbUH4 第 3 版（版本号 `1795075288-7b22`）。页面数据是示例，不是实况。
 - **基线截图**：`~/Library/Application Support/DigitalTwin/evidence/2026-11-19-workbench-home-v3/`
   - `workbench-home-v3-1440.png`：1440 宽首屏
   - `workbench-home-v3-fullpage-1440.png`、`workbench-home-v3-fullpage-400.png`：整页（截图时临时放开了外壳的固定高度，侧栏因此跟着拉长，实际页面侧栏固定、主区滚动）
