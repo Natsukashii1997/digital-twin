@@ -281,6 +281,20 @@ class AccountGuards(unittest.TestCase):
         self.assertIn("[停下]", r.stdout)
         self.assertNotEqual(self.remote(True, True, True).returncode, 0)   # 开着，在名单里
 
+    def test_no_processes_ignores_system_agents(self):
+        """macOS 给每个账号起的自带后台进程（SIP 保护目录里的）不算；别的程序在跑就停下。"""
+        def run(procs):
+            stub = "ps() { printf '%s\\n' " + " ".join(f"'{p}'" for p in procs) + "; }\n"
+            return subprocess.run(["bash", "-c", stub + func(SETUP, "no_processes") + "\nno_processes dt-gate"],
+                                  capture_output=True, text=True)
+        system = ["/usr/sbin/distnoted", "/usr/libexec/lsd",
+                  "/System/Library/Frameworks/CoreServices.framework/Versions/A/Support/mdbulkimport"]
+        self.assertEqual(run(system).returncode, 0)
+        for other in ("/usr/local/bin/node", "/Users/dt-gate/bin/x", "/tmp/x", "/Applications/A.app/Contents/MacOS/A"):
+            r = run(system + [other])
+            self.assertNotEqual(r.returncode, 0, other)
+            self.assertIn(other, r.stdout)
+
     def test_checks_present(self):
         s = code(SETUP)
         for needle in ('sudo -l -U "$u"', "autoLoginUser", "com.apple.access_ssh", "com.apple.access_screensharing",
@@ -436,6 +450,8 @@ class Verify(unittest.TestCase):
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()
         self.assertIn('["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", "probe"', src)
+        self.assertIn('cwd="/"', src)            # 当前目录在主账号家目录下时，别的账号进不去
+        self.assertIn("\ncd /\n", SETUP.read_text())
         self.assertIn("dt_pf_verify.py", PF.read_text())
 
 

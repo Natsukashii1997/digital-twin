@@ -150,10 +150,11 @@ def targets():
 
 def run_as(user, ts):
     src = open(__file__, "rb").read()
+    # 在 /（所有人可进）里起进程，不受当前目录权限影响
     r = subprocess.run(["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", "probe", json.dumps(ts)],
-                       input=src, capture_output=True, timeout=600)
+                       input=src, capture_output=True, timeout=600, cwd="/")
     if r.returncode != 0:
-        raise RuntimeError(f"{user}: {r.stderr.decode(errors='replace')[:300]}")
+        raise RuntimeError(f"退出码 {r.returncode}：{r.stderr.decode(errors='replace')[-400:]}")
     return json.loads(r.stdout)
 
 
@@ -177,7 +178,7 @@ def account_exists(u):
 
 
 def main():
-    if len(sys.argv) >= 3 and sys.argv[1] == "probe":
+    if len(sys.argv) >= 3 and sys.argv[1] == "probe":   # 以账号身份跑的那一半
         print(json.dumps(probe(json.loads(sys.argv[2]))))
         return 0
     if os.geteuid() != 0:
@@ -191,7 +192,13 @@ def main():
         if not account_exists(u):
             print(f"== {u}：账号不存在，跳过")
             continue
-        got = run_as(u, ts)
+        try:
+            got = run_as(u, ts)
+        except Exception as e:   # 一个账号跑不起来不影响别的账号，照样写记录
+            print(f"== {u}：以这个账号身份没跑起来：{e}")
+            report["accounts"][u] = {"error": str(e)[:500]}
+            worst = max(worst, 2) if worst != 1 else 1
+            continue
         rows = []
         print(f"== {u}" + ("（控制面，不受门卫规则管，只作对照）" if u in CONTROL_ACCOUNTS else ""))
         for t, g, c in zip(ts, got, ctrl):

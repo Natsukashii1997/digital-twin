@@ -30,6 +30,8 @@ INIT_USER="$HERE/dt_account_init_user.sh"
 PROBE="$DIR/dt_account_probe.sh"
 SHARED=/Users/Shared/dt-accounts
 MARK="# umask（数字分身 ADR-015 0E-1）"
+# 从仓库里运行时当前目录在主账号家目录下（700），以别的账号身份起的进程进不去：一律从 / 出发
+cd /
 
 [ "$(id -u)" = 0 ] || { echo "要用 sudo 运行：sudo bash $0 ${1:-install}"; exit 1; }
 
@@ -90,12 +92,15 @@ remote_access() {
   fi
 }
 
-# 账号下有没有别的进程在跑（探针结果由账号自己写，有别的进程就可能被改）
+# 账号下有没有别的进程在跑（探针结果由账号自己写，有别的进程就可能被改）。
+# macOS 会给每个账号起几个自带的后台进程（distnoted、lsd、mdbulkimport 等），它们在系统完整性保护（SIP）的
+# /System、/usr（/usr/local 除外）、/bin、/sbin 里，账号改不了，不算；只数这些目录之外的程序。
 no_processes() {
-  local n
-  n=$(pgrep -U "$1" | wc -l | tr -d ' ')
-  [ "$n" = 0 ] && return 0
-  echo "  [停下] $1 下有 $n 个进程在跑（ps -U $1 查看）；探针结果可能被改，请先停掉"
+  local others
+  others=$(ps -U "$1" -o comm= | grep -Ev '^/(System|bin|sbin)/|^/usr/(bin|sbin|libexec|lib)/' || true)
+  [ -z "$others" ] && return 0
+  echo "  [停下] ${1} 下有系统以外的进程在跑；探针结果可能被改，请先停掉："
+  echo "$others" | sed 's/^/    /'
   return 1
 }
 
