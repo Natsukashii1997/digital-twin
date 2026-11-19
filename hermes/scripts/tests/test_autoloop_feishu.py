@@ -161,6 +161,7 @@ class Deliver(Base):
             posts.append((path, body))
             return {}
         with mock.patch.object(F, "hub", hub), mock.patch.object(A, "flush") as flush, \
+                mock.patch.object(F, "hub_readable", lambda: True), \
                 mock.patch("autoloop_publish.hub_card", lambda cid: {"id": cid, "version": 1, "state": "open"}):
             self.assertTrue(F.once()["ok"])
             flush.assert_called_once_with(7)                                   # 送达确认后提交排队的本人回答
@@ -656,7 +657,12 @@ class BridgeLock(Base):
         self.posts = []
         self.leases = {}
         self.hub_now = None                                                     # 中台库里这张卡现在的版本；None = 读不到
-        for target, name, fake in ((F, "hub", self.fake_hub), (A, "flush", lambda cid: None)):
+        self.hub_ok = True                                                      # 领卡前中台库能不能读
+        self.gets = 0
+        self.alerts = []                                                        # 私聊提醒的文字
+        self.flushed = []                                                       # (卡片号, 提交时桥接锁是不是空着)
+        for target, name, fake in ((F, "hub", self.fake_hub), (A, "flush", self.fake_flush),
+                                   (F, "hub_readable", lambda: self.hub_ok)):
             p = mock.patch.object(target, name, fake)
             p.start()
             self.addCleanup(p.stop)
@@ -665,8 +671,25 @@ class BridgeLock(Base):
         p.start()
         self.addCleanup(p.stop)
 
+        p = mock.patch("tidings_weekly.send", lambda chat, kind, body, key: self.alerts.append(body["text"]))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def fake_flush(self, cid):
+        import fcntl
+        fd = os.open(f"{F.db_file()}.bridge.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            free = True
+        except OSError:
+            free = False
+        finally:
+            os.close(fd)
+        self.flushed.append((cid, free))
+
     def fake_hub(self, method, path, body=None, timeout=20):
         if method == "GET":
+            self.gets += 1
             return {"card": self.leases[threading.current_thread().name]}
         self.posts.append((path, body))
         return {}
@@ -714,16 +737,86 @@ class BridgeLock(Base):
         self.assertIn("本地已登记第 3 版", out["skipped"])
         self.assertEqual((self.posts, len(self.patches())), ([], 1))
 
-    def test_hub_unreadable_is_fail_closed(self):
-        """专项续审 P1-01：中台库读不到这张卡、版本不是整数，都不发、不报送达（不当成「没有新版本」）。"""
+    def test_hub_unreadable_before_lease_does_not_lease(self):
+        """第 5 轮 P1-01：领卡前中台库读不到，这轮不领（不用掉中台的尝试次数），私聊提醒，同一原因 1 小时最多 1 次。"""
+        self.hub_ok = False
+        for _ in range(3):
+            out = F.once()
+            self.assertIn("读不到中台库", out["paused"])
+        self.assertEqual((self.gets, self.posts, self.patches()), (0, [], []))
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("不会用掉中台的重试次数", self.alerts[0])
+        with F.db(write=True) as con:                                           # 过了 1 小时：再提醒一次
+            con.execute("UPDATE alerts SET at = '2000-01-01T00:00:00+08:00'")
+        F.once()
+        self.assertEqual(len(self.alerts), 2)
+        self.hub_ok, self.hub_now = True, 1                                     # 恢复：照常领、照常送
+        self.lease(1)
+        self.assertTrue(F.once()["ok"])
+        self.assertEqual(self.gets, 1)
+
+    def test_alert_not_recorded_when_send_fails(self):
+        self.hub_ok = False
+        with mock.patch("tidings_weekly.send", side_effect=F.SendError("发不出去")):
+            F.once()
+        F.once()                                                                # 上次没发出去：这次照样提醒
+        self.assertEqual(len(self.alerts), 1)
+
+    def test_hub_unreadable_after_lease_reports_failed_with_reason(self):
+        """领到后才读不到这张卡的版本（None、True、"2"、2.0）：不发，向中台报 failed 写明原因（中台退避重试），并提醒。"""
         for hub_now in (None, True, "2", 2.0):
             with self.subTest(hub_now=hub_now):
+                self.posts.clear()
                 self.hub_now = hub_now
                 self.lease(2)
                 out = F.once()
-                self.assertIn("读不到中台库里这张卡的版本", out["skipped"])
-                self.assertEqual((self.registered(), self.patches(), self.posts), (1, [], []))
+                self.assertFalse(out["ok"])
+                self.assertEqual(self.posts, [("/v1/cards/7/failed", {"version": 2, "error": "读不到中台库里这张卡的版本，"
+                                                                      "核不了是不是最新版，这次没发"})])
+                self.assertEqual((self.registered(), self.patches()), (1, []))
         self.assertEqual(len(self.lark.sent()), 1)                               # 也没另发新卡
+        self.assertEqual(len(self.alerts), 1)                                    # 同一原因只提醒一次
+        self.assertEqual(self.flushed, [])
+
+    def test_flush_runs_after_lock_released(self):
+        """第 5 轮 P2：报完送达就放锁，再提交排队的本人回答。"""
+        self.hub_now = 2
+        self.lease(2)
+        self.assertTrue(F.once()["ok"])
+        self.assertEqual(self.flushed, [(7, True)])
+        F.confirm(7)
+        self.assertEqual(self.flushed[-1], (7, True))
+
+    def test_run_checks_given_up_and_rests_when_paused(self):
+        """常驻每轮先扫一次已放弃的卡；中台库读不到（paused）时歇 30 秒再看，不空转。"""
+        calls = []
+
+        def once():
+            calls.append("once")
+            if calls.count("once") > 1:
+                raise KeyboardInterrupt                                          # 第二轮停下
+            return {"ok": False, "paused": "读不到中台库"}
+        with mock.patch.object(A, "reconcile", lambda: []), mock.patch.object(F, "once", once), \
+                mock.patch.object(F, "check_given_up", lambda: calls.append("given_up") or []), \
+                mock.patch.object(F.time, "sleep") as sleep, mock.patch("sys.stdout"), self.assertRaises(KeyboardInterrupt):
+            F.run()
+        self.assertEqual(calls, ["given_up", "once", "given_up", "once"])
+        sleep.assert_called_once_with(30)
+
+    def test_given_up_cards_told_once_each(self):
+        """中台已放弃送达的卡：每张私聊说一次（哪张、标题、试了几次、最后原因）。"""
+        cards = [{"card_id": 7, "title": "选一个", "tries": 9, "error": "读不到中台库里这张卡的版本"}]
+        with mock.patch.object(F, "given_up_cards", lambda: cards):
+            self.assertEqual(F.check_given_up(), [7])
+            self.assertEqual(F.check_given_up(), [])
+            cards.append({"card_id": 8, "title": None, "tries": 9, "error": None})
+            self.assertEqual(F.check_given_up(), [8])
+        self.assertEqual(len(self.alerts), 2)
+        self.assertIn("卡片 7「选一个」已放弃送达（试了 9 次", self.alerts[0])
+        self.assertIn("请手动处理", self.alerts[0])
+        self.assertIn("没有记录原因", self.alerts[1])
+        with mock.patch.object(F, "given_up_cards", lambda: None):              # 中台库读不到：不提醒、不报错
+            self.assertEqual(F.check_given_up(), [])
 
     def test_direct_deliver_never_patches_back(self):
         """专项续审 P2-03：绕过 once 直接送旧版本，改飞书之前就拒：消息和登记都不回退。"""
@@ -898,6 +991,28 @@ class FeishuEndToEnd(HubFixture):
             if out:
                 return out
         self.fail("中台没出卡片")
+
+    def test_hub_readonly_queries_match_real_schema(self):
+        """hub_readable、given_up_cards 的只读查询对得上真中台库的视图；放弃送达的卡能查出来（在中台库的副本里写两行，
+        视图定义原样来自中台）。"""
+        import autoloop_publish as P
+        self.assertTrue(F.hub_readable())
+        self.assertEqual(F.given_up_cards(), [])
+        copy = Path(self.home) / "hub-copy.db"
+        with contextlib.closing(sqlite3.connect(P.hub_db())) as src, contextlib.closing(sqlite3.connect(copy)) as dst:
+            src.backup(dst)
+        with contextlib.closing(sqlite3.connect(copy)) as con, con:
+            con.create_function("card_hash", 2, lambda *a: "", deterministic=True)   # 中台进程里注册的索引函数，副本里补一个假的
+            con.execute("INSERT INTO projections (collection, key, data) VALUES ('deliveries', '99:feishu', ?)",
+                        (json.dumps({"card_id": 99, "channel": "feishu", "version": 0, "ref": None, "tries": 9,
+                                     "first_try_at": None, "not_before": None, "error": "坏了", "given_up": 1}),))
+            con.execute("INSERT INTO projections (collection, key, data) VALUES ('deliveries', '98:secretary', ?)",
+                        (json.dumps({"card_id": 98, "channel": "secretary", "tries": 9, "error": "x", "given_up": 1}),))
+        with mock.patch("autoloop_publish.hub_db", lambda: copy):
+            self.assertEqual(F.given_up_cards(), [{"card_id": 99, "title": None, "tries": 9, "error": "坏了"}])
+        with mock.patch("autoloop_publish.hub_db", lambda: Path(self.home) / "none.db"):
+            self.assertFalse(F.hub_readable())
+            self.assertIsNone(F.given_up_cards())
 
     def test_click_to_answer_round_trip(self):
         C.install(confirm=True, target=self.home)

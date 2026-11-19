@@ -28,11 +28,18 @@
   autoloop_feishu.py show [--json]  只读：登记过的卡片、答卷进度和最近的变化记录
 环境变量：DT_AUTOLOOP_CARDS_DB、DT_AUTOLOOP_CHANNEL_KEY_DIR（同 autoloop_config）、AGENT_AUTOLOOP_HOME、DT_LARK_CLI。
 单写入者（#218 第 3 轮 P2-01，专项续审 P1-01 / P2-02 / P2-03）：发卡、改卡、报送达都在桥接锁里做（cards.db 同目录的
-cards.db.bridge.lock，进程级排他锁，不可重入：锁里只调带下划线的内部实现）。once（run 也走它）领到卡后拿锁，锁里按中台库现读
-这张卡：读不到（库打不开、没有这张卡、版本不是整数）就不发、不报送达（fail-closed：中台没收到送达报告，过 1 分钟会再给，
-最多重试 9 次、57 分钟内，见中台 kernel/decide.ts 的 RESEND_AT）；中台已是更新的版本、或本地已登记更高的版本，也不处理
-这次领到的旧版本。deliver 在改飞书消息之前先核本地登记，登记已是更高版本就拒（不把消息改回旧版）；写登记一律带
-「版本不回退」条件。对账补报送达（autoloop_answer.reconcile → report_delivered）同样拿这把锁。
+cards.db.bridge.lock，进程级排他锁，不可重入：锁里只调带下划线的内部实现）。deliver 在改飞书消息之前先核本地登记，登记已是
+更高版本就拒（不把消息改回旧版）；写登记一律带「版本不回退」条件。对账补报送达（autoloop_answer.reconcile → report_delivered）
+同样拿这把锁。报完送达就放锁，再提交排队的本人回答（autoloop_answer.flush，submit 自己会再核版本），中台慢时不堵别的卡。
+中台库读不到（PR #218 第 5 轮 P1-01，常浩 11-19 选甲）：中台每递一次卡（GET /cards/next）都算一次尝试、1 分钟后再递，9 次后
+永久放弃（given_up，改版也不再递，ask 卡没有恢复入口；见中台 kernel/decide.ts 的 nextCard、failed）。所以：
+  - 领卡前先确认中台库能读（hub_readable），读不到这轮不领、不用掉尝试次数，私聊提醒常浩（同一原因 1 小时最多 1 次）；
+  - 领到后仍读不到这张卡的版本（极小窗口、或卡不见了）：不发，向中台报 failed 并写明原因（中台按 1、3、7…分钟退避重试，
+    状态里能看到原因），同样提醒；
+  - 确认是旧版本（中台已是更新版本、或本地已登记更高版本）：不发、不报，中台 1 分钟后递最新版本；
+  - run 每轮只读扫一次中台里 feishu 通道已放弃送达的卡，每张私聊告诉常浩一次（哪张、标题、试了几次、最后原因），请他手动处理；
+    自动恢复要中台扩展点，和规格第 9 节验收 12 一起向上游要。
+提醒记在 cards.db 的 alerts 表（提醒键 → 上次提醒时间），发不出去不记、下次再试。
 不调用 AI。
 """
 import argparse
@@ -69,7 +76,9 @@ CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card
   at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT, attempt TEXT);
 CREATE TABLE IF NOT EXISTS secretary_cards (card_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ref TEXT NOT NULL UNIQUE,
   leased_at TEXT NOT NULL, hub_delivered_at TEXT);
+CREATE TABLE IF NOT EXISTS alerts (key TEXT PRIMARY KEY, at TEXT NOT NULL);
 """
+ALERT_EVERY = 3600                       # 秒：同一原因的提醒最多这么久一次
 
 
 class Fail(Exception):
@@ -308,36 +317,112 @@ def _deliver(card):
 
 
 def newer_elsewhere(card):
-    """这次领到的卡能不能处理：中台库读不到这张卡（或版本）、中台已是更新的版本、本地已登记更高的版本（别的桥接进程送过了），
-    都返回原因（不处理）；核过了返回 None。"""
+    """这次领到的卡能不能处理：返回 None（核过了），或 (种类, 原因)。种类 unreadable：中台库读不到这张卡或版本不是整数
+    （读不到不等于没有新版本：不发，fail-closed）；stale：中台已是更新的版本、或本地已登记更高的版本（别的桥接进程送过了）。"""
     import autoloop_publish as P
     cur = P.hub_card(card["id"])
-    if not cur or type(cur.get("version")) is not int:  # 读不到不等于没有新版本：不发（专项续审 P1-01，fail-closed）
-        return "读不到中台库里这张卡的版本，核不了是不是最新版"
+    if not cur or type(cur.get("version")) is not int:
+        return "unreadable", "读不到中台库里这张卡的版本，核不了是不是最新版"
     if cur["version"] > card["version"]:
-        return f"中台这张卡已经是第 {cur['version']} 版"
+        return "stale", f"中台这张卡已经是第 {cur['version']} 版"
     with db() as con:
         r = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
     if r and r["version"] > card["version"]:
-        return f"本地已登记第 {r['version']} 版"
+        return "stale", f"本地已登记第 {r['version']} 版"
     return None
 
 
+def hub_readable():
+    """中台库能不能读（只读打开、能查 cards）。读不到返回 False（不领卡：领一次就用掉中台一次尝试）。"""
+    import autoloop_publish as P
+    try:
+        con = P._hub()
+        try:
+            con.execute("SELECT id FROM cards LIMIT 1").fetchall()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError, Fail):
+        return False
+    return True
+
+
+def given_up_cards():
+    """中台库只读：feishu 通道已放弃送达的卡 [{card_id, title, tries, error}]；读不到返回 None。"""
+    import autoloop_publish as P
+    try:
+        con = P._hub()
+        try:
+            rows = con.execute("SELECT d.card_id, c.title, d.tries, d.error FROM deliveries d LEFT JOIN cards c "
+                               "ON c.id = d.card_id WHERE d.channel = ? AND d.given_up = 1 ORDER BY d.card_id",
+                               (CHANNEL,)).fetchall()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError, Fail):
+        return None
+    return [dict(r) for r in rows]
+
+
+def alert(key, text, every=ALERT_EVERY):
+    """私聊提醒常浩；同一提醒键 every 秒内只提醒一次（every=None：只提醒一次）。发不出去不记，下次再试。返回是否发了。"""
+    with db() as con:
+        r = con.execute("SELECT at FROM alerts WHERE key = ?", (key,)).fetchone()
+    if r:
+        try:
+            age = (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(r["at"])).total_seconds()
+        except (TypeError, ValueError):
+            age = float("inf")
+        if every is None or age < every:
+            return False
+    from tidings_weekly import send
+    try:
+        send(owner_chat(), "text", {"text": text}, f"al-alert-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
+    except (SendError, Fail):
+        return False
+    with db(write=True) as con:
+        con.execute("INSERT OR REPLACE INTO alerts (key, at) VALUES (?, ?)", (key, now()))
+    return True
+
+
+def check_given_up():
+    """把中台已放弃送达的卡逐张私聊告诉常浩，每张只说一次。返回这次提醒了的卡片号。"""
+    told = []
+    for c in given_up_cards() or []:
+        why = (c.get("error") or "没有记录原因")[:120]
+        text = (f"飞书桥接：中台卡片 {c['card_id']}「{c.get('title') or '（没有标题）'}」已放弃送达（试了 {c.get('tries')} 次，"
+                f"最后原因：{why}）。这张卡不会再自动送到你这里，请手动处理。")
+        if alert(f"given-up:{c['card_id']}", text, every=None):
+            told.append(c["card_id"])
+    return told
+
+
 def once(wait=50):
-    """领一张、处理一张；没有卡片返回 None。处理在桥接锁里做，锁里先看领到的是不是旧版本（P2-01）。"""
+    """领一张、处理一张；没有卡片返回 None。领卡前先确认中台库能读（读不到这轮不领，返回 paused）；处理在桥接锁里做，
+    锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。"""
+    if not hub_readable():                       # 第 5 轮 P1-01：领一次就用掉中台一次尝试，读不到就先别领
+        why = "读不到中台库，暂停领卡"
+        alert("hub-unreadable", f"飞书桥接：{why}，中台卡片暂时送不到你这里（不会用掉中台的重试次数）；中台库恢复后自动继续。")
+        return {"ok": False, "paused": why}
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
     with bridge_lock():
-        stale = newer_elsewhere(card)
-        if stale:                                # 不改消息、不报送达：中台没收到报告，过一会再给（最新版本）
-            return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{stale}，不处理"}
-        try:
-            ref = _deliver(card)
-        except (SendError, Fail) as e:
-            hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
-            return {"card": card["id"], "ok": False, "why": str(e)}
-        _confirm(card["id"])
+        got = newer_elsewhere(card)
+        if got and got[0] == "unreadable":       # 领到后才读不到：报 failed 写明原因（中台退避重试、状态里看得到）
+            why = f"{got[1]}，这次没发"
+            hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why})
+        elif got:                                  # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
+            return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
+        if not got:
+            try:
+                ref = _deliver(card)
+            except (SendError, Fail) as e:
+                hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
+                return {"card": card["id"], "ok": False, "why": str(e)}
+            _report_delivered(card["id"])
+    if got:                                      # 只剩「领到后读不到」：放锁后再提醒（不占着锁发消息）
+        alert("hub-unreadable", f"飞书桥接：卡片 {card['id']} {why}；中台会稍后重试。")
+        return {"card": card["id"], "ok": False, "why": why}
+    _flush(card["id"])                           # 锁外提交（第 5 轮 P2 建议）
     return {"card": card["id"], "ok": True, "ref": ref}
 
 
@@ -361,15 +446,14 @@ def _report_delivered(card_id):
 
 
 def confirm(card_id):
-    """持桥接锁报送达并提交排队的本人回答（手动补报、测试用；once 在锁里调 _confirm）。"""
+    """持桥接锁报送达，放锁后再把送达前点的、排着队的本人回答提交掉（手动补报、测试用）。"""
     with bridge_lock():
-        _confirm(card_id)
+        _report_delivered(card_id)
+    _flush(card_id)
 
 
-def _confirm(card_id):
-    """报送达，再把送达前点的、排着队的本人回答提交掉（发送资格只有一个执行者领得到，见 autoloop_answer.submit）。
-    调用方必须已持桥接锁。"""
-    _report_delivered(card_id)
+def _flush(card_id):
+    """提交排队的本人回答（发送资格只有一个执行者领得到，submit 自己会再核版本，见 autoloop_answer）。不持桥接锁。"""
     import autoloop_answer as A
     A.flush(card_id)
 
@@ -381,9 +465,13 @@ def run():
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
                 A.tell(A.identities()[1], text)
+            for cid in check_given_up():               # 中台已放弃送达的卡：每张私聊说一次
+                print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
             out = once()
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
+            if out and out.get("paused"):              # 中台库读不到：歇 30 秒再看，别空转
+                time.sleep(30)
         except Exception as e:                         # 常驻不因一次出错退出：记下来，10 秒后再领
             why = str(e) if isinstance(e, Fail) else f"{type(e).__name__}: {str(e)[:200]}"
             print(json.dumps({"at": now(), "ok": False, "why": why}, ensure_ascii=False), flush=True)
