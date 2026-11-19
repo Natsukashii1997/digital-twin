@@ -34,6 +34,8 @@ SOURCES = {
     "hermes/prompts/p.md": "hermes/prompts/p.md",
     "hermes/scripts/memdaily_job.py": "hermes/profiles/agumon/scripts/memdaily_job.py",   # 亚古兽的（#182）
     "hermes/prompts/memdaily_report.md": "hermes/profiles/agumon/prompts/memdaily_report.md",
+    "hermes/scripts/sidebar_reports.py": "hermes/profiles/agumon/scripts/sidebar_reports.py",   # 亚古兽的销售侧边栏汇报
+    "hermes/prompts/sidebar_feedback.md": "hermes/profiles/agumon/prompts/sidebar_feedback.md",
     "ops/health_check.py": "bin/health_check.py",
     "ops/check_repos.py": "bin/check_repos.py",
     "ops/self_check.py": "hermes/scripts/self_check.py",
