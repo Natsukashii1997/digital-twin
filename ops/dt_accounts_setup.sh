@@ -15,7 +15,7 @@
 #      （600，随机数，不是真凭据；0E-2 起真凭据也这样存成只有账号能读的文件，常浩 11-19 定）；它的 SHA-256 由 root 记下
 #      root 不按路径碰账号能改的任何文件，只动「只有 root 能改里面条目」的目录里的东西（L3 P1-01）
 #   4. 装探针：LaunchDaemon cn.digital-twin.probe.<账号>，以那个账号身份、在没人登录它时运行 ops/dt_account_probe.sh，
-#      开机和安装时各跑一次；结果写到 /Users/Shared/dt-accounts/probe/<账号>/result.txt（所有人可读，不含凭据）。
+#      开机、安装时各跑一次，之后每 10 分钟一次（开机后第一份另存 boot-<开机时间>.txt）；结果写到 /Users/Shared/dt-accounts/probe/<账号>/result.txt（所有人可读，不含凭据）。
 #      每次安装给探针一个新的随机编号，结果里带上它、最后一行是 done=1、探针进程退出码为 0，才算这次的结果；
 #      读到的测试凭据要和 root 记下的 SHA-256 一致才算「读得到」。
 #      结果文件由账号自己写，账号能伪造它：所以安装时先核对账号下没有别的进程在跑（现在这两个账号什么都不跑）。
@@ -170,6 +170,7 @@ write_plist() {
     <key>DT_PROBE_NONCE</key><string>$nonce</string>
   </dict>
   <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>600</integer>
   <key>Umask</key><integer>63</integer>
 </dict>
 </plist>

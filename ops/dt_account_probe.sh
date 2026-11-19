@@ -6,12 +6,20 @@
 # 凭据存法常浩 11-19 定：0E-2 起真凭据存成账号家目录里只有它能读的文件（磁盘由文件保险箱加密），不用钥匙串，
 # 所以这里只测文件（L3 P1-04）。
 #
-# 由 ops/dt_accounts_setup.sh 安装成 LaunchDaemon（开机和安装时各跑一次），不用手动运行。
+# 由 ops/dt_accounts_setup.sh 安装成 LaunchDaemon（开机、安装时各跑一次，之后每 10 分钟一次），不用手动运行。
 # 测试时可以用环境变量改路径：DT_PROBE_OUT、DT_PROBE_SECRET。
 set -uo pipefail
 
 me=$(id -un)
-home=$(dscl . -read "/Users/$me" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+# 家目录以服务配置里给的 HOME 为准（安装脚本写成 /Users/<账号>）；目录服务只拿来对照。
+# 11-20 冷启动实测：开机后一分钟目录服务还没就绪，dscl 读不出来，按它找凭据就找错了地方——所以最多等它 60 秒，等不到也不影响读凭据
+dshome=""
+for _ in $(seq 30); do
+  dshome=$(dscl . -read "/Users/$me" NFSHomeDirectory 2>/dev/null | awk '$1 == "NFSHomeDirectory:" {print $2}')
+  [ -n "$dshome" ] && break
+  sleep 2
+done
+home=${HOME:-$dshome}
 out=${DT_PROBE_OUT:-/Users/Shared/dt-accounts/probe/$me/result.txt}
 secret=${DT_PROBE_SECRET:-$home/.dt/probe.secret}
 
@@ -39,8 +47,9 @@ redact() { sed -E 's#://[^@/]*@#://***@#'; }
   kv uid "$(id -u)"
   kv gid "$(id -g)"
   kv env_home "${HOME:-}"
-  kv real_home "$home"
-  if [ -n "$home" ] && [ "${HOME:-}" = "$home" ]; then kv home_match yes; else kv home_match no; fi
+  kv real_home "$dshome"
+  if [ -n "$dshome" ] && [ "${HOME:-}" = "$dshome" ]; then kv home_match yes; else kv home_match no; fi
+  kv uptime_s "$(( $(date +%s) - $(sysctl -n kern.boottime 2>/dev/null | sed 's/^{ sec = \([0-9]*\),.*/\1/') ))"
   kv env_path "${PATH:-}"
   kv boot "$(sysctl -n kern.boottime 2>/dev/null | sed 's/^{ sec = \([0-9]*\),.*/\1/')"
   kv console_user "$(stat -f %Su /dev/console 2>/dev/null)"
@@ -67,4 +76,7 @@ redact() { sed -E 's#://[^@/]*@#://***@#'; }
 } > "$out.tmp" 2>/dev/null
 
 chmod 644 "$out.tmp"
+# 每次开机后的第一份结果另存一份（结果文件之后每 10 分钟会被新的覆盖），留作冷启动证据
+boot_copy="$(dirname "$out")/boot-$(sysctl -n kern.boottime 2>/dev/null | sed 's/^{ sec = \([0-9]*\),.*/\1/').txt"
+[ -e "$boot_copy" ] || cp "$out.tmp" "$boot_copy"
 mv -f "$out.tmp" "$out"

@@ -96,6 +96,7 @@ class Probe(unittest.TestCase):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         out, secret = Path(d.name) / "r.txt", Path(d.name) / "s"
+        self.last_out = str(out)
         if secret_text is not None:
             secret.write_text(secret_text)
             secret.chmod(0o600)
@@ -133,9 +134,32 @@ class Probe(unittest.TestCase):
         self.assertEqual(text.splitlines()[-1], "done=1")        # 写完整了才有最后一行
         self.assertEqual(f["env_https_proxy"], "http://***@127.0.0.1:8090")   # 代理里的用户名密码不落进所有人可读的文件
         self.assertNotIn("pass@", text)
-        for key in ("at", "user", "uid", "gid", "real_home", "home_match", "env_path", "console_user", "self_logged_in",
+        self.assertEqual(len(list(Path(self.last_out).parent.glob("boot-*.txt"))), 1)   # 开机后第一份另存
+        for key in ("at", "user", "uid", "gid", "real_home", "home_match", "uptime_s", "env_path", "console_user", "self_logged_in",
                     "home_mode", "sys_proxy", "net_feishu_direct", "net_github_direct"):
             self.assertIn(key, f)
+
+    def test_home_from_service_config_not_directory_service(self):
+        """11-20 冷启动：目录服务没就绪时 dscl 读不出家目录；凭据按服务配置里的 HOME 找，照样读得到。"""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        home = Path(d.name) / "home"
+        (home / ".dt").mkdir(parents=True)
+        (home / ".dt" / "probe.secret").write_text("x")
+        bin_ = Path(d.name) / "bin"
+        bin_.mkdir()
+        (bin_ / "dscl").write_text("#!/bin/bash\necho 'DS Error: -14009'; exit 1\n")
+        (bin_ / "sleep").write_text("#!/bin/bash\n")    # 不真等 60 秒
+        for f in bin_.iterdir():
+            f.chmod(0o755)
+        env = dict(os.environ, HOME=str(home), DT_PROBE_OUT=str(Path(d.name) / "r.txt"),
+                   PATH=f"{bin_}:{self.fakebin()}:{os.environ['PATH']}")
+        r = subprocess.run(["bash", str(PROBE)], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        f = dict(l.split("=", 1) for l in (Path(d.name) / "r.txt").read_text().splitlines())
+        self.assertEqual(f["secret_read"], "yes")
+        self.assertEqual(f["real_home"], "")
+        self.assertEqual(f["home_match"], "no")
 
     def test_missing_secret(self):
         _, f = self.run_probe(None)
