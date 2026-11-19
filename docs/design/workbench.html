@@ -478,6 +478,84 @@ svg.iso .led-ok{fill:var(--ok)} svg.iso .led-warn{fill:var(--warn)}
 .cb-at td small{display:block;color:var(--mute);font-size:12px;margin-top:1px}
 .cb-at tr.off td{color:var(--mute)}
 .cb-at tr.off td b{font-weight:400}
+/* ---------- 主线页（11-19 定稿：地铁线） ---------- */
+.mx{display:grid;gap:30px}
+.mx-ml{border-top:1px solid var(--ink);padding-top:18px}
+.mx-mh{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:22px;align-items:center}
+.mx-mh .t{display:flex;gap:12px;align-items:baseline;min-width:0;white-space:nowrap}
+.mx-mh h3{font-size:20px;font-weight:800}
+.mx-mh .t .mute{font-size:12px}
+.mx-mh .p{display:flex;gap:10px;align-items:center}
+.mx-mh .p b{font-size:16px}
+.mx-gl{display:flex;gap:20px;align-items:baseline;justify-content:space-between;margin:6px 0 14px}
+.mx-gl p{font-size:13px;max-width:60em}
+.mx-gl .o{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--mute);white-space:nowrap}
+.mx-bar{display:inline-flex;gap:2px}
+.mx-bar i{width:14px;height:14px;border:1px solid var(--ink);background:transparent}
+.mx-bar i.s-done{background:var(--ink)}
+.mx-bar i.s-run{background:repeating-linear-gradient(135deg,var(--ink) 0 2px,transparent 2px 4px)}
+.mx-bar i.blk{border-color:var(--accent);background:repeating-linear-gradient(135deg,var(--accent) 0 2px,transparent 2px 4px)}
+.mx-bar i.s-pin{border-style:dashed;border-color:var(--mute)}
+.mx-s{display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid var(--ink);font-size:10px;font-weight:700;flex:none;line-height:1}
+.mx-s.s-done{background:var(--ink);color:var(--bg)}
+.mx-s.s-run{background:var(--bg)}
+.mx-s.s-next{border-color:var(--mute)}
+.mx-s.s-ask{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.mx-s.s-pin{border-style:dashed;color:var(--mute);border-color:var(--mute)}
+.mx-s.s-drop{border-color:var(--mute);color:var(--mute)}
+.mx-me{background:var(--acc-soft)!important;border-color:var(--accent)!important;color:var(--accent)}
+.mx-wait{border:1px solid var(--ink);background:var(--ink);color:var(--bg)}
+.mx-wait .hd{display:flex;gap:10px;align-items:center;padding:8px 12px;font-size:12px}
+.mx-wait .hd b{font-size:15px}
+.mx-wait .hd span{background:var(--accent);color:var(--on-accent);padding:0 7px;font-weight:700}
+.mx-wait ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+.mx-wait li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;padding:9px 12px;border-top:1px solid rgba(128,128,128,.4);align-items:center;font-size:13px}
+.mx-wait li .m{grid-column:1/-1;font-size:11px;opacity:.7}
+.mx-wait .tag{font-size:11px;border:1px solid var(--accent);color:var(--accent);padding:0 6px;white-space:nowrap}
+.mx-wait .btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);padding:1px 10px;font-size:12px}
+.mx-merged{display:flex;gap:10px;align-items:center;font-size:13px;border:1px dashed var(--line);padding:8px 12px;color:var(--mute)}
+.mx-merged b{color:var(--ink);font-weight:400}
+.mx-wait li+li{border-left:1px solid rgba(128,128,128,.4)}
+.mx-metro{display:grid;margin:10px 0 0}
+.mx-metro .st{position:relative;display:grid;justify-items:center;align-content:start;gap:6px;border:0;background:transparent;padding:0 4px 10px;cursor:pointer;text-align:center}
+.mx-metro .ln{position:absolute;top:13px;left:0;right:0;border-top:2px dashed var(--mute)}
+.mx-metro .st.past .ln{border-top:3px solid var(--ink);top:12px}
+.mx-metro .st.first .ln{left:50%}
+.mx-metro .st.last .ln{right:50%}
+.mx-metro .st.past:not(.pastr) .ln{right:50%}
+.mx-metro .st.past:not(.pastr)::after{content:"";position:absolute;top:13px;left:50%;right:0;border-top:2px dashed var(--mute)}
+.mx-metro .st.last.past::after{display:none}
+.mx-metro .dot{position:relative;z-index:1;width:28px;height:28px;display:grid;place-items:center;border:2px solid var(--ink);background:var(--bg);font-size:12px;font-weight:700;border-radius:50%}
+.mx-metro .st.s-done .dot{background:var(--ink);color:var(--bg)}
+.mx-metro .st.s-run .dot{width:34px;height:34px;margin-top:-3px;border-width:3px}
+.mx-metro .st.blk .dot{border-color:var(--accent);color:var(--accent)}
+.mx-metro .st.s-next .dot{border-color:var(--mute)}
+.mx-metro .st.s-pin .dot{border-style:dashed;border-color:var(--mute);color:var(--mute)}
+.mx-metro .st.on .dot{box-shadow:0 0 0 4px var(--bg),0 0 0 6px var(--accent)}
+.mx-metro .lb{font-size:12px;line-height:1.35;max-width:9em}
+.mx-metro .st.s-done .lb{color:var(--mute)}
+.mx-metro .st.s-run .lb{font-weight:700}
+.mx-metro .st.on .lb{background:var(--ink);color:var(--bg);padding:0 4px}
+.mx-metro .c{font-size:11px;color:var(--mute)}
+.mx-stn{border:1px solid var(--ink);background:var(--panel);margin-top:4px}
+.mx-stn .sh{display:flex;gap:10px;align-items:center;padding:9px 14px;border-bottom:1px solid var(--ink);background:var(--bg)}
+.mx-stn .sh b{font-size:16px}
+.mx-stn .sh .who{margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px}
+.mx-stn .now{padding:10px 14px 0;font-size:13.5px}
+.mx-stn .none{padding:12px 14px;font-size:13px}
+.mx-board{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;padding:12px 14px}
+.mx-board .cl{display:grid;gap:6px;align-content:start}
+.mx-board h5{font-size:12px;font-weight:400;color:var(--mute);display:flex;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:3px;margin:0}
+.mx-board .cl.t-me h5{color:var(--accent);border-color:var(--accent)}
+.mx-board .cd{border:1px solid var(--ink);background:var(--bg);padding:6px 8px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 6px;font-size:12px}
+.mx-board .cd .r{grid-column:1;color:var(--mute);font-size:11px}
+.mx-board .cd b{grid-column:1;font-size:13px;font-weight:400}
+.mx-board .cd .e{grid-column:2;grid-row:1/3;align-self:center}
+.mx-board .cl.t-me .cd{border-color:var(--accent);background:var(--acc-soft)}
+.mx-board .cl.t-done .cd{border-color:var(--line);color:var(--mute)}
+.mx-pn{display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center;padding:8px 14px;border-top:1px dashed var(--line);font-size:12.5px}
+.mx-pn .num{color:var(--mute)}
+.mx-pn .me{color:var(--accent)}
 @media (max-width:1240px){
   .split{grid-template-columns:minmax(0,1fr)}
   .rail{position:static;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
@@ -774,8 +852,8 @@ function wfRow(w){
     <div class="mini">${strip(w)}<div class="caps">${caps}</div></div>
   </div>`;
 }
-/* 侧栏首页、汇报、协同三页有稿；其余五页（主线、执行、分身、记录、沉淀）还没设计 */
-const state={page:'home',cw:0,msg:''};
+/* 侧栏首页、汇报、主线、协同四页有稿；其余四页（执行、分身、记录、沉淀）还没设计 */
+const state={page:'home',cw:0,msg:'',ms:{0:4,1:3}};
 /* 首页：清单行。能一眼定的在这里点主按钮，要看详情的去汇报 */
 function homeDecide(){
   return `<section class="dlist" id="decide" aria-label="等我拍板">
@@ -1142,12 +1220,93 @@ document.addEventListener('click',e=>{
   if(m=q('[data-cw]')){state.cw=+m.dataset.cw;state.msg='';render();return}
 });
 
+/* ---------- 主线页（11-19 定稿：地铁线）：大目标 → 有序子项 → 任务单，放当前进度。示例数据，按 CURRENT.md 主线清单改写 ---------- */
+/* 子项状态沿用 CURRENT.md 主线清单：done ✅ run ▶ next ⏳ ask ❓ pause ⏸ pin 📌 drop ✖ */
+const SS={done:['✓','完成'],run:['▶','在做'],next:['','排队'],ask:['?','等你定'],pause:['Ⅱ','先不做'],pin:['·','挂起'],drop:['✕','不做了']};
+/* 任务单状态 */
+const TS={done:'已合并',run:'在做',rev:'审查中',me:'等你',todo:'没开始'};
+const T=(ref,t,st,ex,d)=>({ref,t,st,ex,d});
+const I=(t,s,who,now,a,b,moved,tk,blk)=>({t,s,who,now,a,b,moved,tk:tk||[],blk});
+const TODAY=19;
+const ML=[
+ {name:'执行底座改用 agent-autoloop',issue:'#188',since:'11-15',goal:'活从飞书一句话到合并都走同一套底座；分身按清单代批，工人关在独立账号里。',patrol:'每天 09:00、15:00',
+  items:[
+   I('方案 V2.4','done','cc','两轮评审，你回「代批选 B，9 件事都按推荐」',15,15,15,[T('PR #189','方案定稿','done','cc',15)]),
+   I('批 0A 隔离门','done','cc','工人账号越权 22 项全挡住',16,17,17,[T('PR #191','工人账号、过滤代理、门卫规则','done','cc',17)]),
+   I('批 0C 执行门','done','cc','四轮审查通过；还没装',17,18,18,[T('PR #209','工人侧启动脚本、受信发布最小版','done','cc',18)]),
+   I('ADR-015 信任边界','done','cc','你回「都按推荐」：控制面单独一个账号',18,18,18,[T('PR #206','底座方向、信任边界、迁移回退','done','cc',18)]),
+   I('批 0B 授权门','run','cc','第 2 小批在 GPT 那审查',16,null,19,[
+     T('0B-1 · PR #199','任务凭证与派单网关','done','cc',16),T('0B-2','中台配置、只读窗口','done','cc',17),T('0B-3','飞书按钮实测','done','cc',17),
+     T('0B-4a · PR #202','飞书桥接','done','cc',17),T('0B-4c · PR #218','秘书代批控制面 第 1 小批','done','cc',19),T('0B-4c · PR #225','秘书代批控制面 第 2 小批','rev','gp',19),
+     T('0B-5','推翻与汇报','todo','cc'),T('0B-6','dt-sandbox 加最小 CI','todo','cx')]),
+   I('批 0E 控制面搬家','run','me','卡在你那 3 件事',18,null,18,[
+     T('0E-0','ADR 修订、PRD v1.3、方案 V2.5','me','cc',18),T('0E-1','建 dt-gate、dt-secretary 两个账号','me','me'),T('0E-3','飞书开放平台建「门卫」应用','me','me'),
+     T('0E-2','中台和网关搬进 dt-gate','todo','cc'),T('0E-4','受信发布与合并执行器','todo','cc'),T('0E-5','猛鬼兽、亚古兽搬进 dt-secretary','todo','cc'),T('0E-6','三类反向验收','todo','gp')],'me'),
+   I('0D 恢复门','next','cc','前置条件 3 个齐了 2 个，差 #225 合并',null,null,null),
+   I('批 1 飞书拍板通道','next','cc','',null,null,null),
+   I('批 2 派活（dt-sandbox 5 单）','next','cx','',null,null,null),
+   I('批 3 出口','next','cc','受信发布、合并、发飞书、改定时规则',null,null,null),
+   I('批 4–5 审查交付、主线负责人','next','mg','',null,null,null),
+   I('批 6 驿窗只显示','pin','cc','要先做改动确认，还没定做不做',null,null,null)]},
+ {name:'猛鬼兽日报改版',issue:'#226',since:'11-19',goal:'日报按「接下来归谁」排，看完就知道今天要定什么、谁在办。',patrol:'每天 09:00、15:00',
+  items:[
+   I('结构方案','done','cc','一件事只出现一次',19,19,19),
+   I('三版真卡片','done','me','你选乙',19,19,19),
+   I('实施计划','done','me','你回「都按推荐」',19,19,19),
+   I('第 1 批 版式','run','cc','合并了，还没装',19,null,19,[T('PR #229','乙版卡片和完整报告','done','cc',19),T('安装','装到 ~/.hermes、重启网关','todo','cc'),T('验卡','发一张真卡片给你看','todo','mg')]),
+   I('第 2 批 按钮和回复','next','cc','表下一排「按推荐」按钮，点了就办',null,null,null),
+   I('第 3 批 猛鬼兽自己办只读的事','next','mg','',null,null,null)]}
+];
+const MERGED=[{name:'托管上线',issue:'#126',done:3,total:8,note:'11-15 并入执行底座，按秘书代批重做'}];
+const PATROL={at:'今天 09:00',notes:[
+ [0,'批 0E 控制面搬家','1 天没动，卡在你那 3 件事','me'],
+ [0,'批 0B 授权门','#225 送审 1 天，还没有审查回执',''],
+ [1,'第 1 批 版式','合并 5 小时还没装；建议派 Claude 装好并发一张真卡片，已放进等我拍板','me'],
+ [0,'0D 恢复门','前置条件差 #225 合并，合了就提议派单','']]};
+const doneN=m=>m.items.filter(x=>x.s==='done').length;
+const waits=()=>ML.flatMap((m,mi)=>m.items.flatMap((it,ii)=>it.tk.filter(k=>k.st==='me').map(k=>({mi,ii,m,it,k}))));
+const exChip=id=>id==='me'?'<span class="code mx-me">我</span>':codeChip(id);
+const sMark=s=>`<span class="mx-s s-${s}" title="${SS[s][1]}">${SS[s][0]}</span>`;
+const stale=it=>it.s==='run'&&it.moved!=null&&TODAY-it.moved>=1?`<span class="flag ${it.blk==='me'?'':'warn'}">停 ${TODAY-it.moved} 天</span>`:'';
+const bar=m=>`<span class="mx-bar">${m.items.map(x=>`<i class="s-${x.s} ${x.blk==='me'?'blk':''}"></i>`).join('')}</span>`;
+const mlHead=(m,mi)=>`<div class="mx-mh"><div class="t"><h3>${m.name}</h3><span class="mute">${m.issue} · ${m.since} 起</span></div>
+  <div class="p">${bar(m)}<b class="num">${doneN(m)}/${m.items.length}</b></div>
+</div><div class="mx-gl"><p>${m.goal}</p><span class="o">${codeChip('mg')} 猛鬼兽盯 · 每天 09:00、15:00 巡视</span></div>`;
+function waitBox(){
+  const W=waits();
+  return `<section class="mx-wait"><div class="hd"><b>等你</b><span class="num">${W.length} 件</span></div>
+   <ul>${W.map(w=>`<li><span class="m">${w.m.name} · ${w.it.t}</span><b>${w.k.t}</b>${w.k.ex==='me'?'<span class="tag">你亲手</span>':'<button class="btn pri" type="button">合并</button>'}</li>`).join('')}</ul></section>`;
+}
+const mergedRow=()=>MERGED.map(x=>`<div class="mx-merged"><span class="mx-s s-drop">→</span><b>${x.name}</b><span class="mute">${x.issue} · ${x.done}/${x.total}</span><span>${x.note}</span></div>`).join('');
+const pageHead=()=>`<div class="h-sec"><h2><i class="sq"></i>主线</h2><span class="hint num">${ML.length} 条在推进 · ${MERGED.length} 条已并入 · 等你 ${waits().length} 件</span></div>`;
+
+function mainPage(){
+  return `<div class="mx">${pageHead()}${waitBox()}
+   ${ML.map((m,mi)=>{const sel=state.ms[mi],it=m.items[sel],lastDone=m.items.map(x=>x.s).lastIndexOf('done');
+    const notes=PATROL.notes.filter(n=>n[0]===mi);
+    return `<article class="mx-ml b">${mlHead(m,mi)}
+     <div class="mx-metro" style="grid-template-columns:repeat(${m.items.length},minmax(0,1fr))">${m.items.map((x,i)=>`<button type="button" class="st s-${x.s} ${i<=lastDone?'past':''} ${i<lastDone?'pastr':''} ${i===sel?'on':''} ${x.blk==='me'?'blk':''} ${i===0?'first':''} ${i===m.items.length-1?'last':''}" data-ms="${mi}:${i}"><span class="ln"></span><span class="dot">${SS[x.s][0]}</span><span class="lb">${x.t}</span>${x.tk.length?`<span class="c num">${x.tk.filter(k=>k.st==='done').length}/${x.tk.length} 单</span>`:''}</button>`).join('')}</div>
+     <div class="mx-stn"><div class="sh">${sMark(it.s)}<b>${it.t}</b><span class="mute">${SS[it.s][1]}</span>${stale(it)}<span class="who">${exChip(it.who)} ${it.who==='me'?'我':R[it.who].name}</span></div>
+      ${it.now?`<p class="now">${it.now}</p>`:''}
+      ${it.tk.length?`<div class="mx-board">${[['me','等你'],['rev','审查中'],['run','在做'],['todo','没开始'],['done','已合并']].map(([s,l])=>{const L=it.tk.filter(k=>k.st===s);return L.length?`<div class="cl t-${s}"><h5>${l}<span class="num">${L.length}</span></h5>${L.map(k=>`<div class="cd"><span class="r num">${k.ref}</span><b>${k.t}</b><span class="e">${exChip(k.ex)}</span></div>`).join('')}</div>`:''}).join('')}</div>`:'<p class="mute none">还没有任务单</p>'}
+      ${notes.length?`<div class="mx-pn">${codeChip('mg')}<span class="num">${PATROL.at}</span>${notes.map(n=>`<span class="${n[3]}">${n[1]}：${n[2]}</span>`).join('')}</div>`:''}
+     </div></article>`}).join('')}
+   ${mergedRow()}</div>`;
+}
+
+document.addEventListener('click',e=>{
+  if(state.page!=='main')return;
+  const m=e.target.closest('[data-ms]');if(!m)return;
+  const[mi,i]=m.dataset.ms.split(':').map(Number);state.ms[mi]=i;render();
+});
+
 function render(){
-  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
+  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`,'main'],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
   $('#nav').innerHTML=nav.map(n=>n[0]==='grp'?`<li class="grp">${n[1]}<i></i></li>`:`<li><a href="#" ${n[3]?`data-page="${n[3]}"`:''} ${n[3]===state.page?'aria-current="page"':''}><span class="ico ${n[1]}"></span>${n[0]}${n[2]}</a></li>`).join('');
-  document.querySelector('.bar h1').textContent={report:'汇报',collab:'协同'}[state.page]||'首页';
+  document.querySelector('.bar h1').textContent={report:'汇报',main:'主线',collab:'协同'}[state.page]||'首页';
   $('#sideLeds').innerHTML=AI.map(id=>`<span title="${R[id].full||R[id].name} ${R[id].stateText}"><span class="led ${R[id].state==='ok'?'':'warn'}"></span>${R[id].code}</span>`).join('');
   if(state.page==='report'){ $('#content').innerHTML=reportPage(); return }
+  if(state.page==='main'){ $('#content').innerHTML=mainPage(); return }
   if(state.page==='collab'){ $('#content').innerHTML=collabPage(); cbPost(); return }
 
   const done=RUNS.filter(r=>r[3]!=='wait').length, warn=RUNS.filter(r=>r[3]==='warn').length, wait=RUNS.filter(r=>r[3]==='wait').length;
