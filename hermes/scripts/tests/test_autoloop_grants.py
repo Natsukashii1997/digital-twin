@@ -7,6 +7,7 @@ autoloop_grants.py（任务凭证与派单网关，#195 批 0B-1）：两步批�
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
+import io
 import json
 import os
 import sqlite3
@@ -542,6 +543,13 @@ class Cli(Base):
             self.assertEqual(G.main(["check", "--task", tid, "--action", "merge", "--generation", "1"]), 1)
             self.assertEqual(G.main(["show", "--task", tid]), 0)
         self.assertTrue(out.write.called)
+
+    def test_cli_check_rejects_expired_grant(self):
+        tid = self.new_task()
+        expired = T0 + dt.timedelta(hours=13)
+        with mock.patch.object(G, "now_tz", return_value=expired), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(G.main(["check", "--task", tid, "--action", "edit", "--generation", "1"]), 1)
+        self.assertEqual(json.loads(out.getvalue()), {"ok": False, "why": "凭证已过期"})
 
     def test_no_cli_entry_for_resolution(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
