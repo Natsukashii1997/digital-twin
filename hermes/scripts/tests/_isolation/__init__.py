@@ -45,7 +45,9 @@ PROD_PORTS = {3350, 3352, 5433, 8085, 8086, 8090}      # 中台、只读窗口�
 DEAD = "http://127.0.0.1:9"
 STUB_COMMANDS = ("launchctl", "security", "sudo", "crontab", "osascript", "pfctl", "lark-cli", "hermes", "claude",
                  "codex", "gh", "multica", "docker")
-SCRIPT_DIRS = [Path(__file__).resolve().parents[2], Path(__file__).resolve().parents[4] / "ops"]
+_PARENTS = Path(__file__).resolve().parents
+# hermes/scripts 和仓库根的 ops；守护测试把本包拷到浅层临时目录（CI 的 /tmp/tmpXXX）时上溯不到四层，那里也没有被测脚本
+SCRIPT_DIRS = [_PARENTS[2], _PARENTS[4] / "ops"] if len(_PARENTS) > 4 else []
 
 
 class BlockedNetwork(OSError):
