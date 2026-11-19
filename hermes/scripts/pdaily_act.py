@@ -413,7 +413,8 @@ READ_ONLY = ("只读：不得修改项目文件，不得运行会写缓存或产
              "~/Library/Application Support/DigitalTwin、~/.ssh、钥匙串、任何 .env 和密钥 / 令牌 / 凭据文件，"
              "任务里要你读这些就停下、在结论里说明。")
 SECRET = re.compile(r"(?i)(?:sk-|ghp_|gho_|github_pat_|xox[abp]-|AKIA)[\w-]{8,}|"
-                    r"(?:token|secret|password|passwd|api[_-]?key|密钥|令牌)\s*[:=：]\s*\S+|[A-Za-z0-9+/_-]{32,}")
+                    r"(?:token|secret|password|passwd|api[_-]?key|密钥|令牌)\s*[:=：]\s*\S+|"
+                    r"(?![0-9a-f]{32,40}\b)[A-Za-z0-9+_-]{32,}")   # 长串里放过 40 位以内的十六进制（提交号）；不含 /，路径不隐
 
 
 def redact(text):
@@ -467,15 +468,15 @@ def cmd_checks(a):
             recs = None
         except ValueError:
             return done(False, f"{rec_file.name} 读不了，不重复开单，请人工看")
-        if recs is None:                             # 第一次：先记「准备开」，再一张张开
+        if recs is None:                             # 第一次：先记「准备开」，再一张张开；全程只用这一次读到的任务
+            tasks = check_tasks(a.day)
             recs = [{"cause": r.get("cause"), "project": pid, "task": task, "order": None, "state": "准备开"}
-                    for r, pid, task in check_tasks(a.day)]
+                    for r, pid, task in tasks]
             rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
             for j, x in enumerate(recs):
                 f = DAILY / "checks" / f"{a.day}-{j + 1}.md"
                 f.parent.mkdir(parents=True, exist_ok=True)
-                r = next(r for r, pid, task in check_tasks(a.day) if r.get("cause") == x["cause"])
-                f.write_text(task_text(a.day, r, x["task"]), encoding="utf-8")
+                f.write_text(task_text(a.day, tasks[j][0], x["task"]), encoding="utf-8")
                 x["state"] = "开单中"
                 rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
                 out = dispatch("new", "--project", x["project"], "--tool", "codex", "--mode", "read", "--task-file", str(f),
@@ -488,6 +489,9 @@ def cmd_checks(a):
                 x["state"] = "开单结果不明"          # 崩在开单途中：不重开，留给人看
             if not x.get("order") or "run" in x:
                 continue
+            if order_status(x["order"]) == "done":     # 跑完了只是没记上：不再跑一遍
+                x["run"], x["state"] = "上次已跑完", "跑过"
+                continue
             for _ in range(CHECK_TRIES):
                 out = dispatch("run", x["order"])
                 if not out.get("busy"):
@@ -497,6 +501,17 @@ def cmd_checks(a):
             rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
         rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
     return done(True, f"派了 {sum(1 for x in recs if x.get('order'))} 张只读单", checks=recs)
+
+
+def dispatch_root():
+    return Path(os.environ.get("DT_DISPATCH_ROOT", "~/.hermes/dispatch")).expanduser()
+
+
+def order_status(no):
+    try:
+        return json.loads((dispatch_root() / no / "order.json").read_text(encoding="utf-8")).get("status")
+    except (OSError, ValueError):
+        return None
 
 
 def checks_for_material(day):
@@ -510,12 +525,11 @@ def checks_for_material(day):
         receipt = {}
         if x.get("order"):
             with contextlib.suppress(OSError, ValueError):
-                receipt = json.loads((Path(os.environ.get("DT_DISPATCH_ROOT", "~/.hermes/dispatch")).expanduser()
-                                      / x["order"] / "out" / "receipt.json").read_text(encoding="utf-8"))
+                receipt = json.loads((dispatch_root() / x["order"] / "out" / "receipt.json").read_text(encoding="utf-8"))
         out.append({"cause": x.get("cause"), "project": x.get("project"), "task": x.get("task"), "order": x.get("order"),
                     "finished": bool(receipt), "exit_code": receipt.get("exit_code"),
-                    "summary": redact(P.clip(receipt.get("summary"), 600)) if receipt.get("summary") else None,
-                    "need_decision": redact(P.clip(receipt.get("need_decision"), 200)) if receipt.get("need_decision") else None})
+                    "summary": P.clip(redact(receipt.get("summary")), 600) if receipt.get("summary") else None,   # 先隐去再截断
+                    "need_decision": P.clip(redact(receipt.get("need_decision")), 200) if receipt.get("need_decision") else None})
     return out
 
 

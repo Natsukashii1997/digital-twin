@@ -291,6 +291,31 @@ class ActTests(unittest.TestCase):
         (self.tmp / f"{DAY}.checks.json").write_text("坏的")
         self.assertEqual(self.run_cmd("checks", "--day", DAY)[0], 1)
 
+    def test_redact_order_and_scope(self):
+        """复审第三轮 P3-1：先隐去再截断；提交号、路径不隐。"""
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        self.assertEqual(A.redact(f"提交 {sha}，文件 src/very/long/path/to/some_module_name_here.py"),
+                         f"提交 {sha}，文件 src/very/long/path/to/some_module_name_here.py")
+        root = self.tmp / "dispatch"
+        (root / "D7" / "out").mkdir(parents=True)
+        (root / "D7" / "out" / "receipt.json").write_text(json.dumps({"summary": "长" * 590 + " ghp_ABCDEFGHIJKLMNOPQRST"}))
+        (self.tmp / f"{DAY}.checks.json").write_text(json.dumps([{"cause": "a", "project": "work-desk", "order": "D7"}]))
+        with mock.patch.dict(os.environ, {"DT_DISPATCH_ROOT": str(root)}):
+            got = A.checks_for_material(DAY)[0]["summary"]
+        self.assertNotIn("ghp_", got)
+
+    def test_checks_skip_order_already_done(self):
+        """复审第三轮 P3-3：车间里这张单已经跑完、只是没记上，重跑不再跑一遍。"""
+        root = self.tmp / "dispatch"
+        (root / "D9").mkdir(parents=True)
+        (root / "D9" / "order.json").write_text(json.dumps({"status": "done"}))
+        (self.tmp / f"{DAY}.checks.json").write_text(json.dumps([{"cause": "a", "project": "work-desk", "order": "D9", "state": "已开单"}]))
+        log, fake = self.fake_dispatch()
+        with mock.patch.object(A, "DISPATCH", fake), mock.patch.dict(os.environ, {"DT_DISPATCH_ROOT": str(root)}):
+            self.run_cmd("checks", "--day", DAY)
+        self.assertFalse(log.exists())
+        self.assertEqual(json.loads((self.tmp / f"{DAY}.checks.json").read_text())[0]["run"], "上次已跑完")
+
     def test_checks_none_written_once(self):
         log, fake = self.fake_dispatch()
         with mock.patch.object(A, "DISPATCH", fake):
