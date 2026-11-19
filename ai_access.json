@@ -75,7 +75,7 @@
     },
     {
       "id": "pdaily",
-      "name": "个人项目日报 V2 写稿（pdaily_publish.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后出甲版卡片；#111）",
+      "name": "个人项目日报 V2 写稿（pdaily_publish.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后出乙版卡片；#111、#226）",
       "executor": "hermes",
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
       "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；10:00 以猛鬼兽机器人发常浩私聊卡片（#155、#159；原 09:45）",

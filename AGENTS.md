@@ -18,7 +18,7 @@ hermes/
     progress_data.py   项目进展取数（F6，常浩问“今天各项目怎么样”时现查）
     pdaily_data.py     个人项目日报取数（#110，PRD D22）：按统计日（04:00→04:00，Asia/Shanghai）给名册每个项目出一条记录（阶段目标、里程碑、昨日增量、工程 / 交付 / 验收三项、当前状态、新鲜度），JSON 输出；交付、验收一律记「未核实」，只附自述摘录（当天 CURRENT 节、PR 标题），等 #110 1b 的行动记录再判；目标、CURRENT、新鲜度读主分支在统计日结束时的快照，不读工作区；取不到记 null 不当 0；GitHub 遇到网络问题（唤醒后代理没通）最多等 300 秒重试（DT_GH_WAIT_SECONDS，#176）；只读，未安装
     actions.py         代理行动记录（#110 1b，V2 5.4）：actions.jsonl 的结构（定稿不再改）和 record() 记录函数；--date 按统计日列出行动：actions.jsonl 加六个来源现读现转（合并官、merge-runs、派单台账、定时任务库、夜跑 run-log、裁决文件），每条带授权档位、来源，低于应有档位的标 auth_gap；裁决文件只摘原文不判批准拒绝；安装只认 record() 写的；只读，未安装，暂无脚本调用 record()
-    pdaily_publish.py  个人项目日报写稿与核对（#111 批 2a）：读 facts.json，经 hermes chat 单次让 Hermes 写卡片要素和完整报告（提示词 prompts/pdaily_report.md），脚本核对编号、百分比、PR 数、「已安装 / 已验收」说法、三个数和七段，写法问题自动修并记提醒，编造类不通过就出「分析降级」事实版，再坏出最小卡片；按甲版定稿（11-10，五板块全放卡片不折叠、速览表列宽 25/15/60）生成卡片 JSON；send 建完整报告云文档、拦工作内容（台账编号、工作日报文档等一律拒发）、以猛鬼兽机器人发常浩私聊并回读，记 delivery.json，同一统计日只发一次（#155）
+    pdaily_publish.py  个人项目日报写稿与核对（#111 批 2a；#226 改乙版）：读 facts.json，经 hermes chat 单次让 Hermes 写卡片要素和完整报告（提示词 prompts/pdaily_report.md），脚本核对编号、百分比、PR 数、「已安装 / 已验收」说法、三个数和六段，另核对每类风险有去向、指向的拍板存在、同一类不拆两条、缺材料的事不进拍板（「同一件事在风险和拍板两处各说各的」判不准，只记提醒）；写法问题自动修并记提醒，不通过就带着问题让模型重写一次，再不过出「分析降级」事实版，再坏出最小卡片；按乙版定稿（常浩 2026-11-19 选定：四板块 核心数据速览 → 昨日关键成果 → 风险与阻塞 → 需要你拍板；风险按原因一类一行、带去向「→ 拍板 N」或「只观察」，项目明细在折叠面板；拍板是 #、事项、推荐、已挂四列的表，已挂几天由脚本按候选起始时间算；没有今日推进；速览表列宽 25/15/60 是 11-10 定稿）生成卡片 JSON；send 建完整报告云文档、拦工作内容（台账编号、工作日报文档等一律拒发）、以猛鬼兽机器人发常浩私聊并回读，记 delivery.json，同一统计日只发一次（#155）；工程自检有问题时并进风险表的一行、原文进折叠面板，正常时页脚一句
     pdaily_build_job.py / pdaily_send_job.py  个人项目日报定时任务入口（#155）：Hermes 无模型定时任务 09:15 写稿、10:00 发送（#159，原 09:00 / 09:45）；发送成功不输出，没发成输出一句原因发到私聊
     pdaily_facts.py    个人项目日报事实快照（#110 1c）：把 pdaily_data 的项目记录和 actions 的行动合成 DigitalTwin/daily/<统计日>.facts.json，给 Hermes 写日报用；含拍板候选、风险四类、跨项目明文引用（查被引用方关没关）、观察池（每次现算）、覆盖与可信度；只给候选和出处，不定级、不排序、不推荐；取不到写 null 不当 0；--dry-run 只打印；未安装
     report_data.py     工作日报 / 周报取数（T7，新结构并跑；2026-11-11 常浩定从猛鬼兽撤下，定时任务已暂停，PRD D20）；report_daily.py、report_weekly.py 是定时任务入口；开跑前先等主模型通道连通，最多 300 秒，到时间照常放行交给回退（#140，记录在 evidence/reports/model-route-wait.jsonl）
@@ -68,7 +68,7 @@ hermes/
   baselines/           身份闸的 GitHub 保护基线（#174）：dt-sandbox 规则集和 main 分支保护，名册 executor_gate 指向它；改保护规则先改 GitHub 再改这里
 docs/LESSONS.md        本项目踩过的坑（L-xx）；跨项目的坑在 agent-kit/LESSONS.md（G-xx）
 docs/DECIDED.md        已定内容登记表（全局规则第 15 节）：常浩定稿过的东西，改之前先单独确认；界面类附基线截图路径
-docs/design/           定稿的界面源文件（工作台 workbench-v4.html：首页和汇报页），示例数据
+docs/design/           定稿的界面源文件（工作台 workbench.html：首页、汇报、协同三页），示例数据
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
 docs/三报体系-V2.1.md   主动运营与三报（早报 / 晚报 / 周报）的产品与实施基线（PRD D20）；评审过程在 docs/reviews/
@@ -81,7 +81,7 @@ orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务、工人账号的过滤代理和门卫规则（#190），另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
-  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只写一句，有问题加「🔧 工程自检」一块）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
+  self_check.py        工程自检（#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只在页脚写一句，有问题并进「风险与阻塞」表的一行、原文放折叠面板，#226）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   dt_worktree.py       工人侧启动脚本（#205 批 0C）：装在 /Users/Shared/dt-autoloop/bin/（归主账号，工人只能运行），以 dt-worktree-claude / dt-worktree-codex 的名字挂在中台 Agent dt-claude / dt-codex 的 program 上（引擎零补丁），用 /usr/bin/python3；每轮先准入：事件都来自 hermes 来源、同一任务单号，按工人只读的凭证镜像和任务单核状态、到期、改文件动作、代次（回答 / 复查沿用上次派单的代次）、执行方 / 仓库 / 规则、五要素哈希，续接时还要等于第一轮钉下的范围，每单跨轮累计 2 小时；不过就不启动 CLI，交一条「停下了」通知（中台按本轮结束，不重派）；临时问题写「没跑成」，中台判 failed、5 分钟后重派；CLI 在独立进程组里跑，取消时转发信号、7 秒内整组强杀，超时同样整组停，CLI 退出后清掉剩下的后代再提交；接单程序的取消覆盖整轮（提交后、换交接包和清单前各看一次），掐着上限自己退出的也按超时算；工作目录固定 ~/dt-work/<仓库>/wt/<单号>、分支 <执行方>/<单号>，续接回同一目录；提示词末尾补一段「只改文件、不推不开 PR 不切分支」；CLI 输出原样交给中台；退出后提交改动；只有正常结束（不是取消、不是超时）、后代清干净、再核一次凭证有效，才把交接包写进 ~/dt-outbox/<单号>/；出了问题没交接的一轮（准入不过、取消含落在换清单之后、超时、进程没清干净、交接前凭证失效、提交或交接出错）以「停下了」给中台结论（取消不带通知卡），受信发布据此不认这一轮；正常结束只是没改动的一轮不补「停下了」（会盖掉 CLI 的回执），记成剩余风险，0D 结果账本补；换清单是提交点，最后检查和换清单之间屏蔽取消信号；不推、不碰 GitHub 写凭据；未安装
   autoloop_isolation_check.py  0A 隔离门反向测试（#190）：在工人账号 dt-worker 里运行，逐项尝试越权（读主账号文件、改 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、GitHub 凭据、sudo、连主账号其他本机服务、连加速器代理、经过滤代理绕回本机、往主账号会执行的目录里写），每项都应被挡住；读不到监听端口判出错不判通过；结果写 /Users/Shared/dt-autoloop/results/；共享副本在 /Users/Shared/dt-autoloop/（连同 dt-worker 安装脚本 setup-dt-worker.sh（源文件 ops/dt_worker_setup.sh，可重复跑）、门卫脚本 dt_worker_pf.sh、只读引擎副本）
