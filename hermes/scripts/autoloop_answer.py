@@ -23,6 +23,9 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
 卡已不开着就把排队的结算掉（从没发过）；inflight 超过 2 分钟且进程不在（或超过 10 分钟，防进程号复用）、unknown →
 只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
 回读只认中台的四种卡片状态；缺字段或认不出的状态一律当结果不明，不结算、不放开（PR #202 审查 P1-08）。
+版本（#218 第 2 轮 P1-03）：排队的选择记着点击时卡片在飞书上的版本；提交前卡片已改版（feishu_cards.version 变了）就作废、
+请常浩在新版上重点，不转到新版本；中台确认送达也按版本记（autoloop_feishu）。剩余：领到发送资格到 POST 之间中台改版，
+中台 answer 不核版本，要中台版本核对（规格第 9 节验收 12）才能堵住。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
 秘书先答成功、常浩的点击迟到（中台回 changed=false，或对账看到别的结果）时，回话里补一句「秘书替你选了「X」，不同意可以推翻」
 （secretary_note；推翻入口在代批汇报卡上，0B-5 做）。
@@ -151,9 +154,10 @@ def claim(card, option):
             raise F.Fail("上一次点击还在处理，先别重复点")
         sec = con.execute("SELECT state FROM claims WHERE card_id = ? AND who = 'secretary'", (card["card_id"],)).fetchone()
         note = "秘书已获准替你回答，以中台先受理的为准" if sec and sec["state"] in SECRETARY_LIVE else None
-        attempt = secrets.token_hex(6)
-        con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note, attempt) "
-                    "VALUES (?, 'owner', 'queued', ?, ?, NULL, ?, ?)", (card["card_id"], option, F.now(), note, attempt))
+        attempt = secrets.token_hex(6)                  # 记下点的是飞书上的第几版（按钮在那一版的消息上）
+        con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note, attempt, version) "
+                    "VALUES (?, 'owner', 'queued', ?, ?, NULL, ?, ?, ?)",
+                    (card["card_id"], option, F.now(), note, attempt, card["version"]))
         F.log_claim(con, card["card_id"], "owner", "queued", option, note, attempt)
     return attempt, note
 
@@ -226,6 +230,12 @@ def submit(card_id):
         card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
         if not r or r["state"] != "queued" or not card:
             return None
+        if r["version"] != card["version"]:          # 点之后卡片改版了：旧版本的选择不转到新版本（#218 第 2 轮 P1-03）
+            note = f"你点的是第 {r['version']} 版，卡片已经改成第 {card['version']} 版"
+            con.execute("DELETE FROM claims WHERE card_id = ? AND who = 'owner' AND attempt = ? AND state = 'queued'",
+                        (card_id, r["attempt"]))
+            F.log_claim(con, card_id, "owner", "released", r["choice"], note, r["attempt"])
+            return 1, f"这张卡在你点之后改版了，你的选择没有交出去，请在新版卡片上重新点一次。（{note}）"
         if not card["message_id"] or not card["hub_delivered_at"]:
             return 3, "已记下你的选择，卡片送达确认后马上交给中台。"
         cur = con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner' "

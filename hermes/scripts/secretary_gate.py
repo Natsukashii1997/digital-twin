@@ -17,10 +17,11 @@
   任务和代次从凭证库（只读）；开关、清单从 secretary.read_status；本人状态、飞书送达时间从 cards.db；PR 从受信发布记录。
   error、abstain 是秘书自报，只会让这件事交常浩（往保守的方向），不当成核实过的事实。
   ① 的模型运行证据（审查 P1-01：模型名、是否回退不收提议自报）：按 run.session 只读打开 Hermes 自己的运行记录
-  （$HERMES_HOME/state.db，主模型和回退模型从 $HERMES_HOME/config.yaml 读），这次会话必须：单次调用（source = tool、没有父会话）、
-  正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；模型调用全是 Hermes 配置的主模型（有回退模型或别的模型
-  → 交常浩）；第一条输入里有 run_marker(卡片号, 版本)；最后一条模型输出是一个 JSON 对象，category、card、card_version、choice、
-  text、abstain 和提议逐项相同（提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。
+  （$HERMES_HOME/state.db，主模型和回退模型从 $HERMES_HOME/config.yaml 读），这次会话必须：source = tool、没有父会话、
+  **只有一条输入**、正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；**全部模型调用**（主循环和辅助调用）
+  都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
+  模型输出是一个 JSON 对象，只许有 category、card、card_version、choice、text、abstain、error，和提议逐项严格相同（类型也要一样；
+  提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。source = tool 只是标签，不是调用者身份（ADR-015 账号隔离）。
 
 结果（submit 返回 {"ok", "result", "msg", "decision"?}；命令行最后一行同样是一行 JSON，退出码见括号）：
   done（0）已送达并回读核实；handoff（4）记了一笔「交常浩」；not_ready（3）还不能办，过一会再交，不记账；
@@ -54,7 +55,9 @@
   规则没变；凭证仍有效、代次没变；secretary 准入；任务没被结果不明冻结；① 还要秘书通道已领到、本人没占着（autoloop_feishu.owner_holds）：
   本人占着 → 作废这个决定（释放额度），claim_log 记一笔「你已经在点了，秘书让出」；否则写 claims（who = secretary，
   state = approved，attempt = 决定号）再 secretary_ledger.begin（issued → executing）。
-送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）；② autoloop_grants.resume_dispatch
+送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）。**① 的送达开关 REAL_ASK 关着**
+  （PR #218 第 2 轮 P1-01）：中台 answer 只核卡片开着和 ref、不核版本，获准到送达之间卡片改版时旧答案会落到新版本上；
+  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 前闸全过也交常浩；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
   关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
@@ -63,7 +66,8 @@
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
   ① 停在 executing 而 cards.db 里没有这个决定号的获准记录（claim_log 的 approved，和 claims 同一事务写）：获准没落盘，送达只在
   获准之后，确定没发 → failed（审查 P2-02：账本先提交 executing、cards.db 还没提交时被杀）。查的时候持 cards.db 写锁，不会读到
-  正在获准、还没提交的那一刻。
+  正在获准、还没提交的那一刻。只认获准前记下身份的那一份 cards.db（received.cards_db = meta 里的库身份），用不新建、不补表的
+  方式打开；文件不在、结构不全、身份对不上 → 不下结论（第 2 轮 P1-04：证据库没了不等于没有这条记录）。
 lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自己的 ref（cards.db 的 secretary_cards），报 delivered（同一 ref 重报幂等），
   中台收下后记「中台确认送达」；领到新版本时先清掉旧版本的确认时间，只有这一版报送达成功才记（审查 P1-02）；以后由常驻进程调（本批不装）。
 
@@ -119,11 +123,13 @@ CATEGORIES = ("ask", "redispatch", "reject")
 KEYS = {"ask": {"card", "card_version", "choice"}, "redispatch": {"card", "card_version"}, "reject": {"task", "pr", "head"}}
 COMMON_KEYS = {"schema", "category", "text", "error", "abstain"}
 TEXT_KEYS = ("context", "question", "summary", "basis")
-RUN_KEYS = ("category", "card", "card_version", "choice", "text", "abstain")   # 提议和这次模型输出逐项相同的字段
+RUN_KEYS = ("category", "card", "card_version", "choice", "text", "abstain", "error")   # 模型输出只许有这些字段，提议逐项相同
 RUN_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 RUN_SOURCE = "tool"                         # hermes chat --source tool 的单次调用
 RUN_END = ("cli_close", "agent_close")      # 正常结束
 RUN_FRESH = dt.timedelta(minutes=30)        # 判断结束到交提议的最长间隔
+REAL_ASK = False        # ① 真送达：中台 answer 能按版本核对（CAS）之前整体关闭（PR #218 第 2 轮 P1-01，常浩 11-19 选甲，规格第 9 节验收 12）
+TEST_ASK = False        # 测试在进程内打开 ① 的送达；不经环境变量
 REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
 TEST_GH = None          # 测试在进程内换成假 gh 的路径；不经环境变量
 REVIEW_SOURCE = None    # ③ 审查记录的可信来源（见 review_record）；现在没有，测试在进程内注入
@@ -131,6 +137,10 @@ REVIEW_SOURCE = None    # ③ 审查记录的可信来源（见 review_record）
 
 class Refused(Exception):
     """只拒、不记账（说人话的原因）。"""
+
+
+class SwitchOff(Refused):
+    """送达开关关着（① REAL_ASK、③ REAL_COMMENT）：前闸都过了也交常浩。"""
 
 
 class NotReady(Exception):
@@ -318,7 +328,14 @@ def gh_cmd():
         return TEST_GH
     if REAL_COMMENT:
         return "gh"
-    raise Refused("机器账号还没在 dt-gate 配好（0E-4），退回 PR 的留言整体关闭")
+    raise SwitchOff("机器账号还没在 dt-gate 配好（0E-4），退回 PR 的留言整体关闭")
+
+
+def ask_switch():
+    """① 的送达开关：中台回答还不能按版本核对，获准到送达之间卡片改版时旧答案会落到新版本上（PR #218 第 2 轮 P1-01）。
+    中台有了版本核对（规格第 9 节验收 12）再打开，并让 deliver_ask 带上获准时的版本。"""
+    if not (REAL_ASK or TEST_ASK):
+        raise SwitchOff("中台收回答还不能按卡片版本核对，秘书替你选选项暂时整体关闭，这张交给你")
 
 
 def pr_now(github, pr):
@@ -425,8 +442,14 @@ def hermes_home():
 
 
 def run_marker(card_id, version):
-    """秘书侧给模型的输入里必须原样带这一行：运行记录据此绑到这张卡的这一版（第 2 小批的秘书侧照此写）。"""
+    """秘书侧给模型的输入**第一行**必须原样是这一行（整行相等，不是出现在哪里都算）：运行记录据此绑到这张卡的这一版
+    （第 2 小批的秘书侧照此写）。"""
     return f"dt-secretary-card {int(card_id)} v{int(version)}"
+
+
+def _same(a, b):
+    """严格相同：类型也要一样（True 不等于 1，1.0 不等于 1），按 JSON 规范化后比。"""
+    return json.dumps(a, sort_keys=True, ensure_ascii=False) == json.dumps(b, sort_keys=True, ensure_ascii=False)
 
 
 def _json_object(text):
@@ -455,10 +478,10 @@ def run_evidence(session, card, since, t):
         s = con.execute("SELECT * FROM sessions WHERE id = ?", (session,)).fetchone()
         if s is None:
             no("查不到")
-        usage = con.execute("SELECT model, billing_provider, api_call_count FROM session_model_usage "
-                            "WHERE session_id = ? AND task = ''", (session,)).fetchall()
-        first = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id LIMIT 1",
-                            (session,)).fetchone()
+        usage = con.execute("SELECT model, billing_provider, task, api_call_count FROM session_model_usage WHERE session_id = ?",
+                            (session,)).fetchall()
+        users = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id",
+                            (session,)).fetchall()
         last = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 "
                            "AND content IS NOT NULL AND content != '' ORDER BY id DESC LIMIT 1", (session,)).fetchone()
     except sqlite3.Error:
@@ -480,10 +503,15 @@ def run_evidence(session, card, since, t):
         no("早于这一版卡片送到你那里")
     if t - ended > RUN_FRESH:
         no(f"是 {int(RUN_FRESH.total_seconds() // 60)} 分钟以前的")
-    if not usage or any((r["model"], r["billing_provider"]) != (main["default"], main["provider"]) or not r["api_call_count"]
-                        for r in usage):
+    # 这次会话的全部模型调用（主循环 task='' 和标题生成、压缩等辅助调用）都要是主模型：口径是「整次判断只用了主模型」
+    # （#218 第 2 轮 P2-02）。主循环必须有调用。
+    if not any(r["task"] == "" and r["api_call_count"] for r in usage) or \
+            any((r["model"], r["billing_provider"]) != (main["default"], main["provider"]) for r in usage):
         no("显示用了回退模型或别的模型")
-    if not first or run_marker(card["id"], card["version"]) not in str(first["content"] or ""):
+    if len(users) != 1:                                    # source=tool 只是标签：要求整次会话只有一条输入（#218 第 2 轮 P2-01）
+        no("不是只有一条输入的单次判断")
+    head = str(users[0]["content"] or "").splitlines()
+    if not head or head[0].strip() != run_marker(card["id"], card["version"]):
         no("的输入不是这张卡的这一版")
     out = _json_object(last["content"]) if last else None
     if out is None:
@@ -493,8 +521,10 @@ def run_evidence(session, card, since, t):
 
 
 def run_gate(p, ctx, t):
+    """模型输出只许有 RUN_KEYS 里的字段，并和提议逐项严格相同（缺省等于 null；类型也要一样）。提议本身已按 format_errors
+    严格核过类型，所以输出也就是同样合格的类型（#218 第 2 轮 P1-02：error 也比，True / 1.0 不当 1）。"""
     ev, out = run_evidence(p["run"]["session"], ctx["card"], ctx["feishu_at"], t)
-    if any(out.get(k) != p.get(k) for k in RUN_KEYS):
+    if set(out) - set(RUN_KEYS) or any(not _same(out.get(k), p.get(k)) for k in RUN_KEYS):
         raise Handoff("model", "提议和这次判断的实际输出对不上，不代批")
     ctx["received"] = {**ctx["received"], "run": ev}
 
@@ -558,6 +588,7 @@ def wait_gate(ctx, t):
     if ctx["category"] == "ask":
         with F.db() as con:
             sc = secretary_card(con, card["id"])
+            ctx["received"] = {**ctx["received"], "cards_db": F.db_id(con)}   # 对账时核对是不是同一份 cards.db
         if not secretary_delivered(sc, card["version"]):
             raise NotReady("秘书通道还没领到这张卡的这一版（或中台还没确认送达），过一会再交")
     return sent
@@ -689,7 +720,9 @@ def front_gates(p, ctx, st_status, t, st):
         redispatch_gate(ctx)
     if cat == "reject":
         reject_gate(ctx, p)
-        gh_cmd()                                             # 留言开关关着就到此为止（Refused → 交常浩，见 submit）
+        gh_cmd()                                             # 留言开关关着就到此为止（SwitchOff → 交常浩，见 submit）
+    if cat == "ask":
+        ask_switch()                                         # 送达开关关着就到此为止（SwitchOff → 交常浩）
 
 
 # ---------- 任务锁、获准（唯一的送达授权点）与送达 ----------
@@ -763,8 +796,9 @@ def approve(st, d, ctx, now):
                 SL.void(st, d["id"], f"获准前现读：{e}", now=now)
             return "failed", f"获准前现读：{e}"
         if ask:                                              # 同一把 cards.db 写锁里登记秘书获准；本人点击此后照样能提交，中台先受理的为准
-            con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note, attempt) "
-                        "VALUES (?, 'secretary', 'approved', ?, ?, ?, NULL, ?)", (card_id, choice, F.now(), os.getpid(), d["id"]))
+            con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note, attempt, version) "
+                        "VALUES (?, 'secretary', 'approved', ?, ?, ?, NULL, ?, ?)",
+                        (card_id, choice, F.now(), os.getpid(), d["id"], card["version"]))
             F.log_claim(con, card_id, "secretary", "approved", choice, None, d["id"])
     return None
 
@@ -791,6 +825,12 @@ def readback_ok(c, choice):
 
 def deliver_ask(st, d, ctx, now):
     card_id, choice, ref = ctx["card"]["id"], ctx["hub_choice"], ctx["ref"]
+    try:                                                     # 开关在获准后被关：确定没发
+        ask_switch()
+    except SwitchOff as e:
+        SL.finish(st, d["id"], "failed", {"error": str(e)}, now=now)
+        set_claim(card_id, d["id"], None, str(e))
+        return {"ok": False, "result": "failed", "decision": d["id"], "msg": str(e)}
     try:
         out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": SECRETARY, "ref": ref}, channel=CHANNEL)
     except F.HubError as e:
@@ -898,6 +938,8 @@ def submit(proposal, now=None):
                 front_gates(proposal, ctx, st_status, t, st)
             except Handoff as h:
                 return record_handoff(st, ctx, h.reason, h.why, now)
+            except SwitchOff as e:
+                return record_handoff(st, ctx, "gate", str(e)[:100], now)
             except Refused as e:
                 if ctx["category"] == "reject":              # ③ 留言开关关着：交常浩
                     return record_handoff(st, ctx, "gate", str(e)[:100], now)
@@ -963,9 +1005,15 @@ def _verdict(st, d):
     """按回读证据给结论：(结论, 证据)；读不到返回 None（不动）。"""
     if d["action"] == "ask":
         if d["status"] == "executing":                       # 审查 P2-02：获准记录没落盘就确定没发（持写锁读，见头注释）
-            with F.db(write=True) as con:
-                approved = con.execute("SELECT 1 FROM claim_log WHERE card_id = ? AND who = 'secretary' AND attempt = ? "
-                                       "AND state = 'approved'", (d["card_id"], d["id"])).fetchone()
+            want = ((L.read_raw(d) or {}).get("received") or {}).get("cards_db")
+            try:                                             # 第 2 轮 P1-04：只认获准时那一份、结构完整的 cards.db，不新建
+                with F.db(write=True, create=False) as con:
+                    if not want or F.db_id(con) != want:
+                        return None
+                    approved = con.execute("SELECT 1 FROM claim_log WHERE card_id = ? AND who = 'secretary' AND attempt = ? "
+                                           "AND state = 'approved'", (d["card_id"], d["id"])).fetchone()
+            except (F.Fail, sqlite3.Error):
+                return None                                  # 证据库不在、不全或换了：核不了，不下结论
             if not approved:
                 return "failed", {"checked": "cards.db 里没有这个决定的获准记录：获准没落盘，送达只在获准之后，确定没发",
                                   "found": False}

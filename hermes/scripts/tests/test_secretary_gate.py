@@ -101,6 +101,8 @@ def utc(t):
 
 # ---------- 假 Hermes 运行记录（① 的模型运行证据，审查 P1-01） ----------
 MAIN, MAIN_PROVIDER = "claude-opus-5-5[1m]", "claude-subscription-directsdk-experimental"
+# 模型输出的约定字段：测试自己写死，不从被测代码取（取了的话代码改漏一个字段，测试也跟着漏）
+RUN_FIELDS = ("category", "card", "card_version", "choice", "text", "abstain", "error")
 HERMES_SCHEMA = """
 CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, parent_session_id TEXT, started_at REAL NOT NULL,
   ended_at REAL, end_reason TEXT, tool_call_count INTEGER DEFAULT 0);
@@ -120,19 +122,21 @@ def make_hermes(home):
 
 
 def write_run(home, p, started, ended, sid=None, source="tool", end_reason="cli_close", tools=0, usage=None, marker=None,
-              output=None):
+              output=None, users=1):
     """按提议写一次「秘书判断」的运行记录：输入带这张卡的标记，最后一条输出就是提议里的决定字段。返回会话号。"""
     sid = sid or f"run-{os.urandom(4).hex()}"
     if marker is None:
         marker = SG.run_marker(int(p.get("card") or 0), int(p.get("card_version") or 0))
     if output is None:
-        output = json.dumps({k: p[k] for k in SG.RUN_KEYS if p.get(k) is not None}, ensure_ascii=False)
+        output = json.dumps({k: p[k] for k in RUN_FIELDS if p.get(k) is not None}, ensure_ascii=False)
     with contextlib.closing(sqlite3.connect(home / "state.db")) as con, con:
         con.execute("INSERT INTO sessions VALUES (?, ?, NULL, ?, ?, ?, ?)",
                     (sid, source, started.timestamp(), ended.timestamp() if ended else None, end_reason, tools))
         for model, provider, task, n in usage or ((MAIN, MAIN_PROVIDER, "", 1), (MAIN, MAIN_PROVIDER, "title_generation", 1)):
             con.execute("INSERT INTO session_model_usage VALUES (?, ?, ?, ?, ?)", (sid, model, provider, task, n))
         con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (sid, f"{marker}\n卡片文字……"))
+        for _ in range(users - 1):                                               # 多轮会话：后面又交了别的输入
+            con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)", (sid, "改选第二个"))
         con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)", (sid, "想一想"))
         con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)", (sid, output))
     return sid
@@ -179,6 +183,9 @@ class Base(unittest.TestCase):
             self.addCleanup(p.stop)
         self.calls, self.hub_error, self.hub_side = [], None, None
         p = mock.patch.object(F, "hub", self.fake_hub)
+        p.start()
+        self.addCleanup(p.stop)
+        p = mock.patch.object(SG, "TEST_ASK", True)                            # ① 的送达开关在测试里打开（正式关着）
         p.start()
         self.addCleanup(p.stop)
         self.posted = []
@@ -840,6 +847,13 @@ class RunEvidenceTests(Base):
         run = L.read_raw(self.get(out["decision"]))["received"]["run"]
         self.assertEqual((run["model"], run["provider"]), (MAIN, MAIN_PROVIDER))
 
+    def test_explicit_nulls_in_output_are_the_same_as_omitted(self):
+        """模型把 abstain、error 明写成 null 也是约定内的输出（缺省等于 null）。"""
+        p = self.base()
+        p["run"]["session"] = self.make_run(p, output=json.dumps({**{k: p[k] for k in RUN_FIELDS if p.get(k) is not None},
+                                                                   "abstain": None, "error": None}, ensure_ascii=False))
+        self.assertEqual(self.submit(p)["result"], "done")
+
     def test_bad_runs_hand_off_as_model(self):
         p = self.base()
         five = T - dt.timedelta(minutes=5)
@@ -864,6 +878,20 @@ class RunEvidenceTests(Base):
             "输出不是 JSON": dict(output="选第一个"),
             "白话被改了": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "card_version", "choice")},
                                              "text": {**TEXT, "basis": "别的理由"}}, ensure_ascii=False)),
+            # 第 2 轮 P1-02：输出说出错、提议改成 null；布尔、浮点冒充整数；输出多带字段
+            "输出说出错": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "card_version", "choice", "text")},
+                                             "error": "判断过程出错"}, ensure_ascii=False)),
+            "选项是 true": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "card_version", "text")},
+                                              "choice": True}, ensure_ascii=False)),
+            "版本是 1.0": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "choice", "text")},
+                                             "card_version": 1.0}, ensure_ascii=False)),
+            "输出多字段": dict(output=json.dumps({**{k: p[k] for k in ("category", "card", "card_version", "choice", "text")},
+                                             "note": "顺便升级依赖"}, ensure_ascii=False)),
+            # 第 2 轮 P2-01：多轮会话、标记不在第一行
+            "两条输入": dict(users=2),
+            "标记不在第一行": dict(marker="前言\n" + SG.run_marker(7, 1)),
+            # 第 2 轮 P2-02：辅助调用用了回退模型
+            "辅助调用回退": dict(usage=((MAIN, MAIN_PROVIDER, "", 1), ("deepseek-flash", "deepseek", "title_generation", 1))),
         }
         for name, kw in cases.items():
             with self.subTest(name):
@@ -874,7 +902,8 @@ class RunEvidenceTests(Base):
                     p["run"]["session"] = write_run(self.hermes, p, started, None if ended is False else ended,
                                                     **{k: v for k, v in kw.items() if k != "sid"})
                 d = self.handoff(self.submit(p), "model")
-                self.assertIn("实际输出" if name in ("输出选了别的", "白话被改了", "输出其实弃权") else "运行记录", d["basis"])
+                self.assertIn("实际输出" if name in ("输出选了别的", "白话被改了", "输出其实弃权", "输出说出错", "选项是 true",
+                                                 "版本是 1.0", "输出多字段") else "运行记录", d["basis"])
 
     def test_forged_fallback_claim_in_proposal_is_not_a_field(self):
         """以前能在提议里写 model.fallback=false 骗过去；现在多一个字段就是格式不合格，交常浩。"""
@@ -1075,6 +1104,68 @@ class KillRecoveryTests(Base):
         self.assertEqual(self.answers(), [])
 
 
+class AskSwitchTests(Base):
+    """#218 第 2 轮 P1-01（常浩 11-19 选甲）：中台还不能按版本核对回答，① 的送达开关正式关着：前闸全过也交常浩。"""
+    def test_switch_off_hands_off_and_sends_nothing(self):
+        self.assertFalse(SG.REAL_ASK)
+        with mock.patch.object(SG, "TEST_ASK", False):
+            d = self.handoff(self.submit(), "gate")
+        self.assertIn("暂时整体关闭", d["basis"])
+        self.assertIsNone(self.claim())
+
+    def test_switch_closed_after_approval_is_failed_not_sent(self):
+        real = SG.approve
+
+        def approve(*a, **kw):
+            got = real(*a, **kw)
+            SG.TEST_ASK = False                                                   # 获准之后开关被关
+            return got
+        with mock.patch.object(SG, "approve", approve):
+            out = self.submit()
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertEqual(self.answers(), [])
+        self.assertEqual(self.held(), [])
+        self.assertIsNone(self.claim())
+
+
+class EvidenceDbTests(Base):
+    """#218 第 2 轮 P1-04：对账只认获准时那一份、结构完整的 cards.db；证据库没了、换了、不全都不下结论。"""
+    def killed_before_cards_commit(self):
+        real = SL.begin
+
+        def begin(*a, **kw):
+            real(*a, **kw)
+            raise KeyboardInterrupt
+        with mock.patch.object(SL, "begin", begin), self.assertRaises(KeyboardInterrupt):
+            self.submit()
+        self.assertEqual(self.decisions()[0][3], "executing")
+
+    def still_executing(self):
+        with mock.patch.object(SG, "STALE", -1):
+            self.assertEqual(SG.reconcile(now=T), [])
+        self.assertEqual(self.decisions()[0][3], "executing")
+        self.assertEqual(sorted(self.held()), [("day", "reserved"), ("task", "reserved")])
+
+    def test_cards_db_deleted(self):
+        self.killed_before_cards_commit()
+        Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).unlink()
+        self.still_executing()
+        self.assertFalse(Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).exists())      # 对账没有顺手新建
+
+    def test_cards_db_replaced(self):
+        self.killed_before_cards_commit()
+        Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).unlink()
+        with F.db():                                                            # 别处新建了一份同名空库
+            pass
+        self.still_executing()
+
+    def test_cards_db_incomplete(self):
+        self.killed_before_cards_commit()
+        with contextlib.closing(sqlite3.connect(os.environ["DT_AUTOLOOP_CARDS_DB"])) as con, con:
+            con.execute("DROP TABLE claim_log")
+        self.still_executing()
+
+
 class LateOwnerNoteTests(unittest.TestCase):
     def test_note_names_the_secretary_choice(self):
         self.assertEqual(A.secretary_note({"by": "秘书", "choice": 1, "options": ["甲", "乙"]}),
@@ -1158,9 +1249,9 @@ class SecretaryEndToEnd(HubFixture):
         st.close()
         self.hermes = root / "hermes"
         make_hermes(self.hermes)
-        p = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.hermes)})
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.dict(os.environ, {"HERMES_HOME": str(self.hermes)}), mock.patch.object(SG, "TEST_ASK", True)):
+            p.start()
+            self.addCleanup(p.stop)
         self.workdir = root / "work"
         self.workdir.mkdir()
         self.prepare_hub()

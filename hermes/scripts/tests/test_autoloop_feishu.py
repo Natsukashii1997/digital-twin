@@ -3,8 +3,10 @@
 走「中台出卡 → 桥接领卡、发卡、报送达 → 常浩点击 → 核对、本人在途、答中台 → 只读回读 → 桥接改卡」。
 飞书发送一律换成记录器；不碰 ~/.agent-autoloop 和正式中台。"""
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
+import contextlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -286,6 +288,40 @@ class Answer(Base):
         self.assertIsNone(A.flush(8))                                           # 只发一次
         self.tell.assert_called_once()
 
+    def test_queued_click_on_old_version_is_not_moved_to_new_version(self):
+        """#218 第 2 轮 P1-03：在第 1 版点的、还在排队的选择，卡片改成第 2 版后作废、请常浩重点，不交到第 2 版。"""
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)                 # 第 1 版还没确认送达：排队
+        self.assertEqual(self.claim()["version"], 1)
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})                  # 改成第 2 版、飞书改好了
+        self.confirm()
+        code, said = A.flush(7)
+        self.assertEqual(code, 1)
+        self.assertIn("改版", said)
+        self.assertEqual(self.answers(), [])
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.log()[-1], "released")
+        self.hub_card = {"id": 7, "state": "decided", "choice": 0, "by": OWNER}
+        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER)[0], 0)                 # 在第 2 版上重点：照常交
+        self.assertEqual(self.claim()["version"], 2)
+
+    def test_version_change_clears_hub_confirmation_and_confirms_only_reported_version(self):
+        """#218 第 2 轮 P1-03：改版时清掉中台确认；报第 1 版送达期间改成了第 2 版，第 1 版的确认不记到第 2 版头上。"""
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})
+        self.assertIsNone(F.card_by_token(self.tok)["hub_delivered_at"])
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)                 # 没确认第 2 版：只排队
+        self.assertEqual(self.answers(), [])
+
+        def hub(method, path, body=None, timeout=20):
+            if path.endswith("/delivered"):
+                with F.db(write=True) as con:                                    # 报送期间又改成第 3 版
+                    con.execute("UPDATE feishu_cards SET version = 3 WHERE card_id = 7")
+            return {}
+        with mock.patch.object(F, "hub", hub):
+            F.report_delivered(7)
+        self.assertIsNone(F.card_by_token(self.tok)["hub_delivered_at"])
+
     def test_concurrent_submitters_send_at_most_once(self):
         import threading
         for second in (lambda: A.flush(7), lambda: A.reconcile(), lambda: A.submit(7)):
@@ -481,6 +517,34 @@ class Answer(Base):
         self.assertEqual([r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")],
                          ["claims"])                                            # 也没补建别的表
         con.close()
+
+    def test_claims_without_version_column_is_refused(self):
+        with contextlib.closing(sqlite3.connect(self.tmp.name + "/old.db")) as con, con:
+            con.execute("CREATE TABLE claims (card_id INTEGER, who TEXT, state TEXT, choice INTEGER, at TEXT, pid INTEGER, "
+                        "note TEXT, attempt TEXT, PRIMARY KEY (card_id, who))")
+        with mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": self.tmp.name + "/old.db"}), \
+                self.assertRaisesRegex(F.Fail, "旧结构"):
+            with F.db():
+                pass
+
+    def test_evidence_open_never_creates_or_repairs(self):
+        """#218 第 2 轮 P1-04：给对账当证据的打开方式不新建、不补表，缺身份也不认。"""
+        missing = Path(self.tmp.name) / "none/cards.db"
+        with mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(missing)}), self.assertRaisesRegex(F.Fail, "不在"):
+            with F.db(write=True, create=False):
+                pass
+        self.assertFalse(missing.exists())
+        with F.db() as con:
+            self.assertRegex(F.db_id(con), r"^[0-9a-f]{16}$")
+            con.execute("DROP TABLE claim_log")
+        with self.assertRaisesRegex(F.Fail, "结构不全"):
+            with F.db(create=False):
+                pass
+        with F.db() as con:                                                     # 平常打开会补表：补回来
+            con.execute("DELETE FROM meta")
+        with self.assertRaisesRegex(F.Fail, "没有库身份"):
+            with F.db(create=False):
+                pass
 
     def test_stale_writes_never_touch_a_newer_attempt(self):
         old = self.unknown_claim()

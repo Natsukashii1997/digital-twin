@@ -11,7 +11,10 @@
 卡片库 cards.db（DigitalTwin/autoloop/，600）：
   feishu_cards  卡片号 → 令牌、送达的消息号、私聊号、种类、选项数、版本、飞书送达时间（秘书白天等 30 分钟从这里起算；按版本：
                 version 是最后送到常浩那里的版本，delivered_at 是它送到的时刻，开着的卡改版成功后两者一起换，#218 审查 P1-02）、
-                中台确认送达时间（报 delivered 成功后才有；没有之前本人的点击只排队，不提交，见 autoloop_answer）
+                中台确认送达时间（报 delivered 成功后才有；没有之前本人的点击只排队，不提交，见 autoloop_answer；也按版本：
+                改版时清空，只给报过的那一版记，#218 第 2 轮 P1-03）
+  claims 的 version：本人点击时卡片在飞书上的版本；改版后旧版本排队的选择不转到新版本（autoloop_answer.submit 作废、请常浩重点）
+  meta          库身份（建库时随机生成）：秘书获准时记下，对账时核对，见 db(create=False)
   claims        每张卡每方一行（owner 本人 / secretary 秘书）和进度；claim_log 只追加，记每次状态变化
   secretary_cards  秘书控制面（secretary_gate.py，第 4c 批）在 secretary 通道领到的卡片：卡片号 → 版本、自己生成的 ref、
                 领到时间、中台确认送达时间（报 delivered 成功后才有；没有之前秘书不答这张卡）
@@ -37,6 +40,7 @@ import sqlite3
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -53,12 +57,18 @@ CREATE TABLE IF NOT EXISTS feishu_cards (card_id INTEGER PRIMARY KEY, token TEXT
   chat_id TEXT NOT NULL, kind TEXT NOT NULL, options INTEGER NOT NULL, version INTEGER NOT NULL, delivered_at TEXT,
   hub_delivered_at TEXT);
 CREATE TABLE IF NOT EXISTS claims (card_id INTEGER NOT NULL, who TEXT NOT NULL CHECK (who IN ('owner', 'secretary')),
-  state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, attempt TEXT, PRIMARY KEY (card_id, who));
+  state TEXT NOT NULL, choice INTEGER, at TEXT NOT NULL, pid INTEGER, note TEXT, attempt TEXT, version INTEGER,
+  PRIMARY KEY (card_id, who));
 CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL, who TEXT NOT NULL,
   at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT, attempt TEXT);
 CREATE TABLE IF NOT EXISTS secretary_cards (card_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ref TEXT NOT NULL UNIQUE,
   leased_at TEXT NOT NULL, hub_delivered_at TEXT);
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 """
+REQUIRED = {"feishu_cards": {"card_id", "version", "delivered_at", "hub_delivered_at"},
+            "claims": {"card_id", "who", "state", "attempt", "version"},
+            "claim_log": {"card_id", "who", "state", "attempt"},
+            "secretary_cards": {"card_id", "version", "ref", "hub_delivered_at"}, "meta": {"k", "v"}}
 
 
 class Fail(Exception):
@@ -93,21 +103,36 @@ def db_file():
 
 
 @contextlib.contextmanager
-def db(write=False):
-    """write=True 时开 BEGIN IMMEDIATE：本人点击和秘书获准送达靠这把写锁互斥。"""
+def db(write=False, create=True):
+    """write=True 时开 BEGIN IMMEDIATE：本人点击和秘书获准送达靠这把写锁互斥。
+    create=False 给对账当证据用（#218 第 2 轮 P1-04）：文件不在不新建、不补表，结构不全或没有库身份就抛 Fail——
+    「证据库没了」不能当成「证据库里没有这条」。"""
     f = db_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(f.parent, 0o700)
-    if not f.exists():
-        os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    con = sqlite3.connect(f, timeout=10, isolation_level=None)
+    if not create:
+        if not f.is_file():
+            raise Fail(f"{f} 不在，当不了证据")
+        con = sqlite3.connect(f"file:{urllib.parse.quote(str(f))}?mode=rw", uri=True, timeout=10, isolation_level=None)
+    else:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(f.parent, 0o700)
+        if not f.exists():
+            os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        con = sqlite3.connect(f, timeout=10, isolation_level=None)
     con.row_factory = sqlite3.Row
     try:
         for table in ("claims", "claim_log"):    # 先查后建：旧结构直接拒用，旧库一点不动（不迁移、不补表）
             cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-            if cols and "attempt" not in cols:
-                raise Fail(f"{f} 是旧结构（{table} 没有 attempt 列），拒绝使用；要迁移请单独处理")
-        con.executescript(SCHEMA)
+            if cols and ("attempt" not in cols or (table == "claims" and "version" not in cols)):
+                raise Fail(f"{f} 是旧结构（{table} 缺 attempt / version 列），拒绝使用；要迁移请单独处理")
+        if create:
+            con.executescript(SCHEMA)
+            con.execute("INSERT OR IGNORE INTO meta VALUES ('id', ?)", (secrets.token_hex(8),))
+        else:
+            for table, need in REQUIRED.items():
+                if not need <= {r[1] for r in con.execute(f"PRAGMA table_info({table})")}:
+                    raise Fail(f"{f} 结构不全（{table}），当不了证据")
+            if not db_id(con):
+                raise Fail(f"{f} 没有库身份，当不了证据")
         if write:
             con.execute("BEGIN IMMEDIATE")
         yield con
@@ -119,6 +144,15 @@ def db(write=False):
         raise
     finally:
         con.close()
+
+
+def db_id(con):
+    """cards.db 的身份（建库时随机生成）：秘书获准时记下，对账时核对，库被换成别的（新建的、别处的）就对不上。"""
+    try:
+        r = con.execute("SELECT v FROM meta WHERE k = 'id'").fetchone()
+    except sqlite3.Error:
+        return None
+    return r[0] if r else None
 
 
 def card_by_token(token):
@@ -256,16 +290,18 @@ def deliver(card):
             send_card(owner_chat(), content, f"autoloop-card-{card['id']}-v{card['version']}")
         with db(write=True) as con:                    # 开着的卡改版送到了：送达时间从这一版起算（结束的卡不再计时）
             con.execute("UPDATE feishu_cards SET delivered_at = CASE WHEN ? AND version != ? THEN ? ELSE delivered_at END, "
+                        "hub_delivered_at = CASE WHEN version != ? THEN NULL ELSE hub_delivered_at END, "
                         "version = ? WHERE card_id = ?",
-                        (card["state"] == "open", card["version"], now(), card["version"], card["id"]))
+                        (card["state"] == "open", card["version"], now(), card["version"], card["version"], card["id"]))
         return card["ref"]
     chat = owner_chat()
     token = token_for(card, chat)
     mid = send_card(chat, render(card, token), f"autoloop-card-{card['id']}")   # 幂等键只用卡片号：报告丢了重发不出第二条
     with db(write=True) as con:
         con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, "
-                    "delivered_at = CASE WHEN delivered_at IS NULL OR version != ? THEN ? ELSE delivered_at END "
-                    "WHERE card_id = ?", (mid, card["version"], card["version"], now(), card["id"]))
+                    "delivered_at = CASE WHEN delivered_at IS NULL OR version != ? THEN ? ELSE delivered_at END, "
+                    "hub_delivered_at = CASE WHEN version != ? THEN NULL ELSE hub_delivered_at END "
+                    "WHERE card_id = ?", (mid, card["version"], card["version"], now(), card["version"], card["id"]))
     return mid
 
 
@@ -291,9 +327,9 @@ def report_delivered(card_id):
     if not r or not r["message_id"]:
         raise Fail(f"卡片 {card_id} 还没有登记的消息号，不能报送达")
     hub("POST", f"/v1/cards/{card_id}/delivered", {"version": r["version"], "ref": r["message_id"]})
-    with db(write=True) as con:
-        con.execute("UPDATE feishu_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ?",
-                    (now(), card_id))
+    with db(write=True) as con:                        # 只给报过的这一版记确认：报送期间又改了版就不记（#218 第 2 轮 P1-03）
+        con.execute("UPDATE feishu_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ? AND version = ?",
+                    (now(), card_id, r["version"]))
 
 
 def confirm(card_id):
