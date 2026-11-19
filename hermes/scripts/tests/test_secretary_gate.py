@@ -1173,6 +1173,29 @@ class AskSwitchTests(Base):
         self.assertIn("暂时整体关闭", d["basis"])
         self.assertIsNone(self.claim())
 
+    def test_switch_off_hands_off_at_the_door(self):
+        """4c-2：开关关着，① 一进前闸就交常浩：只带卡片号和版本也行，不等 30 分钟、不看提议内容；卡片不开着只拒。"""
+        self.feishu(7, T - dt.timedelta(minutes=10))                          # 飞书送达才 10 分钟
+        with mock.patch.object(SG, "TEST_ASK", False):
+            d = self.handoff(self.submit({"schema": 1, "category": "ask", "card": 7, "card_version": 1}), "gate")
+            self.assertIn("暂时整体关闭", d["basis"])
+            self.hub("UPDATE cards SET state = 'decided'")
+            out = self.submit({"schema": 1, "category": "ask", "card": 7, "card_version": 1})
+        self.assertEqual(out["result"], "refused")
+        self.assertIsNone(self.claim())
+
+    def test_abstain_or_error_may_leave_choice_null(self):
+        """弃权、出错时 choice 可以是 null；不弃权又不选是格式错。"""
+        for kw, reason in (({"choice": None, "text": None, "abstain": {"reason": "scope"}}, "scope"),
+                           ({"choice": None, "text": None, "error": "超时了"}, "model")):
+            with self.subTest(kw=kw):
+                self.setUp()
+                self.handoff(self.submit(self.prop(**kw)), reason)
+        self.setUp()
+        p = self.prop(choice=None)                                              # 带合格运行记录、只是没选
+        self.assertEqual(SG.format_errors(p, "ask"), ["choice 格式不对"])
+        self.handoff(self.submit(p), "model")
+
     def test_switch_closed_after_approval_is_failed_not_sent(self):
         real = SG.approve
 

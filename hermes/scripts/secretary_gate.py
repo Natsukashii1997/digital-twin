@@ -8,7 +8,7 @@
 提议（不可信输入，JSON，最多 16 KB；以后 dt-secretary 经窄接口调 submit）：
   {"schema": 1, "category": "ask" | "redispatch" | "reject",
    "card": 卡片号, "card_version": 卡片版本,          ← ask、redispatch（② 的卡片是中台放弃时发的通知卡）
-   "choice": 第几项（从 1 数）,                       ← 只 ask；送中台时换成中台的下标 choice - 1
+   "choice": 第几项（从 1 数）,                       ← 只 ask；送中台时换成中台的下标 choice - 1；弃权、出错时可以是 null
    "task": 任务号, "pr": PR 号, "head": 40 位提交,     ← 只 reject
    "text": {"context", "question", "summary", "basis"}  写给常浩的白话（规则同 secretary_ledger：ask 按「回复」，②③ 按「合并」）
    "run": {"session": Hermes 会话号},                 ← 只 ask：这次模型判断的运行记录（见下）
@@ -57,7 +57,7 @@
   state = approved，attempt = 决定号）再 secretary_ledger.begin（issued → executing）。
 送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）。**① 的送达开关 REAL_ASK 关着**
   （PR #218 第 2 轮 P1-01）：中台 answer 只核卡片开着和 ref、不核版本，获准到送达之间卡片改版时旧答案会落到新版本上；
-  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 前闸全过也交常浩；② autoloop_grants.resume_dispatch
+  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 一进前闸就交常浩（只核卡片还开着，不看提议内容；4c-2 秘书侧此时不调模型，只交卡片号和版本）；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
   关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
@@ -410,15 +410,18 @@ def format_errors(p, cat):
         errs.append(f"多了不认识的字段：{'、'.join(sorted(set(p) - want))}")
     if type(p.get("schema")) is not int or p["schema"] != 1:     # 严格整数：True、1.0 都不算（第 3 轮 P2-02）
         errs.append("schema 要是 1")
+    ab = p.get("abstain")
+    giving_up = ab is not None or p.get("error") is not None
     for k in KEYS[cat]:
         v = p.get(k)
+        if k == "choice" and giving_up and v is None:       # 弃权、出错时可以不选（4c-2：秘书侧弃权写 null）
+            continue
         ok = (isinstance(v, str) and P.SHA.match(v)) if k == "head" else \
             (isinstance(v, str) and G.TASK_ID.match(v)) if k == "task" else _pos_int(v)
         if not ok:
             errs.append(f"{k} 格式不对")
     if p.get("error") is not None and not (isinstance(p["error"], str) and p["error"].strip()):
         errs.append("error 要么是 null，要么写明")
-    ab = p.get("abstain")
     if ab is not None and not (isinstance(ab, dict) and set(ab) <= {"reason", "note"} and ab.get("reason") in SL.HANDOFF_REASONS):
         errs.append("abstain 要写交常浩的原因代号")
     if "run" in p and cat != "ask":
@@ -689,6 +692,10 @@ def reject_gate(ctx, p):
 def front_gates(p, ctx, st_status, t, st):
     """前闸，按顺序；不过抛 Handoff / Refused / NotReady。"""
     cat = ctx["category"]
+    if cat == "ask" and not (REAL_ASK or TEST_ASK):           # ① 送达开关关着：不看提议内容，直接交常浩（4c-2：秘书侧此时
+        if ctx["card"]["state"] != "open":                    # 不调模型，只交卡片号和版本）
+            raise Refused(f"卡片已经不开着了（{ctx['card']['state']}），不用办")
+        ask_switch()
     errs = [] if ctx["claimed"] == cat else [f"类别写成了 {ctx['claimed']!r}，这件事是 {cat}"]
     errs += format_errors(p, cat)
     if errs:

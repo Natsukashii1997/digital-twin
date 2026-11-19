@@ -107,11 +107,11 @@
     },
     {
       "id": "secretary",
-      "name": "秘书代批（#195 批 0B：猛鬼兽按常浩签的清单代批中台卡片；0B-4 才有判断和送达，现在只有中台里的 secretary 通道和只读窗口）",
+      "name": "秘书代批（#195 批 0B：猛鬼兽按常浩签的清单代批中台卡片；控制面 secretary_gate.py、秘书侧巡视 secretary_patrol.py 已写，未装、不生效）",
       "executor": "hermes",
-      "reads": "中台只读窗口 autoloop_readonly.py 的卡片快照（不含本人密钥、卡片链接、回答原文）、任务凭证（autoloop_grants.py）",
-      "writes": "0B-4 起：中台 secretary 通道的回答（by=秘书）、托管账本；现在不写任何东西",
-      "note": "仅支持 Hermes（规格 docs/秘书代批-规格.md §6：判断用 hermes chat 单次、最小工具集，模型不持通道钥匙）。0B-4 上线前不生效。"
+      "reads": "巡视：中台只读窗口 autoloop_readonly.py 的卡片快照（不含本人密钥、卡片链接、回答原文）；控制面另从中台库、凭证库、cards.db、受信发布记录重取",
+      "writes": "秘书侧：DigitalTwin/secretary/outbox/ 的提议、patrol.json；控制面：秘书账本（交常浩、代批记录），①送达开关打开后才有中台 secretary 通道的回答（by=秘书）",
+      "note": "仅支持 Hermes（规格 docs/秘书代批-规格.md §6：判断用 hermes chat 单次（-Q --source tool -t todo --max-turns 1），模型不持通道钥匙）。①送达开关（secretary_gate.REAL_ASK）关着时巡视不调模型，①一律交常浩（常浩 11-19 选甲）；没装常驻、没签钥匙，不生效。"
     },
     {
       "id": "proposal-digest",
