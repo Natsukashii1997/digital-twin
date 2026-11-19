@@ -747,6 +747,18 @@ class BridgeLock(Base):
         self.assertIn("中台会稍后重试", self.alerts[0])
         self.assertEqual(self.flushed, [])
 
+    def test_conflict_alert_not_suppressed_by_unreadable_alert(self):
+        """「中台读不到」的提醒刚发过（1 小时限频）时，版本冲突的提醒照样发：各用各的提醒键。"""
+        self.hub_ok = False
+        F.once()                                                                # 领卡前读不到：提醒 1 次
+        self.hub_ok = True
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 3})
+        self.hub_now = 2
+        self.lease(2)
+        F.once()
+        self.assertEqual(len(self.alerts), 2)
+        self.assertIn("比中台的第 2 版还新", self.alerts[1])
+
     def test_report_failed_error_still_alerts(self):
         """第 6 轮 P2-02：报 failed 本身出错（卡不在 404、中台 500、没回应），不抛出、照样提醒，写明请人工核查。"""
         for i, err in enumerate((F.HubError("HTTP 404", status=404), F.HubError("HTTP 500", status=500),
