@@ -68,7 +68,7 @@ hermes/
   baselines/           身份闸的 GitHub 保护基线（#174）：dt-sandbox 规则集和 main 分支保护，名册 executor_gate 指向它；改保护规则先改 GitHub 再改这里
 docs/LESSONS.md        本项目踩过的坑（L-xx）；跨项目的坑在 agent-kit/LESSONS.md（G-xx）
 docs/DECIDED.md        已定内容登记表（全局规则第 15 节）：常浩定稿过的东西，改之前先单独确认；界面类附基线截图路径
-docs/design/           定稿的界面源文件（如工作台首页 workbench-home-v3.html），示例数据
+docs/design/           定稿的界面源文件（工作台 workbench-v4.html：首页和汇报页），示例数据
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
 docs/三报体系-V2.1.md   主动运营与三报（早报 / 晚报 / 周报）的产品与实施基线（PRD D20）；评审过程在 docs/reviews/
