@@ -158,7 +158,6 @@ def targets():
     v6_ports = sorted({p for a, p in socks if a in ("::1", "*")})
     any_ports = sorted({p for a, p in socks if a == "*"})
     allowed = set().union(*ALLOWED.values())
-    # 每类最多几个端口，准连的端口都试（应该通），其余挑前几个（应该挡）
     # 准连的端口都试（应该通）；监听在所有网卡（*）上的端口全试——11-19 试装时工人连得上 127.0.0.1:5000（ControlCenter
     # 的 AirPlay，监听在 *），要看清是不是凡是 * 上的都漏；其余挑前几个（应该挡）
     pick = lambda ports, n: sorted({p for p in ports if p in allowed or p in any_ports} |

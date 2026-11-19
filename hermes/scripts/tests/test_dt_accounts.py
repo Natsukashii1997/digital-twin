@@ -460,7 +460,7 @@ class Verify(unittest.TestCase):
 
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()
-        self.assertIn('["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", "probe"', src)
+        self.assertIn('["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", mode, json.dumps(ts)]', src)
         self.assertIn('cwd="/"', src)            # 当前目录在主账号家目录下时，别的账号进不去
         self.assertIn("\ncd /\n", SETUP.read_text())
         self.assertIn("dt_pf_verify.py", PF.read_text())
