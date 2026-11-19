@@ -1,6 +1,7 @@
 """运行前身份闸（#174，PR #175 第 2 轮 P2-01）采集层集成测试：用假的 gh、git 可执行文件真跑 IDENT_SCRIPT，
 再交给 identity_problems 判，覆盖分页、部分查询失败、权限字段缺失、多账号、不同结构的 gh 登录输出、git 配置读取出错和备用凭据。
 不联网，不碰真实容器、~/.config 和 ~/Library：HOME 指向临时目录，PATH 只放假 gh、git 和系统目录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import json
 import os

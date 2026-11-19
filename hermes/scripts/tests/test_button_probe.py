@@ -1,4 +1,5 @@
 """按钮实测探针（#195 批 0B-3）自测：发卡回读、登记、对照报告；不真发飞书。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import sys

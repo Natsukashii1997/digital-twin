@@ -7,6 +7,7 @@
 不联网、不碰 ~/Library/Application Support/DigitalTwin、不碰 ~/.hermes、不碰 ~/.agent-autoloop。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_secretary.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import fcntl
 import hashlib

@@ -1,4 +1,5 @@
 """AI 前沿群学习报告（#192）自测：假 lark-cli、假源头、现成模型回复，不联网、不调模型、不碰真实目录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

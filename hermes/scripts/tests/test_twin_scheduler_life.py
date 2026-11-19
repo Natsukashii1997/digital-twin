@@ -4,6 +4,7 @@
 只对测试自己拉起、身份全对上的车间进程组发 SIGTERM。不碰 ~/.hermes、正式状态库、真实工单与外部服务。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_scheduler_life.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import os

@@ -2,6 +2,7 @@
 
 report_data.py / report_publish.py 用假 lark-cli（fake_lark.py）和临时目录跑，不联网、不碰真实文档和证据目录。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import sqlite3

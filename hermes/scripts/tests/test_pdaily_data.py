@@ -3,6 +3,7 @@
 临时 git 仓库 + 假 gh（fake_gh.py），不联网。统计日 D = 2026-11-08（04:00 到 11-09 04:00，北京时间）。
 覆盖 V2 第 7.1 节的场景：跨凌晨统计、CURRENT 过期、取数失败、昨天没有新动作、PR 已合并但没安装。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import os

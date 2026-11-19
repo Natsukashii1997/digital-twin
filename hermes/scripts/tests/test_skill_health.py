@@ -2,6 +2,7 @@
 
 node 换成临时 shell 脚本（打印固定报告、或按要求失败），my-skills 换成临时目录。不碰真实 my-skills、会话记录和 ~/.hermes。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import io
 import os

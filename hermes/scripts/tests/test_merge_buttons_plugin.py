@@ -1,5 +1,6 @@
 """PR 卡片按钮插件（#78）自测：只认合并官的按钮、参数原样转给 merge_act.py button、不回复。
 不起网关：直接加载插件模块，Popen 换成记录器。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import json
 import os

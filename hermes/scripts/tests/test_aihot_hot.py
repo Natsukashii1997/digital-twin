@@ -1,4 +1,5 @@
 """AI HOT 热点榜推送（#163）自测：接口用 file:// 假数据，假 lark-cli 记下每次调用；不联网、不碰真实记录目录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess
