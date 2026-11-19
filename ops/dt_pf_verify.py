@@ -34,6 +34,10 @@ OUT_DIR = "/Library/Application Support/DigitalTwin/verify"
 REACHED = ("open", "answer", "200")
 
 
+def reached(got):
+    return got.split(":", 1)[0] in REACHED
+
+
 # ---------- 以账号身份运行的部分：逐项去连，只报结果 ----------
 
 def try_tcp(host, port, timeout=3):
@@ -42,7 +46,7 @@ def try_tcp(host, port, timeout=3):
     s.settimeout(timeout)
     try:
         s.connect((host, port))
-        return "open"
+        return f"open:{s.getsockname()[1]}"   # 带上本地端口：漏过时拿它去 pf 连接表里找、和 root 对照组的端口比
     except ConnectionRefusedError:
         return "refused"
     except socket.timeout:
@@ -198,12 +202,11 @@ def should_reach(user, t):
 
 
 def judge(user, t, got, ctrl):
-    reached = got in REACHED
     if should_reach(user, t):
-        return "符合" if reached else "该通不通"
-    if reached:
+        return "符合" if reached(got) else "该通不通"
+    if reached(got):
         return "没挡住"
-    return "符合" if ctrl in REACHED else "没法判断"
+    return "符合" if reached(ctrl) else "没法判断"
 
 
 def account_exists(u):
@@ -297,6 +300,10 @@ def main():
             continue
         rows = []
         print(f"== {u}" + ("（控制面，不受门卫规则管，只作对照）" if u in CONTROL_ACCOUNTS else ""))
+        leaked = [g.split(":", 1)[1] for t, g in zip(ts, got)
+                  if u not in CONTROL_ACCOUNTS and reached(g) and not should_reach(u, t) and g.startswith("open:")]
+        if leaked:   # 漏过时马上抓 pf 连接表：看是不是撞上了别人（比如前面 root 对照组）留下的连接记录
+            report.setdefault("pf_on_leak", {})[u] = pf_snapshot([int(p) for p in leaked])
         for t, g, c in zip(ts, got, ctrl):
             v = "对照" if u in CONTROL_ACCOUNTS else judge(u, t, g, c)
             rows.append({**t, "got": g, "root": c, "verdict": v})

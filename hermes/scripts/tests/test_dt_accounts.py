@@ -416,7 +416,7 @@ class Verify(unittest.TestCase):
         j = self.v.judge
         self.assertEqual(j("dt-secretary", self.t("127.0.0.1", 8090), "open", "open"), "符合")
         self.assertEqual(j("dt-secretary", self.t("::ffff:127.0.0.1", 8090), "open", "open"), "符合")
-        self.assertEqual(j("dt-secretary", self.t("127.0.0.1", 3350), "open", "open"), "没挡住")   # 秘书连不到中台
+        self.assertEqual(j("dt-secretary", self.t("127.0.0.1", 3350), "open:51234", "open:51200"), "没挡住")   # 秘书连不到中台
         self.assertEqual(j("dt-secretary", self.t("127.0.0.1", 3350), "refused", "open"), "符合")
         self.assertEqual(j("dt-worker", self.t("127.0.0.1", 3350), "open", "open"), "符合")
         self.assertEqual(j("dt-worker", self.t("open.feishu.cn", 443), "open", "open"), "没挡住")   # 公网直连
@@ -435,7 +435,9 @@ class Verify(unittest.TestCase):
         closed.bind(("127.0.0.1", 0))
         cport = closed.getsockname()[1]
         closed.close()
-        self.assertEqual(self.v.probe([self.t("127.0.0.1", port), self.t("127.0.0.1", cport)]), ["open", "refused"])
+        got = self.v.probe([self.t("127.0.0.1", port), self.t("127.0.0.1", cport)])
+        self.assertRegex(got[0], r"^open:\d+$")   # 带本地端口
+        self.assertEqual(got[1], "refused")
 
     def test_probe_repeat_records_local_port(self):
         """诊断模式：每个目标连 n 次，连上的记下本地端口（root 拿它去 pf 连接表里找）。"""
