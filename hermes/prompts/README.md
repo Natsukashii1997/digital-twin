@@ -7,3 +7,5 @@
 - `project_vocab.md`：日报「项目」字段的词表（常浩 2026-10-27 确认）。
 
 安装位置：`~/.hermes/prompts/`（`report_data.py` 按 `scripts` 的兄弟目录找词表）。改了源文件要复制过去。
+
+亚古兽的提示词（文件名以 `memdaily_` 开头）装在 `~/.hermes/profiles/agumon/prompts/`。销售 AI 侧边栏的做法在技能 `hermes/skills/sales-sidebar/`，不在这里。

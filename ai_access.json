@@ -90,6 +90,14 @@
       "note": "仅支持 Hermes（亚古兽 profile 的主模型，2026-11-11 起 openai-codex gpt-6.1-sol、思考 xhigh；DT_MEMDAILY_REASONING 可改）。核对不过重写一次，再不过就不写，定时任务把原因发到亚古兽私聊，不换执行方。每篇标题下一行写「生成：亚古兽（实际模型）｜接入：Hermes 派单｜时间」。"
     },
     {
+      "id": "sidebar",
+      "name": "销售 AI 侧边栏固定汇报（亚古兽，常浩 2026-11-19 定）：需求反馈每天 18:00、项目推进进度每周三 18:30 私发常浩确认，功能同步通知常浩说了才出；版式由 sidebar_reports.py 固定，亚古兽只写内容 JSON",
+      "executor": "hermes",
+      "reads": "测试反馈群 oc_32562463635b4b2ee03d1808c080d1b5 的消息和截图、多维表格 XTPpbsyWza4rixsRuCwcALI8nOh（功能清单、推进计划、使用反馈）、常浩私聊里的安排（亚古兽应用、常浩的用户身份）；上一期存档 DigitalTwin/sidebar/；技能 hermes/skills/sales-sidebar/ 和亚古兽工作目录里的项目档案",
+      "writes": "亚古兽机器人私聊常浩（需求反馈 post、进度卡片；同一期原地改）；常浩回「发群」后以他本人身份发到测试反馈群（只发一次）；存档 DigitalTwin/sidebar/feedback/<日期>.json、progress/<截止日>.json，草稿 DigitalTwin/sidebar/drafts/",
+      "note": "仅支持 Hermes（亚古兽 profile 的主模型，带模型的定时任务）。核对不过按提示改两轮，再不过把原因发常浩，不换执行方。版式是常浩逐项确认的定稿，消息里不加「生成：…」行；留痕在存档 JSON（sent_at）和 hermes -p agumon cron runs。"
+    },
+    {
       "id": "groupdigest",
       "name": "AI 前沿群每日学习报告（#192，常浩 2026-11-16 定；groupdigest.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后发卡片）",
       "executor": "hermes",
