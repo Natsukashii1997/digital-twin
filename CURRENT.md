@@ -42,6 +42,14 @@
 
 ---
 
+## 2026-11-19 · #216 每周提案卡片新增来源「再犯与待提升」（PR #217 已合并 `f17f5e6`，已安装）
+
+常浩 11-18 定（跨项目复盘 P1）；11-19 回「按推荐开始」，合并。依赖 agent-kit#77、#81 已于 11-18 合并，agent-kit#84（「关闭」的坑不进升级首选）11-19 合并并重装。
+
+- 变基到 `6120638` 后临时 HOME 全量：hermes 1390 项 1 项报错、orca 48 项全过；报错的是 `test_autoloop_feishu` 的 `test_delivered_but_crashed_before_recording_recovers_once`（清临时目录时 hub worker 还在写 `runs/2-1`，Directory not empty）。只跑这个模块不加载本 PR 的文件，PR 分支 3 次错 1 次、main 5 次全过，判为偶发、与本 PR 无关。CI `test` 通过。证据 `evidence/2026-11-19-pr217-rebase2/`。
+- 已装：`proposal_digest.py` → `~/.hermes/scripts/`，`SKILL.md` → `~/.hermes/skills/autonomous-ai-agents/proposal-digest/`，`cmp` 一致；旧版备份在 `evidence/2026-11-19-pr217-install/`。`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway` 重启，13:00:27 飞书重新连上（pid 36084）。
+- 定时任务 `81464e7ea4e3` 没改。待：11-23（周一）10:00 第一期带「再犯与待提升」，看卡片和 `DigitalTwin/shadow/guards-decisions.md` 第一次建出来。
+
 ## 2026-11-19 · 亚古兽接手销售 AI 侧边栏固定汇报（PR #219 已合并 `6a29c36`，已安装、已建定时任务）
 
 常浩 11-19 定：销售侧边栏是公司项目，由亚古兽负责；三项固定产出——需求反馈每天 18:00 先私发确认、功能同步通知他说了才出、项目推进进度每周三 18:30 私发；其他项目问题在飞书问亚古兽。11-19 回「按推荐做，确保生成的卡片跟确认版本一致，私发我确认」。
