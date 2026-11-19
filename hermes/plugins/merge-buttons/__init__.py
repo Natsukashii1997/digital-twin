@@ -4,8 +4,9 @@
   - 合并官 PR 卡片：{"merge_officer": "merge"|"return", "ref": "仓库#PR@版本"} → `merge_act.py button`；
   - 托管汇报卡：{"custody": "overturn"|"merge_revert", "ref": "d-YYMMDD-六位十六进制", "card": "16 位十六进制"}
     → `custody_report.py button … --card <令牌>`（card 是发卡时的随机令牌，脚本核对是不是核实过的那张卡；格式不对就不转）；
-  - 中台卡片（#195 批 0B-4）：{"autoloop": "16 位十六进制令牌", "o": 选项号} → `autoloop_answer.py <令牌> <选项号>
-    --chat <聊天号> --operator <点击人>`（点击人取网关的 HERMES_SESSION_USER_ID，0B-3 实测是飞书给的 open_id）；
+  - 中台卡片（#195 批 0B-4）：{"autoloop": "16 位十六进制令牌", "o": 选项号, "v": 版本号} → `autoloop_answer.py <令牌> <选项号>
+    --version <版本号> --chat <聊天号> --operator <点击人>`（点击人取网关的 HERMES_SESSION_USER_ID，0B-3 实测是飞书给的 open_id；
+    v 是按钮所在那一版的版本号，#218 第 3 轮 P1-03）；没带 v 的旧样式按钮照样转，不带 --version，由脚本拒绝并在私聊说明；
   - 按钮实测探针（#195 批 0B-3）：{"probe": "16 位十六进制"} → 不起脚本，只把网关给的会话信息（点击人、聊天、消息号的样子）
     追加到 evidence/button-probe/clicks.jsonl，由 `button_probe.py show` 和登记的测试卡对照。只记录，不触发任何动作。
 不回复，是因为网关回复按钮点击会失败（拿回调 token 当消息号）；进度和结果由脚本直接发到私聊。
@@ -93,12 +94,14 @@ def handle(raw_args):
         value = None
     if isinstance(value, dict) and "probe" in value:          # 探针只认 {"probe": 令牌}，多带别的键一律不认
         return probe(value) if set(value) == {"probe"} else None
-    if isinstance(value, dict) and "autoloop" in value:       # 中台卡片只认 {"autoloop": 令牌, "o": 选项号}
-        o = value.get("o")
-        if set(value) != {"autoloop", "o"} or not CARD.match(str(value["autoloop"])) or type(o) is not int or not 0 <= o < 100:
+    if isinstance(value, dict) and "autoloop" in value:       # 中台卡片只认 {"autoloop": 令牌, "o": 选项号[, "v": 版本号]}
+        o, v = value.get("o"), value.get("v")
+        if set(value) - {"v"} != {"autoloop", "o"} or not CARD.match(str(value["autoloop"])) or type(o) is not int \
+                or not 0 <= o < 100 or ("v" in value and (type(v) is not int or not 0 < v < 10 ** 9)):
             return None
-        return _spawn(ANSWER_SCRIPT, [value["autoloop"], str(o), "--chat", _chat_id(),
-                                      "--operator", _session("HERMES_SESSION_USER_ID")], f"autoloop {o}")
+        ver = ["--version", str(v)] if "v" in value else []
+        return _spawn(ANSWER_SCRIPT, [value["autoloop"], str(o), *ver, "--chat", _chat_id(),
+                                      "--operator", _session("HERMES_SESSION_USER_ID")], f"autoloop {o} v{v}")
     picked = parse(raw_args)
     if picked is None:
         return None

@@ -92,8 +92,15 @@ class Base(unittest.TestCase):
         exp = kw.pop("expires_at", None if action == "handoff" else now + dt.timedelta(minutes=30))
         kw.setdefault("received", dict(RECEIVED))
         kw.setdefault("reply", None if action == "handoff" else {"choice": 1})
+        if action == "ask":
+            kw.setdefault("card_version", kw.pop("version", 1) if "version" in kw else self.next_version())
         return SL.issue(self.st, session_id=session, project=kw.pop("project", "dt-sandbox"), action=action, target=target,
                         revocability=rev, expires_at=exp, now=now, **text, **kw)
+
+    def next_version(self):
+        """① 默认每次用一个新的卡片版本（v6 起同卡同版本只许一个可送达的决定；唯一约束本身在 test_secretary_gate 测）。"""
+        self._version = getattr(self, "_version", 0) + 1
+        return self._version
 
     def rejects(self, code, fn, *a, **kw):
         with self.assertRaises(L.LedgerError) as cm:
@@ -210,7 +217,7 @@ class IssueTests(Base):
                 try:
                     d = SL.issue(st, session_id=SID, project="dt-sandbox", action="ask", target={"card": 10 + i, "task": TASK, "generation": 1},
                                  revocability="correctable", expires_at=T0 + dt.timedelta(hours=1), now=T0, status_reader=self.reader,
-                                 received=dict(RECEIVED), reply={"choice": 1}, **TEXT)
+                                 received=dict(RECEIVED), reply={"choice": 1}, card_version=1, **TEXT)
                     out.append(("ok", d["id"]))
                 except L.LedgerError as e:
                     out.append((e.code, str(e)))
@@ -489,9 +496,9 @@ class FlowTests(Base):
         s = SL.stats(self.st, "2026-11-18")
         self.assertEqual((s["total"], s["reasons"]), (4, {"induced": 1, "gate": 1}))
         self.assertEqual(s["categories"]["ask"], {"total": 2, "decided": 1, "delivered": 0, "handoff": 1,
-                                                  "reasons": {"induced": 1}, "overturned": 0})
+                                                  "reasons": {"induced": 1}, "overturned": 0, "waited_seconds": 0, "waited_count": 0})
         self.assertEqual(s["categories"]["redispatch"], {"total": 1, "decided": 1, "delivered": 1, "handoff": 0, "reasons": {},
-                                                         "overturned": 1})
+                                                         "overturned": 1, "waited_seconds": 0, "waited_count": 0})
         self.assertEqual(s["categories"]["merge"]["handoff"], 1)
         self.assertEqual(SL.stats(self.st, "2026-11-19")["total"], 1)
         self.rejects("BadInput", SL.stats, self.st, "11-18")
@@ -520,7 +527,7 @@ class SeparationTests(Base):
         conn.commit()
         conn.close()
         with L.TS.Store(db, clock=lambda: T0) as s:
-            self.assertEqual(s.version(), 5)
+            self.assertEqual(s.version(), L.TS.SCHEMA_VERSION)          # v5 秘书账本之后还有 v6（同卡同版本唯一）
             self.assertEqual(L.TS.SCHEMA_VERSION, len(L.TS.MIGRATIONS))
             self.assertEqual(s.conn.execute("SELECT ledger_id FROM custody_sessions").fetchone()[0], "L-0000000000000001")
             self.assertEqual(SL.decisions(s), [])

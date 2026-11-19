@@ -35,11 +35,14 @@ SECRETARY 这个「账本用途」调用它们，另写秘书自己的入口检�
 
 给 0B-4c 的接口（import secretary_ledger as SL; with SL.open_store() as st:）：
   SL.issue(st, session_id=, project=, action=, target=, basis=, revocability=, category=, context=, question=, summary=, ask_owner=,
-           cites=, expires_at=, received=, reply=, reason=)  后闸记账 + 原子预占（拒绝抛 custody_ledger.LedgerError）
+           cites=, expires_at=, received=, reply=, reason=, card_version=)  后闸记账 + 原子预占（拒绝抛 custody_ledger.LedgerError）
   SL.begin(st, d) / SL.finish(st, d, "done"|"failed"|"unknown", outcome) / SL.reconcile(st, d, 结果, evidence) / SL.void(st, d, 原因)
   SL.drain(st, 会话号, 账本身份, now) 排空（secretary.drain_proof / ledger_cleanup 调）；SL.stats(st, "YYYY-MM-DD") 统计。
   对账证据：合并同托管（pr_state + merge_commit）；其余三类 done 要 found=true 并带 ref（回读到的回答 / 事件 / 评论），failed 要 found=false。
-  同一张卡同一版本只许一个可送达决定（规格第 6 节）、结果不明冻结任务 / 仓库（第 7 节）是送达闸的事，0B-4c 加。
+  同一张卡同一版本只许一个可送达决定（规格第 6 节，0B-4c）：twin-state v6 的部分唯一索引 secretary_decisions_card，
+  ① 记账时必须给 card_version（卡片版本，可信侧现读的），和 target.card 一起写进 card_id / card_version 两列；
+  已有一个已出未送达、正在送达、已送达、结果不明或对账不清的 ① 时再记，拒绝（DuplicateCard），没做成、作废的不占。
+  结果不明冻结这张任务的后续代批（第 7 节）由送达闸 secretary_gate.py 从账本现算。
 命令行（只读；最后一行都是一行 JSON：{"ok", "msg", ...}）：
   secretary_ledger.py show d-…                一个决定的全部字段
   secretary_ledger.py list [--session s-…]    决定列表
@@ -226,10 +229,11 @@ def raw_errors(action, received, reply):
 
 
 def issue(store, *, session_id, project, action, target, basis, revocability, category=None, context="", question="",
-          summary="", ask_owner="", cites=(), expires_at=None, received=None, reply=None, reason=None, by="hermes", now=None,
-          status_reader=None):
+          summary="", ask_owner="", cites=(), expires_at=None, received=None, reply=None, reason=None, card_version=None,
+          by="hermes", now=None, status_reader=None):
     """后闸记账（规格第 7 节）：决定号、原文、额度原子预占。四类要准入、清单允许、额度够；handoff 只记账。
-    返回决定（dict）。任何一项不满足抛 LedgerError，库里什么都不写、原文删掉。"""
+    card_version：① 必填（正整数，可信侧现读的卡片版本），同一张卡同一版本只许一个可送达的 ①（v6 唯一索引）；
+    对象带卡片的交常浩可以写，用来复查。返回决定（dict）。任何一项不满足抛 LedgerError，库里什么都不写、原文删掉。"""
     fixed_now = now
     now = L._now(now)
     status_reader = status_reader or SECRETARY.status_reader
@@ -271,6 +275,10 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
     cites = list(cites or ())
     if any(not L.DECISION_ID.match(str(c)) for c in cites):
         raise LedgerError(f"依据只能引用决定号：{cites}", "BadInput")
+    if action == "ask" and not _pos_int(card_version):
+        raise LedgerError("① 答提问卡要写卡片版本（card_version，正整数）：同一张卡同一版本只许一个可送达的决定", "BadInput")
+    if card_version is not None and not (_pos_int(card_version) and "card" in target):
+        raise LedgerError("只有对象带卡片时才写卡片版本（正整数）", "BadInput")
     task = target["task"]
 
     def gate(t):
@@ -311,22 +319,31 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
 
     row = {"project": project, "action": action, "category": category, "target": L._j(target), "task_id": task,
            "reason": reason or "", "context": context.strip(), "question": question.strip(), "summary": summary.strip(),
-           "ask_owner": ask_owner.strip(), "basis": basis.strip(), "cites": L._j(cites), "revocability": revocability}
+           "ask_owner": ask_owner.strip(), "basis": basis.strip(), "cites": L._j(cites), "revocability": revocability,
+           "card_id": target.get("card"), "card_version": card_version}
     payload = {"session": session_id, "project": project, "action": action, "category": category, "target": target,
-               "reason": reason, "revocability": revocability, "cites": cites, "expires_at": C.iso(exp) if exp else None}
-    return L.record(store, use=SECRETARY, session_id=session_id, row=row, payload=payload, cites=cites, exp=exp,
-                    fixed_now=fixed_now, now=now, received=received, reply=reply, by=by, gate=gate)
+               "reason": reason, "revocability": revocability, "cites": cites, "expires_at": C.iso(exp) if exp else None,
+               "card_version": card_version}
+    try:
+        return L.record(store, use=SECRETARY, session_id=session_id, row=row, payload=payload, cites=cites, exp=exp,
+                        fixed_now=fixed_now, now=now, received=received, reply=reply, by=by, gate=gate)
+    except sqlite3.IntegrityError as e:              # v6 唯一索引：同卡同版本已有一个可送达的 ①（record 已回滚、删了原文）
+        if "secretary_decisions" not in str(e):
+            raise
+        raise LedgerError(f"卡片 {target.get('card')} 第 {card_version} 版已经有一个可送达的秘书决定，不再记第二个", "DuplicateCard")
 
 
 # ---------- 统计（规格第 8 节） ----------
 def stats(store, day):
     """那一天（Asia/Shanghai，按记账时间）每类的总数、代批数（非交常浩）、送达数（done）、交常浩数和原因分布、被推翻数
-    （处置不是「未处理」的）。代批省下的等待时间要等 0B-4c 记下飞书送达时间后再加。"""
+    （处置不是「未处理」的），以及代批省下的等待：送达成功的决定 outcome.waited_seconds（飞书送达 → 秘书送达，0B-4c 送达闸记）
+    之和与条数（waited_seconds / waited_count；没记的不算）。"""
     if not DAY.match(day or ""):
         raise LedgerError(f"日期要写成 YYYY-MM-DD：{day}", "BadInput")
     out = {"day": day, "total": 0, "categories": {}, "reasons": {}}
     for k in CATEGORIES:
-        out["categories"][k] = {"total": 0, "decided": 0, "delivered": 0, "handoff": 0, "reasons": {}, "overturned": 0}
+        out["categories"][k] = {"total": 0, "decided": 0, "delivered": 0, "handoff": 0, "reasons": {}, "overturned": 0,
+                                "waited_seconds": 0, "waited_count": 0}
     rows = store.conn.execute(f"SELECT * FROM {SECRETARY.decisions} WHERE substr(created_at, 1, 10) = ?", (day,)).fetchall()
     for d in rows:
         c = out["categories"][d["category"]]
@@ -339,6 +356,10 @@ def stats(store, day):
         else:
             c["decided"] += 1
             c["delivered"] += d["status"] == "done"
+            waited = L._row(d)["outcome"].get("waited_seconds")
+            if d["status"] == "done" and isinstance(waited, int) and not isinstance(waited, bool) and waited >= 0:
+                c["waited_seconds"] += waited
+                c["waited_count"] += 1
         c["overturned"] += d["disposition"] != "open"
     return out
 

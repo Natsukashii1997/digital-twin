@@ -432,7 +432,8 @@ class ProjectPinTests(Base):
             with self.assertRaises(SL.LedgerError) as cm:
                 SL.issue(led, session_id=s["id"], project="dt-sandbox", action="ask", target=target, context="示例服务加超时",
                          question="超时 30 秒还是 60 秒", summary="选 30 秒", basis="和现有配置一致", revocability="correctable",
-                         expires_at=at(11), now=at(10, 2), received={"card": 7, "question": "超时调多少"}, reply={"choice": 1})
+                         expires_at=at(11), now=at(10, 2), received={"card": 7, "question": "超时调多少"}, reply={"choice": 1},
+                         card_version=1)
             self.assertEqual(cm.exception.code, "NotAdmitted")
             h = SL.issue(led, session_id=s["id"], project="dt-sandbox", action="handoff", category="ask", reason="gate", target=target,
                          context="示例服务加超时", question="超时 30 秒还是 60 秒", ask_owner="回复我选哪个",
@@ -519,7 +520,8 @@ class StateMachineTests(Base):
             d = SL.issue(st, session_id=s["id"], project="dt-sandbox", action="ask",
                          target={"card": 7, "task": "t-20261118-abcdef", "generation": 1},
                          context="示例服务加超时", question="超时 30 秒还是 60 秒", summary="选 30 秒", basis="和现有配置一致，只影响沙盒",
-                         revocability="correctable", expires_at=at(11), now=at(10, 2), received={"card": 7, "question": "超时调多少", "options": ["30 秒", "60 秒"]}, reply={"choice": 1})
+                         revocability="correctable", expires_at=at(11), now=at(10, 2), received={"card": 7, "question": "超时调多少", "options": ["30 秒", "60 秒"]}, reply={"choice": 1},
+                         card_version=1)
             SL.begin(st, d["id"], now=at(10, 3))
         S.do_off("feishu", now=at(10, 4))
         msg = self.rejects("DrainUnverified", S.do_off, "feishu", drained=True, now=at(10, 5))
@@ -671,6 +673,8 @@ class EndToEndTests(Base):
 
     def ask(self, st, now, **kw):
         kw.setdefault("target", {"card": 7, "task": "t-20261118-abcdef", "generation": 1})
+        self._version = getattr(self, "_version", 0) + 1             # v6：同卡同版本只许一个可送达的决定，每次换一个版本
+        kw.setdefault("card_version", self._version)
         return SL.issue(st, project="dt-sandbox", action="ask", context="示例服务加超时", question="超时 30 秒还是 60 秒",
                         summary="选 30 秒", basis="和现有配置一致，只影响沙盒", revocability="correctable",
                         expires_at=now + dt.timedelta(minutes=30), now=now, received={"card": 7, "question": "超时调多少", "options": ["30 秒", "60 秒"]}, reply={"choice": 1}, **kw)

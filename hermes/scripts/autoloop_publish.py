@@ -18,7 +18,7 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
      在当前代次开始之后才排进来、它的派单事件都是当前代次；还要有当前代次的正面证据（第 2 轮）：这一轮里有当前代次的
      派单事件，或者它是回答卡片的一轮，顺着卡片找到提问的那一轮（最多 5 层），那一轮同样过这些检查、最终落到当前代次的
      派单；一轮里派单和回答合在一起时，每个回答照样要追溯（第 3 轮）。只有定时复查、没有派单证据的轮次 0C 不发布
-     （0D 记账后再放开）。对不上就不发。
+     （0D 记账后再放开）。对不上就不发。这套「轮次 → 派单」的追溯是 bind_run，秘书控制面（secretary_gate.py）绑定卡片时共用。
      剩余风险（常浩 11-18 定，记在这里）：正常结束、只是没有改动的轮次（如只向常浩提问）不写「停下了」（补了会盖掉 CLI 的
      回执），它在中台里也是正常结束；改写清单把旧包挂上去，本脚本分辨不出。和下一条同类，0D 结果账本补上。
      工人自己写的提交内容仍不可信（存心作恶的工人能在当前代次里把旧内容重做一遍），内容由凭证、PR 审查、常浩合并把关。
@@ -259,7 +259,7 @@ def hub_run(run_id):
         if r is None:
             return None
         events = [dict(e) for e in con.execute(
-            "SELECT e.source AS source, e.\"key\" AS key, e.type AS type, e.subject AS subject, e.detail AS detail "
+            "SELECT e.id AS id, e.source AS source, e.\"key\" AS key, e.type AS type, e.subject AS subject, e.detail AS detail "
             "FROM run_events re JOIN events e ON e.id = re.event_id WHERE re.run_id = ?", (int(run_id),))]
         return {**dict(r), "events": events}
     except sqlite3.Error:
@@ -268,15 +268,24 @@ def hub_run(run_id):
         con.close()
 
 
+CARD_COLUMNS = ("id", "key", "kind", "state", "version", "title", "text", "options", "choice", "by", "rule", "lane",
+                "source", "run_id", "created_at", "decided_at", "closed_at")
+CARD_SELECT = ", ".join(f'"{c}"' for c in CARD_COLUMNS)      # by、key 是 SQL 关键字，列名都加引号
+
+
 def hub_card(card_id):
-    """中台库只读：一张卡片的种类、事项和提问的那一轮。查不到返回 None。"""
+    """中台库只读：一张卡片的种类、事项、提问的那一轮，以及秘书控制面要的状态、版本、选项、回答人（#195 0B-4c 起多取这几列，
+    发布只用前几项）。卡片号在中台库里是整数（视图列没有类型亲和性，按字符串查永远查不到），不是正整数写法的直接当查不到。
+    查不到返回 None。"""
     import sqlite3
+    if not re.fullmatch(r"[1-9]\d{0,11}", str(card_id)):
+        return None
     try:
         con = _hub()
     except sqlite3.Error:
         return None
     try:
-        r = con.execute("SELECT id, kind, lane, run_id FROM cards WHERE id = ?", (str(card_id),)).fetchone()
+        r = con.execute(f"SELECT {CARD_SELECT} FROM cards WHERE id = ?", (int(card_id),)).fetchone()
         return dict(r) if r else None
     except sqlite3.Error:
         return None
@@ -284,14 +293,16 @@ def hub_card(card_id):
         con.close()
 
 
-def _run_basics(run, row, generation):
-    """一轮本身的检查：属于这张单、正常结束、不是被挡回去的、在当前代次开始后排进来、事件来源和派单代次都对。"""
+def _run_basics(run, row, generation, states=("done",), on_dispatch=None):
+    """一轮本身的检查：属于这张单、正常结束、不是被挡回去的、在当前代次开始后排进来、事件来源和派单代次都对。
+    states：这一轮可以处在哪些终态（发布只认 done；秘书 ② 认中台放弃的 cancelled，只用于最外层那一轮）。
+    on_dispatch(事件)：每个派单事件额外核一次（秘书控制面用它核网关记账），返回拒绝原因或 None；不给就不核（发布原样）。"""
     if run is None:
         return "中台里查不到这一轮"
     task_id = row["task_id"]
     if (run["lane"], run["rule"], run["agent"]) != (task_id, row["rule"], C.AGENTS[row["executor"]][0]):
         return "这一轮不属于这张单"
-    if run["state"] != "done":
+    if run["state"] not in states:
         return f"这一轮没有正常结束（{run['state']}）"
     if str(run.get("summary") or "").lstrip().startswith(STOPPED):
         return "这一轮被启动脚本挡回去了（停下了），不算数"
@@ -312,10 +323,13 @@ def _run_basics(run, row, generation):
                 return "这一轮的派单事件读不懂"
             if g != generation:
                 return f"这一轮的派单事件是第 {g} 代，不是第 {generation} 代"
+            reason = on_dispatch(e) if on_dispatch else None
+            if reason:
+                return reason
     return None
 
 
-def _generation_evidence(run, row, generation, depth):
+def _generation_evidence(run, row, generation, depth, on_dispatch=None):
     """当前代次的正面证据（审查第 2 轮 P1-02）：这一轮有当前代次的派单事件，或者有回答卡片的事件；
     不管有没有派单，每个回答都要顺着卡片追到提问的那一轮，那一轮也过 _run_basics 并最终落到当前代次的派单
     （第 3 轮：派单和旧回答合在同一轮时，不许因为有派单就跳过回答）。"""
@@ -332,16 +346,24 @@ def _generation_evidence(run, row, generation, depth):
         if not card or card.get("lane") != row["task_id"] or card.get("kind") == "notice" or not card.get("run_id"):
             return "回答事件追溯不到这张单提问的那一轮"
         asked = hub_run(card["run_id"])
-        reason = _run_basics(asked, row, generation) or _generation_evidence(asked, row, generation, depth + 1)
+        reason = (_run_basics(asked, row, generation, on_dispatch=on_dispatch)
+                  or _generation_evidence(asked, row, generation, depth + 1, on_dispatch))
         if reason:
             return f"提问的那一轮：{reason}"
     return None
 
 
+def bind_run(run_id, row, generation, states=("done",), on_dispatch=None):
+    """一轮能不能追到这张单当前代次的派单（发布和秘书控制面共用）：_run_basics + 当前代次的正面证据（回答卡片的一轮顺着卡片往回追）。
+    返回 None 表示绑得上，否则返回原因。参数见 _run_basics。"""
+    run = hub_run(run_id)
+    return (_run_basics(run, row, generation, states, on_dispatch)
+            or _generation_evidence(run, row, generation, 0, on_dispatch))
+
+
 def check_run(run_id, row, generation):
     """交接包落到的那一轮，必须是当前代次里这张单正常结束、有正面代次证据的一轮（审查 P1-02）。返回 None 表示通过。"""
-    run = hub_run(run_id)
-    reason = _run_basics(run, row, generation) or _generation_evidence(run, row, generation, 0)
+    reason = bind_run(run_id, row, generation)
     return f"交接包对应的那一轮：{reason}" if reason else None
 
 
