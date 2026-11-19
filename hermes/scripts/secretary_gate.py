@@ -20,7 +20,8 @@
   （$HERMES_HOME/state.db，主模型和回退模型从 $HERMES_HOME/config.yaml 读），这次会话必须：source = tool、没有父会话、
   **只有一条输入**、正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；**全部模型调用**（主循环和辅助调用）
   都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；系统提示（sessions.system_prompt_hash → system_prompts）
-  记着、且没有项目上下文、记忆、用户档案和 SOUL（PR #225 第 1 轮 P1-02：秘书侧必须带 --ignore-rules）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
+  记着、且没有项目上下文、记忆、用户档案和 SOUL（PR #225 第 1 轮 P1-02：秘书侧必须带 --ignore-rules）；$HERMES_HOME/config.yaml
+  没有自定义系统提示、人格、预载消息（第 2 轮 P1-02：这几样 --ignore-rules 管不到，临时系统提示也不进运行记录）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
   模型输出是一个 JSON 对象，只许有 category、card、card_version、choice、text、abstain、error，和提议逐项严格相同（类型也要一样；
   提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。source = tool 只是标签，不是调用者身份（ADR-015 账号隔离）。
 
@@ -415,9 +416,11 @@ def void_orphans(st, task_id=None, now=None):
 def record_handoff(st, ctx, reason, why, now):
     snap = ctx["received"]
     try:
+        card = ctx.get("card")                               # 对象里没有卡片的（② 通知卡）也按卡片和版本去重（第 2 轮 P1-04）
         d = SL.issue(st, session_id=ctx["session"], project=ctx["project"], action="handoff", category=ctx["category"],
                      reason=reason, target=ctx["target"], revocability="irrevocable", received=snap,
-                     card_version=ctx.get("card_version"), now=now, **handoff_text(ctx["category"], snap, why))
+                     card=card["id"] if card else None, card_version=card["version"] if card else None, now=now,
+                     **handoff_text(ctx["category"], snap, why))
     except L.LedgerError as e:                               # 同一次会话里这张卡这一版已经交过（PR #225 第 1 轮 P1-04）：不记第二笔
         if e.code != "DuplicateHandoff":
             raise
@@ -495,6 +498,38 @@ def _json_object(text):
     return out if isinstance(out, dict) else None
 
 
+NEUTRAL_PERSONALITY = ("", "none", "default", "neutral")   # Hermes v0.22 hermes_cli/personality.py 的「不用人格」写法
+OVERLAY_KEYS = {("agent", "system_prompt"): "自定义系统提示", ("display", "personality"): "人格设定",
+                ("prefill_messages_file", None): "预载消息", ("agent", "prefill_messages_file"): "预载消息"}
+
+
+def hermes_overlays(home):
+    """$HERMES_HOME/config.yaml 里会叠加进判断的东西（PR #225 第 2 轮 P1-02）：agent.system_prompt、display.personality（非中性）、
+    prefill_messages_file / agent.prefill_messages_file。这些 --ignore-rules 管不到；临时系统提示只在调用时注入、不进运行记录，
+    所以按配置核（环境变量那一路由秘书侧清掉，同账号进程能改环境是 #230 的事）。只认两层缩进、不引 YAML 库；看不懂的写法
+    （agent / display 写成一行、值是多行块）一律当成有。返回发现的项（空 = 干净）；读不了配置抛 OSError。"""
+    found, top = [], None
+    for line in (home / "config.yaml").read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        ind = len(line) - len(line.lstrip())
+        key, _, val = line.strip().partition(":")
+        val = val.split(" #")[0].strip()
+        empty = val.strip("'\"").strip() == "" or val in ("null", "~")
+        if ind == 0:
+            top = key
+            if key in ("agent", "display") and not empty:
+                found.append(f"{key} 写成了一行（看不懂）")
+            elif (key, None) in OVERLAY_KEYS and not empty:
+                found.append(OVERLAY_KEYS[(key, None)])
+        elif ind == 2 and (top, key) in OVERLAY_KEYS:
+            if key == "personality" and val.strip("'\"").strip().lower() in NEUTRAL_PERSONALITY:
+                continue
+            if not empty:
+                found.append(OVERLAY_KEYS[(top, key)])
+    return sorted(set(found))
+
+
 def soul_marker(home):
     """$HERMES_HOME/SOUL.md 第一行非空文字（没有就是空）：系统提示里出现它就是带上了 SOUL。"""
     try:
@@ -541,6 +576,12 @@ def run_evidence(session, card, since, t):
         no("显示判断时调用了工具")
     if sp is None or not isinstance(sp["prompt"], str):
         no("没记下系统提示，核不了判断时有没有带上你的个人设定和记忆")
+    try:
+        overlays = hermes_overlays(home)
+    except OSError:
+        no("核不了（读不到 Hermes 配置）")
+    if overlays:
+        no(f"核出 Hermes 配置里有{'、'.join(overlays)}，判断时会一起带上")
     if any(m in sp["prompt"] for m in CONTEXT_MARKERS + soul_marker(home)):
         no("显示判断时带上了你的个人设定、记忆或项目上下文（没按 --ignore-rules 跑）")
     try:

@@ -84,20 +84,25 @@ class Patrol(TSG.Base):
     def test_ask_switch_on_model_proposal_goes_through(self):
         reply = {"category": "ask", "card": 7, "card_version": 1, "choice": 1, "text": dict(TSG.TEXT), "abstain": None,
                  "error": None}
-        with self.fake_model(reply):
+        env = {"HERMES_EPHEMERAL_SYSTEM_PROMPT": "你是猛鬼兽", "HERMES_PREFILL_MESSAGES_FILE": "/tmp/prefill.json",
+               "HERMES_HOME": str(self.hermes), "HERMES_SESSION_KEY": "x"}
+        with self.fake_model(reply), mock.patch.dict(os.environ, env):
             out = SP.once()
         self.assertEqual([o["result"] for o in out], ["done"], out)
         call = self.model_calls[0]
         cmd = call["cmd"]
-        self.assertEqual(cmd[:3], [SP.HERMES_BIN, "chat", "-Q"])
-        for flag, val in (("--source", "tool"), ("-t", "todo"), ("--max-turns", "1")):
+        self.assertEqual(cmd[:3], [SP.HERMES_BIN, "chat", "--quiet"])
+        for flag, val in (("--source", "tool"), ("--toolsets", "todo"), ("--max-turns", "1")):
             self.assertEqual(cmd[cmd.index(flag) + 1], val)
         self.assertIn("--ignore-rules", cmd)                                    # 不带 SOUL、记忆、项目上下文（第 1 轮 P1-02）
         self.assertEqual(call["query"].splitlines()[0], SG.run_marker(7, 1))    # 第一行就是标记
         self.assertIn("1. 30 秒", call["query"])
         self.assertFalse(Path(call["cwd"]).exists())                            # 空的临时目录，用完就删
-        self.assertFalse([k for k in call["env"] if k.startswith(("DT_", "AGENT_AUTOLOOP", "HERMES_SESSION_"))
-                          or any(w in k.upper() for w in ("KEY", "TOKEN", "SECRET"))])
+        self.assertFalse([k for k in call["env"] if k.startswith(("DT_", "AGENT_AUTOLOOP")) or
+                          (k.startswith("HERMES_") and k != "HERMES_HOME") or any(w in k.upper() for w in ("KEY", "TOKEN", "SECRET"))])
+        self.assertEqual(call["env"].get("HERMES_HOME"), str(self.hermes))      # 只留 Hermes 目录
+        flags = [a for a in cmd if a.startswith("-")]                                       # 用到的参数全在能力核对里（第 2 轮 P2-04）
+        self.assertEqual(set(flags), set(SP.HERMES_FLAGS) | {"--run-budget"})
         self.assertEqual(set(self.submitted[0]) - set(OUT_KEYS), {"schema", "run"})
         self.assertEqual(len(self.answers()), 1)
 
@@ -292,7 +297,7 @@ class HermesFlags(unittest.TestCase):
         return calls, mock.patch.object(SP.subprocess, "run", run)
 
     def test_missing_flag_means_no_model_call(self):
-        calls, patch = self.help_says("usage: hermes chat --query-file --source --toolsets --max-turns --run-budget")
+        calls, patch = self.help_says("usage: hermes chat --quiet --query-file --source --toolsets --max-turns --run-budget")
         with patch:
             out = SP.judge({"id": 7, "version": 1})
         self.assertIn("--ignore-rules", out["error"])

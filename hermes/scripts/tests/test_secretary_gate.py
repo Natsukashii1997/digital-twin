@@ -705,6 +705,23 @@ class RedispatchTests(Base):
         self.assertEqual((out["result"], out["reason"]), ("handoff", "gate"), out["msg"])
         self.assertIn("已用完", out["msg"])
 
+    def test_notice_card_hands_off_once(self):
+        """PR #225 第 2 轮 P1-04：② 通知卡的交常浩同样按「会话 + 卡片 + 版本」去重；对象形状不变（只有任务和代次）。"""
+        Base.setUp(self)
+        self.stop_card(attempts=3)                                                # 次数不够：交常浩
+        first, second = self.submit(), self.submit()
+        self.assertEqual((second["result"], second["decision"]), ("handoff", first["decision"]), second)
+        self.assertEqual(len(self.decisions()), 1)
+        d = self.get(first["decision"])
+        self.assertEqual((d["card_id"], d["card_version"]), (8, 1))
+        self.assertEqual(set(json.loads(d["target"]) if isinstance(d["target"], str) else d["target"]), {"task", "generation"})
+        self.hub("UPDATE cards SET version = 2 WHERE id = 8")
+        with F.db(write=True) as con:                                             # 新版本也已在飞书送达 40 分钟
+            con.execute("UPDATE feishu_cards SET version = 2 WHERE card_id = 8")
+        third = self.submit(self.prop(card_version=2))
+        self.assertNotEqual(third["decision"], first["decision"])
+        self.assertEqual(len(self.decisions()), 2)
+
     def test_not_given_up(self):
         for name, kw in (("还在重试", {"state": "queued"}), ("次数不够", {"attempts": 3}), ("不是放弃", {"summary": "已停止"})):
             with self.subTest(name):
@@ -945,6 +962,32 @@ class RunEvidenceTests(Base):
         self.setUp()
         (self.hermes / "SOUL.md").write_text("# 猛鬼兽 · SOUL\n", encoding="utf-8")
         self.assertEqual(self.submit()["result"], "done")                       # 有 SOUL.md、但这次没带上：照常
+
+    def test_config_overlays_hand_off(self):
+        """PR #225 第 2 轮 P1-02：Hermes 配置里有自定义系统提示、人格、预载消息（--ignore-rules 管不到），交常浩；中性人格照常。"""
+        cfg = (self.hermes / "config.yaml").read_text(encoding="utf-8")
+        bad = {"自定义系统提示": "agent:\n  system_prompt: 你是猛鬼兽\n",
+               "多行系统提示": "agent:\n  system_prompt: |\n    你是猛鬼兽\n",
+               "人格": "display:\n  personality: kawaii\n",
+               "预载消息": "prefill_messages_file: /tmp/prefill.json\n",
+               "旧写法预载消息": "agent:\n  prefill_messages_file: prefill.json\n",
+               "写成一行": "agent: {system_prompt: 你是猛鬼兽}\n"}
+        for name, extra in bad.items():
+            with self.subTest(name):
+                self.setUp()
+                (self.hermes / "config.yaml").write_text(cfg + extra, encoding="utf-8")
+                self.assertIn("Hermes 配置里有", self.handoff(self.submit(), "model")["basis"])
+        for extra in ("display:\n  personality: none\n", "agent:\n  system_prompt: ''\n  max_turns: 90\n",
+                      "prefill_messages_file: \"\"\n"):
+            with self.subTest(extra):
+                self.setUp()
+                (self.hermes / "config.yaml").write_text(cfg + extra, encoding="utf-8")
+                self.assertEqual(self.submit()["result"], "done")
+
+    def test_config_unreadable_for_overlays_hands_off(self):
+        """主模型那段读到了、核叠加项时配置却读不了（比如中途被换掉）：核不了就交常浩，不当成干净。"""
+        with mock.patch.object(SG, "hermes_overlays", side_effect=OSError("gone")):
+            self.assertIn("读不到 Hermes 配置", self.handoff(self.submit(), "model")["basis"])
 
     def test_forged_fallback_claim_in_proposal_is_not_a_field(self):
         """以前能在提议里写 model.fallback=false 骗过去；现在多一个字段就是格式不合格，交常浩。"""

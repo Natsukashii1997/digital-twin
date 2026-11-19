@@ -13,12 +13,12 @@
   3. 想办法：
      ① 控制面的送达开关（secretary_gate.REAL_ASK）关着时**不调模型**（常浩 11-19 选甲：省额度；中台按版本核对到位前 ① 本来
         也不生效），交一个只带卡片号和版本的提议，控制面直接记「交常浩」。开关开着时才调模型：hermes chat 单次
-        （-Q --query-file --source tool -t todo --max-turns 1 --ignore-rules：不给读写文件、终端、网页这些工具，只跑一轮，
+        （--quiet --query-file --source tool --toolsets todo --max-turns 1 --ignore-rules：不给读写文件、终端、网页这些工具，只跑一轮，
         不带 SOUL、记忆、项目上下文和预载技能；本机 Hermes 不认得这些参数就不调、交出错），**只送一条输入**，
         输入第一行原样是 secretary_gate.run_marker(卡片号, 版本)；模型只许回一个 JSON，字段只有 category、card、card_version、
         choice、text、abstain、error。提议 = 这份输出 + 可信的 schema、category、card、card_version + {"run": {"session": 会话号}}
         （模型改了身份字段，控制面比对运行记录时对不上、交常浩）；输出不是合格 JSON 就交 {"error": 说明}（控制面记交常浩）。模型进程的工作目录是一个新建的空临时目录，环境里去掉 DT_*、AGENT_AUTOLOOP_*、
-        HERMES_SESSION_* 和名字带 KEY / TOKEN / SECRET 的变量（规格第 9 节验收 11 的软件层部分；真隔离要 0E-5 搬进 dt-secretary）。
+        除 HERMES_HOME 以外的 HERMES_*（含自定义系统提示、预载消息）和名字带 KEY / TOKEN / SECRET 的变量（规格第 9 节验收 11 的软件层部分；真隔离要 0E-5 搬进 dt-secretary）。
      ② 不用模型：按规则写提议和给常浩的白话（清单允许每件事重派一次，额度由控制面账本管）。
   4. 交提议：写到 DigitalTwin/secretary/outbox/（600；文件名只用可信的类别、卡片号、版本，超过 16 KB 改交出错），调
      secretary_gate.py submit --file，读它最后一行 JSON；控制面给了认得的结论就删掉这个文件，交不上的留 7 天。
@@ -55,9 +55,11 @@ import secretary_ledger as SL  # noqa: E402
 FINAL = ("done", "handoff", "refused", "failed", "yielded", "unknown")   # 这一版不再交
 MODEL_BUDGET = 300                       # 秒：一次判断最多等这么久
 HERMES_BIN = os.environ.get("HERMES_BIN") or "hermes"
-SCRUB = re.compile(r"^(DT_|AGENT_AUTOLOOP|HERMES_SESSION_)|KEY|TOKEN|SECRET", re.I)
+# 判断进程的环境：去掉 DT_*、AGENT_AUTOLOOP*、除 HERMES_HOME 以外的全部 HERMES_*（含自定义系统提示 HERMES_EPHEMERAL_SYSTEM_PROMPT、
+# 预载消息 HERMES_PREFILL_MESSAGES_FILE，PR #225 第 2 轮 P1-02）和名字带 KEY / TOKEN / SECRET 的变量
+SCRUB = re.compile(r"^(DT_|AGENT_AUTOLOOP|HERMES_(?!HOME$))|KEY|TOKEN|SECRET", re.I)
 OUTBOX_KEEP = 7 * 86400                  # 秒：交不上留下的提议文件最多留这么久（交上了的当场删）
-HERMES_FLAGS = ("--query-file", "--source", "--toolsets", "--max-turns", "--run-budget", "--ignore-rules")
+HERMES_FLAGS = ("--quiet", "--query-file", "--source", "--toolsets", "--max-turns", "--run-budget", "--ignore-rules")   # 和下面命令里用的逐个对应
 REDISPATCH_TEXT = {"summary": "让工人再试一次",
                    "basis": "工人连续 10 次没跑成，中台停了这件事；清单允许每件事重派一次，先让工人再试，再不成就交给你。"}
 PROMPT = """{marker}
@@ -165,7 +167,7 @@ def judge(card):
         q.write_text(PROMPT.format(marker=SG.run_marker(card["id"], card["version"]), card=card["id"],
                                    version=card["version"], title=card.get("title") or "", text=card.get("text") or "",
                                    options=options_text(card)), encoding="utf-8")
-        cmd = [HERMES_BIN, "chat", "-Q", "--query-file", str(q), "--source", SG.RUN_SOURCE, "-t", "todo",
+        cmd = [HERMES_BIN, "chat", "--quiet", "--query-file", str(q), "--source", SG.RUN_SOURCE, "--toolsets", "todo",
                "--max-turns", "1", "--run-budget", str(MODEL_BUDGET), "--ignore-rules"]   # 不带 SOUL、记忆、项目上下文、预载技能
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=MODEL_BUDGET + 60, cwd=work, env=model_env())
