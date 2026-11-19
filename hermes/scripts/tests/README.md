@@ -152,6 +152,12 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 - 重试分级、低噪声报告（未确认送达每轮再报、`ack` 后才安静、重启后去重仍在、没有待报时 `--quiet` 空输出）；`tick --execute` 默认关闭。
 - 端到端：任务书 S7 场景 1、2、3、7、8（其余场景在上面各文件里），对照表在 `test_twin_scheduler_e2e.py` 文件头。
 
+## 车间只读单（test_run_worker_readonly.py、claude_readonly_probe.py）
+
+`test_run_worker_readonly.py` 钉住 `run_worker.py` 的只读参数：Claude 只读单只加载 Read / Grep / Glob（`--tools`）、不加载 MCP（`--strict-mcp-config`）、权限模式 `dontAsk`，续跑同样受限；写入单和 Codex（`-s read-only`）不变。来由：只加 `--allowedTools` 时，本机 `bypassPermissions` 下只读单照样能用 Bash、Write 和 MCP 写文件（2026-11-19 实测）。
+
+`claude_readonly_probe.py` 是真 claude 的反向验证（会用会员额度、要联网，不进全量测试）：升级 Claude Code 或改了只读参数后手动跑 `python3 -B hermes/scripts/tests/claude_readonly_probe.py <证据目录>`。它用真实 `~/.claude` 设置、临时假仓库（项目设置故意放行 Write、Edit、`Bash(touch *)`），让模型真的去试 Write、Bash、MCP 写文件；工具只有 Read / Grep / Glob、没有 MCP、`dontAsk`、一个探测文件都没写出来才退出码 0。
+
 ## 派单锁与进程身份（test_dispatch_lock.py）
 
 真实子进程跑 `dispatch.py`（`dispatch_harness.py`）。覆盖：4 个进程并行 `new` 编号互不相同；同仓库两张单同时 `run` 只跑一张、另一张排队；同一单同时 `run` 两次只跑一次；锁被占时等待有上限且不动作；`run` 记 `dispatch_pid / run_host / run_started`，车间 pid = pgid = sid；`write_identity` 与 `ps` 一致；`--sched-key` 写字段和标记文件、格式不对在编号前拒绝；手工 `new` 字段集合不变。改动前 9 项中 8 项失败。

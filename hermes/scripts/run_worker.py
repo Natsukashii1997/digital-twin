@@ -6,7 +6,7 @@
 
 做的事：
 - 设置代理（本机 claude 不走系统代理，直连会 403），清掉第三方 Anthropic 变量
-- read 模式只读；write 模式放开权限（PRD M2 决定：边界靠独立 worktree + 下面的护栏 + 合并须常浩确认）
+- read 模式只读（Claude 用 --tools 只留 Read / Grep / Glob、不加载 MCP、dontAsk；Codex 用 -s read-only 沙箱）；write 模式放开权限（PRD M2 决定：边界靠独立 worktree + 下面的护栏 + 合并须常浩确认）
 - 跑完写 结果目录/receipt.json，并检查护栏：车间有没有把东西弄进主分支、本单分支在远端有没有出现或变化（有没有 push）。
   主分支被别的会话正常更新（例如另一个 Claude 会话合并了自己的分支）不算违规，只记在 note_main_moved；
   别的远端引用变化（别的会话 push、fetch）也不算违规，只记在 note_remote_moved。
@@ -106,12 +106,30 @@ def build_env():
     return env
 
 
+CLAUDE_READ_TOOLS = "Read,Grep,Glob"
+
+
+def claude_read_only_flags():
+    """Claude 只读单的权限参数（#236 后续）。
+
+    --allowedTools 只是“放行这些”，不是“只准这些”；本机 ~/.claude/settings.json 的 defaultMode 是
+    bypassPermissions，项目 settings.local.json 还放行了 git push 等，所以只加 --allowedTools 时
+    只读单照样能用 Bash、Write、Edit 和所有 MCP 工具（2026-11-19 实测三种方式都写成了文件）。
+      --tools              内置工具只留这几个，Bash / Write / Edit / Task / Skill 等根本不加载
+      --strict-mcp-config  不加载任何 MCP 服务（含插件和 claude.ai 连接器，其中有能写本机文件和云端的）
+      --permission-mode dontAsk  盖过 bypassPermissions：没预先放行的一律拒绝，不提示
+      --allowedTools       预先放行这几个只读工具，dontAsk 下它们能正常用
+    """
+    return ["--tools", CLAUDE_READ_TOOLS, "--strict-mcp-config", "--permission-mode", "dontAsk",
+            "--allowedTools", CLAUDE_READ_TOOLS]
+
+
 def claude_cmd(a, task):
     cmd = [find_bin("claude"), "-p", task, "--output-format", "json"]
     if a.mode == "write":
         cmd.append("--dangerously-skip-permissions")
     else:
-        cmd += ["--allowedTools", "Read", "Grep", "Glob", "LS"]
+        cmd += claude_read_only_flags()
     if a.resume:
         cmd += ["--resume", a.resume]
     return cmd
