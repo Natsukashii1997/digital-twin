@@ -58,6 +58,14 @@
 
 ---
 
+## 2026-11-19 · #244 亚古兽「思考主线」技能、核验技能收窄（PR 待常浩合并，已安装）
+
+- **起因**：常浩 12:27 说亚古兽分析项目纪要「本末倒置」。查到三处：五个思考模型在 SOUL 里只有五句定义、没有步骤也查不出用没用；亚古兽自建的 `business-analysis-coaching` 触发说明太宽（已加载 27 次）、正文是七步执行顺序，成了分析的主流程；后台自动复盘把常浩的纠正一次次写成这个技能的补丁（共 12 次）。
+- **做了什么**：新增 `hermes/skills/thinking-mainline/`（六步：问、铺、抓、挖和破、立、落；第 3 步之后才列核验清单；回答里要有目标、主要矛盾及排除理由、根因、取舍）；`business-analysis-coaching` 收窄成 `hermes/skills/evidence-check/`（两份参考文件带过来，只改 product-readiness 第 7 节一段）；两者登记进 `ops/self_check.py` 的 `AGUMON_SKILLS`。六步和五个模型的对应关系是 Claude 推断的，常浩还没逐条改过。
+- **试跑**：临时 profile 用同一份纪要、同一模型（gpt-6.2-sol）跑了对照组 1 次、新设置 2 次。第一轮漏了目标和根因，据此把这两样改成必须单独成句；第二轮首句、目标、根因（标推断）、取舍都有。对照组比中午那版好很多，中午的问题部分来自 6.1 和长会话。每版只跑一次，不能说稳定。记录在 `evidence/agumon-thinking-trial/`。
+- **已安装**（常浩说「装」）：两份技能装到 `~/.hermes/profiles/agumon/skills/productivity/`；旧技能用 `hermes -p agumon curator archive` 归档到 `skills/.archive/`（可 restore）；SOUL.md「思维内核」用法段和 workspace/HERMES.md 第 2、3 节各加一条（源文件改动在 niuma-home 的 PR）；23:09 重启 `ai.hermes.gateway-agumon`，已连上飞书；改前备份在 `evidence/agumon-thinking-install-20261119/`。常浩要在飞书发 `/new` 才用上新人设（G-26）。
+- **没做 / 待定**：没关亚古兽的自动技能复盘（`skills.creation_nudge_interval`）；`curator pin` 只防删除不防修改，靠每天自检比对发现被改。全量测试两次都卡住没出结果（同时段另外两个工作区的全量测试也卡着），只确认 `test_self_check` 39 条通过。
+- **下一步**：常浩合并本 PR 和 niuma-home 的 PR；用几天后看亚古兽的分析是否稳定按主线写。
 ## 2026-11-19 · 车间 Claude 只读单改成真正只读（#236 后续；PR #242 已合并 `4f79eaa`，已安装）
 
 - 缺口（#236 第 3 批独立审查发现，本次实测确认）：`run_worker.py` 的 Claude 只读单只加了 `--allowedTools`，本机 bypassPermissions 下照样有 Bash、Write、Edit 和 42 个 MCP 服务，Write、Bash、desktop-commander 三种方式都写成了文件。

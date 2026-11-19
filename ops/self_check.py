@@ -40,7 +40,7 @@ CUSTODY_SCRIPT = Path(os.environ.get("DT_CUSTODY_SCRIPT", HERMES / "scripts/cust
 CUSTODY_TIMEOUT = 60
 CUSTODY_RENEW_DAYS = 3      # 托管策略模板：到期前 3 天日报提醒续签
 LIST_LIMIT = 10
-AGUMON_SKILLS = ("sales-sidebar",)   # 亚古兽的技能，装在 ~/.hermes/profiles/agumon/skills/productivity/ 下（销售侧边栏，2026-11-19）
+AGUMON_SKILLS = ("sales-sidebar", "thinking-mainline", "evidence-check")   # 亚古兽的技能，装在 ~/.hermes/profiles/agumon/skills/productivity/ 下（销售侧边栏、思考主线、证据核验，2026-11-19）
 AGUMON_PREFIX = ("memdaily_", "sidebar_")   # 亚古兽 profile 的脚本和提示词，装在 ~/.hermes/profiles/agumon/ 下（#182；sidebar_ 是销售侧边栏汇报）
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
