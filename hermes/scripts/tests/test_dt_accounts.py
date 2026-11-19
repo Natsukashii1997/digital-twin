@@ -3,6 +3,7 @@
 不用 sudo、不改 pf、不装 LaunchDaemon：门卫规则测 `rules` 子命令打印出的内容，apply 换上假 pfctl 做故障注入；
 探针用环境变量把路径指到临时目录，以当前账号跑一次；root 脚本里的函数抽出来、把系统命令换成桩再测。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import json
 import os
