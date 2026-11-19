@@ -311,7 +311,8 @@ class ProbeResult(unittest.TestCase):
         (Path(d.name) / "probe").mkdir()
         if want:
             (Path(d.name) / "probe" / "dt-gate.sha256").write_text(want + "\n")
-        stub = f'DIR={d.name}\nread_result() {{ printf "%s\\n" {" ".join(repr(l) for l in got_lines) or "\"\""}; }}\n'
+        args = " ".join(repr(l) for l in got_lines) or '""'   # Python 3.9（CI）的 f-string 里不能有反斜杠
+        stub = f'DIR={d.name}\nread_result() {{ printf "%s\\n" {args}; }}\n'
         return subprocess.run(["bash", "-c", stub + func(SETUP, "secret_verdict") + "\nsecret_verdict dt-gate"],
                               capture_output=True, text=True)
 
