@@ -67,6 +67,7 @@ reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书
   ① 停在 executing 超过 2 分钟、回读给不出结论的（中台库读不到，或卡片还开着）一律转 unreconciled：额度保留、冻结这张任务、
   交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
   换成旧快照，推断不可靠；① 现在整体关着，多冻结没有实际代价。frozen_task 也把超时的 executing 算进去，同任务第二张卡不能再获准。
+  回读到已决定却缺回答人或选项：证据不全，也记 unreconciled（专项续审 P2-04，同 autoloop_answer.judge）。
 lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自己的 ref（cards.db 的 secretary_cards），报 delivered（同一 ref 重报幂等），
   中台收下后记「中台确认送达」；领到新版本时先清掉旧版本的确认时间，只有这一版报送达成功才记（审查 P1-02）；以后由常驻进程调（本批不装）。
 
@@ -1015,6 +1016,8 @@ def _verdict(st, d):
             with F.db() as con:
                 sc = secretary_card(con, d["card_id"])
             return "done", {"checked": checked, "found": True, "ref": (sc or {}).get("ref") or "秘书通道"}
+        if c.get("state") in ANSWERED and (c.get("choice") is None or not c.get("by")):   # 证据不全不下结论（专项续审 P2-04，
+            return "unreconciled", {"checked": checked + "（已决定却缺回答人或选项，核不清）"}   # 同 autoloop_answer.judge）
         if c.get("state") in ANSWERED + ("closed",):
             return "failed", {"checked": checked, "found": False}
         return "unreconciled", {"checked": checked + "（还开着：请求可能晚到，不重答）"}

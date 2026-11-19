@@ -639,6 +639,21 @@ class ReconcileTests(Base):
         self.assertEqual(self.held(), [])
         self.assertIsNone(self.claim())
 
+    def test_final_state_missing_answerer_or_choice_is_unreconciled(self):
+        """专项续审 P2-04：中台说已决定，却缺回答人或选项，证据不全：对账不清，不判没做成、不退额度（同 autoloop_answer.judge）。"""
+        for sql in ("UPDATE cards SET state = 'decided', choice = 0, \"by\" = NULL",
+                    "UPDATE cards SET state = 'done', choice = NULL, \"by\" = '秘书'"):
+            with self.subTest(sql=sql):
+                self.setUp()
+                self.hub_error = F.HubError("超时")
+                out = self.submit()
+                self.hub_error = None
+                self.hub(sql)
+                self.assertEqual(SG.reconcile(now=T), [(out["decision"], "unreconciled")])
+                self.assertEqual(self.get(out["decision"])["status"], "unreconciled")
+                self.assertNotEqual(self.held(), [])
+                self.assertEqual(len(self.answers()), 1)                         # 不重答
+
     def test_killed_mid_delivery_reconciles_once(self):
         orig = self.fake_hub
 

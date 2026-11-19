@@ -160,7 +160,8 @@ class Deliver(Base):
                 return {"card": dict(CARD)}
             posts.append((path, body))
             return {}
-        with mock.patch.object(F, "hub", hub), mock.patch.object(A, "flush") as flush:
+        with mock.patch.object(F, "hub", hub), mock.patch.object(A, "flush") as flush, \
+                mock.patch("autoloop_publish.hub_card", lambda cid: {"id": cid, "version": 1, "state": "open"}):
             self.assertTrue(F.once()["ok"])
             flush.assert_called_once_with(7)                                   # 送达确认后提交排队的本人回答
             self.assertTrue(F.card_by_token(self.token())["hub_delivered_at"])
@@ -654,10 +655,15 @@ class BridgeLock(Base):
         self.register()
         self.posts = []
         self.leases = {}
+        self.hub_now = None                                                     # 中台库里这张卡现在的版本；None = 读不到
         for target, name, fake in ((F, "hub", self.fake_hub), (A, "flush", lambda cid: None)):
             p = mock.patch.object(target, name, fake)
             p.start()
             self.addCleanup(p.stop)
+        p = mock.patch("autoloop_publish.hub_card",
+                       lambda cid: None if self.hub_now is None else {"id": cid, "version": self.hub_now, "state": "open"})
+        p.start()
+        self.addCleanup(p.stop)
 
     def fake_hub(self, method, path, body=None, timeout=20):
         if method == "GET":
@@ -677,6 +683,7 @@ class BridgeLock(Base):
                 if a[:3] == ["im", "messages", "patch"]]
 
     def test_out_of_order_old_lease_is_skipped(self):
+        self.hub_now = 3
         self.lease(3)
         self.assertTrue(F.once()["ok"])
         self.lease(2)                                                            # 第 2 版的领取迟到
@@ -686,20 +693,92 @@ class BridgeLock(Base):
         self.assertEqual(len(self.patches()), 1)                                 # 没把消息改回第 2 版
         self.assertEqual([b["version"] for _, b in self.posts], [3])             # 只报过第 3 版送达
 
-    def test_hub_already_newer_skips_lease(self):
+    def test_hub_already_newer_skips_lease_then_next_poll_delivers_latest(self):
+        self.hub_now = 3
         self.lease(2)
-        with mock.patch("autoloop_publish.hub_card", lambda cid: {"id": 7, "version": 3, "state": "open"}):
-            out = F.once()
+        out = F.once()
         self.assertIn("中台这张卡已经是第 3 版", out["skipped"])
-        self.assertEqual((self.registered(), self.patches(), self.posts[1:]), (1, [], []))
-
-    def test_registry_never_goes_back(self):
-        F.deliver({**CARD, "ref": "om_fixture_1", "version": 3})
-        F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})                 # 绕过 once 直接送旧版本：登记也不回退
+        self.assertEqual((self.registered(), self.patches(), self.posts), (1, [], []))   # 不改消息、不报送达
+        self.lease(3)                                                            # 中台过一会再给（最新版本）
+        self.assertTrue(F.once()["ok"])
         self.assertEqual(self.registered(), 3)
+        self.assertEqual([b["version"] for _, b in self.posts], [3])
+        self.assertEqual({b["behaviors"][0]["value"]["v"] for b in self.patches()[0]["body"]["elements"] if b["tag"] == "button"}, {3})
+
+    def test_hub_unreadable_is_fail_closed(self):
+        """专项续审 P1-01：中台库读不到这张卡、版本不是整数，都不发、不报送达（不当成「没有新版本」）。"""
+        for hub_now in (None, True, "2", 2.0):
+            with self.subTest(hub_now=hub_now):
+                self.hub_now = hub_now
+                self.lease(2)
+                out = F.once()
+                self.assertIn("读不到中台库里这张卡的版本", out["skipped"])
+                self.assertEqual((self.registered(), self.patches(), self.posts), (1, [], []))
+        self.assertEqual(len(self.lark.sent()), 1)                               # 也没另发新卡
+
+    def test_direct_deliver_never_patches_back(self):
+        """专项续审 P2-03：绕过 once 直接送旧版本，改飞书之前就拒：消息和登记都不回退。"""
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 3})
+        with self.assertRaisesRegex(F.Fail, "不把消息改回第 2 版"):
+            F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})
+        with self.assertRaisesRegex(F.Fail, "不把消息改回第 2 版"):
+            F.deliver({**CARD, "ref": None, "version": 2})                        # 发新卡的路也拒
+        self.assertEqual(self.registered(), 3)
+        self.assertEqual(len(self.patches()), 1)
+        self.assertEqual(len(self.lark.sent()), 1)
+
+    def test_direct_deliver_waits_for_lock(self):
+        """锁外直接调 deliver 也要等桥接锁：别的进程持锁时不改飞书。"""
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with F.bridge_lock():
+                held.set()
+                release.wait(5)
+        th = threading.Thread(target=holder)
+        th.start()
+        self.assertTrue(held.wait(5))
+        td = threading.Thread(target=lambda: F.deliver({**CARD, "ref": "om_fixture_1", "version": 2}))
+        td.start()
+        time.sleep(0.3)
+        self.assertEqual(self.patches(), [])                                    # 还在等锁
+        release.set()
+        th.join(5)
+        td.join(5)
+        self.assertEqual((len(self.patches()), self.registered()), (1, 2))
+
+    def test_recovery_report_waits_for_lock_and_reports_latest(self):
+        """专项续审 P2-02：第 2 版正在改卡（持锁）时，对账补报送达要等锁；拿到锁时按当时登记的版本报，不报旧的第 1 版。"""
+        entered, release = threading.Event(), threading.Event()
+        real = self.lark
+
+        def lark(args, what, cwd=None):
+            if args[:3] == ["im", "messages", "patch"]:
+                entered.set()
+                release.wait(5)
+            return real(args, what, cwd)
+        self.hub_now = 2
+        self.lease(2, "v2")
+        out = {}
+        with mock.patch.object(F, "lark", lark):
+            t2 = threading.Thread(target=lambda: out.setdefault("v2", F.once()), name="v2")
+            t2.start()
+            self.assertTrue(entered.wait(5))
+            tr = threading.Thread(target=lambda: out.setdefault("report", F.report_delivered(7)), name="report")
+            tr.start()
+            time.sleep(0.3)
+            self.assertNotIn("report", out)                                     # 补报在等锁
+            self.assertEqual(self.posts, [])
+            release.set()
+            t2.join(5)
+            tr.join(5)
+        self.assertTrue(out["v2"]["ok"])
+        self.assertIn("report", out)
+        self.assertEqual([b["version"] for _, b in self.posts], [2, 2])         # 两次都是第 2 版，没有第 1 版
 
     def test_concurrent_v2_v3_are_serialised(self):
         """第 3 版的桥接正在改卡（持锁），第 2 版的桥接领到卡后只能等；等到时登记已是第 3 版，跳过。"""
+        self.hub_now = 3
         entered, release = threading.Event(), threading.Event()
         real = self.lark
 

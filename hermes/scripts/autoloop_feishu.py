@@ -27,9 +27,12 @@
   autoloop_feishu.py once         只领一次（测试、手动补发）
   autoloop_feishu.py show [--json]  只读：登记过的卡片、答卷进度和最近的变化记录
 环境变量：DT_AUTOLOOP_CARDS_DB、DT_AUTOLOOP_CHANNEL_KEY_DIR（同 autoloop_config）、AGENT_AUTOLOOP_HOME、DT_LARK_CLI。
-单写入者（#218 第 3 轮 P2-01）：once（run 也走它）领到卡后先拿桥接锁（cards.db 同目录的 cards.db.bridge.lock，进程级
-排他锁），锁里按中台库现读这张卡：中台已经是更新的版本、或本地已登记更高的版本，就不处理这次领到的旧版本（不改消息、
-不报送达）；写登记一律带「版本不回退」条件。
+单写入者（#218 第 3 轮 P2-01，专项续审 P1-01 / P2-02 / P2-03）：发卡、改卡、报送达都在桥接锁里做（cards.db 同目录的
+cards.db.bridge.lock，进程级排他锁，不可重入：锁里只调带下划线的内部实现）。once（run 也走它）领到卡后拿锁，锁里按中台库现读
+这张卡：读不到（库打不开、没有这张卡、版本不是整数）就不发、不报送达（fail-closed：中台没收到送达报告，过 1 分钟会再给，
+最多重试 9 次、57 分钟内，见中台 kernel/decide.ts 的 RESEND_AT）；中台已是更新的版本、或本地已登记更高的版本，也不处理
+这次领到的旧版本。deliver 在改飞书消息之前先核本地登记，登记已是更高版本就拒（不把消息改回旧版）；写登记一律带
+「版本不回退」条件。对账补报送达（autoloop_answer.reconcile → report_delivered）同样拿这把锁。
 不调用 AI。
 """
 import argparse
@@ -259,7 +262,17 @@ def send_card(chat, content, key):
 
 
 def deliver(card):
-    """发一张卡（ref 为空）或改那条消息（ref 不为空），然后报送达；返回消息号。"""
+    """发一张卡（ref 为空）或改那条消息（ref 不为空）；返回消息号。持桥接锁做（锁外的直接调用也串行、也核版本）。"""
+    with bridge_lock():
+        return _deliver(card)
+
+
+def _deliver(card):
+    """deliver 的内部实现，调用方必须已持桥接锁。改飞书之前先核本地登记的版本（专项续审 P2-03）。"""
+    with db() as con:
+        r = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
+    if r and r["version"] > card["version"]:
+        raise Fail(f"本地已登记第 {r['version']} 版，不把消息改回第 {card['version']} 版")
     if card.get("ref"):
         with db() as con:
             r = con.execute("SELECT token, message_id FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
@@ -295,11 +308,13 @@ def deliver(card):
 
 
 def newer_elsewhere(card):
-    """这次领到的版本是不是已经旧了：中台库里这张卡已是更新的版本，或本地已登记更高的版本（别的桥接进程送过了）。
-    返回原因或 None。中台库读不到时只按本地登记判。"""
+    """这次领到的卡能不能处理：中台库读不到这张卡（或版本）、中台已是更新的版本、本地已登记更高的版本（别的桥接进程送过了），
+    都返回原因（不处理）；核过了返回 None。"""
     import autoloop_publish as P
     cur = P.hub_card(card["id"])
-    if cur and isinstance(cur.get("version"), int) and cur["version"] > card["version"]:
+    if not cur or type(cur.get("version")) is not int:  # 读不到不等于没有新版本：不发（专项续审 P1-01，fail-closed）
+        return "读不到中台库里这张卡的版本，核不了是不是最新版"
+    if cur["version"] > card["version"]:
         return f"中台这张卡已经是第 {cur['version']} 版"
     with db() as con:
         r = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
@@ -315,19 +330,25 @@ def once(wait=50):
         return None
     with bridge_lock():
         stale = newer_elsewhere(card)
-        if stale:                                # 旧版本：不改消息、不报送达，新版本由中台另行派发
+        if stale:                                # 不改消息、不报送达：中台没收到报告，过一会再给（最新版本）
             return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{stale}，不处理"}
         try:
-            ref = deliver(card)
+            ref = _deliver(card)
         except (SendError, Fail) as e:
             hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
             return {"card": card["id"], "ok": False, "why": str(e)}
-        confirm(card["id"])
+        _confirm(card["id"])
     return {"card": card["id"], "ok": True, "ref": ref}
 
 
 def report_delivered(card_id):
-    """按登记的版本和消息号报送达（发卡后先落盘、再报，所以崩溃后可以照登记的原样重报；中台对同一 ref 重报是幂等的），
+    """持桥接锁报送达（对账补报走这里，专项续审 P2-02）。"""
+    with bridge_lock():
+        _report_delivered(card_id)
+
+
+def _report_delivered(card_id):
+    """report_delivered 的内部实现，调用方必须已持桥接锁。按登记的版本和消息号报送达（发卡后先落盘、再报，所以崩溃后可以照登记的原样重报；中台对同一 ref 重报是幂等的），
     中台收下后记「中台确认送达」。登记里没有消息号就不报。"""
     with db() as con:
         r = con.execute("SELECT message_id, version FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
@@ -340,8 +361,15 @@ def report_delivered(card_id):
 
 
 def confirm(card_id):
-    """报送达，再把送达前点的、排着队的本人回答提交掉（发送资格只有一个执行者领得到，见 autoloop_answer.submit）。"""
-    report_delivered(card_id)
+    """持桥接锁报送达并提交排队的本人回答（手动补报、测试用；once 在锁里调 _confirm）。"""
+    with bridge_lock():
+        _confirm(card_id)
+
+
+def _confirm(card_id):
+    """报送达，再把送达前点的、排着队的本人回答提交掉（发送资格只有一个执行者领得到，见 autoloop_answer.submit）。
+    调用方必须已持桥接锁。"""
+    _report_delivered(card_id)
     import autoloop_answer as A
     A.flush(card_id)
 
