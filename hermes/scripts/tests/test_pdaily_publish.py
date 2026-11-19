@@ -778,6 +778,10 @@ class SendTests(unittest.TestCase):
         with mock.patch.object(pp, "start_checks") as sc, mock.patch("sys.stdout"):
             pp.main(["send", "--date", DAY, "--out", str(self.out), "--force"])
         sc.assert_not_called()
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}), mock.patch.object(pp, "start_checks") as sc, \
+                mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY, "--force"]), 0)    # 定时任务入口：没发好也是输出一句原因、退出码 0
+        sc.assert_called_once_with(DAY)                               # 发出去了、只是回读没过：照样派（复审 P3-4）
 
 
 class CheckDestinationTests(unittest.TestCase):
@@ -799,10 +803,12 @@ class CheckDestinationTests(unittest.TestCase):
     def test_check_risk_rules(self):
         r = card_fields()["risks"][0]
         for c, why in (({"project": "外星项目", "task": "x"}, "check 要写成"), ({"project": "猛鬼兽", "task": "x"}, "check 要写成"),
-                       ({"project": "牛马之家"}, "check 要写成"), ("查一下", "check 要写成"),
-                       ({"project": "牛马之家", "task": "长" * 301}, "超过 300 字")):
+                       ({"project": "牛马之家"}, "check 要写成"), ("查一下", "check 要写成")):
             e = self.errs(card_fields(risks=[dict(r, check=c)]))
             self.assertTrue(any(why in x for x in e), (c, e))
+        long = card_fields(risks=[dict(r, check={"project": "牛马之家", "task": "长" * 400})])
+        self.assertEqual(self.errs(long), [])                         # 超长截断记提醒，不算核对失败（复审 P3-5）
+        self.assertLessEqual(len(long["risks"][0]["check"]["task"]), 301)
         e = self.errs(card_fields(risks=[dict(r, to_decisions=[1], check={"project": "牛马之家", "task": "x"})]))
         self.assertTrue(any("就不用猛鬼兽查" in x for x in e), e)
         three = [dict(r, cause=f"类{i}", check={"project": "牛马之家", "task": "x"}) for i in range(3)]

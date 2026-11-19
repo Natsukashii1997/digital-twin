@@ -248,23 +248,48 @@ class ActTests(unittest.TestCase):
             rc, out = self.run_cmd("checks", "--day", DAY)
         self.assertEqual(rc, 0)
         calls = log.read_text().splitlines()
-        self.assertTrue(calls[0].startswith("new --project work-desk --mode read --task-file "))
+        self.assertTrue(calls[0].startswith("new --project work-desk --tool codex --mode read --task-file "))   # 固定 Codex（复审 P1-1）
         self.assertEqual(calls[1:], ["run D2026-0", "run D2026-0"])          # 第一次说忙，隔一会儿再跑
         task = Path(calls[0].split("--task-file ")[1]).read_text()
         self.assertIn("查清 15 处改动的性质", task)
         self.assertIn("不得修改项目文件", task)
+        self.assertIn("不得读取 ~/.hermes", task)                         # 凭据边界（复审 P2-2）
         recs = json.loads((self.tmp / f"{DAY}.checks.json").read_text())
         self.assertEqual([(x["project"], x["order"], x["run"]) for x in recs], [("work-desk", "D2026-0", "跑完")])
-        self.assertEqual(self.run_cmd("checks", "--day", DAY)[1]["msg"], "这一天已经派过了")
+        n = len(log.read_text().splitlines())
+        self.run_cmd("checks", "--day", DAY)                              # 重跑：开过、跑过的都不再动
+        self.assertEqual(len(log.read_text().splitlines()), n)
         root = self.tmp / "dispatch"
         (root / "D2026-0" / "out").mkdir(parents=True)
-        (root / "D2026-0" / "out" / "receipt.json").write_text(json.dumps({"exit_code": "0", "summary": "15 处都是草稿，建议丢弃"}))
+        (root / "D2026-0" / "out" / "receipt.json").write_text(json.dumps(
+            {"exit_code": "0", "summary": "15 处都是草稿，建议丢弃；.env 里 TOKEN=abc123 还有 ghp_abcdefghijklmnop"}))
         with mock.patch.dict(os.environ, {"DT_DISPATCH_ROOT": str(root)}):
             got = A.checks_for_material(DAY)
-        self.assertEqual((got[0]["finished"], got[0]["summary"]), (True, "15 处都是草稿，建议丢弃"))
+        self.assertEqual(got[0]["finished"], True)
+        self.assertEqual(got[0]["summary"], "15 处都是草稿，建议丢弃；.env 里 （已隐去） 还有 （已隐去）")   # 疑似密钥隐去
         f = dict(self.facts, stat_day="2026-11-09")
         with mock.patch.dict(os.environ, {"DT_DISPATCH_ROOT": str(root)}):
             self.assertEqual(P.material(f)["yesterday_checks"][0]["order"], "D2026-0")
+
+    def test_checks_locked_and_resumable(self):
+        """复审 P2-3：另一个进程持锁就不动；崩在开单后、跑之前的，重跑接着跑；崩在开单途中的不重开。"""
+        r = dict(T.card_fields()["risks"][0], check={"project": "牛马之家", "task": "查"})
+        (self.tmp / f"{DAY}.card-fields.json").write_text(json.dumps(dict(self.fields, risks=[r]), ensure_ascii=False))
+        log, fake = self.fake_dispatch()
+        with open(self.tmp / "checks.lock", "a") as lk, mock.patch.object(A, "DISPATCH", fake):
+            A.fcntl.flock(lk, A.fcntl.LOCK_EX)
+            self.assertEqual(self.run_cmd("checks", "--day", DAY)[1]["msg"], "另一个只读单进程在跑，这次不动")
+        self.assertFalse(log.exists())
+        (self.tmp / f"{DAY}.checks.json").write_text(json.dumps([
+            {"cause": "a", "project": "work-desk", "task": "查", "order": "D9", "state": "已开单"},
+            {"cause": "b", "project": "work-desk", "task": "查", "order": None, "state": "开单中"}], ensure_ascii=False))
+        with mock.patch.object(A, "DISPATCH", fake):
+            self.run_cmd("checks", "--day", DAY)
+        self.assertEqual(log.read_text().splitlines(), ["run D9"])
+        recs = json.loads((self.tmp / f"{DAY}.checks.json").read_text())
+        self.assertEqual([x["state"] for x in recs], ["跑过", "开单结果不明"])
+        (self.tmp / f"{DAY}.checks.json").write_text("坏的")
+        self.assertEqual(self.run_cmd("checks", "--day", DAY)[0], 1)
 
     def test_checks_none_written_once(self):
         log, fake = self.fake_dispatch()

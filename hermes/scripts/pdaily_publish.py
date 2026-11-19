@@ -426,6 +426,11 @@ def normalize(facts, card):
     year = (facts.get("stat_day") or "2000")[:4]
     card.pop("today", None)
     warns += drop_decided(facts, card)
+    for i, r in enumerate(card.get("risks") or []):     # 只读单任务超长：截断记提醒，不让整份降级（复审 P3-5）
+        c = r.get("check") if isinstance(r, dict) else None
+        if isinstance(c, dict) and s(c.get("task")) and len(c["task"]) > LIMITS["task"]:
+            c["task"] = cut(c["task"], LIMITS["task"])
+            warns.append(f"risks[{i}].check.task 超过 {LIMITS['task']} 字，已截断")
     for key in ("decisions", "achievements", "risks"):
         for i, x in enumerate(card.get(key) or []):
             if not isinstance(x, dict):
@@ -567,8 +572,6 @@ def check(facts, card, report):
         if c is not None:                        # 猛鬼兽查（#236）：只给只观察的风险；项目在名册里；任务写清
             if not isinstance(c, dict) or roster.resolve(s(c.get("project")) or "") in (None, "hermes") or not s(c.get("task")):
                 errs.append(f"risks[{j}].check 要写成 {{\"project\": 名册项目名, \"task\": 要查什么、交什么}}")
-            elif len(s(c.get("task"))) > LIMITS["task"]:
-                errs.append(f"risks[{j}].check.task 超过 {LIMITS['task']} 字")
             elif to_list(r):
                 errs.append(f"risks[{j}] 已经指到拍板，就不用猛鬼兽查；check 只给不用常浩定的风险")
         if to is None:
@@ -1061,6 +1064,13 @@ SELF_CHECK = Path(os.environ.get("DT_SELF_CHECK", Path(__file__).with_name("self
 SELF_CHECK_TIMEOUT = 900   # 每月 1 号要查名册各仓库，self_check 里这一项最多 600 秒
 
 
+def delivered_today(day):
+    try:
+        return bool(json.loads((DAILY / f"{day}.delivery.json").read_text(encoding="utf-8")).get("sent"))
+    except (OSError, ValueError):
+        return False
+
+
 def start_checks(day):
     """日报发出后，在后台派「猛鬼兽查」的只读单（#236）；起不来只记日志，不影响日报。"""
     try:
@@ -1205,7 +1215,7 @@ def main(argv=None):
         return 1
     if a.cmd == "send":   # 定时任务直接把输出发到私聊：成功不输出，失败说一句原因
         err = send(day.isoformat(), a.out or DAILY, force=a.force)
-        if err is None and not a.out:
+        if not a.out and delivered_today(day.isoformat()):   # 发出去就派（回读没过也派：卡上写了「明天报」，复审 P3-4）
             start_checks(day.isoformat())
         if err:
             print(f"⚠️ 今天的个人项目日报没发成：{err}。详情在 DigitalTwin/daily/{day.isoformat()}.delivery.json")
