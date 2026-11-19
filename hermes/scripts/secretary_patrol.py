@@ -151,7 +151,8 @@ def hermes_supported():
     if _flags_ok is None:
         try:
             r = subprocess.run([HERMES_BIN, "chat", "--help"], capture_output=True, text=True, timeout=60, env=model_env())
-            _flags_ok = r.returncode == 0 and all(f in r.stdout for f in HERMES_FLAGS)
+            words = set(re.findall(r"(?<![\w-])--[\w-]+", r.stdout or ""))     # 整词匹配，不认子串
+            _flags_ok = r.returncode == 0 and set(HERMES_FLAGS) <= words
         except (OSError, subprocess.SubprocessError):
             _flags_ok = False
     return _flags_ok

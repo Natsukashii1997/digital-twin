@@ -278,8 +278,9 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
         raise LedgerError(f"依据只能引用决定号：{cites}", "BadInput")
     if action == "ask" and not _pos_int(card_version):
         raise LedgerError("① 答提问卡要写卡片版本（card_version，正整数）：同一张卡同一版本只许一个可送达的决定", "BadInput")
-    if card is not None and (action != "handoff" or not _pos_int(card) or target.get("card") not in (None, card)):
-        raise LedgerError("card 只给交常浩写，要是正整数，对象里有卡片时要一致", "BadInput")
+    if card is not None and (action != "handoff" or not _pos_int(card) or target.get("card") not in (None, card)
+                             or not _pos_int(card_version)):        # 成对给（PR #225 第 3 轮 P2-05）：只给卡片不给版本会悄悄失去去重
+        raise LedgerError("card 只给交常浩写，要是正整数，对象里有卡片时要一致，而且要同时给 card_version", "BadInput")
     card_id = target.get("card") if isinstance(target, dict) and target.get("card") is not None else card
     if card_version is not None and not (_pos_int(card_version) and card_id is not None):
         raise LedgerError("只有对象带卡片（或交常浩写了 card）时才写卡片版本（正整数）", "BadInput")

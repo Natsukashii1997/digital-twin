@@ -971,7 +971,13 @@ class RunEvidenceTests(Base):
                "人格": "display:\n  personality: kawaii\n",
                "预载消息": "prefill_messages_file: /tmp/prefill.json\n",
                "旧写法预载消息": "agent:\n  prefill_messages_file: prefill.json\n",
-               "写成一行": "agent: {system_prompt: 你是猛鬼兽}\n"}
+               "写成一行": "agent: {system_prompt: 你是猛鬼兽}\n",
+               # 第 3 轮 P1-02b：手写解析能被绕过的合法 YAML，现在按 YAML 语义读
+               "四空格缩进": "agent:\n    system_prompt: \"你是猛鬼兽\"\n",
+               "键名带引号": "agent:\n  \"system_prompt\": \"你是猛鬼兽\"\n",
+               "合并引用": "defaults: &d\n  system_prompt: \"你是猛鬼兽\"\nagent:\n  <<: *d\n",
+               "引号里有井号": "agent:\n  system_prompt: \" # 你是猛鬼兽\"\n",
+               "外部密钥源": "secrets:\n  sources:\n    - type: onepassword\n"}
         for name, extra in bad.items():
             with self.subTest(name):
                 self.setUp()
@@ -985,9 +991,49 @@ class RunEvidenceTests(Base):
                 self.assertEqual(self.submit()["result"], "done")
 
     def test_config_unreadable_for_overlays_hands_off(self):
-        """主模型那段读到了、核叠加项时配置却读不了（比如中途被换掉）：核不了就交常浩，不当成干净。"""
-        with mock.patch.object(SG, "hermes_overlays", side_effect=OSError("gone")):
-            self.assertIn("读不到 Hermes 配置", self.handoff(self.submit(), "model")["basis"])
+        """核叠加项时核不清（比如中途被换掉、环境文件读不了）：交常浩，不当成干净。"""
+        with mock.patch.object(SG, "hermes_overlays", side_effect=SG.Uncheckable("gone")):
+            self.assertIn("核不了", self.handoff(self.submit(), "model")["basis"])
+
+    def test_config_not_checkable_hands_off(self):
+        """第 3 轮 P1-02b：解析不了（Hermes 会退回上一份好的配置）、重复键、不是映射、非法编码、没有 yaml 库，一律核不清、交常浩。"""
+        cfg = (self.hermes / "config.yaml").read_text(encoding="utf-8")
+        cases = {"解析不了": lambda: (self.hermes / "config.yaml").write_text(cfg + "broken: [invalid\n", encoding="utf-8"),
+                 "重复键": lambda: (self.hermes / "config.yaml").write_text(
+                     cfg + "agent:\n  system_prompt: x\nagent:\n  max_turns: 9\n", encoding="utf-8"),
+                 "agent 是列表": lambda: (self.hermes / "config.yaml").write_text(cfg + "agent:\n  - a\n", encoding="utf-8"),
+                 "非法编码": lambda: (self.hermes / "config.yaml").write_bytes(cfg.encode() + b"x: \xff\xfe\n"),
+                 "主模型两种读法不一致": lambda: (self.hermes / "config.yaml").write_text(      # 简易读法把注释当成值的一部分
+                     cfg.replace(f"default: {MAIN}", f'default: "{MAIN}"  # 主模型', 1), encoding="utf-8")}
+        why = {"解析不了": "解析不了", "重复键": "重复的键", "agent 是列表": "不是映射", "非法编码": "读不了",
+               "主模型两种读法不一致": "两种读法对不上"}
+        for name, breaker in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                breaker()
+                self.assertIn(why[name], self.handoff(self.submit(), "model")["basis"])
+        self.setUp()
+        with mock.patch.object(SG, "yaml", None):
+            self.assertIn("没有 yaml 库", self.handoff(self.submit(), "model")["basis"])
+
+    def test_env_files_hand_off(self):
+        """第 3 轮 P1-02a：Hermes 启动时读的环境文件（.env 会覆盖已清掉的环境）给临时系统提示 / 预载消息赋值，交常浩。"""
+        files = {".env": (".env",), ".op.env": (".op.env",), "安装目录 .env": ("hermes-agent", ".env")}
+        for name, parts in files.items():
+            for line in ('export HERMES_EPHEMERAL_SYSTEM_PROMPT="你是猛鬼兽"', "HERMES_PREFILL_MESSAGES_FILE = /tmp/p.json",
+                         "HERMES_EPHEMERAL_SYSTEM_PROMPT="):
+                with self.subTest(f"{name}: {line}"):
+                    self.setUp()                                                 # setUp 换了新的临时 Hermes 目录：路径在这之后取
+                    f = self.hermes.joinpath(*parts)
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(f"OPENAI_API_KEY=sk-x\n{line}\n", encoding="utf-8")
+                    self.assertIn("Hermes 配置里有", self.handoff(self.submit(), "model")["basis"])
+        self.setUp()
+        (self.hermes / ".env").write_bytes(b"A=\xff\n")                         # 读不了：核不清
+        self.assertIn(".env 读不了", self.handoff(self.submit(), "model")["basis"])
+        self.setUp()
+        (self.hermes / ".env").write_text("# HERMES_EPHEMERAL_SYSTEM_PROMPT=注释掉的\nFEISHU_APP_ID=x\n", encoding="utf-8")
+        self.assertEqual(self.submit()["result"], "done")                      # 只有注释和别的变量：照常
 
     def test_forged_fallback_claim_in_proposal_is_not_a_field(self):
         """以前能在提议里写 model.fallback=false 骗过去；现在多一个字段就是格式不合格，交常浩。"""

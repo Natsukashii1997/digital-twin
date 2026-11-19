@@ -21,7 +21,9 @@
   **只有一条输入**、正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；**全部模型调用**（主循环和辅助调用）
   都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；系统提示（sessions.system_prompt_hash → system_prompts）
   记着、且没有项目上下文、记忆、用户档案和 SOUL（PR #225 第 1 轮 P1-02：秘书侧必须带 --ignore-rules）；$HERMES_HOME/config.yaml
-  没有自定义系统提示、人格、预载消息（第 2 轮 P1-02：这几样 --ignore-rules 管不到，临时系统提示也不进运行记录）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
+  按 YAML 语义（重复键、解析不了都算核不清）没有自定义系统提示、人格、预载消息、外部密钥源，Hermes 会读的环境文件（.env、
+  .op.env、安装目录 .env）没给临时系统提示 / 预载消息赋值（第 2、3 轮 P1-02：这几样 --ignore-rules 管不到，临时系统提示
+  也不进运行记录）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
   模型输出是一个 JSON 对象，只许有 category、card、card_version、choice、text、abstain、error，和提议逐项严格相同（类型也要一样；
   提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。source = tool 只是标签，不是调用者身份（ADR-015 账号隔离）。
 
@@ -96,6 +98,11 @@ import sys
 import tempfile
 import urllib.parse
 from pathlib import Path
+
+try:                                         # 核 Hermes 配置用和 Hermes 一样的 yaml.safe_load 语义；没装就核不了、交常浩
+    import yaml
+except ImportError:                          # pragma: no cover
+    yaml = None
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -499,34 +506,91 @@ def _json_object(text):
 
 
 NEUTRAL_PERSONALITY = ("", "none", "default", "neutral")   # Hermes v0.22 hermes_cli/personality.py 的「不用人格」写法
-OVERLAY_KEYS = {("agent", "system_prompt"): "自定义系统提示", ("display", "personality"): "人格设定",
-                ("prefill_messages_file", None): "预载消息", ("agent", "prefill_messages_file"): "预载消息"}
+INJECT_ENV = ("HERMES_EPHEMERAL_SYSTEM_PROMPT", "HERMES_PREFILL_MESSAGES_FILE")   # 会往判断里加东西的环境变量
 
 
-def hermes_overlays(home):
-    """$HERMES_HOME/config.yaml 里会叠加进判断的东西（PR #225 第 2 轮 P1-02）：agent.system_prompt、display.personality（非中性）、
-    prefill_messages_file / agent.prefill_messages_file。这些 --ignore-rules 管不到；临时系统提示只在调用时注入、不进运行记录，
-    所以按配置核（环境变量那一路由秘书侧清掉，同账号进程能改环境是 #230 的事）。只认两层缩进、不引 YAML 库；看不懂的写法
-    （agent / display 写成一行、值是多行块）一律当成有。返回发现的项（空 = 干净）；读不了配置抛 OSError。"""
-    found, top = [], None
-    for line in (home / "config.yaml").read_text(encoding="utf-8").splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
+class Uncheckable(Exception):
+    """Hermes 实际会用的配置核不清（解析不了、有重复键、写法不认识、文件读不了）。"""
+
+
+def _yaml_load(text):
+    """yaml.safe_load 语义（锚点、合并引用、引号、任意缩进都按 YAML 解开），另把重复键当成核不清（Hermes 会默默取后一个）。"""
+    if yaml is None:
+        raise Uncheckable("本机没有 yaml 库")
+
+    class Strict(yaml.SafeLoader):
+        pass
+
+    def mapping(loader, node, deep=False):
+        loader.flatten_mapping(node)                         # 先展开 <<: 合并引用，再查重复键
+        seen = set()
+        for k, _ in node.value:
+            key = loader.construct_object(k, deep=deep)
+            if key in seen:
+                raise Uncheckable(f"配置里有重复的键 {key!r}")
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+    Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    try:
+        return yaml.load(text, Loader=Strict)                # noqa: S506  Strict 是 SafeLoader 子类
+    except yaml.YAMLError as e:
+        raise Uncheckable(f"配置解析不了（{type(e).__name__}）")
+
+
+def _blank(v):
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def hermes_config(home):
+    """按 YAML 语义读 $HERMES_HOME/config.yaml；解析不了时 Hermes 会退回上一份好的配置，所以一律核不清。"""
+    try:
+        text = (home / "config.yaml").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise Uncheckable(f"配置读不了（{type(e).__name__}）")
+    cfg = _yaml_load(text)
+    if not isinstance(cfg, dict):
+        raise Uncheckable("配置顶层不是映射")
+    return cfg
+
+
+def hermes_env_files(home):
+    """Hermes 启动时会读的环境文件（v0.22 hermes_cli/env_loader.py：$HERMES_HOME/.env 覆盖已有环境、.op.env、安装目录的 .env）。"""
+    return [home / ".env", home / ".op.env", home / "hermes-agent" / ".env"]
+
+
+def hermes_overlays(home, cfg):
+    """会叠加进判断、--ignore-rules 又管不到的东西（PR #225 第 2、3 轮 P1-02），返回发现的项（空 = 干净）；核不清抛 Uncheckable。
+    配置（按 YAML 语义）：agent.system_prompt、非中性 display.personality、prefill_messages_file / agent.prefill_messages_file、
+    secrets（外部密钥源：会往环境里写什么核不了）；agent / display 不是映射也算核不清。环境文件：任何一个给 INJECT_ENV 赋值
+    （不管值是什么）。临时系统提示只在调用时注入、不进运行记录，所以只能这样按来源核；同账号进程改文件、制造竞态是 #230 的事。"""
+    found = []
+    agent, display = cfg.get("agent"), cfg.get("display")
+    if not (agent is None or isinstance(agent, dict)) or not (display is None or isinstance(display, dict)):
+        raise Uncheckable("agent / display 不是映射")
+    agent, display = agent or {}, display or {}
+    if not _blank(agent.get("system_prompt")):
+        found.append("自定义系统提示")
+    pers = display.get("personality")
+    if not (pers is None or (isinstance(pers, str) and pers.strip().lower() in NEUTRAL_PERSONALITY)):
+        found.append("人格设定")
+    if not _blank(cfg.get("prefill_messages_file")) or not _blank(agent.get("prefill_messages_file")):
+        found.append("预载消息")
+    if cfg.get("secrets"):
+        found.append("外部密钥源")
+    for f in hermes_env_files(home):
+        try:
+            text = f.read_text(encoding="utf-8")
+        except FileNotFoundError:
             continue
-        ind = len(line) - len(line.lstrip())
-        key, _, val = line.strip().partition(":")
-        val = val.split(" #")[0].strip()
-        empty = val.strip("'\"").strip() == "" or val in ("null", "~")
-        if ind == 0:
-            top = key
-            if key in ("agent", "display") and not empty:
-                found.append(f"{key} 写成了一行（看不懂）")
-            elif (key, None) in OVERLAY_KEYS and not empty:
-                found.append(OVERLAY_KEYS[(key, None)])
-        elif ind == 2 and (top, key) in OVERLAY_KEYS:
-            if key == "personality" and val.strip("'\"").strip().lower() in NEUTRAL_PERSONALITY:
-                continue
-            if not empty:
-                found.append(OVERLAY_KEYS[(top, key)])
+        except (OSError, UnicodeDecodeError) as e:
+            raise Uncheckable(f"{f.name} 读不了（{type(e).__name__}）")
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key = line.partition("=")[0].strip().strip("'\"")
+            if "=" in line and key in INJECT_ENV:
+                found.append(f"{f.name} 里的 {key}")
     return sorted(set(found))
 
 
@@ -544,10 +608,17 @@ def run_evidence(session, card, since, t):
     def no(why):
         raise Handoff("model", f"这次判断的运行记录{why}，不代批")
     home = hermes_home()
-    cfg = AA.hermes_models(home)
+    try:
+        full = hermes_config(home)                           # 先按 YAML 语义读（读不了、非法编码在这里报清楚原因）
+        cfg = AA.hermes_models(home)
+    except (Uncheckable, UnicodeDecodeError, ValueError) as e:
+        no(f"核不了（Hermes 配置：{e}）")
     main = cfg.get("model") or {}
     if cfg.get("error") or not main.get("default") or not main.get("provider"):
         no("核不了（读不到 Hermes 主模型配置）")
+    ym = full.get("model")                                   # 两种读法读出的主模型要一致（第 3 轮 P1-02：别让简易读法和 YAML 语义各说各话）
+    if not isinstance(ym, dict) or (ym.get("default"), ym.get("provider")) != (main["default"], main["provider"]):
+        no("核不了（Hermes 主模型配置的写法两种读法对不上）")
     try:
         con = _ro(home / "state.db")
     except sqlite3.Error:
@@ -577,9 +648,9 @@ def run_evidence(session, card, since, t):
     if sp is None or not isinstance(sp["prompt"], str):
         no("没记下系统提示，核不了判断时有没有带上你的个人设定和记忆")
     try:
-        overlays = hermes_overlays(home)
-    except OSError:
-        no("核不了（读不到 Hermes 配置）")
+        overlays = hermes_overlays(home, full)
+    except Uncheckable as e:
+        no(f"核不了（{e}）")
     if overlays:
         no(f"核出 Hermes 配置里有{'、'.join(overlays)}，判断时会一起带上")
     if any(m in sp["prompt"] for m in CONTEXT_MARKERS + soul_marker(home)):

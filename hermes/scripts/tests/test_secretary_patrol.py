@@ -102,7 +102,7 @@ class Patrol(TSG.Base):
                           (k.startswith("HERMES_") and k != "HERMES_HOME") or any(w in k.upper() for w in ("KEY", "TOKEN", "SECRET"))])
         self.assertEqual(call["env"].get("HERMES_HOME"), str(self.hermes))      # 只留 Hermes 目录
         flags = [a for a in cmd if a.startswith("-")]                                       # 用到的参数全在能力核对里（第 2 轮 P2-04）
-        self.assertEqual(set(flags), set(SP.HERMES_FLAGS) | {"--run-budget"})
+        self.assertEqual(set(flags), set(SP.HERMES_FLAGS))
         self.assertEqual(set(self.submitted[0]) - set(OUT_KEYS), {"schema", "run"})
         self.assertEqual(len(self.answers()), 1)
 
@@ -309,6 +309,13 @@ class HermesFlags(unittest.TestCase):
             self.assertTrue(SP.hermes_supported())
             self.assertTrue(SP.hermes_supported())
         self.assertEqual(len(calls), 1)                                          # 每个进程只查一次
+
+    def test_flags_match_whole_words(self):
+        """第 3 轮 P2-04 建议：--quiet-mode 这种只是包含的不算认得 --quiet。"""
+        words = " ".join(f + "-mode" if f == "--quiet" else f for f in SP.HERMES_FLAGS)
+        _, patch = self.help_says(words)
+        with patch:
+            self.assertFalse(SP.hermes_supported())
 
     def test_help_fails(self):
         _, patch = self.help_says(" ".join(SP.HERMES_FLAGS), rc=2)
