@@ -1,0 +1,361 @@
+{
+ "schema": "2.0",
+ "config": {
+  "update_multi": true
+ },
+ "header": {
+  "title": {
+   "tag": "plain_text",
+   "content": "📅 猛鬼兽日报 · 11-18（周三）"
+  },
+  "subtitle": {
+   "tag": "plain_text",
+   "content": "统计日 11-18 04:00 → 11-19 04:00"
+  },
+  "template": "blue"
+ },
+ "body": {
+  "elements": [
+   {
+    "tag": "markdown",
+    "content": "**📈 核心数据速览**"
+   },
+   {
+    "tag": "table",
+    "page_size": 10,
+    "row_height": "auto",
+    "row_max_height": "999px",
+    "header_style": {
+     "text_align": "left",
+     "text_size": "normal",
+     "background_style": "grey",
+     "bold": true,
+     "lines": 1
+    },
+    "columns": [
+     {
+      "name": "k",
+      "display_name": "指标",
+      "data_type": "lark_md",
+      "width": "25%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "v",
+      "display_name": "昨日",
+      "data_type": "lark_md",
+      "width": "15%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "n",
+      "display_name": "说明",
+      "data_type": "lark_md",
+      "width": "60%",
+      "vertical_align": "top"
+     }
+    ],
+    "rows": [
+     {
+      "k": "有推进的项目",
+      "v": "**5** / 18",
+      "n": "其余 13 个无实质推进"
+     },
+     {
+      "k": "合并 PR",
+      "v": "28",
+      "n": "统计日 04:00→04:00"
+     },
+     {
+      "k": "需要你拍板",
+      "v": "<font color='red'>**8**</font>",
+      "n": "6 件要你选、2 件要你动手；最久的挂了 11 天"
+     },
+     {
+      "k": "风险与阻塞",
+      "v": "7 类",
+      "n": "4 类要你定、3 类只观察"
+     }
+    ]
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**✅ 昨日关键成果**"
+   },
+   {
+    "tag": "markdown",
+    "content": "1. **数字分身**：改用 agent-autoloop 的执行底座：ADR-015、执行门、飞书桥接、秘书开关已合并…\n2. **驿窗 PostPane**：接力未回信就出错也通知发起会话（#365），更新链、目录迁移、简约形态已删，均已合并\n3. **磁盘瘦身**：第 11 批内存页、替你判断三条规则、面板定尺寸已合并；交付未核实\n4. **ChatGPT 回答收藏器**：能认出生成图片的回答（#9），已合并，关闭 #8；验收未核实\n5. **自建技能库**：ui-styles 2.0.0 调淡薄荷主色（#102）、新仓库默认公开（#103）已合并"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**⚠️ 风险与阻塞 · 7 类**"
+   },
+   {
+    "tag": "table",
+    "page_size": 10,
+    "row_height": "auto",
+    "row_max_height": "999px",
+    "header_style": {
+     "text_align": "left",
+     "text_size": "normal",
+     "background_style": "grey",
+     "bold": true,
+     "lines": 1
+    },
+    "columns": [
+     {
+      "name": "c",
+      "display_name": "问题",
+      "data_type": "lark_md",
+      "width": "30%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "w",
+      "display_name": "涉及",
+      "data_type": "lark_md",
+      "width": "45%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "g",
+      "display_name": "去向",
+      "data_type": "lark_md",
+      "width": "25%",
+      "vertical_align": "top"
+     }
+    ],
+    "rows": [
+     {
+      "c": "🔴 安全修复 PR 没合",
+      "w": "10 个项目 11 个 PR，最早 11-12 开",
+      "g": "**→ 拍板 ④**"
+     },
+     {
+      "c": "🟠 接力上限 5 的规则 PR 没合",
+      "w": "4 个项目 4 个 PR，11-14 同批开",
+      "g": "**→ 拍板 ⑤**"
+     },
+     {
+      "c": "🟠 功能和规格 PR 挂着没收",
+      "w": "5 个项目 9 个 PR，最早 11-08 开",
+      "g": "**→ 拍板 ①⑥**"
+     },
+     {
+      "c": "⚪ 本机有没提交的改动",
+      "w": "6 个项目，最多 80 处",
+      "g": "只观察"
+     },
+     {
+      "c": "🟠 项目状态记录过期或缺下一步",
+      "w": "11 个项目",
+      "g": "只观察"
+     },
+     {
+      "c": "🟡 7 天以上没有新动作",
+      "w": "5 个项目",
+      "g": "**→ 拍板 ⑧**"
+     },
+     {
+      "c": "🟡 每周提案有 5 条缺依据",
+      "w": "猛鬼兽 5 条，挂了 10 天",
+      "g": "只观察"
+     }
+    ]
+   },
+   {
+    "tag": "collapsible_panel",
+    "expanded": false,
+    "background_color": "grey-50",
+    "border": {
+     "color": "grey",
+     "corner_radius": "6px"
+    },
+    "padding": "4px 10px 8px 10px",
+    "vertical_spacing": "8px",
+    "header": {
+     "title": {
+      "tag": "plain_text",
+      "content": "每类涉及哪些项目 · 展开"
+     },
+     "width": "fill",
+     "vertical_align": "center",
+     "icon": {
+      "tag": "standard_icon",
+      "token": "down-small-ccm_outlined",
+      "color": "grey",
+      "size": "16px 16px"
+     },
+     "icon_position": "right",
+     "icon_expanded_angle": -180
+    },
+    "elements": [
+     {
+      "tag": "markdown",
+      "content": "**安全修复 PR 没合**：牛马之家 #58｜个人 AI 工作台 #83 #85｜管培生工作台 #72｜自建技能库 #93｜数字分身 #171｜驿窗 #315｜ChatGPT 回答收藏器 #7｜GET 索引维护 #1｜Little Steps 育儿记录 #4｜agent-autoloop #1"
+     },
+     {
+      "tag": "markdown",
+      "content": "**接力上限 5 的规则 PR 没合**：多 Agent 协同 #7｜agent-kit #71｜自建技能库 #97｜数字分身 #185"
+     },
+     {
+      "tag": "markdown",
+      "content": "**功能和规格 PR 挂着没收**：管培生工作台 #61｜数字分身 #102 #96 #187 #173｜牛马之家 #44 #56｜自建技能库 #81｜驿窗 #348"
+     },
+     {
+      "tag": "markdown",
+      "content": "**本机有没提交的改动**：个人 AI 工作台 80 处｜牛马之家 19 处｜CarvoMOTO 17 处｜Little Steps 11 处｜驿窗 10 处｜管培生工作台 4 处，且检出 feat/ui-prototype 不是主分支"
+     },
+     {
+      "tag": "markdown",
+      "content": "**项目状态记录过期或缺下一步**：多 Agent 协同 CURRENT 过期｜数字分身、牛马之家没写下一步｜GitHub 快速中心下一步停在 11-09｜驿窗下一步不可信｜管培生工作台下一步落后于 #77｜CarvoMOTO、agent-kit、自建技能库、agent-autoloop、dt-autoloop-plugins 没有 CURRENT，后两个没设目标"
+     },
+     {
+      "tag": "markdown",
+      "content": "**7 天以上没有新动作**：Obsidian 知识库 等出题验收｜GET 索引维护 等真实扫描验证｜CarvoMOTO 最近提交 11-09｜多 Agent 协同 最近提交 11-11｜UI 设计体系 最近提交 11-08"
+     },
+     {
+      "tag": "markdown",
+      "content": "**每周提案有 5 条缺依据**：L-07 临时克隆全量测试｜L-04 重复 key 机检｜巡检三处设计缺陷记坑｜G-18 等前置提案｜L-14 升 G-19"
+     }
+    ]
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "markdown",
+    "content": "**🎯 需要你拍板 · 8 件**"
+   },
+   {
+    "tag": "table",
+    "page_size": 10,
+    "row_height": "auto",
+    "row_max_height": "999px",
+    "header_style": {
+     "text_align": "left",
+     "text_size": "normal",
+     "background_style": "grey",
+     "bold": true,
+     "lines": 1
+    },
+    "columns": [
+     {
+      "name": "n",
+      "display_name": "#",
+      "data_type": "lark_md",
+      "width": "8%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "i",
+      "display_name": "事项",
+      "data_type": "lark_md",
+      "width": "34%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "r",
+      "display_name": "推荐",
+      "data_type": "lark_md",
+      "width": "43%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "a",
+      "display_name": "已挂",
+      "data_type": "lark_md",
+      "width": "15%",
+      "vertical_align": "top"
+     }
+    ],
+    "rows": [
+     {
+      "n": "①",
+      "i": "<font color='red'>**阻断**</font> **管培生工作台·先合 #61 还是按 v3.0 走**",
+      "r": "先审 #77 PRD v3.0 定总纲，再看 #61 版式要不要按新版改了再合",
+      "a": "—"
+     },
+     {
+      "n": "②",
+      "i": "<font color='red'>**阻断**</font> **个人 AI 工作台（数码世界）·在 5178 做批 3 终验**（要你动手）",
+      "r": "按 CURRENT 清单逐项点验程序坞外壳、逆向 v5 第 1–3 批和两个新页面",
+      "a": "—"
+     },
+     {
+      "n": "③",
+      "i": "<font color='red'>**阻断**</font> **磁盘瘦身·disk-space-guard 停不停**",
+      "r": "先让 Claude 出第 6 批试用一周小结，再按小结定去留",
+      "a": "—"
+     },
+     {
+      "n": "④",
+      "i": "**10 个项目·11 个安全修复 PR 怎么收**",
+      "r": "统一让 Claude 变基自测，你分批点合并；防丢数据的 #7、#4、#315 先合",
+      "a": "—"
+     },
+     {
+      "n": "⑤",
+      "i": "**4 个项目·接力上限 5 这组 PR 怎么收**",
+      "r": "先审多 Agent 协同 #7 定规则，过了再一起合其余三个",
+      "a": "—"
+     },
+     {
+      "n": "⑥",
+      "i": "**数字分身·#102 合并官要你判**",
+      "r": "不直接合：和 base 有冲突，先让 Claude 变基后交合并官重判",
+      "a": "<font color='red'>11 天</font>"
+     },
+     {
+      "n": "⑦",
+      "i": "**猛鬼兽·每周提案 3 条可采纳**",
+      "r": "采纳北京时间函数约定、shell 变量检查规则、L-15 升 G-17",
+      "a": "<font color='red'>10 天</font>"
+     },
+     {
+      "n": "⑧",
+      "i": "**Obsidian 知识库·出 10 题做 Hermes 验收**（要你动手）",
+      "r": "按项目卡第 3 条出 10 题，Hermes 按库作答，命中 ≥ 8 就算过",
+      "a": "—"
+     }
+    ]
+   },
+   {
+    "tag": "markdown",
+    "content": "<font color='grey'>想定哪条，引用这张卡片回一句，例如「① 按推荐」「③ 不做」「都按推荐」。回了才算你定了，只管点到的那几条。</font>"
+   },
+   {
+    "tag": "hr"
+   },
+   {
+    "tag": "button",
+    "text": {
+     "tag": "plain_text",
+     "content": "📄 查看完整报告"
+    },
+    "type": "primary_filled",
+    "size": "medium",
+    "behaviors": [
+     {
+      "type": "open_url",
+      "default_url": "https://example.feishu.cn/docx/sample",
+      "pc_url": "https://example.feishu.cn/docx/sample",
+      "ios_url": "https://example.feishu.cn/docx/sample",
+      "android_url": "https://example.feishu.cn/docx/sample"
+     }
+    ]
+   },
+   {
+    "tag": "markdown",
+    "content": "<font color='grey'>生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-18 04:00 → 11-19 04:00｜取数 11-19 09:52｜工程自检：正常</font>",
+    "text_size": "notation"
+   }
+  ]
+ }
+}
