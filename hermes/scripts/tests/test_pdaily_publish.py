@@ -630,8 +630,10 @@ class SendTests(unittest.TestCase):
                 open({str(self.tmp / "sent.json")!r}, "w").write(content)
                 print(json.dumps({{"ok": True, "data": {{"message_id": "om_1"}}}}))
             elif cmd == "im +messages-mget":
-                title = json.loads(open({str(self.tmp / "sent.json")!r}).read())["header"]["title"]["content"]
-                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">'}}]}}}}))
+                card = json.loads(open({str(self.tmp / "sent.json")!r}).read())
+                title = card["header"]["title"]["content"]
+                foot = card["body"]["elements"][-1].get("content", "") if not os.environ.get("FAKE_DROP_FOOT") else ""
+                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">{{foot}}</card>'}}]}}}}))
             """), encoding="utf-8")
         self.cli.chmod(0o755)
         self.patch = mock.patch.object(pp, "LARK", str(self.cli))
@@ -703,6 +705,16 @@ class SendTests(unittest.TestCase):
         self.assertEqual(values, [{"pdaily": d["card_token"], "n": 0}, {"pdaily": d["card_token"], "n": 1}])   # #235
         self.assertRegex(d["card_token"], r"^[0-9a-f]{16}$")
         self.assertEqual([c["elements"][0]["text"]["content"] for c in cols], ["全部按推荐", "① 按推荐"])
+        snap = json.loads((self.out / f"{DAY}.decisions.sent.json").read_text())      # 拍板快照（审查 P1-1）
+        self.assertEqual([x["item"] for x in snap["decisions"]], ["夜跑收尾"])
+        self.assertEqual(len(d["decisions_sha"]), 64)
+        self.assertIn(f"卡片 {d['card_token'][-6:]}", sent["body"]["elements"][-1]["content"])
+
+    def test_read_back_must_see_card_mark(self):
+        """飞书回读不带按钮的值：靠页脚的令牌尾号认出发出去的是这一张；看不到就不算回读通过（按钮不认）。"""
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}):
+            self.assertIn("回读对不上", pp.send(DAY, self.out))
+        self.assertFalse(self.deliv()["read_back"])
         send_args = json.loads(self.calls.read_text().splitlines()[1])
         self.assertEqual(send_args[send_args.index("--as") + 1], "bot")
         self.assertEqual(send_args[send_args.index("--chat-id") + 1], pp.CHAT)
