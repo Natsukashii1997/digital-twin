@@ -6,6 +6,35 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 安全审计 PR #171 再次续跑核验（2026-11-18，Codex，常浩授权继续原简报；计费阻断）
+
+- 时间：核验记录 `2026-11-18 10:38`。
+- 本轮核对：四仓库已交付分支和原始全量结果均有效，复用既有通过结果。收尾跟进 main 的单个 CURRENT 提交 `24e3dde24b32c5265dd8974e02dfcae83060deb2`，变基前后 hermes/orca 完整 tree 哈希相同，证据 `resume-attempt-3-rebase.json`。
+- 测试：本地仍为 Hermes 1158/1158、ORCA 48/48；同一代码树的原样日志见下方。CI 运行 44221659322 已实际重试为 attempt 3，test job 在 2 秒内结束、steps 为空，GitHub 再次返回账户付款失败或支出上限；原样回执 `resume-attempt-3.json`。
+- 交付：仍只更新 codex/audit-fix-1112 和 PR #171；结论仍有问题，当前需账户所有者处理 GitHub Billing & plans 后复跑 CI。
+- 本轮新坑：无。
+
+## 安全审计 PR #171 二次刷新（2026-11-18，Codex，常浩授权刷新审计分支；待合并）
+
+- 时间：开工 `2026-11-18 09:41`（由 Git reflog 的 09:41:40 变基记录回读核对）。
+- 改了哪些文件：本节；`hermes/scripts/tests/test_autoloop_grants.py` 为既有 CLI 测试统一夹具时钟，并新增 CLI 到期拒绝回归，断言退出码和准确 JSON。生产凭据校验保持当前实现。
+- 测试：最新 main 首次全量 `Ran 1157 tests in 633.495s` / `FAILED (failures=1)`，唯一失败是 CLI 测试签发时钟固定而检查使用真实时钟。修复后完整全量原样 `Ran 1158 tests in 746.262s` / `OK` / `EXIT_CODE=0`；ORCA `Ran 48 tests in 12.652s` / `OK` / `EXIT_CODE=0`。模块 40/40，临时绕过到期判定会被新回归抓到。
+- 验证：收尾 fetch 发现 main 在第一轮后又前进 15 提交，重新变基到 `73a826c37c68701fbd1d3d6d8df760d4bbb51fdd`，三提交重放无新增冲突。下方第一轮 1127 + 48 的记录保留为历史结果，最终采用本节最新基线与计数。证据 `~/Library/Application Support/DigitalTwin/evidence/2026-11-17-refresh/`，最新全量 `hermes-latest-final.log` / `orca-latest-final.log`，首败与反证均保留。
+- 收尾同步：main 又新增 2 个仅改 CURRENT.md 的提交，已变基到 `ed442d84c41f313f4404c3d7f97284090704b777`。变基前后 hermes 与 orca 完整 Git tree 哈希相同，因此上述全量覆盖最终代码与测试；哈希证明见证据 `validated-code-trees.json`。
+- 发布与回读：更新指定审计分支与 PR #171，运行副本采用另行验收。
+- 遗留问题：本地全量通过，但 GitHub Actions 运行 `44221187547` 的 test job 没有启动，steps 为空，annotation 明确为账户付款失败或支出上限需要提高。结论改为仍有问题，需常浩在 GitHub Billing & plans 处理后重跑当前提交 CI。回执在证据 `ci-billing-block.json`。ResourceWarning 原文保留。
+- 本轮新坑：无。
+
+## 安全审计 PR #171 刷新（2026-11-17，Codex，常浩授权变基、验证、推送；待合并）
+
+- 时间：开工 `2026-11-17 18:00`。
+- 改了哪些文件：本轮新增本节交接；保留原审计 dispatch.py 和 test_dispatch_github.py 的修复与回归，无缺失测试需补写。
+- 测试：`python3 -B -m unittest discover -s hermes/scripts/tests` 原样 `Ran 1127 tests in 2178.881s` / `OK` / `EXIT_CODE=0`；ORCA `Ran 48 tests in 22.751s` / `OK` / `EXIT_CODE=0`。当前 Python 3.14，原样 ResourceWarning 保留。main dispatch 对照 20 项中 8 败，修复实现 20 项全过。
+- 验证：变基至最新 main `3478dcd`。两个原提交都只在 CURRENT 冲突，main 最新主线与状态完整保留，审计及返修记录追加保留。代码无文本冲突，现行隔离和授权逻辑逐项核对。证据 `~/Library/Application Support/DigitalTwin/evidence/2026-11-17-refresh/`。
+- 发布与回读：本轮更新指定审计分支和 PR #171，目标运行副本尚未采用。
+- 遗留问题：仓库没有 docs/LESSONS.md，已如实记录；没有合并阻断项。项目整体仍按下方新执行底座主线推进。
+- 本轮新坑：无。
+
 ## 主线：数字分身执行底座改为 fork agent-autoloop（#188）｜完成 4/11
 
 常浩 2026-11-15 定：只有基于 agent-autoloop 框架的这一条主线；常浩会 fork 它自己开发；数字分身、驿窗等已有探索里有价值的 agent 自动化内容融合进来；新结构跑通后只保留这一套。同日先说托管暂停，后改为**秘书代批「选 B」：托管从一开始并入新框架**（猛鬼兽按常浩签的清单代批，工人仍关在 dt-worker 里）。方案 V2.4：`docs/agent-autoloop-底座-方案.md`（PR #189 已合并）；思维评审两轮已收口（决策记录 `docs/reviews/2026-11-15-执行底座改用agent-autoloop-思维评审.md`）。本机已装上游 v1.8.5（`~/.agent-autoloop`，launchd `agent-autoloop`，代理启动脚本在 `~/.agent-autoloop/bin/`），只有试跑规则。
@@ -57,6 +86,19 @@
 工程自检剩 9 项安装副本和 main 不一致，都不是这两批碰过的文件：prompts/README.md、ai_access.py、custody.py、twin_state.py、groupdigest-act、workshop 技能（早于本批的漂移），亚古兽的 sidebar_reports.py 和 sales-sidebar 两份（主目录有另一会话没提交的改动）。要不要补装另行确认（custody.py、twin_state.py 补装会改变运行中的行为）。
 
 ---
+
+## 2026-11-20 · #99 M5 小修按 Codex 审查返修并变基（PR #102 待常浩合并，无需安装）
+
+常浩 11-20 清 PR 积压时回「按建议」：#102 改完 11-11 Codex 审查的 3 项再合。Claude 接手分支，变基到最新 main。
+
+- ① 版本检查：新加 `hermes/scripts/tests/test_python_version.py`，不是 3.9 时在测试输出最后提示一句、给出合并前验证用的命令；**不判失败**。Codex 建议判失败，没照做：测试 README 写着有的模块 3.9 和 3.14 都要过，判失败会让所有用 `python3` 跑的会话都红。只加在 hermes 这套，`orca/tests` 没加。
+- ② 名册查重：`test_roster.py` 先展开 `~` 并规整路径再比（和 dispatch、merge_act 的用法一致），`~/x` 和绝对路径、末尾斜杠、`./`、`../` 都算同一个目录；补 2 条用例。撤掉规整，新用例失败。
+- ③ 执行单 `docs/DT-ORC/migration/2026-11-08-M5-首夜执行单.md` 第二节补一句证据文件带写入方前缀和序号，指向 AGENTS。
+- 变基：`hermes/scripts/tests/README.md`「预期」一段两边都改过，取本 PR 的（不写死总数）；本 PR 的两节 11-08 交接挪回 11-08 的位置；两个新测试文件第一句补 `import _isolation`。
+- 行为变化（都是 #99 原本要的）：名册里 digital-twin 的测试命令从 `python3` 改成 `/usr/bin/python3`，合并官和派单变基后跑的是它；非 3.9 跑测试多一行提示。
+- 测试：见 PR 评论（本机 3.9 相关模块 + CI 全量）。
+- **下一步**：常浩说「合并」后合并；#99 随之关闭。
+
 
 ## 2026-11-19 · #246 工作台分身页（PR 待常浩合并）
 
@@ -582,6 +624,54 @@
 - 验证：`python3 -B -m unittest discover -s hermes/scripts/tests` 490 项 OK；周报推送 20 项（新增迁移用例）。
 - **已安装（11-08 18:49，常浩说「装新版并重启」）**：`~/.hermes/scripts/tidings_weekly.py` 从 main 复制，`cmp` 一致；`--dry-run` 输出「不发：还没到周一 19:30。」；旧版备份和校验值在 `evidence/2026-11-08-tidings-1930-安装/`。定时任务 `18a21b2eb87a` 本来就是每 15 分钟一次，不用改。
 - **下一步**：11-09 19:30 后看私聊是否收到统计日 11-08 的周报卡片（github-center 当天 18:00 出榜）。
+
+## 2026-11-08 · M5 第 1 批修补复验：演练 5（场景 1）、演练 4（场景 2）都通过并 release（#97）
+
+- **来由**：上一节的「唯一下一步」。常浩飞书修正授权（消息 3142，`hermes-49`）第 3 条：复验脚本先给 Hermes 审过、批了，再依次跑演练 5、演练 4。
+- **复验脚本**：v3–v6 四版都被 Hermes 指出漏洞，照着返修：时间窗口（`hermes-50/50b`）、基准归属和慢样本（`55b`）、G2b 与 stop 之间隔着 PRE 查询（`58`）、G2b/G2c 没绑定同一个 run（`63`）。v7（`claude-64`，sha1 9b2a7bd1）在 G2 时保存目标 run 的完整 id，G2b 精确核对 running、G2c 精确核对 cancelled。自测 `claude-65` 14 个场景：3 个通过且调用 release，11 个失败且没调 release。Hermes 复审 v7（申请 `claude-66`，裁决 `hermes-66`）批准 v7 用于演练 5 → 4，并写明不是开跑放行。
+- **演练 5（`claude-67-复验演练-5.log`，drill-5，SBX-18）**：
+  - 目标 run 01a1bac8：stop 前是 running，stop 后是 cancelled；
+  - 停机时没有残留进程；
+  - G5 9 次探针都干净（第一次 +0.18 秒，最大间隔 1.69 秒，最后一次 +10.84 秒）；
+  - G6 7 次远端快照和 stop 前一致；
+  - G1–G8 全过，release 退出码 0，state.released 已写入。
+- **演练 4（`claude-68-复验演练-4.log`，drill-4，SBX-20）**：
+  - G3 看到 agent 放到后台的 `python -c time.sleep(900)`（另有一个 `tail --pid` 等它）；
+  - 目标 run 01a1bacd：stop 前是 running，stop 后是 cancelled；
+  - 主控报告「停机时残留 3 个，结束后剩 0 个」，这正是第 1 批要修的场景；
+  - G5 10 次探针都干净（第一次 +0.01 秒，最大间隔 1.22 秒，最后一次 +10.25 秒）；
+  - G6 7 次一致；
+  - G1–G8 全过，release 退出码 0，state.released 已写入。
+- **执行边界**：每场跑之前都核对了 v7 和主控（2c948decda37）的 sha1，没有带自测用的覆盖变量；两场都没有冻结；定时任务 6fafbfe09d8d 仍暂停；没碰 drill-3。
+- **测试**：本节没有改代码，复验证据就是上面两份日志；本 PR 的测试见上一节。
+- **本轮新坑**：无。
+- **放行申请（申请 `claude-69`，裁决 `hermes-69`）**：Hermes 判定第 1 批修补和两场复验满足技术放行前提，但现有授权覆盖不了下一次开跑（`hermes-34` 第 3 条「开跑另行申请」；08 号已被取代；09 号 12:30 的窗口已过；66 号只批脚本）。PR #102、第 3 批不算硬前提，但下一次运行实际依赖的那些例外（方案甲偏离架构 7.3、用本地登录凭据、`executor.kill`、release 权限、自动交接）要常浩本人逐项写明。它列出常浩要签发的 7 项内容：运行对象和时间窗、允许哪些真实动作（approve、start、恢复定时任务）、边界和上限、清理与冻结、例外和剩余风险、release 与交接、放行委托边界。
+- **状态变化**：PR #101 已在 11-08 13:34 合并（e95bb4a，只改 ARCHITECTURE.md），之前的交接写的「等常浩定」已过时。
+- **开跑授权与准备（11-08 19:25–20:04）**：
+  - Claude 起草计划 `claude-70`（就是 main 的 `hermes/samples/multica-night-2026-11-08.json` 原样，sha1 e564e7bb；todo-lite v0.2 四个 stage，首夜那晚没跑过）和授权草稿 `claude-71`。常浩在飞书私聊发给 Hermes（`hermes-72`）；Hermes 核过是本人消息（`hermes-73`，飞书消息 om_x100b60324f1d0cb4de39f4389eed32f，19:42:21）。
+  - 开跑前清单 `claude-73`：
+    - main 1d17de0 hermes `Ran 490 tests` `OK`；
+    - orca 首跑 `FAILED (failures=1)`，失败用例名没截到，补跑两次 `OK`，记作未闭环异常，不是本执行单的门禁；
+    - 工作区 11 张演练遗留的非终态单不阻断，不清理。
+  - Hermes 第一次没放行（`hermes-73`），要执行器现场的原始回读；补交 `claude-74a`（容器 `true unless-stopped`，`executor_procs(plan,"list")` 返回 `[]`）后批准三步（`hermes-74`）。
+  - 三步都已完成并回读（`claude-75`）：
+    - `plan` 建了父单 SBX-21 和子单 SBX-22～26；
+    - `approve` 22:00 开跑，上限取计划里的 4 小时、20 次；
+    - 定时任务 6fafbfe09d8d 恢复为 active，20:01:51 第一次 tick 正常，没有提前开跑。
+- **未做**：夜跑本身（22:00 由 tick 自动开跑，最晚 02:30 停机、03:00 停净）；第 3 批（`claude-31`，等常浩批）；Multica 上游 issue（`claude-29`，未发）；本 PR 的合并；驿窗那组 1、2、3、18 号；orca 首跑失败的原因。
+- **唯一下一步**：今晚夜跑由定时任务推进，有事会发到常浩的飞书私聊；正常 STOPPED、回读全满足时由 Hermes release，并把定时任务改回暂停。明早常浩看夜跑报告和 dt-sandbox 的 PR，决定送审和合并。
+
+## 2026-11-08 · M5 演练问题修补：第 1 批已合并安装，复验演练 3 门槛设计有误、等常浩修正授权（#97、#99）
+
+- **来由**：M5 首夜两次演练后 Hermes 两次不放行（Multica 显示 STOPPED 不等于执行器已停；取消 run 杀不掉 agent 放到后台的进程）。常浩要求「基于这次演练暴露出的问题，请列一个问题清单，然后逐个解决」。清单 29 条、分批计划见证据目录 `2026-11-08-M5首夜/` 00、24 号。
+- **第 1 批（PR #100，#97，L3，已合并 a3e497d）**：停机在 Multica 回读之外，再到执行器容器里独立核对进程，为空才写 STOPPED；`executor.kill: true` 时结束残留，夜跑途中每次 tick 清孤儿；停机后到 release 前，残留结束不掉或读不清就撤销 STOPPED、冻结；停机后给远端拍快照、持续比对；消息文件尾部截断记为缺口。原计划 27②（改执行器 runtime 配置）不做，改由主控三处清理。
+- **审批**：常浩飞书授权（`hermes-34`，到 11-10 00:00）。Hermes 第 1 次（`hermes-35`）指出停机后只告警不冻结、复验脚本门槛不硬，不批；返修后第 2 次（`hermes-40`）批准合并，条件是 CI 成功；复验脚本又修三处后，第 3 次（`hermes-43`）批准复验。
+- **测试**：19 项新用例先红后绿；全量 `/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests` `Ran 489 tests` `OK`；`orca/tests` `Ran 48 tests`：首跑 1 项计时用例失败，补跑 `OK`（main 上同样不稳，本 PR 没改 orca）；CI `test: SUCCESS`。
+- **安装**：`~/.hermes/scripts/multica_night.py` 与 main 的 cmp 一致（sha1 2c948decda37），旧版备份在 `claude-42-安装备份/`；定时任务 6fafbfe09d8d 仍暂停。
+- **复验演练 3（`claude-44`、`claude-45`）**：主控全部正常（STOPPED，没有残留，10 次探针都干净，停机后远端没变）。但没通过，原因是我设计的门槛有误：G6 拿演练前的快照比，agent 在 stop 前正常推的 PR #8 被判失败；场景 1 的 run 在 stop 前已经结束。按边界不 release，演练 4 没跑。脚本 v3（`claude-46`，自测 `claude-47`）和修正授权草稿（`claude-48`）已备好。
+- **第 2 批（本 PR，#99）**：名册里 digital-twin 的测试命令钉死 `/usr/bin/python3`；AGENTS 写明测试版本和证据文件写入方前缀；tests/README 不写死总数；新增 `test_roster.py`。#14 架构 5.3a 修订见 PR #101（等常浩定）。
+- **未做**：复验演练 4、5；第 3 批（决策清单 `claude-31`，等常浩批）；Multica 上游 issue（草稿 `claude-29`，未发）；驿窗那组 1、2、3、18 号。
+- **唯一下一步**：常浩核对 `claude-48-修正授权草稿.md`，在飞书发给 Hermes；Hermes 审过脚本 v3 后，Claude release drill-3，再跑演练 5、演练 4。
 
 ## 2026-11-08 · M5 首夜：Hermes 主控的 Multica 夜跑与独立停机检查（#92）
 
@@ -1879,3 +1969,17 @@
 | 3 | 信息边界落地：SOUL、全局规则、Vault AGENTS 和两张决定页 | 已完成 |
 | 4 | 提醒上线：晨报样稿 → 取数脚本 → 4 个定时任务 | 挂起（等 T1 日报重设计；样稿和脚本已留） |
 | 5 | 独立巡检脚本，每天 1 次，只在异常时告警（代替 PRD F9.2 原来“并进牛马之家”的写法） | 已完成 |
+
+## 2026-11-12 · 审计第 1 项：凭据扫描读取失败即停（仅隔离 worktree，未提交、未安装）
+
+- **已核实并最小修复**：当前基线 `37af134` 的 `dispatch.secret_hits()` 在 `git log -p` 非零退出时仍按空结果放行。现改为返回 `ok=false`、退出码 1，停止后续推送；错误只报退出码，不转发 Git 原始输出。
+- **回归与全量**：新增 2 项测试、3 个场景，覆盖开 PR 时空输出 / 部分输出失败、确认推本地主分支时读取失败；修前均失败，修后通过，并核对未调用 push、未继续 PR 操作、台账不变。系统 Python 3.9.6 全量：Hermes 767 项，17 失败、4 错误（沙箱禁止 `ps` 和本地套接字，未通过）；ORCA 48 项通过。将这 21 项在未修改的 `37af134` 源码隔离副本上定点重跑，复现相同的 17 失败、4 错误；不将环境受阻写成全量通过。
+- **证据与边界**：`~/Library/Application Support/digital-twin/evidence/2026-11-12-codex-fix/summary.md`；本轮仅修审计第 1 项，不处理其余项。按本轮明确要求不提交、不推送、不联网、不安装、不改真实数据或运行配置；项目原有主线和已定内容不变。
+
+## 2026-11-12 · PR #171 交叉审查返修：补齐合并入口凭据扫描（仅本 worktree，未提交、补改未复审、未安装）
+
+- **审查发现成立并已补齐**：起始 HEAD `4a04971508604872d85104567b61d1b5abbc84da`、分支 `codex/audit-fix-1112`。已有 PR 续跑后，`pr` 虽已拦下扫描读取失败或凭据命中，`merge_github()` 仍能直接推派单分支。现于变基、项目测试之后、分支推送之前，对 `refs/remotes/origin/main..HEAD` 调同一个 `secret_hits()`；读取失败或命中即停，不推派单分支、不调 GitHub 合并、不改完成台账，沿用脱敏回报。
+- **先红后绿**：新增 3 项测试、5 个场景（128 空 / 部分输出、-9、真实合成凭据、真实变基后且测试完成再扫描）。只加测试时 `Ran 3 tests` / `FAILED (failures=5)`；修后 `Ran 3 tests` / `OK`；派单 GitHub 文件全部 20 项通过。
+- **本轮全量**：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`：770 项，17 失败、4 错误，**未通过**；ORCA 同解释器全量 48 项通过。21 个失败 / 错误名称及类别与起始 HEAD 的隔离定点复跑完全一致（17 失败、4 错误），原因涉及沙箱禁止 `ps` 与本地套接字；未跳过、改弱测试或声称全绿，未启动浏览器。
+- **交接与范围**：`~/Library/Application Support/digital-twin/evidence/2026-11-12-codex-fix/summary.md` 末尾「交叉审查返修」，原样日志及起始版本对照在同目录 `rework/`。只修改本 worktree 的 `dispatch.py`、`test_dispatch_github.py`、本文件；未提交、未推送、未联网、未同步安装副本或改运行配置。本轮无须确认的已定内容变化；原审计另 5 项中危不在本报告具体发现中，未重新核实或修复，不宣称解决。
+- **唯一下一步**：在允许 `ps` 和本地套接字的本机环境，对此未提交候选版重跑 Hermes 与 ORCA 两条全量命令，回填证据后交回 PR #171 复核；本轮不放行合并或安装，项目整体仍处原阶段。

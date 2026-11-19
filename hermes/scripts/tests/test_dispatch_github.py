@@ -158,6 +158,139 @@ class DispatchGitHubTests(unittest.TestCase):
         self.assertEqual(sh(self.bare, "for-each-ref", "refs/heads/hermes"), "")
         self.assertEqual(self.gh_calls("pr", "create"), [])
 
+    def test_pr_stops_when_secret_scan_fails(self):
+        for output in ("", "commit abc123\n+++ b/README.md\n+部分输出\n"):
+            with self.subTest(stdout=output):
+                no, _ = self.new_done()
+                before = dispatch.load(no)
+                real_git = dispatch.git
+
+                def fail_scan(cwd, *args, **kwargs):
+                    if args[:2] == ("log", "-p"):
+                        return subprocess.CompletedProcess(args, 128, output, "synthetic-private-diagnostic")
+                    return real_git(cwd, *args, **kwargs)
+
+                with patch.object(dispatch, "git", side_effect=fail_scan) as calls:
+                    r = self.invoke("pr", no)
+                self.assertFalse(r["ok"])
+                self.assertIn("扫描", r["msg"])
+                self.assertNotIn("synthetic-private-diagnostic", json.dumps(r))
+                self.assertNotIn("部分输出", json.dumps(r, ensure_ascii=False))
+                self.assertFalse(any(c.args[1] == "push" for c in calls.call_args_list))
+                self.assertEqual(sh(self.bare, "for-each-ref", "refs/heads/hermes"), "")
+                self.assertEqual(self.gh_calls("pr", "create"), [])
+                self.assertEqual(dispatch.load(no), before)
+
+    def test_push_main_stops_when_secret_scan_fails(self):
+        no, wt = self.new_done()
+        self.invoke("pr", no)
+        tip = self.local_unpushed()
+        before_main = self.remote_main()
+        before_branch = sh(wt, "rev-parse", "HEAD")
+        before = dispatch.load(no)
+        real_git = dispatch.git
+
+        def fail_scan(cwd, *args, **kwargs):
+            if args[:2] == ("log", "-p"):
+                return subprocess.CompletedProcess(args, 128, "", "synthetic-private-diagnostic")
+            return real_git(cwd, *args, **kwargs)
+
+        with patch.object(dispatch, "git", side_effect=fail_scan) as calls:
+            r = self.invoke("merge", no, "--push-main", tip[:12])
+        self.assertFalse(r["ok"])
+        self.assertIn("扫描", r["msg"])
+        self.assertNotIn("synthetic-private-diagnostic", json.dumps(r))
+        self.assertFalse(any(c.args[1] in ("push", "rebase") for c in calls.call_args_list))
+        self.assertEqual(self.remote_main(), before_main)
+        self.assertEqual(sh(wt, "rev-parse", "HEAD"), before_branch)
+        self.assertEqual(self.gh_calls("pr", "merge"), [])
+        self.assertEqual(dispatch.load(no), before)
+
+    def test_merge_cannot_bypass_failed_pr_secret_scan(self):
+        for code, output in ((128, ""), (128, "commit abc123\n+部分输出\n"), (-9, "")):
+            with self.subTest(returncode=code, stdout=output):
+                no, wt = self.new_done()
+                self.invoke("pr", no)
+                before_main = self.remote_main()
+                branch = f"refs/heads/hermes/{no}"
+                before_remote = sh(self.bare, "rev-parse", branch)
+                with open(wt / "README.md", "a") as f:
+                    f.write("续跑的新提交\n")
+                sh(wt, "commit", "-qam", "续跑")
+                before = dispatch.load(no)
+                real_git = dispatch.git
+
+                def fail_scan(cwd, *args, **kwargs):
+                    if args[:2] == ("log", "-p"):
+                        return subprocess.CompletedProcess(args, code, output, "synthetic-private-diagnostic")
+                    return real_git(cwd, *args, **kwargs)
+
+                with patch.object(dispatch, "git", side_effect=fail_scan) as calls:
+                    pr = self.invoke("pr", no)
+                    self.assertFalse(pr["ok"])
+                    self.assertEqual(sh(self.bare, "rev-parse", branch), before_remote)
+                    calls.reset_mock()
+                    merged = self.invoke("merge", no)
+                self.assertFalse(merged["ok"])
+                self.assertIn(f"退出码 {code}", merged["msg"])
+                self.assertNotIn("synthetic-private-diagnostic", json.dumps(merged))
+                self.assertNotIn("部分输出", json.dumps(merged, ensure_ascii=False))
+                self.assertFalse(any(c.args[1] == "push" for c in calls.call_args_list))
+                self.assertEqual(self.gh_calls("pr", "merge"), [])
+                self.assertEqual(self.remote_main(), before_main)
+                self.assertEqual(sh(self.bare, "rev-parse", branch), before_remote)
+                self.assertEqual(dispatch.load(no), before)
+
+    def test_merge_cannot_bypass_pr_secret_hit(self):
+        no, wt = self.new_done()
+        self.invoke("pr", no)
+        before_main = self.remote_main()
+        branch = f"refs/heads/hermes/{no}"
+        before_remote = sh(self.bare, "rev-parse", branch)
+        secret = "abcdefghijklmnop123456"
+        with open(wt / "README.md", "a") as f:
+            f.write(f"api_key = {secret}\n")
+        sh(wt, "commit", "-qam", "续跑带入合成凭据")
+        before = dispatch.load(no)
+        pr = self.invoke("pr", no)
+        self.assertFalse(pr["ok"])
+        self.assertEqual(sh(self.bare, "rev-parse", branch), before_remote)
+        with patch.object(dispatch, "git", wraps=dispatch.git) as calls:
+            merged = self.invoke("merge", no)
+        self.assertFalse(merged["ok"])
+        self.assertIn("密钥", merged["msg"])
+        self.assertNotIn(secret, json.dumps(merged))
+        self.assertFalse(any(c.args[1] == "push" for c in calls.call_args_list))
+        self.assertEqual(self.gh_calls("pr", "merge"), [])
+        self.assertEqual(self.remote_main(), before_main)
+        self.assertEqual(sh(self.bare, "rev-parse", branch), before_remote)
+        self.assertEqual(dispatch.load(no), before)
+
+    def test_merge_scans_rebased_commits_after_tests(self):
+        no, wt = self.new_done()
+        self.invoke("pr", no)
+        before_head = sh(wt, "rev-parse", "HEAD")
+        self.local_unpushed()
+        sh(self.repo, "push", "-q", "origin", "main")
+        marker = wt / "merge-test-marker"
+        self.write_roster(test="printf passed > merge-test-marker")
+        scans = []
+        real_git = dispatch.git
+
+        def observe_scan(cwd, *args, **kwargs):
+            if args[:2] == ("log", "-p"):
+                scans.append((Path(cwd), args[-1], sh(wt, "rev-parse", "HEAD"), marker.exists()))
+            return real_git(cwd, *args, **kwargs)
+
+        with patch.object(dispatch, "git", side_effect=observe_scan):
+            merged = self.invoke("merge", no)
+        self.assertTrue(merged["ok"], merged)
+        after_head = sh(wt, "rev-parse", "HEAD")
+        self.assertNotEqual(after_head, before_head)  # 真正发生过变基，不能沿用开 PR 时的扫描。
+        self.assertEqual(scans, [(wt, "refs/remotes/origin/main..HEAD", after_head, True)])
+        (call,) = self.gh_calls("pr", "merge")
+        self.assertEqual(call[call.index("--match-head-commit") + 1], after_head)
+
     def test_merge_lists_unpushed_commits_then_pushes_after_confirm(self):
         no, wt = self.new_done()
         self.invoke("pr", no)

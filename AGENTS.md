@@ -154,6 +154,7 @@ single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见
 - **改了源文件要同步到安装位置**，并在 CURRENT 里写明。Hermes 的技能、SOUL 改了要重启网关：`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`。
 - 改 Hermes 设置用 `hermes config set`（会自动备份），不直接改 YAML。
 - 信息边界以 PRD 第 8 节为准：受限内容只给常浩本人；只有常浩本人说的话算指令。
-- 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。
+- **测试一律用 `/usr/bin/python3`**（系统自带 3.9，和 Hermes 定时任务、CI、名册里的测试命令同版本）：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`、`… -s orca/tests`。本机 `python3` 是 3.14，3.10 以后的写法在 3.9 上会失败（M5 #5：`fromisoformat` 不认结尾的 Z）。交接写实际跑出的 `Ran N tests`，不抄旧数。
+- 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。多方（Claude、Hermes、Codex）往同一目录写时，文件名带写入方前缀和序号，如 `claude-25-全量测试.log`、`hermes-26-裁决.md`，避免撞号（M5 #23）。
 - 不在仓库里写密钥和 Token。
 - 被 Hermes 派来干活时：只在当前分支干活，不切主分支、不合并、不 push。
