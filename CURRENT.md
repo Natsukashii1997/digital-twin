@@ -58,6 +58,14 @@
 
 ---
 
+## 2026-11-19 · 车间 Claude 只读单改成真正只读（#236 后续；PR #242 已合并 `4f79eaa`，已安装）
+
+- 缺口（#236 第 3 批独立审查发现，本次实测确认）：`run_worker.py` 的 Claude 只读单只加了 `--allowedTools`，本机 bypassPermissions 下照样有 Bash、Write、Edit 和 42 个 MCP 服务，Write、Bash、desktop-commander 三种方式都写成了文件。
+- 改成 `--tools Read,Grep,Glob --strict-mcp-config --permission-mode dontAsk --allowedTools Read,Grep,Glob`；写入单、Codex 不变。代价：Claude 只读单跑不了任何命令（git、gh 也不行），Codex 只读沙箱里还能跑。
+- 测试：新增 test_run_worker_readonly.py 5 项（改前代码上失败 2 项）；真 claude 反向验证脚本 hermes/scripts/tests/claude_readonly_probe.py（手动跑，不进全量）；全量 1500 项通过，CI 通过。常浩经驿窗回「合并」「装上」（仓库不允许自动合并，CI 通过后锁定 `32115d9` 合并）。
+- **已安装**：`~/.hermes/scripts/run_worker.py` 换成 main 版本（装前和 main 的上一版逐字一致，备份 evidence/readonly-claude-236/install/run_worker.py.before-4f79eaa）；装后用安装副本实测：工具只剩 Read、Grep、Glob，没有 MCP，dontAsk，写不出文件；真跑一张只读单，退出码 0、读文件正常。证据 evidence/readonly-claude-236/。
+- 没做：日报「猛鬼兽查」（pdaily_act cmd_checks）仍写死 Codex，放不放开跟随车间默认等常浩定；考虑到上面的代价，核对风险这类活继续用 Codex 可能更合适。
+
 ## 2026-11-19 · #239 工作台主线页（PR 待常浩合并）
 
 常浩 11-19 回「按这个逻辑出」，三版里选乙（原话和逐条内容见 `docs/DECIDED.md` 最上面一节）。
