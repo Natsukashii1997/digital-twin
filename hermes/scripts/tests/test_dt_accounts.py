@@ -435,6 +435,17 @@ class Verify(unittest.TestCase):
         closed.close()
         self.assertEqual(self.v.probe([self.t("127.0.0.1", port), self.t("127.0.0.1", cport)]), ["open", "refused"])
 
+    def test_probe_repeat_records_local_port(self):
+        """诊断模式：每个目标连 n 次，连上的记下本地端口（root 拿它去 pf 连接表里找）。"""
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        self.addCleanup(srv.close)
+        rows = self.v.probe_repeat([self.t("127.0.0.1", srv.getsockname()[1])], 3)[0]
+        self.assertEqual([r["r"] for r in rows], ["open"] * 3)
+        self.assertTrue(all(isinstance(r["lport"], int) for r in rows))
+        self.assertIn('"$@"', PF.read_text())   # verify repeat <次数> 传得进去
+
     def test_targets_cover_every_path(self):
         self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 8086), ("*", 5433), ("::1", 7000)}
         self.v.local_addrs = lambda: ["192.168.1.16", "10.8.0.2", "2409::1"]

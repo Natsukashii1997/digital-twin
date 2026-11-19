@@ -12,6 +12,11 @@
 ICMP 和系统解析器代发的 DNS pf 按账号认不出，不在这里试，记为剩余风险。
 
 退出码：0 全部符合；1 有该挡没挡住（或该通不通）；2 有项目没法判断（对照组 root 自己也连不上）。
+
+诊断模式 `sudo bash ops/dt_worker_pf.sh verify repeat 30`：11-19 试装两次各偶发漏过一项（工人 127.0.0.1:5000、
+秘书 127.0.0.1:5178，端口不同、换一次就挡住了），像是 pf 偶尔认不出连接属于哪个账号就放行。这个模式挑几类该挡的目标
+（本机回环、IPv4 映射、本机网卡地址、公网直连）每个连 N 次，统计漏过的比例；漏过时记下本地端口，root 随即抓 pf 的连接表
+（pfctl -ss）里对应的那几条和锚点里每条规则的命中计数，写到 verify/repeat-<时间>.json。
 """
 import json
 import os
@@ -78,6 +83,31 @@ def try_proxy(host="api.github.com", port=443, timeout=8):
         return "timeout"
     except OSError as e:
         return f"error:{e.errno}"
+
+
+def probe_repeat(targets, n):
+    """每个目标连 n 次；连上的记下本地端口，给 root 去 pf 连接表里找。"""
+    out = []
+    for t in targets:
+        rows = []
+        for _ in range(n):
+            fam = socket.AF_INET6 if ":" in t["host"] else socket.AF_INET
+            s = socket.socket(fam, socket.SOCK_STREAM)
+            s.settimeout(1 if t["what"] != "公网直连" else 2)
+            at = time.time()
+            try:
+                s.connect((t["host"], t["port"]))
+                rows.append({"at": at, "r": "open", "lport": s.getsockname()[1]})
+            except ConnectionRefusedError:
+                rows.append({"at": at, "r": "refused"})
+            except socket.timeout:
+                rows.append({"at": at, "r": "timeout"})
+            except OSError as e:
+                rows.append({"at": at, "r": f"error:{e.errno}"})
+            finally:
+                s.close()
+        out.append(rows)
+    return out
 
 
 def probe(targets):
@@ -151,11 +181,12 @@ def targets():
     return ts
 
 
-def run_as(user, ts):
+def run_as(user, ts, mode="probe", n=None):
     src = open(__file__, "rb").read()
+    extra = [str(n)] if n else []
     # 在 /（所有人可进）里起进程，不受当前目录权限影响
-    r = subprocess.run(["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", "probe", json.dumps(ts)],
-                       input=src, capture_output=True, timeout=600, cwd="/")
+    r = subprocess.run(["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", mode, json.dumps(ts)] + extra,
+                       input=src, capture_output=True, timeout=1800, cwd="/")
     if r.returncode != 0:
         raise RuntimeError(f"退出码 {r.returncode}：{r.stderr.decode(errors='replace')[-400:]}")
     return json.loads(r.stdout)
@@ -180,13 +211,76 @@ def account_exists(u):
     return subprocess.run(["id", u], capture_output=True).returncode == 0
 
 
+def repeat_targets():
+    """诊断模式的目标：每类挑一个该挡、root 连得上的。"""
+    socks = listening()
+    allowed = set().union(*ALLOWED.values())
+    v4 = sorted(p for a, p in socks if a == "127.0.0.1" and p not in allowed)
+    star = sorted(p for a, p in socks if a == "*" and p not in allowed)
+    ts = []
+    if v4:
+        ts.append({"kind": "tcp", "what": "本机回环 IPv4", "host": "127.0.0.1", "port": v4[0]})
+        ts.append({"kind": "tcp", "what": "IPv4 映射地址", "host": "::ffff:127.0.0.1", "port": v4[0]})
+    if star:
+        ts.append({"kind": "tcp", "what": "本机回环 IPv4（* 监听）", "host": "127.0.0.1", "port": star[0]})
+        lan = [a for a in local_addrs() if "." in a]
+        if lan:
+            ts.append({"kind": "tcp", "what": "本机网卡地址", "host": lan[0], "port": star[0]})
+    for h, p in PUBLIC_TCP:
+        ts.append({"kind": "tcp", "what": "公网直连", "host": h, "port": p})
+    return ts
+
+
+def pf_snapshot(lports):
+    """漏过的那几个本地端口在 pf 连接表里的样子，和锚点里每条规则的命中计数。"""
+    states = subprocess.run(["/sbin/pfctl", "-ss"], capture_output=True, text=True).stdout.splitlines()
+    hits = [l for l in states if any(f":{p} " in l + " " or f"[{p}]" in l for p in lports)]
+    rules = subprocess.run(["/sbin/pfctl", "-a", "com.apple/dt-worker", "-vsr"], capture_output=True, text=True).stdout
+    return {"states": hits[:50], "anchor_rules": rules}
+
+
+def repeat(n):
+    ts = repeat_targets()
+    report = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "n": n, "targets": ts, "accounts": {}}
+    leaked_any = False
+    for u in ALLOWED:
+        if not account_exists(u):
+            continue
+        print(f"== {u}（每个目标连 {n} 次）")
+        try:
+            got = run_as(u, ts, "probe-repeat", n)
+        except Exception as e:
+            print(f"  没跑起来：{e}")
+            report["accounts"][u] = {"error": str(e)[:500]}
+            continue
+        lports = [r["lport"] for rows in got for r in rows if r["r"] == "open"]
+        snap = pf_snapshot(lports)
+        for t, rows in zip(ts, got):
+            k = sum(r["r"] == "open" for r in rows)
+            leaked_any |= k > 0
+            print(f"  {t['what']} {t['host']}:{t['port']}：{n} 次里漏过 {k} 次")
+        report["accounts"][u] = {"results": got, "pf": snap}
+    os.makedirs(OUT_DIR, mode=0o755, exist_ok=True)
+    path = os.path.join(OUT_DIR, "repeat-" + time.strftime("%Y%m%d-%H%M%S") + ".json")
+    with open(path, "w") as f:
+        json.dump(report, f, ensure_ascii=False, indent=1)
+    os.chmod(path, 0o644)
+    print(("有漏过" if leaked_any else f"{n} 次都挡住了") + f"；记录在 {path}")
+    return 1 if leaked_any else 0
+
+
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "probe":   # 以账号身份跑的那一半
         print(json.dumps(probe(json.loads(sys.argv[2]))))
         return 0
+    if len(sys.argv) >= 4 and sys.argv[1] == "probe-repeat":
+        print(json.dumps(probe_repeat(json.loads(sys.argv[2]), int(sys.argv[3]))))
+        return 0
     if os.geteuid() != 0:
         print("要用 sudo 运行：sudo bash ops/dt_worker_pf.sh verify")
         return 1
+    if len(sys.argv) >= 3 and sys.argv[1] == "repeat":
+        return repeat(int(sys.argv[2]))
     ts = targets()
     ctrl = probe(ts)
     report = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "targets": ts, "root": ctrl, "accounts": {}}

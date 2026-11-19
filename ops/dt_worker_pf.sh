@@ -13,6 +13,7 @@
 #   sudo bash ops/dt_worker_pf.sh uninstall   拆掉
 #   sudo bash ops/dt_worker_pf.sh status      看规则有没有在生效
 #   sudo bash ops/dt_worker_pf.sh verify      真机越权测试：以各账号身份去连，证明真挡住了（ops/dt_pf_verify.py）
+#   sudo bash ops/dt_worker_pf.sh verify repeat 30   诊断：每类目标连 30 次，看有没有偶发漏过
 #   bash ops/dt_worker_pf.sh rules dt-worker [dt-secretary]   只打印规则，不用 sudo（测试用）
 # apply 由开机任务调用，不用手动运行；每次按本机现有账号重新生成规则，dt-secretary 建好后 5 分钟内自动管上。
 #
@@ -171,7 +172,8 @@ EOF
     # 真机越权测试：以各账号身份逐项去连，证明数据包真被挡住（L3 P1-02）；要在仓库里运行（要用旁边的 dt_pf_verify.py）
     here=$(cd "$(dirname "$0")" && pwd)
     [ -f "$here/dt_pf_verify.py" ] || { echo "找不到 $here/dt_pf_verify.py：请在仓库里运行 sudo bash ops/dt_worker_pf.sh verify"; exit 1; }
-    /usr/bin/python3 -I "$here/dt_pf_verify.py"
+    shift
+    /usr/bin/python3 -I "$here/dt_pf_verify.py" "$@"   # verify repeat <次数>：诊断偶发漏过
     ;;
   uninstall)
     launchctl bootout system "$PLIST" 2>/dev/null || true
