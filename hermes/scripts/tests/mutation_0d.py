@@ -12,6 +12,7 @@ from pathlib import Path
 W = Path(__file__).resolve().parents[3]
 S = W / "hermes/scripts"
 sys.path.insert(0, str(S / "tests"))
+import prod_guard as pg  # noqa: E402
 import prod_snapshot as ps  # noqa: E402
 
 EX, RC, GR, FS, DR, PB, SG = ("test_autoloop_exits", "test_autoloop_recovery", "test_autoloop_grants",
@@ -125,8 +126,13 @@ def main(argv=None):
     a = ap.parse_args(argv)
     only = {int(x) for x in a.only.split(",")} if a.only else None
     home = ps.REAL_HOME
-    base = ps.take(excludes=[f"{home}/.hermes", f"{home}/.hermes/*",   # Hermes 网关一直在写心跳和运行状态（含目录本身的修改时间）
-                             f"{home}/Library/Application Support/DigitalTwin/evidence/*"])   # 结果文件可能写在这里
+    dt_dir = home / "Library/Application Support/DigitalTwin"
+    # 只核这批代码可能写到的正式东西：正式中台的配置、规则、主密钥、secrets（prod_guard 的做法：哈希，中台数据库一直在写不核），
+    # DigitalTwin/autoloop、工人共享的凭证镜像和任务单（prod_guard）、秘书 / 托管目录、LaunchAgents（prod_snapshot）。
+    # 整个 DigitalTwin、~/.hermes 里还有日报、网关心跳等定时任务一直在写，跑二十多分钟必然有和测试无关的变化
+    # （11-19 第一次跑就被 ~/.hermes、evidence 目录本身的修改时间拦下）。
+    roots = [dt_dir / "secretary", dt_dir / "custody", home / "Library/LaunchAgents"]
+    base = (pg.snapshot(), ps.take(roots))
     lines, caught, total = [], 0, 0
     for i, (f, old, new, what, tests) in enumerate(M, 1):
         if only and i not in only:
@@ -147,7 +153,9 @@ def main(argv=None):
         print(line, flush=True)
         lines.append(line)
         try:
-            ps.assert_unchanged(base)
+            ps.assert_unchanged(base[1])
+            if pg.snapshot() != base[0]:
+                raise ps.ProdChanged("正式中台配置或 DigitalTwin/autoloop、工人共享目录变了（prod_guard）")
         except ps.ProdChanged as e:
             print(f"!! 正式目录变了，停下：{e}")
             return 3
