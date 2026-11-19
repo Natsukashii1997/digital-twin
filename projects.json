@@ -140,7 +140,7 @@
       "main": "main",
       "agents": "AGENTS.md",
       "card": "10 项目/数字分身.md",
-      "test": "python3 -B -m unittest discover -s hermes/scripts/tests",
+      "test": "/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests",
       "default_worker": null,
       "write_allowed": true,
       "notes": "本项目。改了脚本和技能要同步到安装位置（见 AGENTS.md）。",
