@@ -28,6 +28,7 @@ import datetime as dt
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import pdaily_data  # noqa: E402
 import pdaily_facts  # noqa: E402
+import pdaily_act  # noqa: E402  拍板账（#235）；它反过来 import 本模块，Python 会给它半初始化的本模块，它只在函数里用
 
 DAILY = pdaily_facts.DAILY
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
@@ -48,7 +50,7 @@ REASONING = os.environ.get("DT_PDAILY_REASONING", "medium")
 CLIP = 300            # 材料里每段原文最多保留多少字
 ACT_CLIP = 100        # 行动记录每个字段最多保留多少字（行动多，压短些）
 # 卡片字段硬上限：比提示词给模型的字数（20 / 45 / 15 / 50）宽一点，留余量，超了才截断
-LIMITS = {"headline": 60, "item": 24, "recommendation": 50, "text": 50, "cause": 20, "scope": 45, "detail": 400}
+LIMITS = {"headline": 60, "item": 24, "recommendation": 50, "text": 50, "cause": 20, "scope": 45, "detail": 400, "task": 300}
 WEEK = "一二三四五六日"
 DECISION_TYPES = ("阻断", "限时", "普通")
 LEVELS = {"高": "🔴", "中": "🟠", "低": "🟡", "待识别": "⚪"}
@@ -119,15 +121,36 @@ def material(facts):
             routine[key] = routine.get(key, 0) + 1
             continue
         actions.append({k: (clip(v, ACT_CLIP) if isinstance(v, str) else v) for k, v in a.items() if k != "action_id"})
-    decisions = [dict(d, candidate=i) for i, d in enumerate(facts.get("decisions") or [])]
+    keys, recent, held = remembered()
+    decisions = [dict(d, candidate=i, **({"already_decided": True} if pdaily_act.cand_key(d) in keys else {}))
+                 for i, d in enumerate(facts.get("decisions") or []) if isinstance(d, dict)]
     return {
         "stat_day": facts.get("stat_day"), "window": facts.get("window"), "fetched_at": facts.get("fetched_at"),
         "projects": projects,
         "actions": actions, "routine_cron": routine,
-        "decisions": decisions, "risks": facts.get("risks"), "cross_refs": facts.get("cross_refs"),
+        "decisions": decisions, "ledger": {"recently_decided": recent, "on_hold": held},
+        "yesterday_checks": yesterday_checks(facts),
+        "risks": facts.get("risks"), "cross_refs": facts.get("cross_refs"),
         "observations": facts.get("observations"), "counts": facts.get("counts"),
         "activity": facts.get("activity"), "coverage": facts.get("coverage"), "notes": facts.get("notes"),
     }
+
+
+def yesterday_checks(facts):
+    """前一天日报派的「猛鬼兽查」只读单和回执摘要（#236）；读不了就当没有。"""
+    try:
+        prev = (dt.date.fromisoformat(facts["stat_day"]) - dt.timedelta(days=1)).isoformat()
+        return pdaily_act.checks_for_material(prev)
+    except (KeyError, TypeError, ValueError, OSError):
+        return []
+
+
+def remembered():
+    """拍板账（#235）：近期定过的候选键、定过的事摘要、先放着的件数；账读不了就当空的，不挡写稿。"""
+    try:
+        return pdaily_act.remembered()
+    except (OSError, ValueError):
+        return set(), [], 0
 
 
 # ---------- 写稿 ----------
@@ -327,7 +350,10 @@ def metrics(facts, card):
         deadlines = sorted(d["deadline"] for d in dec if s(d.get("deadline")))
         dec_n = "；".join(x for x in ("、".join(k for k in kinds if k), f"最晚 {deadlines[0]}" if deadlines else "", oldest) if x)
         mine = sum(1 for r in risks if to_list(r))
-        risk_n = "、".join(x for x in (f"{mine} 类要你定" if mine else "", f"{len(risks) - mine} 类只观察" if len(risks) - mine else "") if x)
+        check = sum(1 for r in risks if not to_list(r) and isinstance(r.get("check"), dict))
+        watch = len(risks) - mine - check
+        risk_n = "、".join(x for x in (f"{mine} 类要你定" if mine else "", f"{check} 类猛鬼兽查" if check else "",
+                                      f"{watch} 类只观察" if watch else "") if x)
     return [
         ("有推进的项目", "未知" if progress is None else f"**{len(progress)}** / {n}",
          "分析降级，没判断" if progress is None else f"其余 {n - len(progress)} 个无实质推进"),
@@ -371,12 +397,40 @@ def cut(v, n):
     return (head[:k] if k >= n // 2 else head).rstrip(TRAIL) + "…"
 
 
+def drop_decided(facts, card):
+    """拍板里常浩已经定过（或先放着没到期）的，直接去掉、记提醒，不算核对失败（#235 审查 P1-3）；
+    风险的去向编号跟着改：指到被去掉那条的删掉，后面的往前挪。"""
+    decs = card.get("decisions")
+    if not isinstance(decs, list):
+        return []
+    keys, cands = remembered()[0], facts.get("decisions") or []
+    gone = []
+    for i, d in enumerate(decs, 1):
+        mine = [pdaily_act.cand_key(c) for c in cand_list(d, cands)] if isinstance(d, dict) else []
+        if mine and all(k in keys for k in mine):
+            gone.append(i)
+    if not gone:
+        return []
+    card["decisions"] = [d for i, d in enumerate(decs, 1) if i not in gone]
+    for r in card.get("risks") or []:
+        to = to_list(r) if isinstance(r, dict) else None
+        if to is not None:
+            r["to_decisions"] = [n - sum(1 for g in gone if g < n) for n in to if n not in gone]
+    return [f"拍板第 {'、'.join(map(str, gone))} 条常浩已经定过（或说了先放着），已去掉"]
+
+
 def normalize(facts, card):
     """就地规整卡片要素，返回提醒清单。只修写法：去尾部标点、最晚时间换格式或去掉、超长截断；旧字段 today、reply 丢掉。"""
     warns = []
     cands = facts.get("decisions") or []
     year = (facts.get("stat_day") or "2000")[:4]
     card.pop("today", None)
+    warns += drop_decided(facts, card)
+    for i, r in enumerate(card.get("risks") or []):     # 只读单任务超长：截断记提醒，不让整份降级（复审 P3-5）
+        c = r.get("check") if isinstance(r, dict) else None
+        if isinstance(c, dict) and s(c.get("task")) and len(c["task"]) > LIMITS["task"]:
+            c["task"] = cut(c["task"], LIMITS["task"])
+            warns.append(f"risks[{i}].check.task 超过 {LIMITS['task']} 字，已截断")
     for key in ("decisions", "achievements", "risks"):
         for i, x in enumerate(card.get(key) or []):
             if not isinstance(x, dict):
@@ -514,12 +568,20 @@ def check(facts, card, report):
             errs.append(f"risks[{j}] 和 risks[{seen[cause]}] 是同一类「{cause}」，要合成一类")
         seen.setdefault(cause, j)
         to = to_list(r)
+        c = r.get("check")
+        if c is not None:                        # 猛鬼兽查（#236）：只给只观察的风险；项目在名册里；任务写清
+            if not isinstance(c, dict) or roster.resolve(s(c.get("project")) or "") in (None, "hermes") or not s(c.get("task")):
+                errs.append(f"risks[{j}].check 要写成 {{\"project\": 名册项目名, \"task\": 要查什么、交什么}}")
+            elif to_list(r):
+                errs.append(f"risks[{j}] 已经指到拍板，就不用猛鬼兽查；check 只给不用常浩定的风险")
         if to is None:
             errs.append(f"risks[{j}] 缺 to_decisions（指向第几条拍板的编号列表；不用常浩定就给空列表，表示只观察）")
             continue
         for n in to:
             if not 1 <= n <= len(decs):
                 errs.append(f"risks[{j}] 的去向写拍板第 {n} 条，但拍板只有 {len(decs)} 条")
+    if sum(1 for r in risks if isinstance(r.get("check"), dict)) > pdaily_act.CHECKS_MAX:
+        errs.append(f"猛鬼兽查（check）每天最多 {pdaily_act.CHECKS_MAX} 类")
     for i, a in enumerate(ach):
         for n in split_names(s(a.get("project"))):
             rec = roster.by_id.get(roster.resolve(n))
@@ -622,7 +684,8 @@ def fallback(facts, reason):
     decs = [{"type": None, "kind": None, "candidates": [i], "project": name(d.get("project_id")), "item": clip(d.get("item"), 60),
              "recommendation": None, "deadline": iso_deadline(d.get("deadline")),
              "source": d.get("source"), "evidence": (d.get("evidence") or [])[:2]}
-            for i, d in enumerate(facts.get("decisions") or []) if isinstance(d, dict)]
+            for i, d in enumerate(facts.get("decisions") or [])
+            if isinstance(d, dict) and pdaily_act.cand_key(d) not in remembered()[0]]
     ach = []
     for p in facts.get("projects") or []:
         prs = (p.get("yesterday_delta") or {}).get("merged_prs") or []
@@ -757,17 +820,36 @@ def risk_rows(risks, degraded):
         to = to_list(r)
         if degraded or to is None:
             go = "<font color='grey'>未判断</font>"
+        elif to:
+            go = f"**→ 拍板 {''.join(num_mark(n) for n in to)}**"
         else:
-            go = f"**→ 拍板 {''.join(num_mark(n) for n in to)}**" if to else "只观察"
+            go = "猛鬼兽派只读单查，明天报" if isinstance(r.get("check"), dict) else "只观察"
         rows.append({"c": f"{LEVELS.get(r.get('level'), '⚪')} {r.get('cause') or '待分类'}", "w": r.get("scope") or "", "g": go})
     return rows
 
 
-def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None):
+def card_mark(token):
+    """页脚的卡片令牌尾号（同托管汇报卡）：回读时靠它认出发出去的就是这一张。"""
+    return f"卡片 {token[-6:]}"
+
+
+def decision_buttons(token, ns):
+    """拍板表下一排按钮（乙版定稿的排法）：全部按推荐 + ① 按推荐…；按钮只带 {"pdaily": 令牌, "n": 编号}，0 = 其余全部。
+    ns：能按推荐办的编号（有推荐、不是要常浩亲手做的，pdaily_act.buttonable）。"""
+    def b(text, value, kind):
+        return {"tag": "column", "width": "auto", "elements": [{
+            "tag": "button", "text": {"tag": "plain_text", "content": text}, "type": kind, "size": "small",
+            "behaviors": [{"type": "callback", "value": {"pdaily": token, "n": value}}]}]}
+    cols = [b("全部按推荐", 0, "primary_filled")] + [b(f"{num_mark(k)} 按推荐", k, "primary") for k in ns]
+    return {"tag": "column_set", "flex_mode": "flow", "horizontal_spacing": "8px", "columns": cols}
+
+
+def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None, token=None):
     """乙版卡片 JSON 2.0（常浩 2026-11-19 在私聊三版预览里选定，#226）；默认宽度。四板块：
     核心数据速览 → 昨日关键成果 → 风险与阻塞（按原因一类一行，带去向；项目明细在折叠面板里）→ 需要你拍板（表格）。
     selfcheck：工程自检结果（#159）。None 不显示（预览）；"" 表示正常，只在底部灰字写一句；有内容就并进风险表
-    最后一行「猛鬼兽自检有问题」，原文放进折叠面板。"""
+    最后一行「猛鬼兽自检有问题」，原文放进折叠面板。
+    token：卡片令牌（#235）。给了就在拍板表下加一排「按推荐」按钮；预览不给，不放按钮。"""
     sub = [f"统计日 {window_text(facts)}"]
     if unread(facts):
         sub.append(f"{len(unread(facts))} 个项目未读到")
@@ -802,8 +884,14 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None)
     if decs:
         els.append(table((("n", "#", "8%"), ("i", "事项", "34%"), ("r", "推荐", "43%"), ("a", "已挂", "15%")),
                          decision_rows(facts, decs)))
-        els.append(md("<font color='grey'>想定哪条，引用这张卡片回一句，例如「① 按推荐」「③ 不做」「都按推荐」。"
-                      "回了才算你定了，只管点到的那几条。</font>"))
+        ns = [n for n, d in enumerate(decs, 1) if pdaily_act.buttonable(d)]
+        if token and not degraded and ns and len(decs) <= 20:      # 降级卡、没有能按推荐办的：不放按钮（审查 P1-3）
+            els.append(decision_buttons(token, ns))
+            els.append(md("<font color='grey'>点「按推荐」就交给猛鬼兽办；不做、先放着或想改，引用这张卡片回一句，"
+                          "例如「③ 不做」「④ 先放着」。点了或回了才算你定了，只管点到的那几条，只做到开 PR。</font>"))
+        else:
+            els.append(md("<font color='grey'>想定哪条，引用这张卡片回一句，例如「① 按推荐」「③ 不做」「都按推荐」。"
+                          "回了才算你定了，只管点到的那几条。</font>"))
     else:
         els.append(md("今天没有要你拍板的事"))
     els.append({"tag": "hr"})
@@ -816,6 +904,8 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None)
         trace += f"｜完整报告未生成：{doc_error or '未知原因'}"
     if selfcheck == "":
         trace += "｜工程自检：正常"
+    if token:
+        trace += f"｜{card_mark(token)}"
     els.append({"tag": "markdown", "content": f"<font color='grey'>{trace}</font>", "text_size": "notation"})
     return {"schema": "2.0", "config": {"update_multi": True},
             "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(facts['stat_day'])}"},
@@ -974,6 +1064,22 @@ SELF_CHECK = Path(os.environ.get("DT_SELF_CHECK", Path(__file__).with_name("self
 SELF_CHECK_TIMEOUT = 900   # 每月 1 号要查名册各仓库，self_check 里这一项最多 600 秒
 
 
+def delivered_today(day):
+    try:
+        return bool(json.loads((DAILY / f"{day}.delivery.json").read_text(encoding="utf-8")).get("sent"))
+    except (OSError, ValueError):
+        return False
+
+
+def start_checks(day):
+    """日报发出后，在后台派「猛鬼兽查」的只读单（#236）；起不来只记日志，不影响日报。"""
+    try:
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("pdaily_act.py")), "checks", "--day", day],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError as e:
+        pdaily_act.log(f"只读单没起来 {day}：{e}")
+
+
 def run_self_check():
     """跑工程自检（原 09:50 单独发，#159 起并进日报）。返回 ""＝正常；有问题返回要显示的正文；没跑成也返回一句说明。"""
     try:
@@ -1019,7 +1125,7 @@ def send(day, out, force=False):
         except ValueError:
             pass
     rec = {"stat_day": day, "channel": CHAT, "sent": False, "at": None, "doc_url": None, "message_id": None,
-           "read_back": False, "error": None}
+           "read_back": False, "error": None, "card_token": secrets.token_hex(8)}   # 按钮令牌（#235）：只认最新一张卡
     try:
         meta = json.loads((out / f"{day}.build.json").read_text(encoding="utf-8"))
         ff = out / f"{day}.facts.json"
@@ -1027,7 +1133,7 @@ def send(day, out, force=False):
     except (OSError, ValueError):
         meta, facts = None, None
     if meta is None or facts is None or not (out / f"{day}.card-fields.json").exists():
-        card, doc_text = failure_card(day, "09:00 的写稿没跑成，没有可发的日报"), None
+        card, doc_text, fields = failure_card(day, "09:00 的写稿没跑成，没有可发的日报"), None, None
     else:
         fields = json.loads((out / f"{day}.card-fields.json").read_text(encoding="utf-8"))
         doc_text = (out / f"{day}.report.md").read_text(encoding="utf-8")
@@ -1044,27 +1150,41 @@ def send(day, out, force=False):
         except SendError as e:
             doc_error = str(e)
         card = build_card(facts, fields, meta.get("trace") or trace_line(facts, meta.get("model"), meta.get("degraded")),
-                          doc_url=doc_url, doc_error=doc_error, selfcheck=run_self_check())
+                          doc_url=doc_url, doc_error=doc_error, selfcheck=run_self_check(), token=rec["card_token"])
     text = json.dumps(card, ensure_ascii=False)
     bad = work_content(text)
     if bad or not card["header"]["title"]["content"].startswith("📅 猛鬼兽日报 · "):
         rec["error"] = f"卡片里有工作内容（{'、'.join(bad) or '标题不对'}），拒发"
         deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
         return rec["error"]
-    (out / f"{day}.card.sent.json").write_text(text, encoding="utf-8")
+    snap = None
+    if fields is not None:                       # 拍板快照（#235 审查 P1-1）：按钮和编号只认常浩看到的这一版
+        snap, rec["decisions_sha"] = pdaily_act.snapshot(facts, dicts(fields, "decisions"))
+    try:
+        prev_sent = bool(json.loads(deliv.read_text(encoding="utf-8")).get("sent"))
+    except (OSError, ValueError):
+        prev_sent = False
     rec["doc_url"], rec["doc_error"] = doc_url, doc_error
     try:
         data = lark(["im", "+messages-send", "--chat-id", CHAT, "--msg-type", "interactive", "--content", text,
-                     "--idempotency-key", f"pdaily-{day}" + ("-r" if force else "")], "发卡片", "bot")
+                     "--idempotency-key", f"pdaily-{day}" + (f"-r{rec['card_token']}" if force else "")], "发卡片", "bot")
         rec["message_id"], rec["sent"] = data.get("message_id"), bool(data.get("message_id"))
         rec["at"] = dt.datetime.now(pdaily_data.TZ).isoformat(timespec="seconds")
         if rec["sent"]:
             got = lark(["im", "+messages-mget", "--message-ids", rec["message_id"]], "回读", "bot")
             m = (got.get("messages") or [{}])[0]
-            rec["read_back"] = m.get("msg_type") == "interactive" and card["header"]["title"]["content"] in str(m.get("content"))
+            rec["read_back"] = m.get("msg_type") == "interactive" and card["header"]["title"]["content"] in str(m.get("content")) \
+                and (card_mark(rec["card_token"]) not in text or card_mark(rec["card_token"]) in str(m.get("content")))
+            # 带令牌的卡：回读要见到这张卡的令牌尾号（飞书回读不带按钮的值，同托管汇报卡）
     except SendError as e:
         rec["error"] = str(e)
-    deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    if not rec["sent"] and prev_sent:            # 重发没发出去：原来那张卡的记录、卡片、快照都不动（复审 P3-C）
+        (out / f"{day}.delivery.retry.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    else:
+        (out / f"{day}.card.sent.json").write_text(text, encoding="utf-8")
+        if snap is not None:
+            (out / f"{day}.decisions.sent.json").write_text(json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8")
+        deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     if not rec["sent"]:
         return rec["error"] or "发卡片没拿到消息号"
     if not rec["read_back"]:
@@ -1095,6 +1215,8 @@ def main(argv=None):
         return 1
     if a.cmd == "send":   # 定时任务直接把输出发到私聊：成功不输出，失败说一句原因
         err = send(day.isoformat(), a.out or DAILY, force=a.force)
+        if not a.out and delivered_today(day.isoformat()):   # 发出去就派（回读没过也派：卡上写了「明天报」，复审 P3-4）
+            start_checks(day.isoformat())
         if err:
             print(f"⚠️ 今天的个人项目日报没发成：{err}。详情在 DigitalTwin/daily/{day.isoformat()}.delivery.json")
         return 0
