@@ -125,7 +125,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     only = {int(x) for x in a.only.split(",")} if a.only else None
     home = ps.REAL_HOME
-    base = ps.take(excludes=[f"{home}/.hermes/*",                       # Hermes 网关一直在写心跳和运行状态
+    base = ps.take(excludes=[f"{home}/.hermes", f"{home}/.hermes/*",   # Hermes 网关一直在写心跳和运行状态（含目录本身的修改时间）
                              f"{home}/Library/Application Support/DigitalTwin/evidence/*"])   # 结果文件可能写在这里
     lines, caught, total = [], 0, 0
     for i, (f, old, new, what, tests) in enumerate(M, 1):
