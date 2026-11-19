@@ -1,0 +1,17 @@
+# 按计划先不装的源文件（工程自检 ops/self_check.py 读 main 上这份，#236）。
+# 一行一个仓库路径，# 后面写为什么不装、什么时候装。没装不报；装了但和 main 不同照报。
+# 装上以后把它从这里删掉（AGENTS.md 里对应脚本的「未安装」也一起改）。
+
+hermes/scripts/autoloop_answer.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/autoloop_config.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/autoloop_feishu.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/autoloop_grants.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/autoloop_publish.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/autoloop_readonly.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/button_probe.py  # 按钮实测探针（#195 0B-3），只在实测时手动跑
+hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
+hermes/scripts/custody_ledger.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
+hermes/scripts/custody_report.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
+hermes/scripts/secretary.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
+hermes/scripts/secretary_gate.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
+hermes/scripts/secretary_ledger.py  # 秘书代批（#195 0B-4），未签代批清单、未生效

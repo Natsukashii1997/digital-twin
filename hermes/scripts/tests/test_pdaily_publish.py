@@ -770,6 +770,51 @@ class SendTests(unittest.TestCase):
             rc = pp.main(["send", "--date", DAY, "--out", str(self.out)])
         self.assertEqual((rc, buf.getvalue()), (0, ""))
 
+    def test_send_starts_checks_only_for_real_daily_dir(self):
+        """#236：定时任务（不带 --out）发成功后，在后台派「猛鬼兽查」的只读单；带 --out（补发到别处、测试）不派。"""
+        with mock.patch.object(pp, "start_checks") as sc, mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY]), 0)
+        sc.assert_called_once_with(DAY)
+        with mock.patch.object(pp, "start_checks") as sc, mock.patch("sys.stdout"):
+            pp.main(["send", "--date", DAY, "--out", str(self.out), "--force"])
+        sc.assert_not_called()
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}), mock.patch.object(pp, "start_checks") as sc, \
+                mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY, "--force"]), 0)    # 定时任务入口：没发好也是输出一句原因、退出码 0
+        sc.assert_called_once_with(DAY)                               # 发出去了、只是回读没过：照样派（复审 P3-4）
+
+
+class CheckDestinationTests(unittest.TestCase):
+    """#236：风险的第三种去向「猛鬼兽查」。"""
+    def errs(self, card):
+        f = facts()
+        pp.normalize(f, card)
+        return pp.check(f, card, report_text())
+
+    def test_check_risk_valid_and_shown(self):
+        r = dict(card_fields()["risks"][0], check={"project": "牛马之家", "task": "查清主目录 15 处改动是什么、该提交还是丢弃"})
+        card = card_fields(risks=[r])
+        self.assertEqual(self.errs(card), [])
+        rows = pp.risk_rows([r], None)
+        self.assertEqual(rows[0]["g"], "猛鬼兽派只读单查，明天报")
+        m = {k: (v, n) for k, v, n in pp.metrics(facts(), card)}
+        self.assertEqual(m["风险与阻塞"], ("1 类", "1 类猛鬼兽查"))
+
+    def test_check_risk_rules(self):
+        r = card_fields()["risks"][0]
+        for c, why in (({"project": "外星项目", "task": "x"}, "check 要写成"), ({"project": "猛鬼兽", "task": "x"}, "check 要写成"),
+                       ({"project": "牛马之家"}, "check 要写成"), ("查一下", "check 要写成")):
+            e = self.errs(card_fields(risks=[dict(r, check=c)]))
+            self.assertTrue(any(why in x for x in e), (c, e))
+        long = card_fields(risks=[dict(r, check={"project": "牛马之家", "task": "长" * 400})])
+        self.assertEqual(self.errs(long), [])                         # 超长截断记提醒，不算核对失败（复审 P3-5）
+        self.assertLessEqual(len(long["risks"][0]["check"]["task"]), 301)
+        e = self.errs(card_fields(risks=[dict(r, to_decisions=[1], check={"project": "牛马之家", "task": "x"})]))
+        self.assertTrue(any("就不用猛鬼兽查" in x for x in e), e)
+        three = [dict(r, cause=f"类{i}", check={"project": "牛马之家", "task": "x"}) for i in range(3)]
+        e = self.errs(card_fields(risks=three))
+        self.assertTrue(any("最多 2 类" in x for x in e), e)
+
 
 class SampleLayoutTests(unittest.TestCase):
     """逐行写法：成果一行一条；规整去掉尾部标点；超长截断。"""

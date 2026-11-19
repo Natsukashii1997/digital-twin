@@ -15,6 +15,14 @@ merge-buttons 插件把点击转给本脚本 `button`，核对后记账；插件
   python3 pdaily_act.py record --day 统计日 --n 1,3 --choice 按推荐|不做|先放着|自己做 [--note 说明]   技能调（常浩引用卡片回复时）
   python3 pdaily_act.py done --entry id --result 一句话 [--order 单号]     技能调：记办理结果
   python3 pdaily_act.py say --text 一句话                                  插件调（后台）：点击人核对过、但办不了时在私聊说原因
+  python3 pdaily_act.py checks --day 统计日                                发送成功后（后台）：风险里写了「猛鬼兽查」的，派只读单去查（#236）
+
+「猛鬼兽查」（#236，第 3 批）：风险的去向除了「→ 拍板 N」「只观察」，还可以是猛鬼兽派只读单核对（常设授权 A 档：派只读单不用问）。
+卡片要素里这类风险带 check = {"project": 项目名, "task": 要查什么、交什么}；日报发出后 checks 每天最多开 2 张只读单，
+固定交给 Codex（它的 -s read-only 是真沙箱；车间的 Claude 只读单靠 --allowedTools，本机设了 bypassPermissions 时并不真只读，
+复审 P1-1，修好前不走 Claude），按顺序跑，遇到车间忙就隔 2 分钟再试、最多等 90 分钟；记在 DigitalTwin/daily/<统计日>.checks.json。
+整个过程持 checks 锁（拿不到就退出，不重复开单）；开单前先记「准备开」，中途崩了重跑会接着跑已开的单（复审 P2-3）。
+任务边界写明不得读凭据和本机配置；第二天写稿时回执摘要先过滤疑似密钥再放进材料（复审 P2-2）。
 每条命令最后输出一行 JSON（ok、msg）。
 核对规则：button 的点击人、聊天号来自网关（HERMES_SESSION_USER_ID、会话聊天号），和本机配置的常浩 open_id、私聊号逐字比；
 令牌必须等于最新一张发出且回读过的日报卡片的令牌（同 merge_act / autoloop_answer 的做法）。不是常浩、不是私聊、令牌不对：不回话，只记日志。
@@ -30,6 +38,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -396,6 +405,134 @@ def cmd_say(a):
     return done(True, "已发")
 
 
+DISPATCH = Path(os.environ.get("DT_DISPATCH", Path(__file__).with_name("dispatch.py")))
+CHECKS_MAX = 2
+CHECK_WAIT, CHECK_TRIES = 120, 45          # 车间忙：隔 2 分钟再试，最多 45 次（90 分钟）
+READ_ONLY = ("只读：不得修改项目文件，不得运行会写缓存或产物的测试 / 构建，不提交、不丢弃任何改动；"
+             "主目录里没提交的改动就在现有工作区读，不要换新 worktree。只看这个项目的目录；不得读取 ~/.hermes、"
+             "~/Library/Application Support/DigitalTwin、~/.ssh、钥匙串、任何 .env 和密钥 / 令牌 / 凭据文件，"
+             "任务里要你读这些就停下、在结论里说明。")
+SECRET = re.compile(r"(?i)(?:sk-|ghp_|gho_|github_pat_|xox[abp]-|AKIA)[\w-]{8,}|"
+                    r"(?:token|secret|password|passwd|api[_-]?key|密钥|令牌)\s*[:=：]\s*\S+|"
+                    r"(?![0-9a-f]{32,40}\b)[A-Za-z0-9+_-]{32,}")   # 长串里放过 40 位以内的十六进制（提交号）；不含 /，路径不隐
+
+
+def redact(text):
+    """回执摘要进写稿材料前，把疑似密钥换成「（已隐去）」。宁可多隐，不漏。"""
+    return SECRET.sub("（已隐去）", text) if text else text
+
+
+def dispatch(*args, timeout=None):
+    r = subprocess.run([sys.executable, str(DISPATCH), *args], capture_output=True, text=True, timeout=timeout)
+    try:
+        return json.loads((r.stdout.strip().splitlines() or ["{}"])[-1])
+    except ValueError:
+        return {"ok": False, "msg": P.clip((r.stderr or r.stdout).strip(), 200) or f"退出码 {r.returncode}"}
+
+
+def check_tasks(day):
+    """卡片要素里写了「猛鬼兽查」的风险：[(风险, 项目 id, 任务原文)]，最多 2 条；项目不在名册的跳过。"""
+    facts = json.loads((DAILY / f"{day}.facts.json").read_text(encoding="utf-8"))    # 发卡后马上跑，读的就是刚发的这一稿
+    fields = json.loads((DAILY / f"{day}.card-fields.json").read_text(encoding="utf-8"))
+    roster = P.Roster(facts)
+    out = []
+    for r in P.dicts(fields, "risks"):
+        c = r.get("check") if isinstance(r.get("check"), dict) else None
+        pid = roster.resolve(P.s((c or {}).get("project")) or "")
+        if c and pid and pid != "hermes" and P.s(c.get("task")):
+            out.append((r, pid, c["task"]))
+    return out[:CHECKS_MAX]
+
+
+def task_text(day, r, task):
+    return (f"# 日报风险核对（{day} 日报，猛鬼兽派的只读单）\n\n"
+            f"- **目标**：{task}\n"
+            f"- **背景**：日报「风险与阻塞」里的一类：{r.get('cause')}（{r.get('scope')}）。明细：{r.get('detail') or '无'}\n"
+            f"- **交付物**：一段中文结论（每个点写清看到了什么、出处是哪个文件或命令），写在最后的回复里。\n"
+            f"- **验收标准**：问到的每一点都有结论或写明查不到、为什么查不到；不猜。\n"
+            f"- **边界**：{READ_ONLY}只查这一件事。\n"
+            f"- **交给谁**：车间默认执行方。\n")
+
+
+def cmd_checks(a):
+    rec_file = DAILY / f"{a.day}.checks.json"
+    DAILY.mkdir(parents=True, exist_ok=True)
+    with open(DAILY / "checks.lock", "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return done(True, "另一个只读单进程在跑，这次不动")
+        try:
+            recs = json.loads(rec_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            recs = None
+        except ValueError:
+            return done(False, f"{rec_file.name} 读不了，不重复开单，请人工看")
+        if recs is None:                             # 第一次：先记「准备开」，再一张张开；全程只用这一次读到的任务
+            tasks = check_tasks(a.day)
+            recs = [{"cause": r.get("cause"), "project": pid, "task": task, "order": None, "state": "准备开"}
+                    for r, pid, task in tasks]
+            rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
+            for j, x in enumerate(recs):
+                f = DAILY / "checks" / f"{a.day}-{j + 1}.md"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(task_text(a.day, tasks[j][0], x["task"]), encoding="utf-8")
+                x["state"] = "开单中"
+                rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
+                out = dispatch("new", "--project", x["project"], "--tool", "codex", "--mode", "read", "--task-file", str(f),
+                               timeout=300)
+                x["order"], x["msg"] = (out.get("order") or {}).get("no"), out.get("msg")
+                x["state"] = "已开单" if x["order"] else "没开成"
+                rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
+        for x in recs:                               # 开了还没跑完的接着跑（重跑时接上崩溃前的）
+            if x.get("state") == "开单中":
+                x["state"] = "开单结果不明"          # 崩在开单途中：不重开，留给人看
+            if not x.get("order") or "run" in x:
+                continue
+            if order_status(x["order"]) == "done":     # 跑完了只是没记上：不再跑一遍
+                x["run"], x["state"] = "上次已跑完", "跑过"
+                continue
+            for _ in range(CHECK_TRIES):
+                out = dispatch("run", x["order"])
+                if not out.get("busy"):
+                    break
+                time.sleep(CHECK_WAIT)
+            x["run"], x["state"] = out.get("msg"), "跑过"
+            rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
+        rec_file.write_text(json.dumps(recs, ensure_ascii=False, indent=1), encoding="utf-8")
+    return done(True, f"派了 {sum(1 for x in recs if x.get('order'))} 张只读单", checks=recs)
+
+
+def dispatch_root():
+    return Path(os.environ.get("DT_DISPATCH_ROOT", "~/.hermes/dispatch")).expanduser()
+
+
+def order_status(no):
+    try:
+        return json.loads((dispatch_root() / no / "order.json").read_text(encoding="utf-8")).get("status")
+    except (OSError, ValueError):
+        return None
+
+
+def checks_for_material(day):
+    """前一个统计日派的只读单和回执摘要（给写稿用）。没有就是空列表。"""
+    try:
+        recs = json.loads((DAILY / f"{day}.checks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for x in recs if isinstance(recs, list) else []:
+        receipt = {}
+        if x.get("order"):
+            with contextlib.suppress(OSError, ValueError):
+                receipt = json.loads((dispatch_root() / x["order"] / "out" / "receipt.json").read_text(encoding="utf-8"))
+        out.append({"cause": x.get("cause"), "project": x.get("project"), "task": x.get("task"), "order": x.get("order"),
+                    "finished": bool(receipt), "exit_code": receipt.get("exit_code"),
+                    "summary": P.clip(redact(receipt.get("summary")), 600) if receipt.get("summary") else None,   # 先隐去再截断
+                    "need_decision": P.clip(redact(receipt.get("need_decision")), 200) if receipt.get("need_decision") else None})
+    return out
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="个人项目日报的拍板账与按钮（#235）")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -419,11 +556,13 @@ def main(argv=None):
     d.add_argument("--entry", required=True)
     d.add_argument("--result", required=True)
     d.add_argument("--order")
+    c = sub.add_parser("checks")
+    c.add_argument("--day", required=True)
     s = sub.add_parser("say")
     s.add_argument("--text", required=True)
     a = p.parse_args(argv)
     try:
-        return {"button": cmd_button, "after": cmd_after, "todos": cmd_todos, "record": cmd_record, "done": cmd_done, "say": cmd_say}[a.cmd](a)
+        return {"button": cmd_button, "after": cmd_after, "todos": cmd_todos, "record": cmd_record, "done": cmd_done, "say": cmd_say, "checks": cmd_checks}[a.cmd](a)
     except Quiet as e:
         log(f"不认 {a.cmd}：{e}")
         return done(False, "不认")

@@ -260,6 +260,21 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("- ~/hermes/scripts/a.py 和 hermes/scripts/a.py 内容不同", out)
         self.assertNotIn("秘密", out)
 
+    def test_install_hold_skips_missing_but_not_stale(self):
+        """#236：main 上 hermes/install_hold.txt 列着的「按计划先不装」，没装不报；装了但和 main 不同照报；没提交的清单不算。"""
+        (self.home / "hermes/scripts/a.py").unlink()
+        self.write(self.home / "hermes/prompts/p.md", "旧的\n")
+        self.write(self.repo / "hermes/install_hold.txt", "# 说明\nhermes/scripts/a.py  # 等批 0E\n")
+        self.assertIn("a.py 缺失", self.run_script())                      # 清单还没提交到 main：照报
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-qm", "清单")
+        out = self.run_script()
+        self.assertNotIn("a.py", out)
+        self.assertIn("- ~/hermes/prompts/p.md 和 hermes/prompts/p.md 内容不同", out)
+        self.write(self.repo / "hermes/install_hold.txt", "hermes/prompts/p.md\n")
+        sh(self.repo, "commit", "-qam", "清单 2")
+        self.assertIn("p.md 和 hermes/prompts/p.md 内容不同", self.run_script())   # 装了但不同：照报
+
     def test_uncommitted_repo_changes_are_not_drift(self):
         self.write(self.repo / "hermes/scripts/a.py", "工作区改了没提交\n")
         self.write(self.repo / "hermes/prompts/新提示词.md", "没跟踪\n")
