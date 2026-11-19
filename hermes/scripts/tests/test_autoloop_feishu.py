@@ -705,6 +705,15 @@ class BridgeLock(Base):
         self.assertEqual([b["version"] for _, b in self.posts], [3])
         self.assertEqual({b["behaviors"][0]["value"]["v"] for b in self.patches()[0]["body"]["elements"] if b["tag"] == "button"}, {3})
 
+    def test_local_newer_than_hub_is_skipped_not_failed(self):
+        """本地已登记更高版本（比如中台库被恢复成旧快照）：跳过，不改消息、不向中台报失败。"""
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 3})
+        self.hub_now = 2
+        self.lease(2)
+        out = F.once()
+        self.assertIn("本地已登记第 3 版", out["skipped"])
+        self.assertEqual((self.posts, len(self.patches())), ([], 1))
+
     def test_hub_unreadable_is_fail_closed(self):
         """专项续审 P1-01：中台库读不到这张卡、版本不是整数，都不发、不报送达（不当成「没有新版本」）。"""
         for hub_now in (None, True, "2", 2.0):
