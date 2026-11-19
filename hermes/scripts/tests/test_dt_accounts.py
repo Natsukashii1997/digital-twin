@@ -103,7 +103,9 @@ class Probe(unittest.TestCase):
         env = dict(os.environ, DT_PROBE_OUT=str(out), DT_PROBE_SECRET=str(secret), DT_PROBE_NONCE="n0nce",
                    HTTPS_PROXY="http://user:pass@127.0.0.1:8090",
                    PATH=f"{self.fakebin()}:{os.environ['PATH']}")
-        r = subprocess.run(["bash", str(PROBE)], capture_output=True, text=True, env=env, timeout=60)
+        # 和 LaunchDaemon 一样在 umask 077 下跑（plist 里 Umask 63）
+        r = subprocess.run(["bash", "-c", 'umask 077; exec bash "$0"', str(PROBE)], capture_output=True, text=True,
+                           env=env, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(out.stat().st_mode & 0o777, 0o644)
         text = out.read_text()
@@ -134,7 +136,9 @@ class Probe(unittest.TestCase):
         self.assertEqual(text.splitlines()[-1], "done=1")        # 写完整了才有最后一行
         self.assertEqual(f["env_https_proxy"], "http://***@127.0.0.1:8090")   # 代理里的用户名密码不落进所有人可读的文件
         self.assertNotIn("pass@", text)
-        self.assertEqual(len(list(Path(self.last_out).parent.glob("boot-*.txt"))), 1)   # 开机后第一份另存
+        boots = list(Path(self.last_out).parent.glob("boot-*.txt"))
+        self.assertEqual(len(boots), 1)                                   # 开机后第一份另存
+        self.assertEqual(boots[0].stat().st_mode & 0o777, 0o644)          # 主账号读得到（11-20 实测是 600，读不到）
         for key in ("at", "user", "uid", "gid", "real_home", "home_match", "uptime_s", "env_path", "console_user", "self_logged_in",
                     "home_mode", "sys_proxy", "net_feishu_direct", "net_github_direct"):
             self.assertIn(key, f)

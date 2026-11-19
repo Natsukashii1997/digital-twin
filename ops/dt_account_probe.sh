@@ -78,5 +78,5 @@ redact() { sed -E 's#://[^@/]*@#://***@#'; }
 chmod 644 "$out.tmp"
 # 每次开机后的第一份结果另存一份（结果文件之后每 10 分钟会被新的覆盖），留作冷启动证据
 boot_copy="$(dirname "$out")/boot-$(sysctl -n kern.boottime 2>/dev/null | sed 's/^{ sec = \([0-9]*\),.*/\1/').txt"
-[ -e "$boot_copy" ] || cp "$out.tmp" "$boot_copy"
+[ -e "$boot_copy" ] || cp -p "$out.tmp" "$boot_copy"   # -p 保留 644；umask 077 下新建的是 600
 mv -f "$out.tmp" "$out"
