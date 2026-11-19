@@ -152,6 +152,58 @@ class ActTests(unittest.TestCase):
         self.assertTrue(any("已经定过" in x for x in e), e)
         self.assertEqual(P.check(self.facts, T.card_fields(), T.report_text()), [])
 
+    def fake_dispatch(self, busy_times=0):
+        """假 dispatch.py：new 回单号，run 前 busy_times 次说忙；每次调用记一行。"""
+        log = self.tmp / "dispatch.log"
+        fake = self.tmp / "fake_dispatch.py"
+        fake.write_text(
+            "import json, sys, pathlib\n"
+            f"log = pathlib.Path({str(log)!r})\n"
+            "n = len(log.read_text().splitlines()) if log.exists() else 0\n"
+            "log.open('a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1] == 'new':\n"
+            "    print(json.dumps({'ok': True, 'msg': '已开单', 'order': {'no': 'D2026-%d' % n}}))\n"
+            f"elif sum(1 for l in log.read_text().splitlines() if l.startswith('run')) <= {busy_times}:\n"
+            "    print(json.dumps({'ok': False, 'msg': '排队中', 'busy': True}))\n"
+            "else:\n"
+            "    print(json.dumps({'ok': True, 'msg': '跑完'}))\n", encoding="utf-8")
+        return log, fake
+
+    def test_checks_dispatch_read_only_orders(self):
+        r = dict(T.card_fields()["risks"][0], check={"project": "牛马之家", "task": "查清 15 处改动的性质"})
+        r2 = dict(r, cause="别的", check={"project": "外星项目", "task": "x"})       # 名册外的跳过
+        fields = dict(self.fields, risks=[r, r2])
+        (self.tmp / f"{DAY}.card-fields.json").write_text(json.dumps(fields, ensure_ascii=False))
+        log, fake = self.fake_dispatch(busy_times=1)
+        with mock.patch.object(A, "DISPATCH", fake), mock.patch.object(A, "CHECK_WAIT", 0):
+            rc, out = self.run_cmd("checks", "--day", DAY)
+        self.assertEqual(rc, 0)
+        calls = log.read_text().splitlines()
+        self.assertTrue(calls[0].startswith("new --project work-desk --mode read --task-file "))
+        self.assertEqual(calls[1:], ["run D2026-0", "run D2026-0"])          # 第一次说忙，隔一会儿再跑
+        task = Path(calls[0].split("--task-file ")[1]).read_text()
+        self.assertIn("查清 15 处改动的性质", task)
+        self.assertIn("不得修改项目文件", task)
+        recs = json.loads((self.tmp / f"{DAY}.checks.json").read_text())
+        self.assertEqual([(x["project"], x["order"], x["run"]) for x in recs], [("work-desk", "D2026-0", "跑完")])
+        self.assertEqual(self.run_cmd("checks", "--day", DAY)[1]["msg"], "这一天已经派过了")
+        root = self.tmp / "dispatch"
+        (root / "D2026-0" / "out").mkdir(parents=True)
+        (root / "D2026-0" / "out" / "receipt.json").write_text(json.dumps({"exit_code": "0", "summary": "15 处都是草稿，建议丢弃"}))
+        with mock.patch.dict(os.environ, {"DT_DISPATCH_ROOT": str(root)}):
+            got = A.checks_for_material(DAY)
+        self.assertEqual((got[0]["finished"], got[0]["summary"]), (True, "15 处都是草稿，建议丢弃"))
+        f = dict(self.facts, stat_day="2026-11-09")
+        with mock.patch.dict(os.environ, {"DT_DISPATCH_ROOT": str(root)}):
+            self.assertEqual(P.material(f)["yesterday_checks"][0]["order"], "D2026-0")
+
+    def test_checks_none_written_once(self):
+        log, fake = self.fake_dispatch()
+        with mock.patch.object(A, "DISPATCH", fake):
+            self.assertEqual(self.run_cmd("checks", "--day", DAY)[1]["msg"], "派了 0 张只读单")
+        self.assertFalse(log.exists())
+        self.assertEqual(json.loads((self.tmp / f"{DAY}.checks.json").read_text()), [])
+
     def test_broken_ledger_lines_ignored(self):
         (self.tmp / "decisions.jsonl").write_text("坏行\n[1]\n")
         self.assertEqual(A.entries(), {})
