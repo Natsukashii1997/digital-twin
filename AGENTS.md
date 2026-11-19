@@ -72,7 +72,7 @@ hermes/
 hermes/install_hold.txt 按计划先不装的源文件（工程自检读 main 上这份；装上就删掉那行，#236）
 docs/LESSONS.md        本项目踩过的坑（L-xx）；跨项目的坑在 agent-kit/LESSONS.md（G-xx）
 docs/DECIDED.md        已定内容登记表（全局规则第 15 节）：常浩定稿过的东西，改之前先单独确认；界面类附基线截图路径
-docs/design/           定稿的界面源文件（工作台 workbench.html：首页、汇报、主线、协同四页），示例数据
+docs/design/           定稿的界面源文件（工作台 workbench.html：首页、汇报、主线、协同、分身五页），示例数据
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
 docs/三报体系-V2.1.md   主动运营与三报（早报 / 晚报 / 周报）的产品与实施基线（PRD D20）；评审过程在 docs/reviews/
