@@ -217,10 +217,10 @@ p{margin:0}
 .hb-kpi i{font-style:normal;font-size:11px;color:var(--mute)}
 .hb-kpi .me{background:var(--acc-soft)}
 .hb-kpi .me b{color:var(--accent)}
-.st{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;border:1px solid var(--ink);padding:0 7px;background:var(--bg)}
-.st i{width:8px;height:8px;flex:none;background:var(--ok)}
-.st.me{border-color:var(--accent);color:var(--accent)} .st.me i{background:var(--accent)}
-.st.warn i{background:var(--warn)}
+.stt{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;border:1px solid var(--ink);padding:0 7px;background:var(--bg)}
+.stt i{width:8px;height:8px;flex:none;background:var(--ok)}
+.stt.me{border-color:var(--accent);color:var(--accent)} .stt.me i{background:var(--accent)}
+.stt.warn i{background:var(--warn)}
 .prog{display:inline-flex;gap:3px;vertical-align:-1px;margin:0 4px}
 .prog i{width:10px;height:10px;border:1px solid var(--ink);display:inline-block}
 .prog i.f{background:var(--ink)} .prog i.n{background:var(--ok);border-color:var(--ok)}
@@ -698,7 +698,7 @@ const NIGHT={
   back:{t:'04:57'},
   outMarks:['23:55','00:25','02:10','00:26','02:51','04:58','08:00']
 };
-const ST=(k,t)=>`<span class="st ${k==='ok'?'':k}"><i></i>${t}</span>`;
+const ST=(k,t)=>`<span class="stt ${k==='ok'?'':k}"><i></i>${t}</span>`;
 const GEN=`<span class="gen">白话是猛鬼兽写的（opus-5-5）；数字和动作取自中台记录和 GitHub 回读</span>`;
 const hbTabs=()=>`<div class="hb-tabs num"><span class="on">11-18 夜间 <b style="font-weight:400;opacity:.7">3 单</b></span><span>11-18 白天 · 秘书 2 条</span><span>11-17 夜间 · 没开</span><span>11-17 白天 · 秘书 1 条</span><span>更早 ▾</span></div>`;
 const hbKpi=()=>`<div class="hb-kpi">
