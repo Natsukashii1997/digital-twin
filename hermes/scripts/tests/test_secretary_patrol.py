@@ -35,6 +35,9 @@ class Patrol(TSG.Base):
         p = mock.patch.object(SP.R, "read", self.snapshot)
         p.start()
         self.addCleanup(p.stop)
+        p = mock.patch.object(SP, "_flags_ok", True)                             # 本机 Hermes 参数核对另测（HermesFlags）
+        p.start()
+        self.addCleanup(p.stop)
         self.extra_cards = []
 
     def snapshot(self):
@@ -46,7 +49,7 @@ class Patrol(TSG.Base):
                   "options": json.loads(r[6] or "[]"), "rule": r[7], "lane": r[8]} for r in rows]
         return {"cards": cards + self.extra_cards}
 
-    def fake_submit(self, p):
+    def fake_submit(self, p, cat, card):
         p = json.loads(json.dumps(p, ensure_ascii=False))                     # 走一遍 JSON，和文件交接一样
         self.submitted.append(p)
         return SG.submit(p, now=T)
@@ -89,6 +92,7 @@ class Patrol(TSG.Base):
         self.assertEqual(cmd[:3], [SP.HERMES_BIN, "chat", "-Q"])
         for flag, val in (("--source", "tool"), ("-t", "todo"), ("--max-turns", "1")):
             self.assertEqual(cmd[cmd.index(flag) + 1], val)
+        self.assertIn("--ignore-rules", cmd)                                    # 不带 SOUL、记忆、项目上下文（第 1 轮 P1-02）
         self.assertEqual(call["query"].splitlines()[0], SG.run_marker(7, 1))    # 第一行就是标记
         self.assertIn("1. 30 秒", call["query"])
         self.assertFalse(Path(call["cwd"]).exists())                            # 空的临时目录，用完就删
@@ -121,6 +125,17 @@ class Patrol(TSG.Base):
         with self.fake_model(reply):
             out = SP.once()
         self.assertEqual(out[0]["result"], "handoff")                           # 原样转交，多的字段由控制面拦
+        self.assertEqual(self.answers(), [])
+
+    def test_model_cannot_change_identity_fields(self):
+        """第 1 轮 P1-01：模型改了 category / card / card_version，提议里仍是可信的；控制面比对运行记录发现对不上，交常浩。"""
+        reply = {"category": "../../outside", "card": 70, "card_version": 9, "choice": 1, "text": dict(TSG.TEXT),
+                 "abstain": None, "error": None}
+        with self.fake_model(reply):
+            out = SP.once()
+        sub = self.submitted[0]
+        self.assertEqual((sub["category"], sub["card"], sub["card_version"]), ("ask", 7, 1))
+        self.assertEqual((out[0]["result"], self.decisions()[0][4]), ("handoff", "model"))
         self.assertEqual(self.answers(), [])
 
     # ----- ② -----
@@ -182,22 +197,52 @@ class Submit(unittest.TestCase):
     def fake_gate(self, body):
         self.gate.write_text("import json, sys\nargs = sys.argv[1:]\n" + body, encoding="utf-8")
 
+    CARD = {"id": 7, "version": 1, "kind": "ask", "state": "open"}
+
     def test_writes_private_file_and_reads_last_line(self):
-        self.fake_gate("p = json.load(open(args[2]))\nprint('别的输出')\n"
-                       "print(json.dumps({'ok': False, 'result': 'handoff', 'msg': p['category'], 'decision': 'd-1'}))\n")
-        out = SP.submit({"schema": 1, "category": "ask", "card": 7, "card_version": 1})
-        self.assertEqual((out["result"], out["msg"]), ("handoff", "ask"))
+        self.fake_gate("import os, stat\np = json.load(open(args[2]))\nprint('别的输出')\n"
+                       "print(json.dumps({'ok': False, 'result': 'handoff', 'decision': 'd-1', 'msg': "
+                       "'%s|%o|%s' % (p['category'], stat.S_IMODE(os.stat(args[2]).st_mode), os.path.basename(args[2]))}))\n")
+        out = SP.submit({"schema": 1, "category": "ask", "card": 7, "card_version": 1}, "ask", self.CARD)
+        cat, mode, name = out["msg"].split("|")
+        self.assertEqual((out["result"], cat, mode), ("handoff", "ask", "600"))
+        self.assertTrue(name.startswith("ask-7-v1-"))
         box = self.root / "secretary/outbox"
         self.assertEqual(stat.S_IMODE(box.stat().st_mode), 0o700)
-        (f,) = list(box.iterdir())
-        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o600)
-        self.assertTrue(f.name.startswith("ask-7-v1-"))
+        self.assertEqual(list(box.iterdir()), [])                              # 控制面给了结论：投递区不留（第 1 轮 P2-03）
+
+    def test_file_name_never_comes_from_the_proposal(self):
+        """第 1 轮 P1-01：提议里的类别、卡片号、版本带 ../ 也不进路径；文件名只用巡视侧可信的值。"""
+        self.fake_gate("import os\nprint(json.dumps({'result': 'handoff', 'msg': os.path.abspath(args[2])}))\n")
+        evil = {"schema": 1, "category": "../../../evil", "card": "../x", "card_version": "/tmp/y"}
+        out = SP.submit(evil, "ask", self.CARD)
+        path = Path(out["msg"])
+        self.assertEqual(path.parent.resolve(), (self.root / "secretary/outbox").resolve())
+        self.assertTrue(path.name.startswith("ask-7-v1-"))
+        self.assertFalse(any(p.name == "evil" or p.name.startswith("evil") for p in self.root.rglob("*")))
+
+    def test_oversized_proposal_becomes_error(self):
+        self.fake_gate("p = json.load(open(args[2]))\nprint(json.dumps({'result': 'handoff', 'msg': p.get('error') or ''}))\n")
+        big = {"schema": 1, "category": "ask", "card": 7, "card_version": 1, "text": {"basis": "长" * SG.MAX_PROPOSAL}}
+        self.assertIn("太长", SP.submit(big, "ask", self.CARD)["msg"])
+
+    def test_unreachable_keeps_file_and_old_files_are_pruned(self):
+        self.fake_gate("print('坏了')\n")
+        self.assertEqual(SP.submit({"category": "ask"}, "ask", self.CARD)["result"], "unreachable")
+        (f,) = list((self.root / "secretary/outbox").iterdir())                 # 交不上：留着
+        old = 1_000_000.0
+        os.utime(f, (old, old))
+        SP.prune_outbox(now=old + SP.OUTBOX_KEEP - 1)
+        self.assertTrue(f.exists())
+        SP.prune_outbox(now=old + SP.OUTBOX_KEEP + 1)
+        self.assertFalse(f.exists())
 
     def test_unrecognised_or_broken_gate_is_unreachable(self):
         for body in ("print('不是 JSON')\n", "print(json.dumps({'result': 'maybe'}))\n", "sys.exit(3)\n", ""):
             with self.subTest(body=body):
                 self.fake_gate(body)
-                self.assertEqual(SP.submit({"category": "ask", "card": 7, "card_version": 1})["result"], "unreachable")
+                self.assertEqual(SP.submit({"category": "ask", "card": 7, "card_version": 1}, "ask", self.CARD)["result"],
+                                 "unreachable")
 
     def test_unreachable_is_retried(self):
         self.fake_gate("print('坏了')\n")
@@ -207,12 +252,63 @@ class Submit(unittest.TestCase):
             self.assertEqual([o["result"] for o in SP.once()], ["unreachable"])
 
     def test_unreadable_state_file_is_not_overwritten(self):
+        """读不懂、或是合法 JSON 但不是「卡片版本 → 记录」的对象（第 1 轮 P2-02）：退出、不覆盖。"""
         f = SP.state_file()
         f.parent.mkdir(parents=True)
-        f.write_text("{坏", encoding="utf-8")
-        with self.assertRaises(SystemExit):
-            SP.load_state()
-        self.assertEqual(f.read_text(encoding="utf-8"), "{坏")
+        self.fake_gate("print(json.dumps({'result': 'handoff'}))\n")
+        for bad in ("{坏", "[]", "null", '{"7:1": "handoff"}', '{"7:1": {"msg": "x"}}'):
+            with self.subTest(bad=bad):
+                f.write_text(bad, encoding="utf-8")
+                with self.assertRaises(SystemExit):
+                    SP.load_state()
+                with mock.patch.object(SP.R, "read", lambda: {"cards": [self.CARD]}), self.assertRaises(SystemExit):
+                    SP.once()
+                self.assertEqual(f.read_text(encoding="utf-8"), bad)
+
+    def test_only_one_round_at_a_time(self):
+        """第 1 轮 P1-04 第二层：另一轮巡视拿着锁时，这一轮不跑。"""
+        import fcntl
+        SP.secretary_dir().mkdir(parents=True)
+        fd = os.open(SP.secretary_dir() / "patrol.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with mock.patch.object(SP.R, "read", side_effect=AssertionError("不该读卡")), self.assertRaises(SystemExit):
+            SP.once()
+
+
+class HermesFlags(unittest.TestCase):
+    """第 1 轮 P2-04：本机 Hermes 不认得要用的参数就不调模型，按出错交常浩。"""
+    def setUp(self):
+        p = mock.patch.object(SP, "_flags_ok", None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def help_says(self, text, rc=0):
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, rc, stdout=text, stderr="")
+        return calls, mock.patch.object(SP.subprocess, "run", run)
+
+    def test_missing_flag_means_no_model_call(self):
+        calls, patch = self.help_says("usage: hermes chat --query-file --source --toolsets --max-turns --run-budget")
+        with patch:
+            out = SP.judge({"id": 7, "version": 1})
+        self.assertIn("--ignore-rules", out["error"])
+        self.assertEqual([c[:3] for c in calls], [[SP.HERMES_BIN, "chat", "--help"]])   # 只查了参数，没调模型
+
+    def test_all_flags_known(self):
+        calls, patch = self.help_says(" ".join(SP.HERMES_FLAGS))
+        with patch:
+            self.assertTrue(SP.hermes_supported())
+            self.assertTrue(SP.hermes_supported())
+        self.assertEqual(len(calls), 1)                                          # 每个进程只查一次
+
+    def test_help_fails(self):
+        _, patch = self.help_says(" ".join(SP.HERMES_FLAGS), rc=2)
+        with patch:
+            self.assertFalse(SP.hermes_supported())
 
 
 if __name__ == "__main__":

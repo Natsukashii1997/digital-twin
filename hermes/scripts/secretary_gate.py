@@ -19,7 +19,8 @@
   ① 的模型运行证据（审查 P1-01：模型名、是否回退不收提议自报）：按 run.session 只读打开 Hermes 自己的运行记录
   （$HERMES_HOME/state.db，主模型和回退模型从 $HERMES_HOME/config.yaml 读），这次会话必须：source = tool、没有父会话、
   **只有一条输入**、正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；**全部模型调用**（主循环和辅助调用）
-  都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
+  都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；系统提示（sessions.system_prompt_hash → system_prompts）
+  记着、且没有项目上下文、记忆、用户档案和 SOUL（PR #225 第 1 轮 P1-02：秘书侧必须带 --ignore-rules）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
   模型输出是一个 JSON 对象，只许有 category、card、card_version、choice、text、abstain、error，和提议逐项严格相同（类型也要一样；
   提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。source = tool 只是标签，不是调用者身份（ADR-015 账号隔离）。
 
@@ -57,7 +58,7 @@
   state = approved，attempt = 决定号）再 secretary_ledger.begin（issued → executing）。
 送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）。**① 的送达开关 REAL_ASK 关着**
   （PR #218 第 2 轮 P1-01）：中台 answer 只核卡片开着和 ref、不核版本，获准到送达之间卡片改版时旧答案会落到新版本上；
-  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 一进前闸就交常浩（只核卡片还开着，不看提议内容；4c-2 秘书侧此时不调模型，只交卡片号和版本）；② autoloop_grants.resume_dispatch
+  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 不看提议内容、不等 30 分钟，只核卡片开着且版本一致、准入、派单绑定、诱导词，就交常浩（4c-2 秘书侧此时不调模型，只交卡片号和版本；常浩 11-19 选甲）；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
   关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
@@ -128,6 +129,9 @@ RUN_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 RUN_SOURCE = "tool"                         # hermes chat --source tool 的单次调用
 RUN_END = ("cli_close", "agent_close")      # 正常结束
 RUN_FRESH = dt.timedelta(minutes=30)        # 判断结束到交提议的最长间隔
+# 判断时不许带上的上下文（PR #225 第 1 轮 P1-02）：Hermes 不加 --ignore-rules 会把项目上下文文件（AGENTS.md 等）、记忆、
+# 用户档案和 SOUL 注入系统提示；这几个是 Hermes v0.22 写进系统提示的块标题，SOUL 另按 $HERMES_HOME/SOUL.md 第一行查
+CONTEXT_MARKERS = ("# Project Context", "MEMORY (your personal notes)", "USER PROFILE (who the user is)")
 REAL_ASK = False        # ① 真送达：中台 answer 能按版本核对（CAS）之前整体关闭（PR #218 第 2 轮 P1-01，常浩 11-19 选甲，规格第 9 节验收 12）
 TEST_ASK = False        # 测试在进程内打开 ① 的送达；不经环境变量
 REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
@@ -388,11 +392,37 @@ def frozen_task(st, task_id, but=None):
     return [r[0] for r in rows if r[1] != "executing" or _age(r[2]) >= STALE]
 
 
+def void_orphans(st, task_id=None, now=None):
+    """记了账（issued）却超过 STALE 还没开始送的秘书决定：进程在记账和获准之间停了（PR #225 第 1 轮 P1-03）。
+    它们还没发过任何请求，作废、释放额度，让这件事按完整前闸重新走一遍（不续用旧的获准前提）。返回作废的决定号。"""
+    t = now or CU.now_tz()
+    rows = st.conn.execute("SELECT id, updated_at FROM secretary_decisions WHERE action != 'handoff' AND status = 'issued'"
+                           + (" AND task_id = ?" if task_id else ""), (task_id,) if task_id else ()).fetchall()
+    out = []
+    for did, at in rows:
+        try:
+            age = (t - CU.parse_iso(at)).total_seconds()
+        except (TypeError, ValueError):
+            age = float("inf")
+        if age < STALE:
+            continue                                         # 可能正有进程在获准
+        with contextlib.suppress(L.LedgerError):             # 刚好被别的进程推进或作废了
+            SL.void(st, did, "记了账但一直没开始送（进程中途停了），作废、释放额度", now=now)
+            out.append(did)
+    return out
+
+
 def record_handoff(st, ctx, reason, why, now):
     snap = ctx["received"]
-    d = SL.issue(st, session_id=ctx["session"], project=ctx["project"], action="handoff", category=ctx["category"],
-                 reason=reason, target=ctx["target"], revocability="irrevocable", received=snap,
-                 card_version=ctx.get("card_version"), now=now, **handoff_text(ctx["category"], snap, why))
+    try:
+        d = SL.issue(st, session_id=ctx["session"], project=ctx["project"], action="handoff", category=ctx["category"],
+                     reason=reason, target=ctx["target"], revocability="irrevocable", received=snap,
+                     card_version=ctx.get("card_version"), now=now, **handoff_text(ctx["category"], snap, why))
+    except L.LedgerError as e:                               # 同一次会话里这张卡这一版已经交过（PR #225 第 1 轮 P1-04）：不记第二笔
+        if e.code != "DuplicateHandoff":
+            raise
+        return {"ok": True, "result": "handoff", "decision": e.existing, "reason": reason,
+                "msg": f"这张卡这一版已经交给你了（{e.existing}），不重复记"}
     return {"ok": True, "result": "handoff", "decision": d["id"], "reason": reason,
             "msg": f"交常浩（{SL.HANDOFF_REASONS[reason]}）：{why}"}
 
@@ -465,6 +495,15 @@ def _json_object(text):
     return out if isinstance(out, dict) else None
 
 
+def soul_marker(home):
+    """$HERMES_HOME/SOUL.md 第一行非空文字（没有就是空）：系统提示里出现它就是带上了 SOUL。"""
+    try:
+        lines = [ln.strip() for ln in (home / "SOUL.md").read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return ()
+    return (lines[0],) if lines else ()
+
+
 def run_evidence(session, card, since, t):
     """按 Hermes 自己的运行记录核这次判断（头注释「① 的模型运行证据」）。返回 (证据, 模型输出的 JSON 对象)；不过抛 Handoff(model)。"""
     def no(why):
@@ -488,6 +527,8 @@ def run_evidence(session, card, since, t):
                             (session,)).fetchall()
         last = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 "
                            "AND content IS NOT NULL AND content != '' ORDER BY id DESC LIMIT 1", (session,)).fetchone()
+        sp_hash = s["system_prompt_hash"] if "system_prompt_hash" in s.keys() else None
+        sp = con.execute("SELECT prompt FROM system_prompts WHERE hash = ?", (sp_hash,)).fetchone() if sp_hash else None
     except sqlite3.Error:
         no("读不全")
     finally:
@@ -498,6 +539,10 @@ def run_evidence(session, card, since, t):
         no("显示没有正常结束")
     if s["tool_call_count"]:
         no("显示判断时调用了工具")
+    if sp is None or not isinstance(sp["prompt"], str):
+        no("没记下系统提示，核不了判断时有没有带上你的个人设定和记忆")
+    if any(m in sp["prompt"] for m in CONTEXT_MARKERS + soul_marker(home)):
+        no("显示判断时带上了你的个人设定、记忆或项目上下文（没按 --ignore-rules 跑）")
     try:
         started = dt.datetime.fromtimestamp(float(s["started_at"]), tz=t.tzinfo)
         ended = dt.datetime.fromtimestamp(float(s["ended_at"]), tz=t.tzinfo)
@@ -692,9 +737,15 @@ def reject_gate(ctx, p):
 def front_gates(p, ctx, st_status, t, st):
     """前闸，按顺序；不过抛 Handoff / Refused / NotReady。"""
     cat = ctx["category"]
-    if cat == "ask" and not (REAL_ASK or TEST_ASK):           # ① 送达开关关着：不看提议内容，直接交常浩（4c-2：秘书侧此时
-        if ctx["card"]["state"] != "open":                    # 不调模型，只交卡片号和版本）
-            raise Refused(f"卡片已经不开着了（{ctx['card']['state']}），不用办")
+    if cat == "ask" and not (REAL_ASK or TEST_ASK):           # ① 送达开关关着：不看秘书的判断、不等 30 分钟，但先查来路再交常浩
+        card = ctx["card"]                                    # （4c-2：秘书侧此时不调模型，只交卡片号和版本；PR #225 第 1 轮 P2-01，
+        if card["state"] != "open":                           # 常浩 11-19 选甲：卡片版本、准入、派单绑定、诱导词照查，原因写准）
+            raise Refused(f"卡片已经不开着了（{card['state']}），不用办")
+        if type(p.get("card_version")) is not int or card["version"] != p["card_version"]:
+            raise Refused(f"卡片已经变了（现在第 {card['version']} 版），提议作废，按新版本重交")
+        admission_gate(ctx, st_status)
+        bind_gate(ctx, t)
+        induce_gate(ctx)
         ask_switch()
     errs = [] if ctx["claimed"] == cat else [f"类别写成了 {ctx['claimed']!r}，这件事是 {cat}"]
     errs += format_errors(p, cat)
@@ -942,6 +993,7 @@ def submit(proposal, now=None):
             try:
                 if ctx["category"] in ("redispatch", "reject"):     # 从前闸到续接发出全程持锁（审查 P1-03）
                     held.enter_context(task_locked(ctx["task"]))
+                void_orphans(st, ctx["task"], now)
                 front_gates(proposal, ctx, st_status, t, st)
             except Handoff as h:
                 return record_handoff(st, ctx, h.reason, h.why, now)
@@ -990,6 +1042,7 @@ def reconcile(card=None, now=None):
     """对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定按回读证据结算；从不重发。返回 [(决定号, 结论)]。"""
     notes = []
     with SL.open_store(now) as st:
+        notes += [(did, "void") for did in void_orphans(st, now=now)]
         rows = st.conn.execute("SELECT id FROM secretary_decisions WHERE action != 'handoff' AND status IN "
                                "('executing','unknown','unreconciled')" + (" AND card_id = ?" if card else "")
                                + " ORDER BY created_at", (card,) if card else ()).fetchall()
