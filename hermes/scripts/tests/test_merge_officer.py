@@ -1,4 +1,5 @@
 """影子合并官（#61）自测：判定、一致率、HEAD 绑定、回放；命令行用假 gh，不联网、不碰真实记录，并核对只调了只读的 gh 命令。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import csv
 import json
 import os

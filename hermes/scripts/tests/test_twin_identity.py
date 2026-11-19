@@ -4,6 +4,7 @@
 和临时的 600 配置文件。不联网、不碰 ~/.hermes、不碰真实配置；每条断言都检查输出不带 open_id / chat_id 的值。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_identity.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import os

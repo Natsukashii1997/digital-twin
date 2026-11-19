@@ -3,6 +3,7 @@
 漂移检查用临时 git 仓库当 DT_REPO、临时目录当 HERMES_HOME 和 DT_BIN，HOME 也换成临时目录；git 用临时全局配置。
 仓库自检的子进程打桩或用空名册跑真的 check_repos.py。Tidings 的 node 换成当前 python、health.js 换成临时脚本。不联网，不碰真实仓库、~/.hermes、安装副本和 Vault。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import io
 import json
@@ -33,6 +34,10 @@ SOURCES = {
     "hermes/prompts/p.md": "hermes/prompts/p.md",
     "hermes/scripts/memdaily_job.py": "hermes/profiles/agumon/scripts/memdaily_job.py",   # 亚古兽的（#182）
     "hermes/prompts/memdaily_report.md": "hermes/profiles/agumon/prompts/memdaily_report.md",
+    "hermes/scripts/sidebar_reports.py": "hermes/profiles/agumon/scripts/sidebar_reports.py",   # 亚古兽的销售侧边栏汇报
+    "hermes/skills/sales-sidebar/SKILL.md": "hermes/profiles/agumon/skills/productivity/sales-sidebar/SKILL.md",
+    "hermes/skills/sales-sidebar/references/feedback.md":
+        "hermes/profiles/agumon/skills/productivity/sales-sidebar/references/feedback.md",
     "ops/health_check.py": "bin/health_check.py",
     "ops/check_repos.py": "bin/check_repos.py",
     "ops/self_check.py": "hermes/scripts/self_check.py",

@@ -2,6 +2,7 @@
 
 ops/autoloop_isolation_check.py（0A 隔离门反向测试）的判定逻辑。只用临时目录和打桩，不连中台、不联网、不读主账号文件。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import os
 import tempfile

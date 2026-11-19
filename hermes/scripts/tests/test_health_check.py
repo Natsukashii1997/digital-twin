@@ -3,6 +3,7 @@
 用临时目录造假的 state.db、agent.log 和巡检日志；发信的子进程打桩，不联网、不碰 ~/.hermes、不发飞书。
 每月的沙盒和仓库自检在 test_self_check.py。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import importlib.util
 import io

@@ -1,4 +1,5 @@
 """Tidings 周报推送（#55、#58 按设置页发）自测：假 lark-cli 记下每次调用，不联网、不碰真实周报和状态文件。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

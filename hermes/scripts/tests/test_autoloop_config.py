@@ -3,9 +3,11 @@
 autoloop_config.py（中台配置，#195 批 0B-2）的生成规则和 autoloop_readonly.py（只读窗口）的白名单、只读接口。
 不连中台、不碰 ~/.agent-autoloop；真中台的端到端在 test_autoloop_hub_e2e.py。
 
-整个模块先把中台目录、钥匙文件、备份目录、锁、令牌、名册都指到临时目录，命令行换成一定失败的 false，网络请求一律抛错：
-哪个测试或「故意改坏」漏过了某道闸，也碰不到本机正式中台（2026-11-17 一次反向验证漏了隔离，误装到正式中台，已恢复）。
+中台目录、钥匙文件、备份目录、锁、令牌、网络由统一测试隔离（_isolation，#212）在导入前指到临时目录、默认禁网；
+本模块另把名册换成空名册、命令行换成一定失败的 false、中台请求换成抛 Rejected：哪个测试或「故意改坏」漏过了某道闸，
+也碰不到本机正式中台（2026-11-17 一次反向验证漏了隔离，误装到正式中台，已恢复）。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import copy
 import json
 import os
@@ -39,11 +41,7 @@ def setUpModule():
 
     def no_network(*a, **kw):
         raise C.Rejected("单测不连中台")
-    for p in (mock.patch.dict(os.environ, {
-                  "AGENT_AUTOLOOP_HOME": str(root / "no-hub"), "DT_HERMES_SOURCE_KEY_FILE": str(root / "key/hermes-source.key"),
-                  "DT_AUTOLOOP_EVIDENCE": str(root / "evidence"), "DT_AUTOLOOP_LOCK": str(root / "lock/config.lock"),
-                  "DT_READONLY_TOKEN_FILE": str(root / "token/readonly.token"), "DT_AUTOLOOP_CLI": "/usr/bin/false",
-                  "DT_OWNER_OPEN_ID": OWNER}),
+    for p in (mock.patch.dict(os.environ, {"DT_AUTOLOOP_CLI": "/usr/bin/false", "DT_OWNER_OPEN_ID": OWNER}),
               mock.patch.object(G, "ROSTER", roster), mock.patch.object(C, "hub", side_effect=no_network)):
         p.start()
         _ISOLATION.append(p)

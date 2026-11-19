@@ -1,5 +1,6 @@
 """PR 卡片按钮插件（#78）自测：只认合并官的按钮、参数原样转给 merge_act.py button、不回复。
 不起网关：直接加载插件模块，Popen 换成记录器。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import json
 import os
@@ -102,20 +103,33 @@ class MergeButtonsPlugin(unittest.TestCase):
             popen.assert_not_called()
         self.assertFalse((Path(self.tmp.name) / "probe" / "clicks.jsonl").exists())
 
-    def test_autoloop_click_forwards_token_option_chat_and_operator(self):
+    def test_autoloop_click_forwards_token_option_version_chat_and_operator(self):
+        out, popen = self.click('button {"autoloop": "0123456789abcdef", "o": 1, "v": 3}')
+        self.assertIsNone(out)
+        self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/autoloop_answer.py", "0123456789abcdef", "1",
+                                                 "--version", "3", "--chat", "oc_home", "--operator", "ou_owner"])
+        self.assertTrue(popen.call_args[1]["start_new_session"])
+        self.assertNotIn("0123456789abcdef", (Path(self.tmp.name) / "buttons.log").read_text())   # 日志不记令牌
+
+    def test_autoloop_old_button_without_version_forwarded_without_version(self):
+        """#218 第 3 轮 P1-03：旧样式按钮（没有 v）照样转，不带 --version，由脚本拒绝并在私聊说明。"""
         out, popen = self.click('button {"autoloop": "0123456789abcdef", "o": 1}')
         self.assertIsNone(out)
         self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/autoloop_answer.py", "0123456789abcdef", "1",
                                                  "--chat", "oc_home", "--operator", "ou_owner"])
-        self.assertTrue(popen.call_args[1]["start_new_session"])
-        self.assertNotIn("0123456789abcdef", (Path(self.tmp.name) / "buttons.log").read_text())   # 日志不记令牌
 
     def test_autoloop_rejects_bad_values(self):
         for raw in ('button {"autoloop": "0123", "o": 1}', 'button {"autoloop": "0123456789abcdef", "o": "1"}',
                     'button {"autoloop": "0123456789abcdef", "o": true}', 'button {"autoloop": "0123456789abcdef", "o": -1}',
                     'button {"autoloop": "0123456789abcdef", "o": 100}', 'button {"autoloop": "0123456789abcdef"}',
                     'button {"autoloop": "0123456789abcdef", "o": 1, "by": "ou_x"}',
-                    'button {"autoloop": "0123456789abcdef --x", "o": 1}'):
+                    'button {"autoloop": "0123456789abcdef --x", "o": 1}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "v": "2"}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "v": true}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "v": 2.0}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "v": 0}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "v": null}',
+                    'button {"autoloop": "0123456789abcdef", "o": 1, "v": 2, "by": "ou_x"}'):
             out, popen = self.click(raw)
             self.assertIsNone(out)
             popen.assert_not_called()

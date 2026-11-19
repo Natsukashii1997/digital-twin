@@ -3,6 +3,7 @@
 ops/dt_worker_egress.py（工人账号的过滤代理）：判定逻辑，加上在临时端口起一个真代理、假上游，走一遍放行和拒绝。
 不联网（解析打桩）、不碰加速器、日志写临时目录。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import asyncio
 import importlib.util
 import tempfile

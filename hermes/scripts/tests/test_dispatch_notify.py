@@ -6,6 +6,7 @@ subprocess.run 由假 worker 接管；状态库是临时目录里的 twin_state 
 重复通知幂等；关掉通知时漏掉的变化由 reconcile 补上；need_decision 的“先解阻塞再续跑”顺序。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_dispatch_notify.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import datetime as dt
 import importlib.util

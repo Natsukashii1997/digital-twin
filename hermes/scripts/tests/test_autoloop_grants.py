@@ -5,6 +5,7 @@ autoloop_grants.py（任务凭证与派单网关，#195 批 0B-1）：两步批�
 只在凭证有效时续接、逐个现读领取后发事件。凭证库、镜像、任务单、名册都放临时目录；飞书回读打桩 fetch_message
 （走真实的 twin_identity.verify_message），发私聊打桩 notify_owner；中台用假的 post。不联网、不碰 ~/Library/Application Support/DigitalTwin。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import os

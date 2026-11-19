@@ -11,8 +11,8 @@ L3 第 1 轮返修补的：受信发布按真中台库核交接包对应的那�
 5 分钟后重派，不当成做完（P1-04，上游 kernel/decide.ts retryLater）；用上游真解析器（claude / codex 插件的 read、
 worker/contract.ts 的 readMessage）验证 CLI 已经交过结果后再追加的停下消息、没跑成消息怎么被解析（P2-02）。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import shutil
-import hashlib
 import importlib.util
 import io
 import json
@@ -39,14 +39,17 @@ from test_autoloop_grants import CHAT, OWNER as GRANT_OWNER, raw_msg  # noqa: E4
 from test_autoloop_hub_e2e import OWNER, SKIP, HubFixture, raw_post  # noqa: E402
 from test_dt_worktree import FAKE_CLI, GIT_ENV, SCRIPT, git  # noqa: E402
 
-PROD = Path("~/.agent-autoloop").expanduser()
+# 正式中台按系统账号的家目录取：统一隔离（_isolation，#212）把 HOME 换成了临时目录，用 ~ 会指到空目录，
+# 前后核对就成了空核对、上游源码也找不到（UpstreamParser 会被悄悄跳过）
+PROD = _isolation.REAL_HOME / ".agent-autoloop"
 
 
 def prod_snapshot():
-    """正式中台：配置文件的哈希、库里几张表的行数（只读打开）。没有正式中台时返回 None。"""
+    """正式中台：配置文件的大小和修改时间（不读内容：config.json 里有钥匙）、库里几张表的行数（只读打开）。
+    没有正式中台时返回 None。"""
     if not (PROD / "rules.json").exists():
         return None
-    snap = {f: hashlib.sha256((PROD / f).read_bytes()).hexdigest() for f in ("rules.json", "config.json")}
+    snap = {f: [(PROD / f).stat().st_size, (PROD / f).stat().st_mtime_ns] for f in ("rules.json", "config.json")}
     con = sqlite3.connect(f"file:{urllib.parse.quote(str(PROD / 'hub.db'))}?mode=ro", uri=True, timeout=5)
     try:
         for t in ("runs", "cards", "events"):

@@ -3,6 +3,7 @@
 → 重复装不变 → 钥匙在时不许新增派单规则 → 只读窗口不漏字段。
 本机没有 agent-autoloop 命令行（如 CI）时跳过；DT_HUB_E2E=0 也跳过。不碰 ~/.agent-autoloop 和正式中台。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import shutil

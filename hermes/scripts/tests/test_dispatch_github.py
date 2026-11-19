@@ -3,6 +3,7 @@
 用临时裸仓库当 GitHub 背后的远端、临时主仓库、临时名册和台账，PATH 最前面放假 gh（fake_gh.py）。
 不调用真实 gh、模型或外部服务，不碰真实仓库和 ~/.hermes。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import importlib.util
 import io
