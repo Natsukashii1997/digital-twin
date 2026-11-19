@@ -65,8 +65,10 @@ def now():
 
 
 # ====================== 需求反馈（飞书 post） ======================
-TYPES = {"fixed": "✅", "pending": "✴️", "planned": "⬆️"}
-LABEL = {"fixed": "已修复", "pending": "待解决", "planned": "待上线"}
+TYPES = {"fixed": "✅", "launched": "♐",   # 已上线单独一组（常浩 2026-11-19 定）
+         "pending": "✴️", "planned": "⬆️"}
+LABEL = {"fixed": "已修复", "launched": "已上线", "pending": "待解决", "planned": "待上线"}
+OPEN_TYPES = {"pending", "planned"}
 ZWSP = re.compile(r"(?<=[一-鿿])(?=[0-9A-Za-z])|(?<=[0-9A-Za-z%])(?=[一-鿿])")
 
 
@@ -82,11 +84,11 @@ def fb_check(draft, prev=None):
         errs.append("items 为空：群里没有新反馈时不出这一期，直接回复常浩一句「今天群里没有新反馈，本期不出」")
     order = [i.get("type") for i in items]
     if order != sorted(order, key=lambda t: list(TYPES).index(t) if t in TYPES else 9):
-        errs.append("类型顺序要按 ✅ 已修复 → ✴️ 待解决 → ⬆️ 待上线 排")
+        errs.append("类型顺序要按 已修复 → 已上线 → 待解决 → 待上线 排")
     for n, it in enumerate(items, 1):
         t = it.get("type")
         if t not in TYPES:
-            errs.append(f"第 {n} 项 type 只能是 fixed / pending / planned")
+            errs.append(f"第 {n} 项 type 只能是 fixed / launched / pending / planned")
             continue
         if t == "fixed" and it.get("title"):
             errs.append(f"第 {n} 项是已修复，类型行固定写「已修复」，不要写 title")
@@ -110,14 +112,16 @@ def texts(it):
 
 
 def carry_check(items, old):
-    """上期 ✴️：要么原标题原话继续 ✴️，要么改列 ✅（原话照旧）；上期 ⬆️：原标题原话继续 ⬆️。"""
+    """上期未完成项原样带过；已确认修复保留原话，已确认上线保留原标题和原话。"""
     errs = []
     by_title = {(i["type"], i.get("title")): i for i in items}
     fixed_quotes = [texts(i) for i in items if i["type"] == "fixed"]
     for o in old:
-        if o["type"] == "fixed":
+        if o["type"] not in OPEN_TYPES:
             continue
         cur = by_title.get((o["type"], o.get("title")))
+        if cur is None and o["type"] == "planned":
+            cur = by_title.get(("launched", o.get("title")))
         if cur:
             if not set(texts(o)) <= set(texts(cur)):
                 errs.append(f"上期{LABEL[o['type']]}「{o['title']}」带过来时原话要照旧，不能删改")
@@ -127,7 +131,7 @@ def carry_check(items, old):
         if o["type"] == "pending":
             errs.append(f"上期待解决「{o['title']}」本期没带上：群里没确认修复就原标题、原话照旧继续列待解决；确认修复了就改列已修复，原话照旧")
         else:
-            errs.append(f"上期待上线「{o['title']}」本期没带上：群里没确认上线就原标题、原话照旧继续列；确认上线了怎么列常浩还没定，先问他，不要自己定")
+            errs.append(f"上期待上线「{o['title']}」本期没带上：未确认上线就原标题、原话照旧继续列待上线；确认上线就改列已上线，原标题、原话照旧")
     # 同类型内「旧的在前、按提出时间」不在这里卡：11-18 那期补带了 11-13 漏掉的旧待上线，按提出时间排在上期带来的前面
     return errs
 
@@ -168,7 +172,7 @@ def fb_status(today=None):
     return {**out, "previous": last.get("date"), "read_from": last.get("cutoff"),
             "previous_group_sent": bool(last.get("group_message_id")),
             "carry": [{"type": i["type"], "title": i.get("title"), "quotes": i.get("quotes")}
-                      for i in last.get("items", []) if i["type"] != "fixed"]}
+                      for i in last.get("items", []) if i["type"] in OPEN_TYPES]}
 
 
 def fb_send(path, run=md.lark):
