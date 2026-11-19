@@ -51,11 +51,11 @@
     },
     {
       "id": "chat",
-      "name": "飞书对话（猛鬼兽；含 progress 项目进展现查、vault 关于常浩的问答、merge-officer 与 proposal-digest 技能）",
+      "name": "飞书对话（猛鬼兽；含 progress 项目进展现查、vault 关于常浩的问答、merge-officer、proposal-digest 与 pdaily-act 日报拍板办理技能）",
       "executor": "hermes",
       "reads": "常浩的飞书私聊消息；Vault（经 MCP vault-read 只读）；项目名册；各仓库 git / GitHub",
-      "writes": "飞书私聊回复；Hermes 记忆（~/.hermes 下）",
-      "note": "仅支持 Hermes：飞书入口就是 Hermes 本身。"
+      "writes": "飞书私聊回复；Hermes 记忆（~/.hermes 下）；日报拍板账 DigitalTwin/daily/decisions.jsonl（经 pdaily_act.py）；按推荐派的车间单（执行方和留痕按 workshop）",
+      "note": "仅支持 Hermes：飞书入口就是 Hermes 本身。日报拍板按钮（#235）由 merge-buttons 插件核对记账后注入私聊会话，交给这里办。"
     },
     {
       "id": "hermes-aux",
@@ -75,7 +75,7 @@
     },
     {
       "id": "pdaily",
-      "name": "个人项目日报 V2 写稿（pdaily_publish.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后出甲版卡片；#111）",
+      "name": "个人项目日报 V2 写稿（pdaily_publish.py 调 hermes chat 单次写卡片要素和完整报告，脚本核对后出乙版卡片；#111、#226）",
       "executor": "hermes",
       "reads": "DigitalTwin/daily/<统计日>.facts.json（pdaily_facts.py 的事实快照，压缩后整份交给模型），提示词 hermes/prompts/pdaily_report.md",
       "writes": "DigitalTwin/daily/<统计日>.card.json、.report.md、.reply.md、.build.json、.delivery.json；飞书完整报告云文档；10:00 以猛鬼兽机器人发常浩私聊卡片（#155、#159；原 09:45）",
@@ -88,6 +88,14 @@
       "reads": "常浩的飞书私聊、白名单群和常浩参与的群、视频会议与妙记、日程、飞书任务（亚古兽应用、常浩的用户身份，memdaily_data.py）；前一篇的行动 & 阻塞（先读当月文档，空着再往前读，最后是旧汇总文档）；提示词 hermes/prompts/memdaily_report.md；本机配置和模板样例 DigitalTwin/memdaily/config.json、template-0715.md",
       "writes": "当月《常浩-记忆日报汇总 · YYYY-MM》最顶部插入一篇（2026-11-17 常浩选方案甲：旧汇总文档 TCG9dy7Uco… 满 4 万块，原样归档；当月第一篇自动建新文档，写前数块数，快满开「续」；各份文档登记在 DigitalTwin/memdaily/docs.json；写前快照 DigitalTwin/memdaily/backup/）；DigitalTwin/memdaily/<日期>.draft.json、.xml、.build.json、.delivery.json；亚古兽机器人私聊常浩三段式推送",
       "note": "仅支持 Hermes（亚古兽 profile 的主模型，2026-11-11 起 openai-codex gpt-6.1-sol、思考 xhigh；DT_MEMDAILY_REASONING 可改）。核对不过重写一次，再不过就不写，定时任务把原因发到亚古兽私聊，不换执行方。每篇标题下一行写「生成：亚古兽（实际模型）｜接入：Hermes 派单｜时间」。"
+    },
+    {
+      "id": "sidebar",
+      "name": "销售 AI 侧边栏固定汇报（亚古兽，常浩 2026-11-19 定）：需求反馈每天 18:00、项目推进进度每周三 18:30 私发常浩确认，功能同步通知常浩说了才出；版式由 sidebar_reports.py 固定，亚古兽只写内容 JSON",
+      "executor": "hermes",
+      "reads": "测试反馈群 oc_32562463635b4b2ee03d1808c080d1b5 的消息和截图、多维表格 XTPpbsyWza4rixsRuCwcALI8nOh（功能清单、推进计划、使用反馈）、常浩私聊里的安排（亚古兽应用、常浩的用户身份）；上一期存档 DigitalTwin/sidebar/；技能 hermes/skills/sales-sidebar/ 和亚古兽工作目录里的项目档案",
+      "writes": "亚古兽机器人私聊常浩（需求反馈 post、进度卡片；同一期原地改）；常浩回「发群」后以他本人身份发到测试反馈群（只发一次）；存档 DigitalTwin/sidebar/feedback/<日期>.json、progress/<截止日>.json，草稿 DigitalTwin/sidebar/drafts/",
+      "note": "仅支持 Hermes（亚古兽 profile 的主模型，带模型的定时任务）。核对不过按提示改两轮，再不过把原因发常浩，不换执行方。版式是常浩逐项确认的定稿，消息里不加「生成：…」行；留痕在存档 JSON（sent_at）和 hermes -p agumon cron runs。"
     },
     {
       "id": "groupdigest",
@@ -109,7 +117,7 @@
       "id": "proposal-digest",
       "name": "每周待决提案的推荐（Hermes 带模型定时任务，每周一 10:00）",
       "executor": "hermes",
-      "reads": "~/session-retro/*/提案.md、牛马之家每周整理（proposal_digest_draft.py 取草稿）",
+      "reads": "~/session-retro/*/提案.md、牛马之家每周整理、agent-kit 每周汇总的再犯与待提升（node tools/weekly-review.mjs --json）（proposal_digest_draft.py 取草稿）",
       "writes": "推荐文件、飞书私聊卡片；常浩回复后写回各来源的结论",
       "note": "仅支持 Hermes（Hermes 定时任务）。"
     },
@@ -129,7 +137,7 @@
     "工程自检 self_check.py、每日巡检 health_check.py、仓库自检 check_repos.py：纯脚本",
     "skill 月度体检推送 skill_health.py：纯脚本，转发 my-skills 的 monthly-health.mjs 统计",
     "晨报取数 brief_data.py：挂起中，不在运行",
-    "任务凭证与派单网关 autoloop_grants.py、中台配置 autoloop_config.py、中台只读窗口 autoloop_readonly.py（#195 批 0B）、按钮实测探针 button_probe.py（0B-3）、飞书桥接 autoloop_feishu.py / autoloop_answer.py（0B-4）：纯脚本"
+    "任务凭证与派单网关 autoloop_grants.py、中台配置 autoloop_config.py、中台只读窗口 autoloop_readonly.py（#195 批 0B）、按钮实测探针 button_probe.py（0B-3）、飞书桥接 autoloop_feishu.py / autoloop_answer.py（0B-4a）、秘书开关与账本 secretary.py / secretary_ledger.py（0B-4b）、秘书代批控制面 secretary_gate.py（0B-4c）：纯脚本"
   ],
   "exceptions": [
     {

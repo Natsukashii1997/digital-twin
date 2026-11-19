@@ -4,6 +4,7 @@
 不碰 ~/.hermes、真实工单、真实模型和外部服务。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_ai_access.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import io
 import json

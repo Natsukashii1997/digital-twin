@@ -3,6 +3,7 @@
 临时目录假造来源，假 gh（fake_gh.py）不联网；1a、1b 的取数用 mock 换成造好的记录，只测 1c 自己的汇总逻辑。
 统计日 D = 2026-11-08（04:00 到 11-09 04:00，北京时间）。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import csv
 import datetime as dt
 import json

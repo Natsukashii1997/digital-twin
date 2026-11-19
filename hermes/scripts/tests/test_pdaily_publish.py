@@ -3,6 +3,7 @@
 
 事实快照用手造的小样（结构同 pdaily_facts.build 的输出）；Hermes 用临时目录里的假命令，不调模型；会话库用临时 SQLite。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import copy
 import json
 import os
@@ -76,11 +77,11 @@ def card_fields(**over):
     c = {
         "headline": "牛马之家证据口径合并；今天先收尾夜跑",
         "progress_projects": ["work-desk"],
-        "decisions": [{"type": "限时", "candidate": 0, "project": "猛鬼兽", "item": "夜跑收尾", "recommendation": "按授权 72 收尾",
-                       "deadline": "11-09 06:00", "reply": "按授权 72 收尾"}],
+        "decisions": [{"type": "限时", "kind": "选", "candidates": [0], "project": "猛鬼兽", "item": "夜跑收尾",
+                       "recommendation": "按授权 72 收尾", "deadline": "11-09 06:00"}],
         "achievements": [{"project": "牛马之家", "text": "证据口径对齐合并（#43），未发布"}],
-        "risks": [{"level": "待识别", "category": "管理失真", "project": "牛马之家", "text": "主目录 15 处未提交"}],
-        "today": [{"priority": "P0", "item": "夜跑收尾", "owner_action": "猛鬼兽：你回复后按授权 72 收尾"}],
+        "risks": [{"level": "待识别", "cause": "本机有没提交的改动", "scope": "1 个项目 15 处", "projects": ["牛马之家"],
+                   "detail": "牛马之家 15 处", "to_decisions": []}],
     }
     c.update(over)
     return c
@@ -89,7 +90,7 @@ def card_fields(**over):
 def report_text(n=("1", "1", "1"), sections=None, extra=""):
     secs = sections or pp.SECTIONS
     body = "\n\n".join(f"## {s}\n- 内容" for s in secs)
-    return f"一句话：牛马之家证据口径合并\n实质推进 {n[0]} 个项目｜待你决策 {n[1]} 件｜阻塞 / 风险 {n[2]} 个项目\n\n{body}\n{extra}"
+    return f"一句话：牛马之家证据口径合并\n实质推进 {n[0]} 个项目｜待你决策 {n[1]} 件｜风险 {n[2]} 类\n\n{body}\n{extra}"
 
 
 def reply_text(card=None, report=None):
@@ -100,7 +101,7 @@ class ParseTests(unittest.TestCase):
     def test_ok(self):
         card, report = pp.parse_reply(reply_text())
         self.assertEqual(card["progress_projects"], ["work-desk"])
-        self.assertIn("一、需要你拍板", report)
+        self.assertIn("三、需要你拍板", report)
 
     def test_fenced_json_ok(self):
         card, _ = pp.parse_reply(f"{pp.CARD_MARK}\n```json\n{{\"a\": 1}}\n```\n{pp.REPORT_MARK}\n正文")
@@ -129,10 +130,15 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any("不在名册里" in x for x in e), e)
 
     def test_dependency_pair_names_checked(self):
-        ok = card_fields(risks=[{"level": "中", "category": "管理失真", "project": "牛马之家 ↔ 数字分身", "text": "x"}])
-        self.assertEqual(self.errs(ok, report_text(n=("1", "1", "2"))), [])   # 依赖两头各算一个项目
-        bad = card_fields(risks=[{"level": "中", "category": "管理失真", "project": "牛马之家 ↔ 外星项目", "text": "x"}])
+        """拍板的 project 可以写多个（、或 ↔ 隔开），每个都要在名册里；风险的 projects 逐个查。"""
+        d = card_fields()["decisions"][0]
+        self.assertEqual(self.errs(card_fields(decisions=[dict(d, project="牛马之家 ↔ 数字分身")])), [])
+        bad = card_fields(decisions=[dict(d, project="牛马之家、外星项目")])
         self.assertTrue(any("外星项目" in x for x in self.errs(bad)))
+        r = card_fields()["risks"][0]
+        self.assertTrue(any("外星项目" in x for x in self.errs(card_fields(risks=[dict(r, projects=["牛马之家", "外星项目"])]))))
+        for v in (None, [], "牛马之家", [1]):
+            self.assertTrue(any("缺 projects" in x for x in self.errs(card_fields(risks=[dict(r, projects=v)]))), v)
 
     def test_fabricated_ref(self):
         e = self.errs(report=report_text(extra="另外合并了 #999"))
@@ -141,11 +147,15 @@ class CheckTests(unittest.TestCase):
     def test_deadline_needs_source(self):
         """最晚时间只认对应候选里写着的时间：编的、只写时刻的、不连候选的都去掉（不显示），不让整份降级。"""
         d0 = card_fields()["decisions"][0]
-        for dl, cand in (("11-10 09:00", 0), ("06:00", 0), ("11-09 06:00", None), ("今天 18:00", 0)):
-            card = card_fields(decisions=[dict(d0, deadline=dl, candidate=cand)])
+        for dl, cand in (("11-10 09:00", [0]), ("06:00", [0]), ("11-09 06:00", []), ("今天 18:00", [0])):
+            card = card_fields(decisions=[dict(d0, deadline=dl, candidates=cand)])
             self.assertEqual(self.errs(card), [], dl)
             self.assertIsNone(card["decisions"][0]["deadline"], dl)
             self.assertTrue(any("最晚时间" in w for w in self.warns), dl)
+        old = {k: v for k, v in d0.items() if k != "candidates"}
+        card = card_fields(decisions=[dict(old, candidate=0)])          # 旧写法 candidate 单个序号也认
+        self.assertEqual(self.errs(card), [])
+        self.assertEqual(card["decisions"][0]["deadline"], "11-09 06:00")
 
     def test_deadline_formats_normalized(self):
         for dl in ("2026-11-09 06:00", "11-09 06:00", "11月9日 06:00", "11-9 6:00"):
@@ -162,14 +172,16 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any("progress_projects" in x for x in e), e)
         self.assertTrue(any("缺 decisions" in x for x in e), e)
 
-    def test_today_matches_alias(self):
-        """前面写全名、今日推进写简称（11-07 真实稿误拦过）。"""
-        c = card_fields(risks=[{"level": "低", "category": "协作阻塞", "project": "个人 AI 工作台（数码世界）", "text": "x"}],
-                        today=[{"priority": "P1", "item": "数码世界终验收口", "owner_action": "常浩终验"}])
-        self.assertEqual(self.errs(c, report_text(n=("1", "1", "1"))), [])
+    def test_today_dropped(self):
+        """不再有今日推进（#226）：模型顺手写了 today、reply 也不报错，规整时丢掉。"""
+        c = card_fields(today=[{"priority": "P1", "item": "整理桌面", "owner_action": "常浩"}])
+        c["decisions"][0]["reply"] = "回「合并」即可"
+        self.assertEqual(self.errs(c), [])
+        self.assertNotIn("today", c)
+        self.assertNotIn("reply", c["decisions"][0])
 
     def test_alias_names(self):
-        ok = card_fields(risks=[{"level": "低", "category": "协作阻塞", "project": "数码世界", "text": "PR 开着"}])
+        ok = card_fields(risks=[{"level": "低", "cause": "PR 挂着没人处理", "scope": "1 个项目", "projects": ["数码世界"], "detail": "x", "to_decisions": []}])
         self.assertEqual(self.errs(ok), [])
 
     def test_install_and_acceptance_claims(self):
@@ -194,12 +206,12 @@ class CheckTests(unittest.TestCase):
             e = self.errs(card_fields(achievements=[{"project": "牛马之家", "text": text}]))
             self.assertFalse(any("安装 / 验收" in x for x in e), (text, e))
 
-    def test_claims_in_report_section_two(self):
+    def test_claims_in_report_achievements(self):
         secs = [f"## {x}\n- 内容" for x in pp.SECTIONS]
-        secs[1] = "## 二、昨日关键成果\n- 牛马之家：证据口径已安装到 5280\n- 数字分身：合并，交付未核实"
-        report = "一句话：x\n实质推进 1 个项目｜待你决策 1 件｜阻塞 / 风险 1 个项目\n\n" + "\n\n".join(secs)
+        secs[0] = f"## {pp.ACH_SECTION}\n- 牛马之家：证据口径已安装到 5280\n- 数字分身：合并，交付未核实"
+        report = "一句话：x\n实质推进 1 个项目｜待你决策 1 件｜风险 1 类\n\n" + "\n\n".join(secs)
         e = self.errs(report=report)
-        self.assertTrue(any("完整报告二段" in x for x in e), e)
+        self.assertTrue(any("完整报告成果段" in x for x in e), e)
 
     def test_ref_spellings(self):
         self.assertEqual(self.errs(report=report_text(extra="PR#43 和 issue#102、PR #43")), [])
@@ -207,10 +219,7 @@ class CheckTests(unittest.TestCase):
             e = self.errs(report=report_text(extra=f"见 {bad}"))
             self.assertTrue(any("999" in x for x in e), (bad, e))
 
-    def test_reply_shells_and_cut(self):
-        c = card_fields(decisions=[dict(card_fields()["decisions"][0], reply="回复「合并」即可")])
-        self.errs(c)
-        self.assertEqual(c["decisions"][0]["reply"], "合并")
+    def test_cut_on_punctuation(self):
         self.assertEqual(pp.cut("材料记录了 HTTP 业务链，以及授权前置条件的反例测试，还有更多", 20),
                          "材料记录了 HTTP 业务链…")       # 停在标点上，不切成「授…」
 
@@ -235,13 +244,17 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(pp.header_numbers(card_fields(progress_projects=["work-desk", "work-desk"])), ("1", "1", "1"))
 
     def test_no_false_alarms(self):
-        """正常写法不误拦：正文提前提到段名、第六段带缩进子条目、开头数字加粗、｜两侧空格。"""
+        """正常写法不误拦：正文提前提到段名、带缩进子条目、开头数字加粗、｜两侧空格。"""
         secs = "\n\n".join(f"## {x}\n- 内容" for x in pp.SECTIONS)
-        secs = secs.replace("## 一、需要你拍板\n- 内容", "## 一、需要你拍板\n- 内容，细节见六、今日推进计划")
-        secs = secs.replace("## 六、今日推进计划\n- 内容", "## 六、今日推进计划\n" + "\n".join(
-            f"{i}. 目标{i}\n   - 负责人：Hermes\n   - 动作：做\n   - 完成标准：有证据" for i in range(1, 6)))
-        report = f"一句话：x\n实质推进 **1** 个项目 ｜ 待你决策 **1** 件 ｜ 阻塞 / 风险 **1** 个项目\n\n{secs}"
+        secs = secs.replace(f"## {pp.ACH_SECTION}\n- 内容", f"## {pp.ACH_SECTION}\n- 内容，细节见三、需要你拍板")
+        secs = secs.replace("## 三、需要你拍板\n- 内容", "## 三、需要你拍板\n" + "\n".join(
+            f"{i}. 事项{i}\n   - 为什么是你：要定\n   - 推荐：做" for i in range(1, 6)))
+        report = f"一句话：x\n实质推进 **1** 个项目 ｜ 待你决策 **1** 件 ｜ 风险 **1** 类\n\n{secs}"
         self.assertEqual(self.errs(report=report), [])
+
+    def test_today_section_in_report_refused(self):
+        e = self.errs(report=report_text(extra="\n## 六、今日推进计划\n- 做事"))
+        self.assertTrue(any("今日推进" in x for x in e), e)
 
     def test_header_numbers_must_match_card(self):
         e = self.errs(report=report_text(n=("3", "1", "1")))
@@ -266,12 +279,45 @@ class CheckTests(unittest.TestCase):
             e = self.errs(card_fields(progress_projects=["disk-slim"]), report_text(), f)
             self.assertFalse(any("不算实质推进" in x for x in e), (key, e))
 
-    def test_today_limit_and_link(self):
-        t = card_fields()["today"][0]
-        e = self.errs(card_fields(today=[t] * 4))
-        self.assertTrue(any("最多 3 条" in x for x in e))
-        e = self.errs(card_fields(today=[{"priority": "P1", "item": "整理桌面", "owner_action": "常浩"}]))
-        self.assertTrue(any("对不上" in x for x in e), e)
+    def test_risk_destination(self):
+        """每类风险要有去向：to_decisions 是编号列表（空 = 只观察），指到的拍板要存在。"""
+        r = card_fields()["risks"][0]
+        for v in (None, "1", [True], ["1"]):
+            e = self.errs(card_fields(risks=[dict(r, to_decisions=v)]))
+            self.assertTrue(any("缺 to_decisions" in x for x in e), (v, e))
+        self.assertEqual(self.errs(card_fields(risks=[dict(r, to_decisions=[1])])), [])
+        for n in (0, 2):
+            e = self.errs(card_fields(risks=[dict(r, to_decisions=[n])]))
+            self.assertTrue(any(f"拍板第 {n} 条" in x for x in e), (n, e))
+
+    def test_same_cause_must_merge(self):
+        r = card_fields()["risks"][0]
+        e = self.errs(card_fields(risks=[r, dict(r, projects=["数字分身"])]), report_text(n=("1", "1", "2")))
+        self.assertTrue(any("要合成一类" in x for x in e), e)
+
+    def test_same_matter_told_twice_only_warns(self):
+        """风险明细和一条单项目的拍板点到同一个项目的同一个编号、去向却没指过去：记提醒，不拦（别的项目的同号不算）。"""
+        d = dict(card_fields()["decisions"][0], project="牛马之家", item="#43 去留", recommendation="退回重做")
+        r = dict(card_fields()["risks"][0], cause="PR 挂着没人处理", projects=["牛马之家", "数字分身"], detail="牛马之家 #43｜数字分身 #102")
+        card = card_fields(decisions=[d], risks=[r])
+        self.assertEqual(self.errs(card), [])
+        w = pp.overlaps(facts(), card)
+        self.assertTrue(len(w) == 1 and "牛马之家 #43" in w[0] and "拍板 1" in w[0], w)
+        self.assertEqual(pp.overlaps(facts(), card_fields(decisions=[d], risks=[dict(r, to_decisions=[1])])), [])
+        other = dict(d, project="数字分身")                       # 数字分身的 #43 是另一个仓库的号
+        self.assertEqual(pp.overlaps(facts(), card_fields(decisions=[other], risks=[r])), [])
+        many = dict(d, project="牛马之家、数字分身")              # 多项目的拍板分不清编号归谁，不提醒
+        self.assertEqual(pp.overlaps(facts(), card_fields(decisions=[many], risks=[r])), [])
+
+    def test_no_material_not_a_decision(self):
+        d = dict(card_fields()["decisions"][0], recommendation="材料里没有试用数据，暂不给倾向")
+        e = self.errs(card_fields(decisions=[d]))
+        self.assertTrue(any("缺材料的事不进拍板" in x for x in e), e)
+
+    def test_decision_kind_required(self):
+        d = card_fields()["decisions"][0]
+        self.assertTrue(any("kind" in x for x in self.errs(card_fields(decisions=[dict(d, kind="看")]))))
+        self.assertEqual(self.errs(card_fields(decisions=[dict(d, kind="做")])), [])
 
     def test_bad_enum(self):
         e = self.errs(card_fields(decisions=[dict(card_fields()["decisions"][0], type="紧急")]))
@@ -294,25 +340,39 @@ class MetricTests(unittest.TestCase):
 
     def test_normal(self):
         r = self.rows()
+        self.assertEqual(list(r), ["有推进的项目", "合并 PR", "需要你拍板", "风险与阻塞"])       # 四行，不再有代理动作
         self.assertEqual(r["有推进的项目"], ("**1** / 4", "其余 3 个无实质推进"))
-        self.assertEqual(r["待你拍板"][1], "限时 1 件，最晚 11-09 06:00")
+        self.assertEqual(r["需要你拍板"][1], "1 件要你选；最晚 11-09 06:00")
         self.assertEqual(r["合并 PR"][0], "2")
-        self.assertIn("red", r["待你拍板"][0])
-        self.assertIn("最晚 11-09 06:00", r["待你拍板"][1])
-        self.assertEqual(r["Hermes 代理动作"], ("1", "合并 1、另定时任务 1 次"))
+        self.assertIn("red", r["需要你拍板"][0])
+        self.assertEqual(r["风险与阻塞"], ("1 类", "1 类只观察"))
+
+    def test_kinds_ages_and_destinations(self):
+        f = facts()
+        f["decisions"][0]["since"] = "2026-11-02T20:30:00+08:00"
+        d = card_fields()["decisions"][0]
+        c = card_fields(decisions=[dict(d, deadline=None), dict(d, kind="做", candidates=[], deadline=None)],
+                        risks=[dict(card_fields()["risks"][0], to_decisions=[1]), dict(card_fields()["risks"][0], cause="别的")])
+        r = self.rows(f, c)
+        self.assertEqual(r["需要你拍板"][1], "1 件要你选、1 件要你动手；最久的挂了 7 天")
+        self.assertEqual(r["风险与阻塞"], ("2 类", "1 类要你定、1 类只观察"))
+        self.assertEqual(pp.age_days(f, c["decisions"][0]), 7)
+        self.assertIsNone(pp.age_days(f, c["decisions"][1]))               # 不是来自候选：不编天数
+        self.assertIsNone(pp.age_days(facts(), d))                          # 候选没有 since
 
     def test_unknown_not_zero(self):
         f = facts()
         f["activity"]["merged_prs"] = None
         f["activity"]["actions_by_kind"] = None
-        r = self.rows(f)
-        self.assertEqual(r["合并 PR"][0], "未知")
-        self.assertEqual(r["Hermes 代理动作"][0], "未知")
+        self.assertEqual(self.rows(f)["合并 PR"][0], "未知")
+        self.assertEqual(pp.action_counts(f), (None, "行动记录取不到"))
 
-    def test_failed_action_source_marked(self):
+    def test_action_counts_for_report(self):
+        """代理动作不在卡片上了，事实版完整报告的述职段还用它。"""
+        self.assertEqual(pp.action_counts(facts()), ("1", "合并 1、另定时任务 1 次"))
         f = facts()
         f["coverage"]["actions"]["定时任务库"] = {"ok": False, "count": None, "error": "库锁了"}
-        v, n = self.rows(f)["Hermes 代理动作"]
+        v, n = pp.action_counts(f)
         self.assertEqual(v, "1+")
         self.assertIn("定时任务库取不到", n)
 
@@ -324,30 +384,61 @@ class CardTests(unittest.TestCase):
     def text(self, c):
         return json.dumps(c, ensure_ascii=False)
 
-    def test_layout_like_sample(self):
+    def test_layout_b(self):
+        """乙版（常浩 2026-11-19 定，#226）：四板块，顺序是速览 → 成果 → 风险 → 拍板；没有今日推进和单列的自检。"""
         c = self.card(doc_url="https://x.feishu.cn/docx/abc")
         self.assertEqual(c["schema"], "2.0")
         self.assertNotIn("width_mode", self.text(c))       # 默认宽度（常浩 11-09 定）
         self.assertEqual(c["header"]["title"]["content"], "📅 猛鬼兽日报 · 11-08（周日）")
         heads = [e["content"] for e in c["body"]["elements"] if e.get("tag") == "markdown" and e["content"].startswith("**")]
-        self.assertEqual(heads, ["**📈 核心数据速览**", "**🎯 需要你拍板**", "**✅ 昨日关键成果**", "**⚠️ 风险与阻塞**", "**💡 今日推进**"])
+        self.assertEqual(heads, ["**📈 核心数据速览**", "**✅ 昨日关键成果**", "**⚠️ 风险与阻塞 · 1 类**", "**🎯 需要你拍板 · 1 件**"])
         btn = [e for e in c["body"]["elements"] if e["tag"] == "button"][0]
         self.assertEqual(btn["behaviors"][0]["default_url"], "https://x.feishu.cn/docx/abc")
+        self.assertNotIn("今日推进", self.text(c))
+        self.assertNotIn("callback", self.text(c))          # 没给令牌（预览）：没有按钮
 
     def test_no_doc_drops_button_and_says_why(self):
         c = self.card(doc_error="云文档接口超时")
         self.assertFalse([e for e in c["body"]["elements"] if e["tag"] == "button"])
         self.assertIn("完整报告未生成：云文档接口超时", c["body"]["elements"][-1]["content"])
 
-    def test_more_than_five_decisions_all_on_card(self):
-        """常浩 11-10 定稿：各板块不折叠，全部放在卡片上。"""
+    def test_decision_table(self):
+        """拍板一张表：#、事项、推荐、已挂；按模型给的先后编号，全部列出。"""
+        f = facts()
+        f["decisions"][0]["since"] = "2026-11-04T09:00:00+08:00"
         d = card_fields()["decisions"][0]
-        c = self.card(card_fields(decisions=[dict(d, item=f"事{i}", type="普通") for i in range(7)] + [d]))
-        t = self.text(c)
-        self.assertNotIn("见完整报告", t)
-        for i in range(7):
-            self.assertIn(f"事{i}", t)
-        self.assertLess(t.index("限时"), t.index("事0"))      # 限时排在普通前
+        decs = [d, dict(d, type="普通", kind="做", candidates=[], deadline=None, project="牛马之家、数字分身、磁盘瘦身", item="终验")] + \
+               [dict(d, type="普通", item=f"事{i}", deadline=None, candidates=[]) for i in range(7)]
+        tabs = [e for e in self.card(card_fields(decisions=decs), f=f)["body"]["elements"] if e.get("tag") == "table"]
+        tab = tabs[-1]
+        self.assertEqual([(c["display_name"], c["width"]) for c in tab["columns"]],
+                         [("#", "8%"), ("事项", "34%"), ("推荐", "43%"), ("已挂", "15%")])
+        rows = tab["rows"]
+        self.assertEqual(len(rows), 9)
+        self.assertEqual([r["n"] for r in rows[:3]], ["①", "②", "③"])
+        self.assertEqual(rows[0]["i"], "<font color='red'>**限时**</font> **猛鬼兽·夜跑收尾**\n<font color='red'>最晚 11-09 06:00</font>")
+        self.assertEqual(rows[0]["a"], "<font color='red'>5 天</font>")
+        self.assertEqual(rows[1]["i"], "**3 个项目·终验**（要你动手）")
+        self.assertEqual(rows[1]["a"], "—")
+        self.assertEqual(rows[0]["r"], "按授权 72 收尾")
+        self.assertNotIn("见完整报告", self.text(tab))
+
+    def test_risk_table_and_folded_detail(self):
+        """风险一类一行，带去向；项目明细在默认收起的折叠面板里。"""
+        r = card_fields()["risks"][0]
+        risks = [dict(r, level="高", cause="安全修复 PR 没合", scope="2 个项目 3 个 PR", projects=["牛马之家", "数字分身"],
+                      detail="牛马之家 #43｜数字分身 #102", to_decisions=[1]), r]
+        els = self.card(card_fields(risks=risks))["body"]["elements"]
+        tab = [e for e in els if e.get("tag") == "table"][1]
+        self.assertEqual([(c["display_name"], c["width"]) for c in tab["columns"]], [("问题", "30%"), ("涉及", "45%"), ("去向", "25%")])
+        self.assertEqual(tab["rows"], [{"c": "🔴 安全修复 PR 没合", "w": "2 个项目 3 个 PR", "g": "**→ 拍板 ①**"},
+                                       {"c": "⚪ 本机有没提交的改动", "w": "1 个项目 15 处", "g": "只观察"}])
+        fold = [e for e in els if e.get("tag") == "collapsible_panel"]
+        self.assertEqual(len(fold), 1)
+        self.assertFalse(fold[0]["expanded"])
+        self.assertEqual([x["content"] for x in fold[0]["elements"]],
+                         ["**安全修复 PR 没合**：牛马之家 #43｜数字分身 #102", "**本机有没提交的改动**：牛马之家 15 处"])
+        self.assertLess(els.index(tab), els.index(fold[0]))
 
     def test_table_like_restored_card(self):
         """速览表照 11-10 定稿：「昨日」窄、「说明」宽，自动行高、换行。"""
@@ -362,7 +453,9 @@ class CardTests(unittest.TestCase):
         self.assertIn("1 个项目未读到", self.card(f=f)["header"]["subtitle"]["content"])
 
     def test_empty_sections(self):
-        t = self.text(self.card(card_fields(decisions=[], achievements=[], risks=[], today=[])))
+        c = self.card(card_fields(decisions=[], achievements=[], risks=[]))
+        self.assertEqual(len([e for e in c["body"]["elements"] if e.get("tag") == "table"]), 1)      # 只剩速览表
+        t = self.text(c)
         for s in ("今天没有要你拍板的事", "昨天没有新成果", "没有风险和阻塞"):
             self.assertIn(s, t)
 
@@ -423,8 +516,10 @@ class BuildTests(unittest.TestCase):
             #!{sys.executable}
             import os, sys
             rc = int(os.environ.get("FAKE_RC", "0"))
+            retry = {str(self.tmp / "reply2.txt")!r}
             if rc == 0:
-                print(open({str(self.reply)!r}, encoding="utf-8").read())
+                again = any(a.endswith(".retry.md") for a in sys.argv) and os.path.exists(retry)
+                print(open(retry if again else {str(self.reply)!r}, encoding="utf-8").read())
             sys.stderr.write("模型报错了\\n" if rc else "")
             if not os.environ.get("FAKE_NOSID"):
                 sys.stderr.write("\\nsession_id: s1\\n")
@@ -465,11 +560,30 @@ class BuildTests(unittest.TestCase):
         self.assertIn("核对没过", meta["degraded"])
         self.assertTrue(any("#999" in e for e in meta["check_errors"]))
         self.assertIn("#999", self.out("reply.md"))           # 原稿留着，方便查为什么没过
+        self.assertIn("#999", self.out("reply.first.md"))     # 重写过一次（#226），第一稿另存
+        self.assertTrue(any("#999" in e for e in meta["first_errors"]))
+
+    def test_check_fails_rewrites_once(self):
+        """核对没过：带着问题清单让模型整份重写一次，第二稿过了就用第二稿。"""
+        self.reply.write_text(reply_text(report=report_text(extra="#999")), encoding="utf-8")
+        (self.tmp / "reply2.txt").write_text(reply_text(), encoding="utf-8")
+        meta = pp.build(facts(), self.tmp / "out")
+        self.assertIsNone(meta["degraded"], meta)
+        self.assertEqual(meta["check_errors"], [])
+        self.assertNotIn("#999", self.out("reply.md"))
+        q = self.out("query.retry.md")
+        self.assertIn("上一稿没过核对", q)
+        self.assertIn("#999", q)
+        self.assertNotIn("上一稿没过核对", self.out("query.md"))
 
     def test_given_reply_skips_model(self):
         meta = pp.build(facts(), self.tmp / "out", reply=reply_text())
         self.assertIsNone(meta["degraded"])
         self.assertIsNone(meta["session_id"])
+        (self.tmp / "reply2.txt").write_text(reply_text(), encoding="utf-8")
+        meta = pp.build(facts(), self.tmp / "out", reply=reply_text(report=report_text(extra="#999")))
+        self.assertIn("核对没过", meta["degraded"])            # 现成回复不重写
+        self.assertFalse((self.tmp / "out" / f"{DAY}.query.retry.md").exists())
 
 
 class GenerateEnvTests(unittest.TestCase):
@@ -516,8 +630,10 @@ class SendTests(unittest.TestCase):
                 open({str(self.tmp / "sent.json")!r}, "w").write(content)
                 print(json.dumps({{"ok": True, "data": {{"message_id": "om_1"}}}}))
             elif cmd == "im +messages-mget":
-                title = json.loads(open({str(self.tmp / "sent.json")!r}).read())["header"]["title"]["content"]
-                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">'}}]}}}}))
+                card = json.loads(open({str(self.tmp / "sent.json")!r}).read())
+                title = card["header"]["title"]["content"]
+                foot = card["body"]["elements"][-1].get("content", "") if not os.environ.get("FAKE_DROP_FOOT") else ""
+                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">{{foot}}</card>'}}]}}}}))
             """), encoding="utf-8")
         self.cli.chmod(0o755)
         self.patch = mock.patch.object(pp, "LARK", str(self.cli))
@@ -547,15 +663,19 @@ class SendTests(unittest.TestCase):
         self.assertNotIn("**🔧 工程自检**", self.heads())
         self.assertIn("工程自检：正常", self.sent()["body"]["elements"][-1]["content"])
 
-    def test_self_check_problems_after_risks(self):
+    def test_self_check_problems_join_risks(self):
+        """#226：自检有问题不再单列一块，并进风险表最后一行，原文进折叠面板。"""
         with mock.patch.dict(os.environ, {"FAKE_CHECK_OUT": "🔧 工程自检\n\n🔁 安装副本不一致：1 项和仓库 main 对不上\n- hermes/x.py"}):
             pp.send(DAY, self.out)
         h = self.heads()
-        self.assertEqual(h.index("**🔧 工程自检**"), h.index("**⚠️ 风险与阻塞**") + 1)
-        self.assertEqual(h[-1], "**💡 今日推进**")
-        t = json.dumps(self.sent(), ensure_ascii=False)
-        self.assertIn("安装副本不一致", t)
-        self.assertNotIn("工程自检：正常", t)
+        self.assertNotIn("**🔧 工程自检**", h)
+        self.assertIn("**⚠️ 风险与阻塞 · 2 类**", h)
+        els = self.sent()["body"]["elements"]
+        row = [e for e in els if e.get("tag") == "table"][1]["rows"][-1]
+        self.assertEqual(row, {"c": "🟠 猛鬼兽自检有问题", "w": "🔁 安装副本不一致：1 项和仓库 main 对不上", "g": "处理办法见明细"})
+        fold = [e for e in els if e.get("tag") == "collapsible_panel"][0]
+        self.assertIn("- hermes/x.py", fold["elements"][-1]["content"])
+        self.assertNotIn("工程自检：正常", json.dumps(self.sent(), ensure_ascii=False))
 
     def test_self_check_failed_said_in_card(self):
         with mock.patch.dict(os.environ, {"FAKE_CHECK_RC": "2"}):
@@ -580,6 +700,30 @@ class SendTests(unittest.TestCase):
         d = self.deliv()
         self.assertTrue(d["sent"] and d["read_back"])
         self.assertEqual(d["message_id"], "om_1")
+        cols = [c for e in sent["body"]["elements"] if e.get("tag") == "column_set" for c in e["columns"]]
+        values = [c["elements"][0]["behaviors"][0]["value"] for c in cols]
+        self.assertEqual(values, [{"pdaily": d["card_token"], "n": 0}, {"pdaily": d["card_token"], "n": 1}])   # #235
+        self.assertRegex(d["card_token"], r"^[0-9a-f]{16}$")
+        self.assertEqual([c["elements"][0]["text"]["content"] for c in cols], ["全部按推荐", "① 按推荐"])
+        snap = json.loads((self.out / f"{DAY}.decisions.sent.json").read_text())      # 拍板快照（审查 P1-1）
+        self.assertEqual([x["item"] for x in snap["decisions"]], ["夜跑收尾"])
+        self.assertEqual(len(d["decisions_sha"]), 64)
+        self.assertIn(f"卡片 {d['card_token'][-6:]}", sent["body"]["elements"][-1]["content"])
+
+    def test_failed_resend_keeps_original_record(self):
+        """复审 P3-C：当天已发出的卡，再 --force 重发没发出去，原来的发卡记录、卡片、快照都不动。"""
+        self.assertIsNone(pp.send(DAY, self.out))
+        before = {n: (self.out / f"{DAY}.{n}").read_text() for n in ("delivery.json", "card.sent.json", "decisions.sent.json")}
+        with mock.patch.object(pp, "lark", side_effect=pp.SendError("发卡片失败：网络")):
+            self.assertIn("网络", pp.send(DAY, self.out, force=True))
+        self.assertEqual({n: (self.out / f"{DAY}.{n}").read_text() for n in before}, before)
+        self.assertIn("网络", (self.out / f"{DAY}.delivery.retry.json").read_text())
+
+    def test_read_back_must_see_card_mark(self):
+        """飞书回读不带按钮的值：靠页脚的令牌尾号认出发出去的是这一张；看不到就不算回读通过（按钮不认）。"""
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}):
+            self.assertIn("回读对不上", pp.send(DAY, self.out))
+        self.assertFalse(self.deliv()["read_back"])
         send_args = json.loads(self.calls.read_text().splitlines()[1])
         self.assertEqual(send_args[send_args.index("--as") + 1], "bot")
         self.assertEqual(send_args[send_args.index("--chat-id") + 1], pp.CHAT)
@@ -626,39 +770,77 @@ class SendTests(unittest.TestCase):
             rc = pp.main(["send", "--date", DAY, "--out", str(self.out)])
         self.assertEqual((rc, buf.getvalue()), (0, ""))
 
+    def test_send_starts_checks_only_for_real_daily_dir(self):
+        """#236：定时任务（不带 --out）发成功后，在后台派「猛鬼兽查」的只读单；带 --out（补发到别处、测试）不派。"""
+        with mock.patch.object(pp, "start_checks") as sc, mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY]), 0)
+        sc.assert_called_once_with(DAY)
+        with mock.patch.object(pp, "start_checks") as sc, mock.patch("sys.stdout"):
+            pp.main(["send", "--date", DAY, "--out", str(self.out), "--force"])
+        sc.assert_not_called()
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}), mock.patch.object(pp, "start_checks") as sc, \
+                mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY, "--force"]), 0)    # 定时任务入口：没发好也是输出一句原因、退出码 0
+        sc.assert_called_once_with(DAY)                               # 发出去了、只是回读没过：照样派（复审 P3-4）
+
+
+class CheckDestinationTests(unittest.TestCase):
+    """#236：风险的第三种去向「猛鬼兽查」。"""
+    def errs(self, card):
+        f = facts()
+        pp.normalize(f, card)
+        return pp.check(f, card, report_text())
+
+    def test_check_risk_valid_and_shown(self):
+        r = dict(card_fields()["risks"][0], check={"project": "牛马之家", "task": "查清主目录 15 处改动是什么、该提交还是丢弃"})
+        card = card_fields(risks=[r])
+        self.assertEqual(self.errs(card), [])
+        rows = pp.risk_rows([r], None)
+        self.assertEqual(rows[0]["g"], "猛鬼兽派只读单查，明天报")
+        m = {k: (v, n) for k, v, n in pp.metrics(facts(), card)}
+        self.assertEqual(m["风险与阻塞"], ("1 类", "1 类猛鬼兽查"))
+
+    def test_check_risk_rules(self):
+        r = card_fields()["risks"][0]
+        for c, why in (({"project": "外星项目", "task": "x"}, "check 要写成"), ({"project": "猛鬼兽", "task": "x"}, "check 要写成"),
+                       ({"project": "牛马之家"}, "check 要写成"), ("查一下", "check 要写成")):
+            e = self.errs(card_fields(risks=[dict(r, check=c)]))
+            self.assertTrue(any(why in x for x in e), (c, e))
+        long = card_fields(risks=[dict(r, check={"project": "牛马之家", "task": "长" * 400})])
+        self.assertEqual(self.errs(long), [])                         # 超长截断记提醒，不算核对失败（复审 P3-5）
+        self.assertLessEqual(len(long["risks"][0]["check"]["task"]), 301)
+        e = self.errs(card_fields(risks=[dict(r, to_decisions=[1], check={"project": "牛马之家", "task": "x"})]))
+        self.assertTrue(any("就不用猛鬼兽查" in x for x in e), e)
+        three = [dict(r, cause=f"类{i}", check={"project": "牛马之家", "task": "x"}) for i in range(3)]
+        e = self.errs(card_fields(risks=three))
+        self.assertTrue(any("最多 2 类" in x for x in e), e)
+
 
 class SampleLayoutTests(unittest.TestCase):
-    """逐行对齐甲版样例 hermes/samples/pdaily-card-2026-11-08.json 的写法（常浩 11-09 定稿）。"""
+    """逐行写法：成果一行一条；规整去掉尾部标点；超长截断。"""
     def lines(self, fields):
         f = facts()
         pp.normalize(f, fields)
         c = pp.build_card(f, fields, "灰字")
         return [e["content"] for e in c["body"]["elements"] if e.get("tag") == "markdown"]
 
-    def test_decision_line(self):
-        d = dict(card_fields()["decisions"][0], item="夜跑收尾。", recommendation="按授权 72 收尾。",
-                 reply="回「按授权 72 收尾」即可")
-        body = self.lines(card_fields(decisions=[d, dict(d, type="普通", deadline=None, reply=None,
-                                                                    item="PR #102", recommendation="复盘后再定，今天不用回")]))[2]
-        self.assertEqual(body.split("\n")[0], "<font color='red'>**限时**</font>｜**猛鬼兽·夜跑收尾**：按授权 72 收尾。"
-                                              "最晚 **11-09 06:00**，回「按授权 72 收尾」")
-        self.assertEqual(body.split("\n")[1], "<font color='grey'>普通</font>｜**猛鬼兽·PR #102**：复盘后再定，今天不用回")
-        self.assertNotIn("。。", body)
-        self.assertNotIn("回「回「", body)
+    def test_lines(self):
+        d = dict(card_fields()["decisions"][0], item="夜跑收尾。", recommendation="按授权 72 收尾。")
+        f, c = facts(), card_fields(decisions=[d])
+        pp.normalize(f, c)
+        self.assertEqual((c["decisions"][0]["item"], c["decisions"][0]["recommendation"]), ("夜跑收尾", "按授权 72 收尾"))
+        ls = self.lines(card_fields())
+        self.assertEqual(ls[2], "1. **牛马之家**：证据口径对齐合并（#43），未发布")
+        self.assertIn("引用这张卡片回一句", ls[-2])
 
-    def test_other_lines(self):
-        ls = self.lines(card_fields(today=[{"priority": "P1", "item": "牛马之家盲测", "owner_action": "Hermes 协调"},
-                                           {"priority": "P0", "item": "夜跑收尾", "owner_action": "你回拍板 1"}]))
-        self.assertEqual(ls[4], "1. **牛马之家**：证据口径对齐合并（#43），未发布")
-        self.assertEqual(ls[6], "⚪ **管理失真｜牛马之家**：主目录 15 处未提交")
-        self.assertEqual(ls[8], "1. **P0 夜跑收尾**：你回拍板 1\n2. **P1 牛马之家盲测**：Hermes 协调")   # P0 在前
-
-    def test_more_all_shown(self):
-        """常浩 11-10：风险与阻塞等板块不折叠到完整报告，8 条全在卡片上。"""
-        r = card_fields()["risks"][0]
-        body = self.lines(card_fields(risks=[r] * 8))[6]
-        self.assertEqual(body.count("管理失真｜牛马之家"), 8)
-        self.assertNotIn("见完整报告", body)
+    def test_sample_file_matches_builder(self):
+        """乙版样例 hermes/samples/pdaily-card-b-2026-11-18.json 就是 build_card 的产物，板块和表头对得上。"""
+        sample = json.loads((HERE.parent.parent / "samples" / "pdaily-card-b-2026-11-18.json").read_text(encoding="utf-8"))
+        heads = [e["content"].split(" · ")[0] for e in sample["body"]["elements"]
+                 if e.get("tag") == "markdown" and e["content"].startswith("**")]
+        self.assertEqual(heads, ["**📈 核心数据速览**", "**✅ 昨日关键成果**", "**⚠️ 风险与阻塞", "**🎯 需要你拍板"])
+        tabs = [[c["display_name"] for c in e["columns"]] for e in sample["body"]["elements"] if e.get("tag") == "table"]
+        self.assertEqual(tabs, [["指标", "昨日", "说明"], ["问题", "涉及", "去向"], ["#", "事项", "推荐", "已挂"]])
 
     def test_overlong_clipped(self):
         f, c = facts(), card_fields(achievements=[{"project": "牛马之家", "text": "很长" * 40}])
@@ -716,7 +898,8 @@ class FallbackMoreTests(unittest.TestCase):
     def test_degraded_metrics(self):
         card, _ = pp.fallback(facts(), "x")
         r = {k: (v, n) for k, v, n in pp.metrics(facts(), card)}
-        self.assertEqual(r["待你拍板"], ("候选 1", "分析降级，类型未判断"))
+        self.assertEqual(r["需要你拍板"], ("候选 1", "分析降级，没判断"))
+        self.assertEqual(r["风险与阻塞"], ("1 类", "分析降级，没归类、没判断去向"))
         self.assertEqual(r["有推进的项目"][0], "未知")
 
 

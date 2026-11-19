@@ -3,6 +3,7 @@
 每个项目一个临时裸仓库当远端、一个临时主目录；PATH 最前面放假 gh（fake_gh.py），远端设置从 api.json 回话。
 git 用临时全局配置。不联网，不碰真实仓库。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

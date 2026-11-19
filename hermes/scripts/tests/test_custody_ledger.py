@@ -4,6 +4,7 @@
 test_custody 的 P1-08 用例）。并发预占用多个真进程抢同一个库。不联网、不碰 ~/Library/Application Support/DigitalTwin。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_custody_ledger.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import multiprocessing as mp
@@ -504,7 +505,7 @@ class MigrationTests(Base):
         conn.commit()
         conn.close()
         with L.TS.Store(self.db, clock=lambda: T0) as s:
-            self.assertEqual(s.version(), 4)
+            self.assertEqual(s.version(), L.TS.SCHEMA_VERSION)   # 之后的版本（v5 秘书账本）照样不动 v3 数据
             self.assertEqual(L.decisions(s), [])
 
 

@@ -12,6 +12,7 @@
   8 重启恢复、审计、脱敏与回退                                                       test_s8_restart_audit_redaction_rollback
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_scheduler_e2e.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

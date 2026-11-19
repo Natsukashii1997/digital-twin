@@ -4,6 +4,7 @@
 每项测试用独立临时目录里的状态库、固定时钟和虚构的派单台账；不碰 ~/.hermes、不碰真实工单、不调用模型或外部服务。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_state.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import importlib.util
 import json

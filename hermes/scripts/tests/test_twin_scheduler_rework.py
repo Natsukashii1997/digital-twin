@@ -6,6 +6,7 @@ P0 同键重复开单（ChatGPT 终审 2026-10-29）：同一个仍是 claimed �
 真实子进程跑 dispatch.py（dispatch_harness.py，可在拿锁前睡一会模拟慢 fetch）；临时状态库与派单根目录；不碰 ~/.hermes、正式状态库、
 真实工单与外部服务。单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_twin_scheduler_rework.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import datetime as dt
 import io

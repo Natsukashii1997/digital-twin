@@ -1,5 +1,6 @@
 """亚古兽工具拦截插件（#142）自测：他人只能用安全工具、常浩本人两个 ID 都不受限、本机与定时任务不受限、
 会话信息读不到时拦截、牛马之家只在本人私聊。不起网关：直接加载插件，假的 gateway.session_context 提供会话信息。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import sys
 import types

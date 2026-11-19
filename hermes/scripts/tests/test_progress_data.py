@@ -2,6 +2,7 @@
 
 用临时 git 仓库、临时名册和临时台账跑 progress_data.py，不碰真实仓库和 ~/.hermes。
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
 import subprocess

@@ -2,6 +2,36 @@
 
 名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`python3 -B -m unittest discover -s hermes/scripts/tests`。
 
+## 统一测试隔离（_isolation，#212）
+
+测试碰不到本机正式环境，不靠每个测试自己记得隔离（来由：11-17 反向验证误装进正式中台、10-27 假模型名写进正式凭证 G-13、11-11 覆盖正式配置）：
+
+- **每个测试模块第一句（文档字符串之后）写 `import _isolation`**，在导入任何被测脚本之前。`test_isolation_guard.py` 扫描本目录，漏写或写在别的 import 后面就失败。按上面的命令跑时 `_isolation` 包排在所有 `test_*.py` 前面先被导入，漏写的模块也已在隔离里；单跑一个文件靠第一句。
+- 导入时：清掉 `DT_*`、`HERMES_*`、`FEISHU_*` 等可能指向正式环境的变量（`DT_HUB_E2E`、`DT_AUTOLOOP_CLI` 两个开关保留），把 `HOME`、`XDG_*`、`AGENT_AUTOLOOP_HOME`、`HERMES_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS`、`DT_AUTOLOOP_SHARED`、`DT_PUBLISH_OUTBOX` 指到本次运行的临时目录（要只读核对真正的正式目录、读上游源码，用 `_isolation.REAL_HOME`，不用 `~`），`DT_HUB` 指到不监听的 127.0.0.1:9；git 用临时全局配置。
+- 默认禁网：本进程连非回环地址、解析外部域名抛 `_isolation.BlockedNetwork`（`OSError` 子类）；回环放行，但本机正式服务端口（3350、3352、5433、8085、8086、8090）也拦。子进程拿到指向死端口的 `HTTP(S)_PROXY`。
+- `PATH` 最前面放拦截桩：`launchctl`、`security`、`sudo`、`crontab`、`osascript`、`pfctl`、`lark-cli`、`hermes`、`claude`、`codex`、`gh`、`multica`、`docker` 调到就退出码 97。测试要用假命令，照旧把自己的目录放在 `PATH` 更前面或用 `DT_*_CLI` 指定。
+- 进程退出时把拦下的连接和命令汇总打到 stderr。缺口：测试给子进程拼全新环境（如 `PATH` 只写 `/usr/bin:/bin`、不带 `HOME`）时桩和代理管不到那个子进程，这种写法要自己指好临时目录。
+
+## 反向验证核对正式目录（prod_snapshot.py，#212）
+
+「故意改坏」类验证和全量测试的前后，用它核对本机正式目录没被动过。只读：只取路径、类型、大小、修改时间，不打开文件；家目录按系统账号取（不受 `HOME` 影响）。默认核对 `~/.agent-autoloop`、`~/.hermes`、`~/Library/LaunchAgents`、`~/Library/Application Support/DigitalTwin`、`/Users/Shared/dt-autoloop`，变了退出码 3 并逐条列出新增 / 删除 / 变了的路径。
+
+```sh
+python3 -B hermes/scripts/tests/prod_snapshot.py run --out-dir <证据目录> -- python3 -B -m unittest discover -s hermes/scripts/tests
+python3 -B hermes/scripts/tests/prod_snapshot.py take 前.json     # 之后 check 前.json 再比；diff 前.json 后.json 比两份
+```
+
+改坏脚本里每改坏一处、跑完测试就核一次，变了立刻停：
+
+```python
+import prod_snapshot as ps          # sys.path 加上 hermes/scripts/tests
+base = ps.take()
+...                                 # 改坏一处、跑测试、还原
+ps.assert_unchanged(base)           # 变了抛 ps.ProdChanged，消息里写明哪些路径变了
+```
+
+Hermes 网关一直在写心跳和运行状态（`~/.hermes/state/`、`gateway_state.json`、`*.db-wal` 等），空闲时也会变；要排除就加 `--exclude '<绝对路径通配>'`，排除了什么写进证据。
+
 ## 派单续跑回执（test_dispatch_followup.py）
 
 只需要 Python 3.8 或以上版本的标准库，无需安装依赖。在仓库根目录执行：
@@ -122,6 +152,12 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 - 重试分级、低噪声报告（未确认送达每轮再报、`ack` 后才安静、重启后去重仍在、没有待报时 `--quiet` 空输出）；`tick --execute` 默认关闭。
 - 端到端：任务书 S7 场景 1、2、3、7、8（其余场景在上面各文件里），对照表在 `test_twin_scheduler_e2e.py` 文件头。
 
+## 车间只读单（test_run_worker_readonly.py、claude_readonly_probe.py）
+
+`test_run_worker_readonly.py` 钉住 `run_worker.py` 的只读参数：Claude 只读单只加载 Read / Grep / Glob（`--tools`）、不加载 MCP（`--strict-mcp-config`）、权限模式 `dontAsk`，续跑同样受限；写入单和 Codex（`-s read-only`）不变。来由：只加 `--allowedTools` 时，本机 `bypassPermissions` 下只读单照样能用 Bash、Write 和 MCP 写文件（2026-11-19 实测）。
+
+`claude_readonly_probe.py` 是真 claude 的反向验证（会用会员额度、要联网，不进全量测试）：升级 Claude Code 或改了只读参数后手动跑 `python3 -B hermes/scripts/tests/claude_readonly_probe.py <证据目录>`。它用真实 `~/.claude` 设置、临时假仓库（项目设置故意放行 Write、Edit、`Bash(touch *)`），让模型真的去试 Write、Bash、MCP 写文件；工具只有 Read / Grep / Glob、没有 MCP、`dontAsk`、一个探测文件都没写出来才退出码 0。
+
 ## 派单锁与进程身份（test_dispatch_lock.py）
 
 真实子进程跑 `dispatch.py`（`dispatch_harness.py`）。覆盖：4 个进程并行 `new` 编号互不相同；同仓库两张单同时 `run` 只跑一张、另一张排队；同一单同时 `run` 两次只跑一次；锁被占时等待有上限且不动作；`run` 记 `dispatch_pid / run_host / run_started`，车间 pid = pgid = sid；`write_identity` 与 `ps` 一致；`--sched-key` 写字段和标记文件、格式不对在编号前拒绝；手工 `new` 字段集合不变。改动前 9 项中 8 项失败。
@@ -136,7 +172,7 @@ ChatGPT 2026-10-29 评审 F1 / F2 与返修终审 P0 的负向用例，18 项。
 
 ## 影子合并官（test_merge_officer.py）与每周提案收口（test_proposal_digest.py）
 
-假 gh、假 lark-cli 和临时目录，不联网、不碰真实记录和提案。影子合并官覆盖：风险档（L0 文档、规则文档上调 L1、按文件数分 L1/L2、敏感路径 L3 及按仓库的敏感路径）、七种退回理由、有退回理由时不靠「问常浩」绕过、判定不改入参；一致率按同一 HEAD 比对（新提交后旧判定标「取代」）、问常浩不计、回填单列不计入门槛、门槛边界（20 次 90% 达标，85% 或 19 次不达标）；回放前后对比且只读；命令行只调 `gh pr list` / `gh pr view`，一个仓库失败时报告并继续。提案收口覆盖：回复写法与八种错误（一条都不写）；三类来源的汇总（已定的不列、延期 / 待定照列、被取代的旧编号并入新条目、只读最新一期、LESSONS 默认不列，打开后只算名册项目近 7 天且未升级的）；发卡片的幂等键和同日不重发；写回格式（复盘条目标题下一行、decisions.md 追加行、LESSONS 台账）和改主意时替换结论行；给 Hermes 的草稿（含原文摘录，无参数入口 proposal_digest_draft.py）、卡片带推荐、推荐文件四种错误不发、「按推荐」及「按推荐，2 改否」覆盖、没有推荐时拒绝「按推荐」。
+假 gh、假 lark-cli 和临时目录，不联网、不碰真实记录和提案。影子合并官覆盖：风险档（L0 文档、规则文档上调 L1、按文件数分 L1/L2、敏感路径 L3 及按仓库的敏感路径）、七种退回理由、有退回理由时不靠「问常浩」绕过、判定不改入参；一致率按同一 HEAD 比对（新提交后旧判定标「取代」）、问常浩不计、回填单列不计入门槛、门槛边界（20 次 90% 达标，85% 或 19 次不达标）；回放前后对比且只读；命令行只调 `gh pr list` / `gh pr view`，一个仓库失败时报告并继续。提案收口覆盖：回复写法与八种错误（一条都不写）；三类来源的汇总（已定的不列、延期 / 待定照列、被取代的旧编号并入新条目、只读最新一期、LESSONS 默认不列，打开后只算名册项目近 7 天且未升级的）；发卡片的幂等键和同日不重发；写回格式（复盘条目标题下一行、decisions.md 追加行、LESSONS 台账）和改主意时替换结论行；给 Hermes 的草稿（含原文摘录，无参数入口 proposal_digest_draft.py）、卡片带推荐、推荐文件四种错误不发、「按推荐」及「按推荐，2 改否」覆盖、没有推荐时拒绝「按推荐」。再犯与待提升（#216）：PATH 最前面放假 `node`，回放 agent-kit `weekly-review.mjs --json` 的输出（`DT_WEEKLY_REVIEW` 指向临时目录里的替身脚本），不跑真的 agent-kit；覆盖只列「再犯」和〔提议〕两种（只写未升级的不列）、升级首选在前、每期 7 条截断并写「另有 N 条」、超出的记进期号状态并由 list 打印、DT_LESSONS_MIN_PROJECTS 为 0 时 LESSONS 候选仍不列（打开时两类共存、连续编号）、apply「按推荐」加逐条写进 guards-decisions.md 且不混进 LESSONS 台账、下期已定的不列延期的再列、汇总取不到（脚本出错、输出不是 JSON、schema 不对、脚本不在）时其他来源照常并写明原因、只有这句提示也照发且草稿不为空。
 
 ## 飞书一句话合并（test_merge_act.py）
 

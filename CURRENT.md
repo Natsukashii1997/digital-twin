@@ -13,7 +13,7 @@
 - ✅ 方案：V2.4，Fable 5.2 独立评估 + ChatGPT High 两轮评审，常浩 11-15 回「代批选 B，9 件事都按推荐」；PR #189 已合并 `832d7ca`（同时把 CI 固定到 ubuntu-24.04：ubuntu-latest 已是 26.04、没有 Python 3.9），#188 已关
 - ✅ D 档不代批：常浩 11-15 回「D档还是都不能替我批」，维持授权清单 v1
 - ✅ 批 0A 隔离门：PR #191 已合并 `928f26b`、已安装；dt-worker 越权反向测试 22 项全挡住，`claude -p` 正常；过滤代理、门卫规则在生效；merge_act 不再在主账号跑 PR 代码
-- ▶ 批 0B 授权门（#195）：秘书代批规格 v0.4 定稿，PR #196 已合并 `5b9d2d3`（思维评审两轮成熟退出；常浩 11-17 定：任何时候可代批、白天先等 30 分钟；清单 v1 开提问卡 / 重派 / 退回 / 合并；21:00 汇总；在途点击「获准送达前本人优先」；dt-sandbox 加最小 CI 做合并验收）；常浩 11-17「按计划开工」，0B 分 6 批（0B-1 任务凭证 → 0B-2 中台配置与只读窗口 → 0B-3 飞书按钮实测 → 0B-4 代批核心 → 0B-5 推翻与汇报；0B-6 dt-sandbox 加最小 CI 可并行），完整验收等 0C 后一起。✅ 0B-1 任务凭证与派单网关：PR #199 已合并 `cd90a4e`（L3 两轮 + 常浩授权专项续审，通过；未安装，hermes 来源密钥 0B-2 建）。✅ 0B-2 中台配置与只读窗口：PR #200 已合并 `9f3f3ca`（常浩 11-17「按计划开工」即合并；L3 四轮，第 4 轮通过；`b381b89` CI 通过；PR 落后 main 的提交只改 CURRENT.md、不重叠，未变基直接锁定版本合并，合并结果除 CURRENT.md 外与审过的版本一致）；**已安装**（常浩 11-17 回「装」）：在 main `4ad0176` 上跑 install 和 issue-source-key（--confirm --target ~/.agent-autoloop）；装前 rules.json、config.json、hub.db 备份在 evidence/autoloop-config/install-20261117-213605/；status 回读：hermes 来源和钥匙在、feishu / secretary 通道在、两条派单规则已载入且暂停（原因「0C 启动脚本就绪前暂停」，由常浩决定恢复）、钥匙文件 DigitalTwin/autoloop/hermes-source.key 权限 600；plan 显示没有要改的；装前装后中台 runs 2 条、events 3 条不变，没有派单跑起来。▶ 0B-3 飞书按钮实测：常浩 11-17「按计划开工」（三小步：探针 PR → 装插件、重启网关、发测试卡、常浩点一次 → 白话结论）；读代码推断：点击人 open_id 网关有（HERMES_SESSION_USER_ID，插件原来没取），原消息号网关不转（HERMES_SESSION_MESSAGE_ID 是回调 token），靠按钮里的随机令牌对卡；第 1 小步 PR #201 已合并 `ba7d38a`（常浩 11-17「不送审，合并」；探针只记录不触发动作；全量 1152 + 48 通过，CI 通过）；**插件已安装**（常浩 11-17「三件都做」；旧版备份 evidence/button-probe/merge-buttons-init.before-20261117.py；新版同时带上 #133 托管按钮转交，custody_report 未安装、没有托管卡，点不到）；21:59 重启网关，飞书重连正常；以猛鬼兽机器人发了两张测试卡（登记卡尾号 f81e，没登记的卡尾号 d4a7，都回读核对过），button_probe 从仓库 main 直接跑、不装。**实测结论（22:00）**：谁点的——插件拿得到常浩 open_id（HERMES_SESSION_USER_ID，和 owner 文件对上）；在哪点的——chat_id 对上私聊，但 chat_type 私聊也报 group，只能认 chat_id；原消息号——插件里拿不到（HERMES_SESSION_MESSAGE_ID 为空），只能靠按钮里登记过的令牌对卡，登记卡对上、没登记的卡被认出；重复点击——f81e 第二下没到网关（原因不明），去重要在脚本层做（令牌一次性）；插件分不出点按钮和打字 /card（推断）。结论与原始记录在 evidence/button-probe/2026-11-17-结论.md。✅ 0B-3 实测完成。▶ 0B-4 代批核心：常浩 11-17「按计划开工」（4a 本人飞书批 → 4b 清单与账本 → 4c 秘书巡视代答①②③ → 4d 代合并④，每批一个 PR，按推荐都送 L3）；4a PR #202（分支 claude/195-feishu-bridge，`ba12769`：autoloop_feishu 飞书桥接、autoloop_answer 本人点击核对与本人在途、插件转交、autoloop_config issue-channel-key；全量 1170 + 48 通过，临时中台端到端，改坏 24/24；顺手修 test_autoloop_grants 时间炸弹——main 上 11-17 22:00 起这项测试会失败），L3 第 1 轮「返修」（4 个 P1、4 个 P2），返修 `9ba6c4e`：送达前点击只排队、确认后提交（真中台验证送达前答会被 4xx 拒）、错误分类（明确拒绝才释放、5xx 和超时记结果不明）、claims 状态机和 reconcile 对账（从不重答）、秘书契约（本人不改秘书行、owner_holds 给 4c）、改卡核消息号、别处点击不回话、签钥匙先占文件；全量 1181 + 48 通过、改坏 38/38；P1-01（同一 macOS 账号的进程能伪造点击参数、也能直接读通道钥匙）常浩 11-17 **选甲**：4a 合并但不签 feishu 通道钥匙、不装，隔离在 ADR-015 定（方向：独立账号 dt-gate + 单独飞书机器人直接收点击，0C 前定）；`4b656b2` 第 2 轮「返修」（新 P1-05 重复发送资格、P1-06 送达确认没落盘、P1-07 过期对账覆盖新尝试，P1-04 的 60 秒放开条件不成立），返修 `39c2b29`：尝试号 + 唯一发送资格、对账按登记原样重报送达（真中台验证幂等）、条件更新、结果不明不自动放开（要常浩明确同意 release --confirm）；全量 1187 + 48 通过、改坏 45 处抓到 43 处（剩下 2 处是同一事务里互相兜底的两道检查，一起改坏能抓到）；L3 两轮已用完，常浩 11-18「授权第 3 轮」，第 3 轮「返修」：第 2 轮 4 个 P1 全部关闭，新 P1-08（中台卡片状态认不出时当成「开着」，可能误放开或误结算），返修 `20390e8`：只认 open / decided / done / closed，认不出一律当结果不明；P2-08 旧库结构拒用；全量 1192 + 48 通过、改坏 6/6；常浩 11-18「授权专项复核」，复核**通过**（P1-08 关闭，P2-07、P2-08 关闭；P2-09 旧库先查后建已顺手改 `747bb45`，全量 1192 + 48 通过）；`20390e8`、`747bb45` 的 CI 因 GitHub 账单没启动；之后 PR 和 main 冲突（test_autoloop_grants 时间炸弹两边都修了），合并 main 取 main 写法 `3313bd1`，全量 1192 + 48 通过，**CI 在 `3313bd1` 通过**；常浩 11-18 回「合并」，✅ **PR #202 已合并 `096851e`**（压缩合并、锁定 `3313bd1`）；▶ 4b 秘书开关、代批清单与账本：常浩 11-18「按推荐开工」（复用选甲：和托管共用底座；签了清单不算开，私聊「开秘书」才开），PR #207（`d8dc69a`：secretary.py、secretary_ledger.py、twin-state v5、docs/代批清单-模板.md；custody / custody_ledger 抽出用途参数，托管行为不变；全量 1249 + 48 通过，改坏 61/61），已送 L3 第 1 轮；不签、不装、不开；合并后不签钥匙、不装；本机还没有 DigitalTwin/owner_chat_id（twin_identity setup-chat），上线前要配，0B-1 approve 也依赖它；未签 feishu 通道钥匙、未装。0B-6 在[另一个会话](local_1d8cbef8)：dt-sandbox 最小 CI 开在 dt-sandbox#22（247 项测试通过；故意弄坏的草稿 #23 变红、已关闭），等常浩合并
+- ▶ 批 0B 授权门（#195）：秘书代批规格 v0.4 定稿，PR #196 已合并 `5b9d2d3`（思维评审两轮成熟退出；常浩 11-17 定：任何时候可代批、白天先等 30 分钟；清单 v1 开提问卡 / 重派 / 退回 / 合并；21:00 汇总；在途点击「获准送达前本人优先」；dt-sandbox 加最小 CI 做合并验收）；常浩 11-17「按计划开工」，0B 分 6 批（0B-1 任务凭证 → 0B-2 中台配置与只读窗口 → 0B-3 飞书按钮实测 → 0B-4 代批核心 → 0B-5 推翻与汇报；0B-6 dt-sandbox 加最小 CI 可并行），完整验收等 0C 后一起。✅ 0B-1 任务凭证与派单网关：PR #199 已合并 `cd90a4e`（L3 两轮 + 常浩授权专项续审，通过；未安装，hermes 来源密钥 0B-2 建）。✅ 0B-2 中台配置与只读窗口：PR #200 已合并 `9f3f3ca`（常浩 11-17「按计划开工」即合并；L3 四轮，第 4 轮通过；`b381b89` CI 通过；PR 落后 main 的提交只改 CURRENT.md、不重叠，未变基直接锁定版本合并，合并结果除 CURRENT.md 外与审过的版本一致）；**已安装**（常浩 11-17 回「装」）：在 main `4ad0176` 上跑 install 和 issue-source-key（--confirm --target ~/.agent-autoloop）；装前 rules.json、config.json、hub.db 备份在 evidence/autoloop-config/install-20261117-213605/；status 回读：hermes 来源和钥匙在、feishu / secretary 通道在、两条派单规则已载入且暂停（原因「0C 启动脚本就绪前暂停」，由常浩决定恢复）、钥匙文件 DigitalTwin/autoloop/hermes-source.key 权限 600；plan 显示没有要改的；装前装后中台 runs 2 条、events 3 条不变，没有派单跑起来。▶ 0B-3 飞书按钮实测：常浩 11-17「按计划开工」（三小步：探针 PR → 装插件、重启网关、发测试卡、常浩点一次 → 白话结论）；读代码推断：点击人 open_id 网关有（HERMES_SESSION_USER_ID，插件原来没取），原消息号网关不转（HERMES_SESSION_MESSAGE_ID 是回调 token），靠按钮里的随机令牌对卡；第 1 小步 PR #201 已合并 `ba7d38a`（常浩 11-17「不送审，合并」；探针只记录不触发动作；全量 1152 + 48 通过，CI 通过）；**插件已安装**（常浩 11-17「三件都做」；旧版备份 evidence/button-probe/merge-buttons-init.before-20261117.py；新版同时带上 #133 托管按钮转交，custody_report 未安装、没有托管卡，点不到）；21:59 重启网关，飞书重连正常；以猛鬼兽机器人发了两张测试卡（登记卡尾号 f81e，没登记的卡尾号 d4a7，都回读核对过），button_probe 从仓库 main 直接跑、不装。**实测结论（22:00）**：谁点的——插件拿得到常浩 open_id（HERMES_SESSION_USER_ID，和 owner 文件对上）；在哪点的——chat_id 对上私聊，但 chat_type 私聊也报 group，只能认 chat_id；原消息号——插件里拿不到（HERMES_SESSION_MESSAGE_ID 为空），只能靠按钮里登记过的令牌对卡，登记卡对上、没登记的卡被认出；重复点击——f81e 第二下没到网关（原因不明），去重要在脚本层做（令牌一次性）；插件分不出点按钮和打字 /card（推断）。结论与原始记录在 evidence/button-probe/2026-11-17-结论.md。✅ 0B-3 实测完成。▶ 0B-4 代批核心：常浩 11-17「按计划开工」（4a 本人飞书批 → 4b 清单与账本 → 4c 秘书巡视代答①②③ → 4d 代合并④，每批一个 PR，按推荐都送 L3）；4a PR #202（分支 claude/195-feishu-bridge，`ba12769`：autoloop_feishu 飞书桥接、autoloop_answer 本人点击核对与本人在途、插件转交、autoloop_config issue-channel-key；全量 1170 + 48 通过，临时中台端到端，改坏 24/24；顺手修 test_autoloop_grants 时间炸弹——main 上 11-17 22:00 起这项测试会失败），L3 第 1 轮「返修」（4 个 P1、4 个 P2），返修 `9ba6c4e`：送达前点击只排队、确认后提交（真中台验证送达前答会被 4xx 拒）、错误分类（明确拒绝才释放、5xx 和超时记结果不明）、claims 状态机和 reconcile 对账（从不重答）、秘书契约（本人不改秘书行、owner_holds 给 4c）、改卡核消息号、别处点击不回话、签钥匙先占文件；全量 1181 + 48 通过、改坏 38/38；P1-01（同一 macOS 账号的进程能伪造点击参数、也能直接读通道钥匙）常浩 11-17 **选甲**：4a 合并但不签 feishu 通道钥匙、不装，隔离在 ADR-015 定（方向：独立账号 dt-gate + 单独飞书机器人直接收点击，0C 前定）；`4b656b2` 第 2 轮「返修」（新 P1-05 重复发送资格、P1-06 送达确认没落盘、P1-07 过期对账覆盖新尝试，P1-04 的 60 秒放开条件不成立），返修 `39c2b29`：尝试号 + 唯一发送资格、对账按登记原样重报送达（真中台验证幂等）、条件更新、结果不明不自动放开（要常浩明确同意 release --confirm）；全量 1187 + 48 通过、改坏 45 处抓到 43 处（剩下 2 处是同一事务里互相兜底的两道检查，一起改坏能抓到）；L3 两轮已用完，常浩 11-18「授权第 3 轮」，第 3 轮「返修」：第 2 轮 4 个 P1 全部关闭，新 P1-08（中台卡片状态认不出时当成「开着」，可能误放开或误结算），返修 `20390e8`：只认 open / decided / done / closed，认不出一律当结果不明；P2-08 旧库结构拒用；全量 1192 + 48 通过、改坏 6/6；常浩 11-18「授权专项复核」，复核**通过**（P1-08 关闭，P2-07、P2-08 关闭；P2-09 旧库先查后建已顺手改 `747bb45`，全量 1192 + 48 通过）；`20390e8`、`747bb45` 的 CI 因 GitHub 账单没启动；之后 PR 和 main 冲突（test_autoloop_grants 时间炸弹两边都修了），合并 main 取 main 写法 `3313bd1`，全量 1192 + 48 通过，**CI 在 `3313bd1` 通过**；常浩 11-18 回「合并」，✅ **PR #202 已合并 `096851e`**（压缩合并、锁定 `3313bd1`）；▶ 4b 秘书开关、代批清单与账本：常浩 11-18「按推荐开工」（复用选甲：和托管共用底座；签了清单不算开，私聊「开秘书」才开），PR #207（`d8dc69a`：secretary.py、secretary_ledger.py、twin-state v5、docs/代批清单-模板.md；custody / custody_ledger 抽出用途参数，托管行为不变；全量 1249 + 48 通过，改坏 61/61），L3 第 1 轮「返修」（4 个 P1：签署没固定项目→仓库映射、交常浩被名册挡、决定没记清单版本、原文可空；P2 口令处理不改行为只改说明），返修 `79f5e3f`、合并 main `3ef32f0`，全量 1334 + 48 通过、CI 通过、改坏 23/23；第 2 轮「返修」（第 1 轮 4 个 P1 全关；新 P1-05：名册 inventory 不合格仓库名能签进状态、签完读不回），返修 `4801514`（inventory 同样校验、落盘前结构复核）；常浩 11-18「授权专项复核」，复核**通过**（P1-05 关闭，无新增问题；驿窗 30 分钟超时停了接力，回信是浏览器只读核到的）；本机全量 1336 + 48 通过；`4801514` CI 通过；常浩 11-18 回「合并」，✅ **PR #207 已合并 `ef7cae0`**（压缩合并、锁定 `4801514`）；不签清单、不装、不开秘书；正式 twin-state 库首次被已安装脚本打开会自动升 v5，安装前单独问常浩；▶ 4c 秘书巡视代答：常浩 11-19「按推荐开工」（分两小批：先控制面、再秘书侧；③退回 PR 用机器账号留言，凭据 0E-4 接）；4c-1 控制面 PR #218（`7324ca8`：secretary_gate.py 前后闸、获准、送达、对账；twin-state v6 同卡同版本唯一；顺手修 autoloop_publish.hub_card 按整数查卡片的已有 bug；全量 1381 + 48 通过、改坏 56/56），L3 共 6 轮（第 3–6 轮常浩 11-19 授权专项续审）：第 1、2 轮关闭 ① 运行证据、REAL_ASK 关闭（常浩选甲，不破零补丁，中台按版本核对是验收 12）、②③ 全程持受信发布锁、送达证据按版本；第 3 轮剩 5 项常浩回「按推荐」：① 卡住超过 2 分钟核不出一律对账不清、同任务冻结（回到第 2 轮前的保守口径），按钮带版本号（**没带版本的旧样式按钮一律拒**），桥接单写锁，schema 严格整数；第 4 轮补：中台查不到就不发、补报送达和直接发卡都拿锁、改消息前核版本、秘书对账缺字段判说不清；第 5 轮常浩选甲：中台每递一次卡算一次尝试、9 次后永久放弃（given_up，ask 卡无恢复入口），桥接改为领卡前先查中台库、读不到不领并私聊提醒，领到后才读不到报 failed 写明原因，已放弃的卡每张私聊说一次，报完送达放锁再提交本人回答；第 6 轮 P1 关闭、剩 2 个 P2，常浩选甲「修完不再审」：本地版本比中台新报 failed、报 failed 出错也提醒（`37d7ebe`、`94dee5c`，PR 上已写「补改未复审」）；全量 1486 + 48 通过、改坏 144/144、测试前后正式文件哈希一致、CI 通过；回信摘录在 evidence/reviews/2026-11-19-PR218-L3-*；✅ **PR #218 已合并 `3211b13`**（常浩 11-19 经驿窗回「合并」；压缩合并、锁定 `94dee5c`；合并时 `94dee5c` 的 CI 还在排队，上一提交 `37d7ebe` CI 通过，`94dee5c` 只多一条测试、本机通过；合并后 hermes/ 与审过的版本逐字一致）；不签钥匙、不装、不开秘书，REAL_ASK 关闭；▶ 4c 第 2 小批（秘书侧）：常浩 11-19「按推荐开工」（①送达开关关着时巡视不调模型），PR #225（分支 claude/195-secretary-patrol，`31e7198` + 合 main `76d8bb9`：新增 secretary_patrol.py；控制面两处改变已有行为——①开关关着一进前闸就交常浩、弃权出错时 choice 可为 null；全量 1503 + 48 通过、改坏 24/24、正式文件哈希一致）；**待送 L3 第 1 轮**（上下文到 50%，交接给新会话）；向上游要的中台扩展点：answer 按版本核对（验收 12）、given_up 卡恢复入口；桥接正式启用前 run 要受监督常驻（单跑 once 不扫已放弃的卡）；③现有审查记录绑不了 PR 和受审提交，一律交常浩，来源批 4 再定；不签钥匙、不装；P2（handoff 只认可回读的中台事项）放 4c；不签、不装、不开；合并后不签钥匙、不装；本机还没有 DigitalTwin/owner_chat_id（twin_identity setup-chat），上线前要配，0B-1 approve 也依赖它；未签 feishu 通道钥匙、未装。0B-6 在[另一个会话](local_1d8cbef8)：dt-sandbox 最小 CI 开在 dt-sandbox#22（247 项测试通过；故意弄坏的草稿 #23 变红、已关闭），等常浩合并
 - ✅ ADR-015（底座方向、信任边界、迁移回退）：PR #206 已合并 `170dc54`（常浩 11-18「合并」）。ChatGPT High 思维评审 1 轮「决策升级」；核实猛鬼兽、亚古兽的飞书用户令牌都能以常浩身份发消息；常浩 11-18「都按推荐」：dt-gate 控制面 + 不带 AI 的门卫机器人、本人批准只认门卫点击、代批生效前秘书必须有效降权、无人值守全权 AI 进程纳入检查；0C 不等 0E，受信发布按归 dt-gate 写、不装真实凭据。修订 1（11-18「都按推荐，原则6改」）：秘书降权走 4b，猛鬼兽、亚古兽一起搬进 dt-secretary；PRD 原则 1、6 改字面
 - ▶ 批 0E 控制面搬家与秘书降权：常浩 11-18「按计划开工」，分 0E-0 文档 → 0E-1 两个账号初始化与门卫规则 → 0E-2 中台和网关搬进 dt-gate → 0E-3 门卫机器人 → 0E-4 受信发布与合并执行器（等 0C）→ 0E-5 猛鬼兽、亚古兽搬进 dt-secretary → 0E-6 三类反向验收；0E-1 起按 L3 送审。✅ 0E-0 文档（ADR-015 修订 1、PRD v1.3、方案 V2.5）PR #208 已合并 `642ff84`。▶ 0E-1 两个账号初始化与门卫规则：常浩 11-18 建好 dt-gate（uid 503）、dt-secretary（uid 504），标准账号、已隐藏；PR #210（分支 claude/0e-1-accounts）：`ops/dt_accounts_setup.sh` 初始化 + 探针（`ops/dt_account_probe.sh`），`ops/dt_worker_pf.sh` 改白名单默认拒绝（工人、秘书都只能连列出的本机端口，其余含公网直连一律挡）+ 逐条回读核对 + 真机越权测试 verify（`ops/dt_pf_verify.py`），巡检认 state、10 分钟过期。L3 第 2 轮（链 r1a1f3f49cab01）返修 P1×4、P2×5，常浩 11-19「按推荐返修」：工人一并改默认拒绝（0A 记录写「只准连 3350、8090」，实际规则挡不住公网直连）、0E-2 起凭据存成账号目录里的文件不用钥匙串、第 3 轮前先试装拿真机证据。未装，等常浩跑两条 sudo 安装 + verify、重启一次后送第 3 轮。常浩亲手：在飞书开放平台建「门卫」应用（只开以应用身份发消息，可用范围只选常浩，回调配置等 0E-3），凭据不经任何 AI
 - ✅ 批 0C 执行门（#205）：PR #209 已合并 `d4a8557`（常浩 11-18「合并209」）；L3 四轮（第 3、4 轮常浩授权专项复核），第 4 轮「通过」；未安装、未在 dt-worker 部署，派单规则仍暂停；REAL_PUBLISH 继续关闭。详见下面「0C PR #209 已合并（未安装）」
@@ -39,6 +39,101 @@
 - ⏳ 常浩签托管策略（D 档，只能常浩）
 
 #135 网络缺口修好并重新验收之前，**托管保持禁用，也不开夜跑**（隔离执行器能访问宿主本机服务）。
+
+---
+
+## 主线：猛鬼兽日报改版（#226）｜完成 6/7
+
+常浩 2026-11-19 反馈日报「形式大于使用价值，没有行动指引」；当天在私聊三版真卡片预览里选乙版，对实施计划回「都按推荐」，第 1 批合并时说「合并并安装，继续直到完成任务」。定稿登记在 [docs/DECIDED.md](docs/DECIDED.md)，规格在 [docs/个人项目日报-V2-设计.md](docs/个人项目日报-V2-设计.md) 4.0，PRD D22。
+
+- ✅ 结构方案、三版预览选乙、实施计划都按推荐
+- ✅ 第 1 批版式：PR #229 已合并 `c589327`，已安装（pdaily_publish.py、pdaily_report.md、HERMES.md，旧版备份 evidence/2026-11-19-pr229-install/），网关已重启；验证卡已发私聊、回读通过
+- ✅ 第 2 批拍板按钮和回复闭环（#235）：PR #241 已合并 `3d2f790`（独立审查三轮，第三轮「可以合并」；CI 通过，锁定 `9de2fcd`）
+- ✅ 第 3 批猛鬼兽查只读单、自检按计划不装的不报（#236）：PR #243 已合并 `a867612`（合 main 解决 7 处冲突，均为第 2 批压缩合并所致；全量 1524 条在 `df40eb2` 上通过，合并后相关 4 组 172 条通过；CI 通过，锁定 `647b600`）
+- ✅ 安装（2026-11-19 23:02）：pdaily_publish.py、pdaily_act.py、self_check.py → ~/.hermes/scripts/；pdaily_report.md → ~/.hermes/prompts/；HERMES.md → ~/.hermes/workspace/；pdaily-act 技能 → ~/.hermes/skills/autonomous-ai-agents/pdaily-act/；merge-buttons 插件 → ~/.hermes/plugins/merge-buttons/。旧版备份和全量测试日志在 evidence/2026-11-19-pdaily-b23-install/；装后逐个 cmp 与 main 一致；网关已重启，飞书 23:03:42 重连成功（第一次连接超时，重试连上）。工程自检不再报按计划不装的 13 个脚本，输出存 evidence/2026-11-19-pdaily-b23-install/self_check.out。下一次 10:00 日报起带按钮，风险表可能出现「猛鬼兽派只读单查，明天报」——**未在真卡片上验证**
+- ❓ Hermes 配置 `plugins.entries.merge-buttons.allow_gateway_injection: true`：等常浩点头（现在没设，等于关；不开时点按钮照样记账，私聊提示引用卡片回「办 ①」）。按钮的具体样子等常浩在 11-20 的真卡片上看过再登记进 DECIDED
+- ✅ 车间 Claude 只读单改成真正只读：另一会话 PR #242 已合并 `4f79eaa`，run_worker.py 安装副本和 main 一致；第 3 批的只读单仍写死 Codex（要不要放开 Claude 另议）
+
+工程自检剩 9 项安装副本和 main 不一致，都不是这两批碰过的文件：prompts/README.md、ai_access.py、custody.py、twin_state.py、groupdigest-act、workshop 技能（早于本批的漂移），亚古兽的 sidebar_reports.py 和 sales-sidebar 两份（主目录有另一会话没提交的改动）。要不要补装另行确认（custody.py、twin_state.py 补装会改变运行中的行为）。
+
+---
+
+## 2026-11-19 · 车间 Claude 只读单改成真正只读（#236 后续；PR #242 已合并 `4f79eaa`，已安装）
+
+- 缺口（#236 第 3 批独立审查发现，本次实测确认）：`run_worker.py` 的 Claude 只读单只加了 `--allowedTools`，本机 bypassPermissions 下照样有 Bash、Write、Edit 和 42 个 MCP 服务，Write、Bash、desktop-commander 三种方式都写成了文件。
+- 改成 `--tools Read,Grep,Glob --strict-mcp-config --permission-mode dontAsk --allowedTools Read,Grep,Glob`；写入单、Codex 不变。代价：Claude 只读单跑不了任何命令（git、gh 也不行），Codex 只读沙箱里还能跑。
+- 测试：新增 test_run_worker_readonly.py 5 项（改前代码上失败 2 项）；真 claude 反向验证脚本 hermes/scripts/tests/claude_readonly_probe.py（手动跑，不进全量）；全量 1500 项通过，CI 通过。常浩经驿窗回「合并」「装上」（仓库不允许自动合并，CI 通过后锁定 `32115d9` 合并）。
+- **已安装**：`~/.hermes/scripts/run_worker.py` 换成 main 版本（装前和 main 的上一版逐字一致，备份 evidence/readonly-claude-236/install/run_worker.py.before-4f79eaa）；装后用安装副本实测：工具只剩 Read、Grep、Glob，没有 MCP，dontAsk，写不出文件；真跑一张只读单，退出码 0、读文件正常。证据 evidence/readonly-claude-236/。
+- 没做：日报「猛鬼兽查」（pdaily_act cmd_checks）仍写死 Codex，放不放开跟随车间默认等常浩定；考虑到上面的代价，核对风险这类活继续用 Codex 可能更合适。
+
+## 2026-11-19 · #239 工作台主线页（PR 待常浩合并）
+
+常浩 11-19 回「按这个逻辑出」，三版里选乙（原话和逐条内容见 `docs/DECIDED.md` 最上面一节）。
+
+- 主线页是地铁线：页头一条「等你」；每条主线一条线、一项一站，点一站看它的任务单（按等你 / 审查中 / 在做 / 没开始 / 已合并分列）和猛鬼兽巡视的话；已并入的主线折成一行。示例数据按本文件的两条主线改写。
+- 验证：真实浏览器 1440×900 和 1280 宽看过，点站切换正常，控制台无报错；首页、汇报、协同三页和改前逐像素对比无差异。基线截图在 `evidence/2026-11-19-workbench-main/`，合并脚本在同目录 `build-final/`。只做了电脑版。只改了设计稿和文档，全量测试未跑，看 CI。
+- **下一步**：常浩合并 PR；之后设计分身页（秘书、托管、代批清单、授权规则）。
+
+## 2026-11-19 · #237 工作台协同页（PR #238 已合并 `b756f1f`）
+
+常浩 11-19 三轮选稿定（原话和逐条内容见 `docs/DECIDED.md` 最上面一节）。
+
+- 协同页只讲规则：工作流是泳道，每一步的规则（做什么、用什么、怎样算过、不过怎么办）接在泳道正下方同一列；拖动、加步、删步后自动检查交接，改动先送「等我拍板」。自动化按负责人分组登记 21 个（猛鬼兽 8、亚古兽 3、Codex 5、Claude Code 2、本机 3），只有是什么、做什么、什么时候跑、在跑 / 已暂停。页面里不放说明文字。
+- 验证：真实浏览器 1440×900 和 1280 宽看过，用鼠标拖块换顺序、拖模块加步、删步、撤销、切页签都正常，控制台无报错；首页、汇报页和改前逐像素对比，汇报页一致，首页只差浮动动画。基线截图在 `evidence/2026-11-19-workbench-collab/`，合并脚本在同目录 `build-final/`。只做了电脑版。只改了设计稿和文档，全量测试未跑，看 CI。
+- 没动：首页写的「9 个自动化」、侧栏「协同 6 · 9」（另行确认要不要改成 21）。
+- 已合并；主线页见上面 #239。
+
+## 2026-11-19 · #226 个人项目日报改乙版第 1 批（PR #229 已开，未合并、未安装）
+
+- 改了 `hermes/scripts/pdaily_publish.py`（卡片要素、核对、乙版卡片、事实版、核对不过重写一次）、`hermes/prompts/pdaily_report.md`、测试、样例 `hermes/samples/pdaily-card-b-2026-11-18.json`，同步设计文档、工作规程第 5 节、PRD D22、AGENTS、DECIDED。
+- 测试：hermes 1495 项全过（约 30 分钟）、orca 全过。用 11-18 的事实快照让 Hermes 按新提示词实跑写稿（只出稿不发）：8 件拍板、7 类风险，核对通过。过程文件在 `evidence/pdaily-redesign/`。
+- 实跑发现：按编号硬拦「同一件事在风险和拍板两处说」会误判（各仓库 #7 重号，整份被降成事实版），改成只记提醒。
+- 待：常浩说合并 → 装 `pdaily_publish.py`、`pdaily_report.md`、`HERMES.md` 到 `~/.hermes/`（HERMES.md 改了要重启网关）→ 发真卡片验。
+
+## 2026-11-19 · #232 工作台汇报页重做（PR #233 已合并 `19cc35e`；状态标签样式修复 PR #234 已合并 `5531937`）
+
+常浩 11-19 三轮选稿定（原话和逐条内容见 `docs/DECIDED.md` 最上面一节）。
+
+- 定稿文件改名为 `docs/design/workbench.html`（以后不随版本改名），汇报页换成：报告页签 → 六个数字 → 一夜时间轴 → 等我拍板 → 昨晚的经过（一件一件的白话，句子里标出秘书的决定和做完的动作，右栏是要你做）→ 额度条。
+- 示例数据：等我拍板加了来自夜间的两张，共 6 条，首页清单行和刊头数字跟着变。
+- 验证：真实浏览器看过首页和汇报页，点「去合并」跳到拍板区，控制台无报错；基线截图 3 张在 `evidence/2026-11-19-workbench-report/`。只做了电脑版。只改了设计稿和文档，全量测试未跑，看 CI。
+- 实现时要补：白话由猛鬼兽写（新的 AI 功能，要登记 AI 接入）；额度读数的记录点。
+- 合并后发现：汇报页的状态标签用了类名 `.st`，和首页工作流行里的状态块（`.wfr .nm .st`）撞名，首页每条工作流左下的状态块多了一圈边框。已把汇报页的类名改成 `.stt`，首页恢复原样。合并后重截了首页整页基线 `evidence/2026-11-19-workbench-report/workbench-home-fullpage-1440.png`（带问题的旧图改名为 `-before-234.png`）。
+- 协同页见上面 #237。
+
+## 2026-11-19 · #227 工作台第 4 版：侧栏四组八个入口、首页拍板清单行、汇报页（PR #228 已合并 `ab31a89`）
+
+常浩 11-19 在会话里逐条定（原话见 `docs/DECIDED.md` 第 4 版一节）。
+
+- 定稿文件 `docs/design/workbench-v4.html`（由第 3 版改名并修改）：侧栏改成首页、汇报｜主线、协同｜执行、分身｜记录、沉淀；首页的等我拍板改清单行，原来的黑底四卡搬到汇报页，下面接交班报告；改动类主按钮「确认生效」改为「确认」。
+- 登记表：新增第 4 版一节，第 3 版的第 1、4、6 条标为已修订。
+- 验证：真实浏览器 1440×900 看过首页和汇报页，点「确认」、切到汇报、控制台无报错；基线截图 3 张在 `evidence/2026-11-19-workbench-v4/`。只做了电脑版。只改了设计稿和文档，没有脚本改动，全量测试未跑，看 CI。
+- **下一步**：见上一节 #232。
+
+## 2026-11-19 · #216 每周提案卡片新增来源「再犯与待提升」（PR #217 已合并 `f17f5e6`，已安装）
+
+常浩 11-18 定（跨项目复盘 P1）；11-19 回「按推荐开始」，合并。依赖 agent-kit#77、#81 已于 11-18 合并，agent-kit#84（「关闭」的坑不进升级首选）11-19 合并并重装。
+
+- 变基到 `6120638` 后临时 HOME 全量：hermes 1390 项 1 项报错、orca 48 项全过；报错的是 `test_autoloop_feishu` 的 `test_delivered_but_crashed_before_recording_recovers_once`（清临时目录时 hub worker 还在写 `runs/2-1`，Directory not empty）。只跑这个模块不加载本 PR 的文件，PR 分支 3 次错 1 次、main 5 次全过，判为偶发、与本 PR 无关。CI `test` 通过。证据 `evidence/2026-11-19-pr217-rebase2/`。
+- 已装：`proposal_digest.py` → `~/.hermes/scripts/`，`SKILL.md` → `~/.hermes/skills/autonomous-ai-agents/proposal-digest/`，`cmp` 一致；旧版备份在 `evidence/2026-11-19-pr217-install/`。`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway` 重启，13:00:27 飞书重新连上（pid 36084）。
+- 定时任务 `81464e7ea4e3` 没改。待：11-23（周一）10:00 第一期带「再犯与待提升」，看卡片和 `DigitalTwin/shadow/guards-decisions.md` 第一次建出来。
+
+## 2026-11-19 · 亚古兽接手销售 AI 侧边栏固定汇报（PR #219 已合并 `6a29c36`，已安装、已建定时任务）
+
+常浩 11-19 定：销售侧边栏是公司项目，由亚古兽负责；三项固定产出——需求反馈每天 18:00 先私发确认、功能同步通知他说了才出、项目推进进度每周三 18:30 私发；其他项目问题在飞书问亚古兽。11-19 回「按推荐做，确保生成的卡片跟确认版本一致，私发我确认」。
+
+- 版式固定在 `hermes/scripts/sidebar_reports.py`，亚古兽只写内容 JSON；回归基准是定稿原件（11-18 进度卡片 `card_final.json`、11-17/11-18 两期需求反馈发出稿），逐字节一致。做法打包成亚古兽技能 `hermes/skills/sales-sidebar/`（常浩 11-19「打包成 skill」；两个定时任务都挂它），项目档案在亚古兽工作目录 `销售侧边栏-项目档案.md`，规程第 9 节在 `~/.hermes/profiles/agumon/workspace/HERMES.md`（不在仓库，改前备份在 DigitalTwin/backups/）。
+- 已安装到 `~/.hermes/profiles/agumon/`；定时任务 `da4fac30ca49`（每天 18:00）、`4e1ea12562e2`（周三 18:30）；首期存档迁入 `DigitalTwin/sidebar/`（11-18 两份定稿）。
+- 试跑：需求反馈 11-19 11:02 群里无新消息，回一句「本期不出」；重做 11-18 只出稿，和定稿对比内容一致，发现原话换行会断开引用块，已修；进度卡片按 11-12～11-19 试发私聊 `om_x100b60d2d30680acc055909758bcb0b`，按试跑问题补了反馈闭环口径、下个节点来源、自然周、卡片不放口径说明。
+- 常浩 11-19 回「没问题」（试发卡片）、「打包成 skill」、「Merge」；合并时 main 未设必需检查，`--auto` 当场合并，CI 随后 success。ops/self_check.py 新版已装到 ~/.hermes/scripts/（旧版备份在 DigitalTwin/backups/）。
+- 待：今晚 18:00 第一次正式跑；11-25 第一次周报。
+## 2026-11-18 · #212 测试统一隔离与反向验证核对工具（PR 待审，未合并）
+
+- **为什么**：11-17 那次误装的修法只隔离了 `test_autoloop_config.py` 一个模块；`hermes/scripts/tests/` 44 个测试模块没有统一隔离（同类还有 10-27 G-13、11-11 `8e3890a`）。常浩已批准做这一批。
+- **统一隔离** `hermes/scripts/tests/_isolation/`：每个测试模块第一句 `import _isolation`（47 个都加了，含 #209 新进来的 3 个）；按仓库测试命令跑时这个包排在所有 `test_*.py` 前面先导入，漏写的模块也在隔离里。导入时清掉 `DT_*`、`HERMES_*`、`FEISHU_*` 等变量，`HOME`、`XDG_*`、`AGENT_AUTOLOOP_HOME`、`HERMES_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS`、`DT_AUTOLOOP_SHARED`、`DT_PUBLISH_OUTBOX` 指到临时目录，`DT_HUB` 指到 127.0.0.1:9；本进程禁网（回环放行，本机正式服务端口照拦），子进程拿死代理；`PATH` 最前面放 `launchctl`、`security`、`lark-cli`、`hermes`、`claude`、`codex`、`gh` 等拦截桩。`test_isolation_guard.py` 扫描目录，第一句不是它就失败（夹具 `fixtures/isolation_bypass/` 证明会判失败）。`test_autoloop_config.py` 里 #200 的环境变量隔离并入统一机制，只留名册、命令行、中台请求三个桩。
+- **反向验证工具** `hermes/scripts/tests/prod_snapshot.py`：只取路径、类型、大小、修改时间，不打开文件；默认核对 `~/.agent-autoloop`、`~/.hermes`、`~/Library/LaunchAgents`、`DigitalTwin`、`/Users/Shared/dt-autoloop`，变了退出码 3 并列出路径；用法写在 `hermes/scripts/tests/README.md`。#200 和之后各批的改坏脚本在证据目录里（不在仓库），没改；以后的改坏验证用它。
+- **验证**：变基到 `e047ccb` 后 `/usr/bin/python3`（3.9）全量 1288 + orca 48 通过、0 跳过（变基前 3.14 全量 1214 通过），都在外层临时 `HOME` 保护下跑；最终那次用 `prod_snapshot.py run` 包住，前后摘要按排除规则 0 处变化（排除的是 Hermes 网关和中台自己一直在写的心跳、缓存、cron、日志、`hub.db-wal`，空闲对照里也会变）。证据 `evidence/212-test-isolation/`。顺带发现：`test_autoloop_hub_e2e` 用的真 `agent-autoloop` 命令行会调 `launchctl print gui/501`，现在被桩拦下，测试照常通过。`test_exec_gate_e2e`（#209）原来用 `~/.agent-autoloop` 找正式中台和上游源码，隔离后会指到空目录、`UpstreamParser` 2 项会被悄悄跳过，改成按系统账号取（`_isolation.REAL_HOME`），它的前后核对也从读文件内容算哈希改成只看大小和修改时间（`config.json` 里有钥匙）。
+- **下一步**：常浩安排审查（路径规则判 L3）后决定合并；开着的 PR 新加的测试文件（#207、#210、#211、#187、#102）合并到这之后要各加第一句 `import _isolation`，否则守护测试失败；#211 的 `prod_guard.py` 宜改用本机制（它的核对会读 `master.key`、`secrets.env` 内容算哈希）。
 
 ---
 
