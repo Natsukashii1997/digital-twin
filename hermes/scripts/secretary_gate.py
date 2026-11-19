@@ -21,9 +21,9 @@
   **只有一条输入**、正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；**全部模型调用**（主循环和辅助调用）
   都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；系统提示（sessions.system_prompt_hash → system_prompts）
   记着、且没有项目上下文、记忆、用户档案和 SOUL（PR #225 第 1 轮 P1-02：秘书侧必须带 --ignore-rules）；$HERMES_HOME/config.yaml
-  按 YAML 语义（重复键、解析不了都算核不清）没有自定义系统提示、人格、预载消息、外部密钥源，Hermes 会读的环境文件（.env、
-  .op.env、安装目录 .env）没给临时系统提示 / 预载消息赋值（第 2、3 轮 P1-02：这几样 --ignore-rules 管不到，临时系统提示
-  也不进运行记录）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
+  按 YAML 语义（重复键、复杂键、解析不了都算核不清）没有自定义系统提示、人格、预载消息、外部密钥源，没有管理员级配置目录
+  （/etc/hermes、$HERMES_MANAGED_DIR），Hermes 会读的环境文件（.env、.op.env、安装目录 .env）里不出现 HERMES_（第 2、3、4 轮
+  P1-02：这几样 --ignore-rules 管不到，临时系统提示也不进运行记录）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
   模型输出是一个 JSON 对象，只许有 category、card、card_version、choice、text、abstain、error，和提议逐项严格相同（类型也要一样；
   提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。source = tool 只是标签，不是调用者身份（ADR-015 账号隔离）。
 
@@ -506,7 +506,11 @@ def _json_object(text):
 
 
 NEUTRAL_PERSONALITY = ("", "none", "default", "neutral")   # Hermes v0.22 hermes_cli/personality.py 的「不用人格」写法
-INJECT_ENV = ("HERMES_EPHEMERAL_SYSTEM_PROMPT", "HERMES_PREFILL_MESSAGES_FILE")   # 会往判断里加东西的环境变量
+# Hermes 读的环境文件里出现这个前缀就交常浩（第 4 轮 P1-02a）：不自己解析 dotenv（export 后跟制表符、BOM、NUL 都绕过过
+# 手写解析），只按字面找。管住的不止临时系统提示 / 预载消息，还有 HERMES_HOME、HERMES_MANAGED_DIR、HERMES_IGNORE_RULES 这类
+# 改「读哪份配置、带不带规则」的变量；常浩本机这几个文件里一个 HERMES_ 都没有。
+ENV_FILE_MARKER = "HERMES_"
+MANAGED_DIRS = (Path("/etc/hermes"),)       # Hermes 管理员级配置目录（v0.22 hermes_cli/managed_scope.py，另有 $HERMES_MANAGED_DIR）
 
 
 class Uncheckable(Exception):
@@ -526,14 +530,20 @@ def _yaml_load(text):
         seen = set()
         for k, _ in node.value:
             key = loader.construct_object(k, deep=deep)
-            if key in seen:
+            try:
+                dup = key in seen
+            except TypeError:                                # 复杂键（序列、映射当键）：Hermes 也读不成，核不清（第 4 轮 P2-06）
+                raise Uncheckable("配置里有不能当键的复杂键")
+            if dup:
                 raise Uncheckable(f"配置里有重复的键 {key!r}")
             seen.add(key)
         return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
     Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
     try:
         return yaml.load(text, Loader=Strict)                # noqa: S506  Strict 是 SafeLoader 子类
-    except yaml.YAMLError as e:
+    except Uncheckable:
+        raise
+    except Exception as e:                                   # noqa: BLE001  解析、构造阶段的任何异常都算核不清，不能让进程崩掉变成「交不上」
         raise Uncheckable(f"配置解析不了（{type(e).__name__}）")
 
 
@@ -542,9 +552,10 @@ def _blank(v):
 
 
 def hermes_config(home):
-    """按 YAML 语义读 $HERMES_HOME/config.yaml；解析不了时 Hermes 会退回上一份好的配置，所以一律核不清。"""
+    """按 YAML 语义读 $HERMES_HOME/config.yaml（和 Hermes read_raw_config 一样用 utf-8-sig，去掉开头的 BOM）；解析不了时 Hermes
+    会退回上一份好的配置，所以一律核不清。"""
     try:
-        text = (home / "config.yaml").read_text(encoding="utf-8")
+        text = (home / "config.yaml").read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as e:
         raise Uncheckable(f"配置读不了（{type(e).__name__}）")
     cfg = _yaml_load(text)
@@ -553,17 +564,57 @@ def hermes_config(home):
     return cfg
 
 
+def managed_dirs():
+    """Hermes 管理员级配置目录的候选（v0.22 managed_scope.get_managed_dir：$HERMES_MANAGED_DIR 非空且是目录，否则 /etc/hermes）。
+    两个都看：判断进程的环境由巡视清掉了 HERMES_MANAGED_DIR，但控制面自己的环境里有就照样算。"""
+    extra = os.environ.get("HERMES_MANAGED_DIR", "").strip()
+    return [*MANAGED_DIRS, *([Path(extra).expanduser()] if extra else [])]
+
+
 def hermes_env_files(home):
-    """Hermes 启动时会读的环境文件（v0.22 hermes_cli/env_loader.py：$HERMES_HOME/.env 覆盖已有环境、.op.env、安装目录的 .env）。"""
-    return [home / ".env", home / ".op.env", home / "hermes-agent" / ".env"]
+    """Hermes 启动时会读的环境文件（v0.22 hermes_cli/env_loader.py load_hermes_dotenv）：$HERMES_HOME/.env（覆盖已有环境）、
+    .op.env、安装目录的 .env（main.py 的 PROJECT_ROOT = hermes_cli 上一级的真实路径）。安装目录必须真是 Hermes 源码根目录
+    （有 hermes_cli/main.py），不然说明 Hermes 装在别处、读的 .env 不是这一份，核不清。管理员级 .env 不在这里：有管理员目录就整体交常浩。"""
+    root = (home / "hermes-agent").resolve()
+    if not (root / "hermes_cli" / "main.py").is_file():
+        raise Uncheckable("找不到 Hermes 安装目录（$HERMES_HOME/hermes-agent/hermes_cli/main.py），读的是哪份 .env 核不清")
+    return [home / ".env", home / ".op.env", root / ".env"]
+
+
+def _env_file_text(f):
+    """按 Hermes 的读法取环境文件的文字（v0.22 _sanitize_env_file_if_needed / _load_dotenv_with_fallback：UTF-8 去 BOM、
+    去掉 NUL；UTF-16 / UTF-32 带 BOM 的它会转码或另行处理）。不是 UTF-8 的一律核不清，不猜编码。不存在返回 None。"""
+    try:
+        raw = f.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise Uncheckable(f"{f.name} 读不了（{type(e).__name__}）")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+        raise Uncheckable(f"{f.name} 不是 UTF-8 编码")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise Uncheckable(f"{f.name} 读不了（不是合法的 UTF-8）")
+    return text.replace("\x00", "")
 
 
 def hermes_overlays(home, cfg):
     """会叠加进判断、--ignore-rules 又管不到的东西（PR #225 第 2、3 轮 P1-02），返回发现的项（空 = 干净）；核不清抛 Uncheckable。
     配置（按 YAML 语义）：agent.system_prompt、非中性 display.personality、prefill_messages_file / agent.prefill_messages_file、
-    secrets（外部密钥源：会往环境里写什么核不了）；agent / display 不是映射也算核不清。环境文件：任何一个给 INJECT_ENV 赋值
-    （不管值是什么）。临时系统提示只在调用时注入、不进运行记录，所以只能这样按来源核；同账号进程改文件、制造竞态是 #230 的事。"""
+    secrets（外部密钥源：会往环境里写什么核不了）；agent / display 不是映射也算核不清。管理员级配置目录存在就核不清（它的
+    config.yaml 深度合并在用户配置上面、.env 最后覆盖，第 4 轮 P1-02b；不自己实现合并规则）。环境文件：文字里出现 HERMES_ 就算
+    （第 4 轮 P1-02a）。临时系统提示只在调用时注入、不进运行记录，所以只能这样按来源核；同账号进程改文件、制造竞态是 #230 的事。
+    运行时的 HERMES_HOME 和这里核的是不是同一个：环境文件改不了它（出现 HERMES_ 就交常浩），判断进程用了别的家目录时运行记录不在
+    这里的 state.db，run_evidence 查不到会话就交常浩。"""
     found = []
+    for d in managed_dirs():
+        try:
+            present = d.is_dir()
+        except OSError as e:
+            raise Uncheckable(f"管理员级配置目录 {d} 查不了（{type(e).__name__}）")
+        if present:
+            raise Uncheckable(f"有 Hermes 管理员级配置目录 {d}，它会叠加在你的配置上面，实际生效的配置核不清")
     agent, display = cfg.get("agent"), cfg.get("display")
     if not (agent is None or isinstance(agent, dict)) or not (display is None or isinstance(display, dict)):
         raise Uncheckable("agent / display 不是映射")
@@ -578,19 +629,9 @@ def hermes_overlays(home, cfg):
     if cfg.get("secrets"):
         found.append("外部密钥源")
     for f in hermes_env_files(home):
-        try:
-            text = f.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            continue
-        except (OSError, UnicodeDecodeError) as e:
-            raise Uncheckable(f"{f.name} 读不了（{type(e).__name__}）")
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[len("export "):].lstrip()
-            key = line.partition("=")[0].strip().strip("'\"")
-            if "=" in line and key in INJECT_ENV:
-                found.append(f"{f.name} 里的 {key}")
+        text = _env_file_text(f)
+        if text is not None and ENV_FILE_MARKER in text.upper():
+            found.append(f"{f.name} 里的 HERMES_ 变量")
     return sorted(set(found))
 
 

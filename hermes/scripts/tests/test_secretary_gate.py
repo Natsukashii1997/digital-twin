@@ -120,6 +120,8 @@ def make_hermes(home):
                                       "  provider: deepseek\n  model: deepseek-flash\n", encoding="utf-8")
     with contextlib.closing(sqlite3.connect(home / "state.db")) as con, con:
         con.executescript(HERMES_SCHEMA)
+    (home / "hermes-agent/hermes_cli").mkdir(parents=True, exist_ok=True)       # 安装目录（控制面要核它真是 Hermes 源码根目录）
+    (home / "hermes-agent/hermes_cli/main.py").write_text("", encoding="utf-8")
 
 
 CLEAN_PROMPT = "You are a helpful assistant. Answer the user's request directly."   # 加了 --ignore-rules 的样子
@@ -176,6 +178,9 @@ class Base(unittest.TestCase):
         self.assertTrue(str(L.db_path()).startswith(str(root)))
         self.hermes = root / "hermes"
         make_hermes(self.hermes)
+        p = mock.patch.object(SG, "MANAGED_DIRS", (root / "etc-hermes",))      # 管理员级配置目录不看本机真的 /etc/hermes
+        p.start()
+        self.addCleanup(p.stop)
         self.assertEqual(SG.hermes_home(), self.hermes)
         with contextlib.closing(sqlite3.connect(self.hubdb)) as con, con:
             con.executescript(HUB_SCHEMA)
@@ -1002,10 +1007,14 @@ class RunEvidenceTests(Base):
                  "重复键": lambda: (self.hermes / "config.yaml").write_text(
                      cfg + "agent:\n  system_prompt: x\nagent:\n  max_turns: 9\n", encoding="utf-8"),
                  "agent 是列表": lambda: (self.hermes / "config.yaml").write_text(cfg + "agent:\n  - a\n", encoding="utf-8"),
+                 "复杂键": lambda: (self.hermes / "config.yaml").write_text(cfg + "? [a, b]\n: value\n", encoding="utf-8"),
+                 "映射当键": lambda: (self.hermes / "config.yaml").write_text(cfg + "? {a: 1}\n: value\n", encoding="utf-8"),
+                 "坏日期": lambda: (self.hermes / "config.yaml").write_text(cfg + "since: 2026-13-45\n", encoding="utf-8"),
                  "非法编码": lambda: (self.hermes / "config.yaml").write_bytes(cfg.encode() + b"x: \xff\xfe\n"),
                  "主模型两种读法不一致": lambda: (self.hermes / "config.yaml").write_text(      # 简易读法把注释当成值的一部分
                      cfg.replace(f"default: {MAIN}", f'default: "{MAIN}"  # 主模型', 1), encoding="utf-8")}
         why = {"解析不了": "解析不了", "重复键": "重复的键", "agent 是列表": "不是映射", "非法编码": "读不了",
+               "复杂键": "复杂键", "映射当键": "复杂键", "坏日期": "解析不了",
                "主模型两种读法不一致": "两种读法对不上"}
         for name, breaker in cases.items():
             with self.subTest(name):
@@ -1017,23 +1026,66 @@ class RunEvidenceTests(Base):
             self.assertIn("没有 yaml 库", self.handoff(self.submit(), "model")["basis"])
 
     def test_env_files_hand_off(self):
-        """第 3 轮 P1-02a：Hermes 启动时读的环境文件（.env 会覆盖已清掉的环境）给临时系统提示 / 预载消息赋值，交常浩。"""
+        """第 3、4 轮 P1-02a：Hermes 启动时读的环境文件（.env 会覆盖已清掉的环境）里出现 HERMES_ 就交常浩，不自己解析 dotenv：
+        export 后跟制表符、开头的 BOM、夹在名字里的 NUL（Hermes 读前会去掉）、带引号、空值、注释掉的、改家目录 / 管理员目录 /
+        规则开关的，一律算。"""
         files = {".env": (".env",), ".op.env": (".op.env",), "安装目录 .env": ("hermes-agent", ".env")}
+        lines = {"export 空格": b'export HERMES_EPHEMERAL_SYSTEM_PROMPT="x"', "export 制表符": b"export\tHERMES_EPHEMERAL_SYSTEM_PROMPT=x",
+                 "等号两边空格": b"HERMES_PREFILL_MESSAGES_FILE = /tmp/p.json", "空值": b"HERMES_EPHEMERAL_SYSTEM_PROMPT=",
+                 "键带引号": b'"HERMES_PREFILL_MESSAGES_FILE"=/tmp/p.json', "名字里夹 NUL": b"HERMES\x00_EPHEMERAL_SYSTEM_PROMPT=x",
+                 "小写": b"hermes_ephemeral_system_prompt=x",
+                 "改家目录": b"HERMES_HOME=/tmp/other", "改管理员目录": b"HERMES_MANAGED_DIR=/tmp/m",
+                 "关规则开关": b"HERMES_IGNORE_RULES=0", "注释掉的": b"# HERMES_EPHEMERAL_SYSTEM_PROMPT=x"}
         for name, parts in files.items():
-            for line in ('export HERMES_EPHEMERAL_SYSTEM_PROMPT="你是猛鬼兽"', "HERMES_PREFILL_MESSAGES_FILE = /tmp/p.json",
-                         "HERMES_EPHEMERAL_SYSTEM_PROMPT="):
-                with self.subTest(f"{name}: {line}"):
+            for how, line in lines.items():
+                with self.subTest(f"{name}: {how}"):
                     self.setUp()                                                 # setUp 换了新的临时 Hermes 目录：路径在这之后取
                     f = self.hermes.joinpath(*parts)
                     f.parent.mkdir(parents=True, exist_ok=True)
-                    f.write_text(f"OPENAI_API_KEY=sk-x\n{line}\n", encoding="utf-8")
-                    self.assertIn("Hermes 配置里有", self.handoff(self.submit(), "model")["basis"])
+                    f.write_bytes(b"OPENAI_API_KEY=sk-x\n" + line + b"\n")
+                    self.assertIn("HERMES_ 变量", self.handoff(self.submit(), "model")["basis"])
         self.setUp()
-        (self.hermes / ".env").write_bytes(b"A=\xff\n")                         # 读不了：核不清
-        self.assertIn(".env 读不了", self.handoff(self.submit(), "model")["basis"])
+        (self.hermes / ".env").write_bytes(b"\xef\xbb\xbfHERMES_EPHEMERAL_SYSTEM_PROMPT=x\n")   # 开头的 BOM：Hermes 用 utf-8-sig 读
+        self.assertIn("HERMES_ 变量", self.handoff(self.submit(), "model")["basis"])
+        for raw, why in ((b"A=\xff\n", "读不了"), ("H=1\n".encode("utf-16"), "不是 UTF-8")):        # 核不清
+            with self.subTest(why):
+                self.setUp()
+                (self.hermes / ".env").write_bytes(raw)
+                self.assertIn(why, self.handoff(self.submit(), "model")["basis"])
         self.setUp()
-        (self.hermes / ".env").write_text("# HERMES_EPHEMERAL_SYSTEM_PROMPT=注释掉的\nFEISHU_APP_ID=x\n", encoding="utf-8")
+        (self.hermes / ".env").write_bytes("\ufeff# 飞书\nFEISHU_APP_ID=x\nOPENAI_API_KEY=sk-x\n".encode("utf-8"))
         self.assertEqual(self.submit()["result"], "done")                      # 只有注释和别的变量：照常
+
+    def test_install_dir_must_be_hermes(self):
+        """第 4 轮 P1-02a：安装目录的 .env 只有在 $HERMES_HOME/hermes-agent 真是 Hermes 源码根目录时才是 Hermes 读的那份；不是就核不清。"""
+        (self.hermes / "hermes-agent/hermes_cli/main.py").unlink()
+        self.assertIn("找不到 Hermes 安装目录", self.handoff(self.submit(), "model")["basis"])
+
+    def test_managed_scope_hands_off(self):
+        """第 4 轮 P1-02b：有管理员级配置目录（/etc/hermes 或控制面环境里的 $HERMES_MANAGED_DIR）就交常浩：它的 config.yaml 深度
+        合并在用户配置上面、.env 最后覆盖，不自己实现合并规则。目录空着也算；只是个文件、或环境变量是空白不算。"""
+        (self.root / "etc-hermes").mkdir()
+        self.assertIn("管理员级配置目录", self.handoff(self.submit(), "model")["basis"])
+        self.setUp()
+        (self.root / "m").mkdir()
+        with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": str(self.root / "m")}):
+            self.assertIn("管理员级配置目录", self.handoff(self.submit(), "model")["basis"])
+        self.setUp()
+        (self.root / "m").mkdir()
+        with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": f"  {self.root / 'm'}  "}):   # Hermes 去掉两边空白再用
+            self.assertIn("管理员级配置目录", self.handoff(self.submit(), "model")["basis"])
+        self.setUp()
+        (self.root / "etc-hermes").write_text("", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": " "}):
+            self.assertEqual(self.submit()["result"], "done")
+
+    def test_run_in_other_home_hands_off(self):
+        """第 4 轮：判断进程用了别的 HERMES_HOME 时，它的运行记录不在控制面读的 state.db，查不到会话就交常浩。"""
+        p = self.base()
+        other = self.root / "other-hermes"
+        make_hermes(other)
+        p["run"]["session"] = write_run(other, p, T - dt.timedelta(minutes=5), T - dt.timedelta(minutes=4))
+        self.handoff(self.submit(p), "model")
 
     def test_forged_fallback_claim_in_proposal_is_not_a_field(self):
         """以前能在提议里写 model.fallback=false 骗过去；现在多一个字段就是格式不合格，交常浩。"""
@@ -1481,6 +1533,9 @@ class SecretaryEndToEnd(HubFixture):
         st.close()
         self.hermes = root / "hermes"
         make_hermes(self.hermes)
+        p = mock.patch.object(SG, "MANAGED_DIRS", (root / "etc-hermes",))      # 管理员级配置目录不看本机真的 /etc/hermes
+        p.start()
+        self.addCleanup(p.stop)
         for p in (mock.patch.dict(os.environ, {"HERMES_HOME": str(self.hermes)}), mock.patch.object(SG, "TEST_ASK", True)):
             p.start()
             self.addCleanup(p.stop)
