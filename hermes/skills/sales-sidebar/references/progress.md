@@ -1,6 +1,6 @@
 # 销售 AI 侧边栏 · 项目推进进度（每周三 18:30，亚古兽）
 
-常浩 2026-11-19 定：每周三 18:30 把本周进度做成一张飞书卡片，**私发常浩**，不发群。卡片版式是 2026-11-18 常浩逐项确认的定稿（11-18 那期的内容 JSON 样例 `~/.hermes/profiles/agumon/prompts/sidebar_progress_sample.json`），由脚本固定生成；你只写内容 JSON，不自己拼卡片，不加、删、改任何区块。
+常浩 2026-11-19 定：每周三 18:30 把本周进度做成一张飞书卡片，**私发常浩**，不发群。卡片版式是 2026-11-18 常浩逐项确认的定稿（11-18 那期的内容 JSON 样例 `~/.hermes/profiles/agumon/skills/productivity/sales-sidebar/references/progress-sample.json`），由脚本固定生成；你只写内容 JSON，不自己拼卡片，不加、删、改任何区块。
 
 脚本：`python3 ~/.hermes/profiles/agumon/scripts/sidebar_reports.py progress <status|render|send>`（下文简称 `sr`）。
 
