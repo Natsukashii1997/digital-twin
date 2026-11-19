@@ -8,12 +8,17 @@
 #   sudo bash ops/dt_accounts_setup.sh remove-probe   拆掉探针（结果文件保留）
 #
 # 做的事（可重复跑）：
-#   1. 核对：账号存在、是标准账号（不在 admin 组）、登录界面已隐藏、不能解锁文件保险箱；后两项只提示，不替你改
-#   2. 家目录改成 700（系统默认 750，同组 staff 的其他账号能列出里面有什么）
-#   3. 以账号自己的身份（ops/dt_account_init_user.sh）：登录 shell 的 umask 设成 077，放测试值文件 ~/.dt/probe.secret（600，随机数，不是真凭据）
+#   1. 核对：账号存在、是标准账号（不在 admin 组）、没有 sudo 权限、不是自动登录账号、远程登录 / 屏幕共享开着时
+#      不在允许名单里（这几项不过就停下）；登录界面已隐藏、不能解锁文件保险箱、远程管理（ARD）没开只提示，不替你改
+#   2. 家目录必须正好是 /Users/<账号>，改成 700（系统默认 750，同组 staff 的其他账号能列出里面有什么）
+#   3. 以账号自己的身份（ops/dt_account_init_user.sh）：登录 shell 的 umask 设成 077，放测试凭据 ~/.dt/probe.secret
+#      （600，随机数，不是真凭据；0E-2 起真凭据也这样存成只有账号能读的文件，常浩 11-19 定）；它的 SHA-256 由 root 记下
 #      root 不按路径碰账号能改的任何文件，只动「只有 root 能改里面条目」的目录里的东西（L3 P1-01）
 #   4. 装探针：LaunchDaemon cn.digital-twin.probe.<账号>，以那个账号身份、在没人登录它时运行 ops/dt_account_probe.sh，
-#      开机和安装时各跑一次；结果写到 /Users/Shared/dt-accounts/probe/<账号>/result.txt（所有人可读，不含凭据）
+#      开机和安装时各跑一次；结果写到 /Users/Shared/dt-accounts/probe/<账号>/result.txt（所有人可读，不含凭据）。
+#      每次安装给探针一个新的随机编号，结果里带上它、最后一行是 done=1、探针进程退出码为 0，才算这次的结果；
+#      读到的测试凭据要和 root 记下的 SHA-256 一致才算「读得到」。
+#      结果文件由账号自己写，账号能伪造它：所以安装时先核对账号下没有别的进程在跑（现在这两个账号什么都不跑）。
 # 不建账号、不改密码、不装中台和猛鬼兽（0E-2、0E-5 再加）、不碰 dt-worker。
 set -euo pipefail
 
@@ -45,14 +50,53 @@ check_account() {
   if [ "$(dscl . -read "/Users/$u" IsHidden 2>/dev/null | awk '{print $2}')" = 1 ]; then
     echo "  登录界面：已隐藏"
   else
-    echo "  [提示] 登录界面还能看到 $u；要藏起来：sudo dscl . create /Users/$u IsHidden 1"
+    echo "  [提示] 登录界面还能看到 ${u}；要藏起来：sudo dscl . create /Users/$u IsHidden 1"
   fi
   if fdesetup list 2>/dev/null | cut -d, -f1 | grep -qx "$u"; then
     echo "  [提示] $u 能解锁文件保险箱；要去掉：sudo fdesetup remove -user $u"
   else
     echo "  文件保险箱：不能解锁"
   fi
+  # 以实际权限为准：admin 组之外，sudoers 里单独授权也算
+  if sudo -l -U "$u" 2>&1 | grep -q "is not allowed to run sudo"; then
+    echo "  sudo：没有权限"
+  else
+    echo "  [停下] $u 有 sudo 权限（sudo -l -U $u 查看）；请从 /etc/sudoers 和 /etc/sudoers.d 里去掉"
+    bad=1
+  fi
+  if [ "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" = "$u" ]; then
+    echo "  [停下] $u 是自动登录账号：请在「系统设置 → 用户与群组 → 自动以此身份登录」改成「关闭」"
+    bad=1
+  fi
+  remote_access "$u" com.openssh.sshd com.apple.access_ssh "远程登录" || bad=1
+  remote_access "$u" com.apple.screensharing com.apple.access_screensharing "屏幕共享" || bad=1
+  if pgrep -qx ARDAgent; then
+    echo "  [提示] 远程管理（ARD）开着；请在「系统设置 → 通用 → 共享 → 远程管理」确认只允许常浩"
+  fi
   return $bad
+}
+
+# 远程登录 / 屏幕共享：服务没开就行；开着时，系统的允许名单（com.apple.access_*）要存在且不含这个账号。
+# 允许名单不存在 = 「所有用户」都能登录。
+remote_access() {
+  local u=$1 job=$2 group=$3 name=$4
+  if ! launchctl print "system/$job" >/dev/null 2>&1; then
+    echo "  ${name}：没开"
+  elif dscl . -read "/Groups/$group" >/dev/null 2>&1 && ! dseditgroup -o checkmember -m "$u" "$group" >/dev/null 2>&1; then
+    echo "  ${name}：开着，$u 不在允许名单里"
+  else
+    echo "  [停下] ${name}开着，$u 能登录：请在「系统设置 → 通用 → 共享 → ${name}」改成「仅这些用户」且不含 $u"
+    return 1
+  fi
+}
+
+# 账号下有没有别的进程在跑（探针结果由账号自己写，有别的进程就可能被改）
+no_processes() {
+  local n
+  n=$(pgrep -U "$1" | wc -l | tr -d ' ')
+  [ "$n" = 0 ] && return 0
+  echo "  [停下] $1 下有 $n 个进程在跑（ps -U $1 查看）；探针结果可能被改，请先停掉"
+  return 1
 }
 
 # root 往账号自己能改的目录里写之前，拒绝符号链接：否则账号能把它指向系统文件，让 root 去改（重跑时尤其要防）
@@ -63,10 +107,18 @@ no_link() {
   done
 }
 
-# 一个目录「只有 root 能改里面的条目」：属 root、不是链接、同组和其他人不能写。
+# 一个目录「只有 root 能改里面的条目」：属 root、不是链接、同组和其他人不能写、没有放行权限的 ACL
+# （macOS 的 ACL 能在权限位之外单独给某个账号加 add_file、delete_child 等权限，有就一律不认，L3 P2-05）。
 # 这样的目录里，账号换不掉任何一项，root 按路径操作其中的条目才安全。
 root_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $(( 0$(stat -f %Lp "$1") & 022 )) = 0 ]
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $(( 0$(stat -f %Lp "$1") & 022 )) = 0 ] &&
+    ! ls -led "$1" | sed 1d | grep -q ' allow '
+}
+
+# /Users/Shared 谁都能往里建东西，靠粘滞位保证别人删不掉、换不掉 root 建的目录：属 root、不是链接、有粘滞位、没有放行 ACL
+sticky_dir() {
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $(( 0$(stat -f %p "$1") & 01000 )) != 0 ] &&
+    ! ls -led "$1" | sed 1d | grep -q ' allow '
 }
 
 # 家目录本身由 root 收紧（它的上一级 /Users 只有 root 能改，账号换不掉这个目录项）；
@@ -75,17 +127,26 @@ root_dir() {
 harden() {
   local u=$1 home
   home=$(dscl . -read "/Users/$u" NFSHomeDirectory | awk '{print $2}')
-  case "$home" in /Users/?*) ;; *) echo "  [停下] $u 的家目录不在 /Users 下：$home"; return 1 ;; esac
-  root_dir "$(dirname "$home")" || { echo "  [停下] $(dirname "$home") 不是只有 root 能改的目录"; return 1; }
+  # 只认 /Users/<账号> 这一个写法：不认 ..、多一层、结尾斜杠（L3 P1-01）
+  [ "$home" = "/Users/$u" ] || { echo "  [停下] $u 的家目录不是 /Users/${u}：$home"; return 1; }
+  root_dir /Users || { echo "  [停下] /Users 不是只有 root 能改的目录"; return 1; }
   [ -d "$home" ] && no_link "$home" || { echo "  [停下] $u 的家目录 $home 不存在或不是普通目录"; return 1; }
   chown "$u:staff" "$home"
   chmod 700 "$home"
-  echo "  家目录 $home：$(stat -f %Lp "$home")"
-  sudo -u "$u" -H /bin/bash -s -- "$home" "$MARK" < "$INIT_USER" || { echo "  [停下] 以 $u 身份初始化没做完"; return 1; }
+  echo "  家目录 ${home}：$(stat -f %Lp "$home")"
+  local out sum
+  out=$(sudo -u "$u" -H /bin/bash -s -- "$home" "$MARK" < "$INIT_USER") || { echo "$out"; echo "  [停下] 以 $u 身份初始化没做完"; return 1; }
+  echo "$out" | grep -v '^secret_sha256='
+  sum=$(echo "$out" | sed -n 's/^secret_sha256=\([0-9a-f]\{64\}\)$/\1/p')
+  [ -n "$sum" ] || { echo "  [停下] 没拿到测试凭据的 SHA-256"; return 1; }
+  # root 自己的目录里记下应有的 SHA-256，探针读到的要和它一致
+  install -d -o root -g wheel -m 700 "$DIR/probe"
+  echo "$sum" > "$DIR/probe/$u.sha256"
+  chmod 600 "$DIR/probe/$u.sha256"
 }
 
 write_plist() {
-  local u=$1 p
+  local u=$1 nonce=$2 p
   p=$(plist "$u")
   cat > "$p" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -97,6 +158,12 @@ write_plist() {
   <key>GroupName</key><string>staff</string>
   <key>ProgramArguments</key>
   <array><string>/bin/bash</string><string>$PROBE</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/$u</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DT_PROBE_NONCE</key><string>$nonce</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>Umask</key><integer>63</integer>
 </dict>
@@ -106,11 +173,10 @@ EOF
   chmod 644 "$p"
 }
 
-# 装上并跑一次；等结果文件更新（最多 40 秒）
+# 装上并跑一次；等这次的结果（带本次编号、最后一行 done=1、进程退出码 0，最多 40 秒）
 load_probe() {
-  local u=$1 p l res before
-  p=$(plist "$u"); l=$(label "$u"); res="$SHARED/probe/$u/result.txt"
-  before=$(stat -f %m "$res" 2>/dev/null || echo 0)
+  local u=$1 nonce=$2 p l
+  p=$(plist "$u"); l=$(label "$u")
   # bootout 是异步的，等旧任务卸完再装，装失败隔几秒重试（全局坑 G-18）
   launchctl bootout "system/$l" 2>/dev/null || true
   for _ in $(seq 20); do launchctl print "system/$l" >/dev/null 2>&1 || break; sleep 0.5; done
@@ -120,33 +186,50 @@ load_probe() {
     sleep 3
   done
   [ "$ok" = yes ] || { echo "  [停下] 探针没装上：sudo launchctl bootstrap system $p"; return 1; }
+  local got=no
   for _ in $(seq 40); do
-    [ "$(stat -f %m "$res" 2>/dev/null || echo 0)" -gt "$before" ] && break
+    if read_result "$u" | grep -qx "nonce=$nonce" && read_result "$u" | tail -1 | grep -qx "done=1"; then got=yes; break; fi
     sleep 1
   done
-  [ "$(stat -f %m "$res" 2>/dev/null || echo 0)" -gt "$before" ] || { echo "  [停下] 40 秒没等到探针结果：$res"; return 1; }
+  [ "$got" = yes ] || { echo "  [停下] 40 秒没等到这次的探针结果"; return 1; }
+  for _ in $(seq 10); do launchctl print "system/$l" 2>/dev/null | grep -q 'last exit code = 0' && return 0; sleep 1; done
+  echo "  [停下] 探针进程退出码不是 0：sudo launchctl print system/$l"
+  return 1
 }
 
 # 结果文件在账号自己的目录里：以账号身份读，账号把它换成指向别处的链接也读不到它本来读不到的东西
+read_result() { sudo -u "$1" /bin/cat "$SHARED/probe/$1/result.txt" 2>/dev/null; }
+
+# 读到的测试凭据和 root 记下的 SHA-256 对不对得上
+secret_verdict() {
+  local want got
+  want=$(cat "$DIR/probe/$1.sha256" 2>/dev/null)
+  got=$(read_result "$1" | sed -n 's/^secret_sha256=//p')
+  if [ -n "$want" ] && [ "$got" = "$want" ]; then echo "  测试凭据：没人登录时读得到，内容一致"
+  else echo "  [注意] 测试凭据：读不到或内容不一致（应为 ${want:-未记录}，读到 ${got:-无}）"; return 1; fi
+}
+
 show_result() {
-  local res="$SHARED/probe/$1/result.txt"
-  sudo -u "$1" /bin/cat "$res" 2>/dev/null | sed 's/^/    /' | grep . || echo "    （还没有探针结果）"
+  read_result "$1" | sed 's/^/    /' | grep . || echo "    （还没有探针结果）"
 }
 
 case "${1:-install}" in
   install)
     [ -f "$PROBE_SRC" ] && [ -f "$INIT_USER" ] || { echo "找不到 $PROBE_SRC 或 $INIT_USER"; exit 1; }
+    mkdir -p "$DIR"; chown root:wheel "$DIR"; chmod 755 "$DIR"
+    root_dir "$DIR" || { echo "[停下] $DIR 不是只有 root 能改的目录，请人工查看"; exit 1; }
     stop=0
     for u in $ACCOUNTS; do
       echo "== $u"
       check_account "$u" || { stop=1; continue; }
+      no_processes "$u" || { stop=1; continue; }
       harden "$u" || stop=1
     done
     [ "$stop" = 0 ] || { echo "有账号没过核对，先按上面提示处理，再重跑。"; exit 1; }
-    mkdir -p "$DIR"; chown root:wheel "$DIR"; chmod 755 "$DIR"
     install -o root -g wheel -m 755 "$PROBE_SRC" "$PROBE"
-    # /Users/Shared 谁都能建东西：mkdir 不跟链接；建完（或已有）先确认是 root 的普通目录、别人不能写，
-    # 之后它在带粘滞位的 /Users/Shared 里别人删不掉、换不掉，里面的条目只有 root 能改
+    # /Users/Shared 谁都能建东西：先核对它本身属 root、有粘滞位；mkdir 不跟链接；建完（或已有）再确认是 root 的普通目录、
+    # 别人不能写，之后它在 /Users/Shared 里别人删不掉、换不掉，里面的条目只有 root 能改
+    sticky_dir /Users/Shared || { echo "[停下] /Users/Shared 不是属 root、带粘滞位的目录，请人工查看"; exit 1; }
     mkdir "$SHARED" 2>/dev/null || true
     root_dir "$SHARED" || { echo "[停下] $SHARED 不是 root 的普通目录或别人能写，请人工查看"; exit 1; }
     chmod 755 "$SHARED"
@@ -154,10 +237,12 @@ case "${1:-install}" in
     root_dir "$SHARED/probe" || { echo "[停下] $SHARED/probe 不是 root 的普通目录"; exit 1; }
     for u in $ACCOUNTS; do
       install -d -o "$u" -g staff -m 755 "$SHARED/probe/$u"
-      write_plist "$u"
-      echo "== $u 探针"
-      load_probe "$u" || stop=1
+      nonce=$(openssl rand -hex 8)
+      write_plist "$u" "$nonce"
+      echo "== $u 探针（编号 ${nonce}）"
+      load_probe "$u" "$nonce" || stop=1
       show_result "$u"
+      secret_verdict "$u" || stop=1
     done
     [ "$stop" = 0 ] || exit 1
     echo "完成。把上面的结果交给 Claude 看，或回会话说「装好了」。"
@@ -167,9 +252,10 @@ case "${1:-install}" in
       echo "== $u"
       check_account "$u" || true
       home=$(dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
-      [ -n "$home" ] && echo "  家目录 $home：$(stat -f %Lp "$home" 2>/dev/null)"
+      [ -n "$home" ] && echo "  家目录 ${home}：$(stat -f %Lp "$home" 2>/dev/null)"
       echo "  探针结果："
       show_result "$u"
+      secret_verdict "$u" || true
     done
     ;;
   remove-probe)

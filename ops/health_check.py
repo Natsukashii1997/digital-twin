@@ -29,7 +29,7 @@ AGENT_SKILLS = HOME / ".agents/skills"   # 飞书 lark-* 技能的源头；两�
 BOTS = (("猛鬼兽", "ai.hermes.gateway", ""), ("亚古兽", "ai.hermes.gateway-agumon", "profiles/agumon"))
 EGRESS_PORT = 8090                       # 工人账号的过滤代理（ops/dt_worker_egress.py，#190）
 PF_STATUS = Path("/Library/Application Support/DigitalTwin/pf-dt-worker.status")   # 门卫规则每 5 分钟刷新一次
-PF_STALE_MIN = 20
+PF_STALE_MIN = 10   # 每 5 分钟重载并逐条回读一次；超过两个周期没刷新就算停了（L3 P1-03）
 PF_USERS = ("dt-worker", "dt-secretary")   # 门卫规则要管的账号：本机有哪个就要管上哪个（ADR-015 0E-1）
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
@@ -225,7 +225,11 @@ def _account_exists(name):
 
 
 def check_pf(path=PF_STATUS, now=None, accounts=None):
-    """门卫规则的状态文件由 root 每 5 分钟写一次：在生效、规则数对、没过期、本机有的工人 / 秘书账号都管上了。"""
+    """门卫规则的状态文件由 root 每 5 分钟写一次：在生效、规则数对、没过期、本机有的工人 / 秘书账号都管上了。
+
+    巡检以主账号身份跑，读不了 pf 的实际规则（要 root）；实际规则由开机任务每 5 分钟重新生成、加载并逐条回读，
+    对上才写 state=ok，所以「10 分钟内的 state=ok」就是最近一次核对真实运行态的结果。
+    0E-1 之前的旧版状态文件没有 state 字段，按旧规则判。"""
     install = "主账号终端运行 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install`"
     try:
         text = path.read_text()
@@ -234,6 +238,9 @@ def check_pf(path=PF_STATUS, now=None, accounts=None):
         return [f"工人账号的门卫规则没装（没有状态文件）；{install}"]
     fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
     rules = int(fields["rules"]) if fields.get("rules", "").isdigit() else 0
+    if "state" in fields and fields["state"] != "ok":
+        why = fields.get("reason", "正在加载").replace("_", " ")
+        return [f"工人账号的门卫规则没在生效（{fields['state']}：{why}）；{install}"]
     if fields.get("enabled") != "yes" or rules < 3:
         return [f"工人账号的门卫规则没在生效（{text.strip()[:80]}）"]
     if age_min > PF_STALE_MIN:

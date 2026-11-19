@@ -341,6 +341,15 @@ class WorkerIsolation(unittest.TestCase):
         self.assertIn("没在生效", self.status("at=x enabled=no rules=6\n")[0])
         self.assertIn("没在生效", self.status("没有 dt-worker 这个账号\n")[0])
         self.assertIn("没刷新", self.status("at=x enabled=yes rules=6\n", age_min=60)[0])
+        self.assertIn("没刷新", self.status("at=x enabled=yes rules=6\n", age_min=11)[0])
+
+    def test_pf_state_not_ok(self):
+        """0E-1 起加载前先写 applying、出错写 failed：都要报，原因带出来（L3 P1-03）。"""
+        both = ("dt-worker", "dt-secretary")
+        self.assertEqual(self.status("at=x state=ok enabled=yes rules=9 users=dt-worker,dt-secretary\n", accounts=both), [])
+        issues = self.status("at=x state=failed enabled=yes reason=加载上的规则和应有的不一致\n", accounts=both)
+        self.assertIn("failed：加载上的规则和应有的不一致", issues[0])
+        self.assertIn("applying", self.status("at=x state=applying\n")[0])
 
 
 if __name__ == "__main__":

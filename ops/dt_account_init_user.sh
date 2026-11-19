@@ -14,9 +14,11 @@ cd "$home"
 # 登录 shell 的 umask
 grep -qF "$mark" .zprofile 2>/dev/null || printf '%s\numask 077\n' "$mark" >> .zprofile
 
-# 测试值文件（随机数，不是真凭据），给探针看「没人登录时读不读得到」
+# 测试凭据（随机数，不是真凭据），给探针看「没人登录时读不读得到」；0E-2 起真凭据也这样存（常浩 11-19 定）
 mkdir -p .dt
 chmod 700 .dt
 [ -s .dt/probe.secret ] || openssl rand -hex 16 > .dt/probe.secret
 chmod 600 .dt/probe.secret
-echo "  以 $(id -un) 身份：umask 077、测试值文件 ~/.dt/probe.secret 就绪"
+echo "  以 $(id -un) 身份：umask 077、测试凭据 ~/.dt/probe.secret 就绪"
+# 最后一行交给 root 记下，探针读到的要和它一致
+printf 'secret_sha256=%s\n' "$(shasum -a 256 .dt/probe.secret | cut -d' ' -f1)"
