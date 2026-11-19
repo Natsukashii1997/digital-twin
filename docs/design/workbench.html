@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap">
 <style>
-/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：黑底拍板卡片横条 + 交班报告 */
+/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：数字条 + 一夜时间轴 + 黑底拍板卡片 + 逐件白话叙述 + 额度条 */
 @font-face{font-family:"BM";src:local("Berkeley Mono"),local("BerkeleyMono-Regular"),local("TX-02"),local("TX-02 Regular"),local("TX02-Regular");font-weight:400;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:"BM";src:local("Berkeley Mono Bold"),local("BerkeleyMono-Bold"),local("TX-02 Bold"),local("TX02-Bold");font-weight:700;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 :root{
@@ -200,21 +200,89 @@ p{margin:0}
 .drow[data-done] .acts{display:none}
 .drow[data-done] .done{display:flex}
 
-/* ===== 汇报页：交班报告 ===== */
-.rp{display:grid;gap:40px}
-.rep{border:1px solid var(--ink);background:var(--panel);font-size:13px}
-.rep+.rep{margin-top:12px}
-.rep .rh{display:flex;gap:14px;align-items:baseline;padding:9px 16px;border-bottom:1px solid var(--ink)}
-.rep .rh b{font-size:16px}
-.rep .rh .sum{margin-left:auto;display:flex;gap:14px;font-size:12px;color:var(--mute)}
-.rep.fold .rh{border-bottom:0}
-.rep .g{display:grid;grid-template-columns:170px minmax(0,1fr);border-bottom:1px dashed var(--line)}
-.rep .g:last-child{border-bottom:0}
-.rep .g>span{padding:10px 16px;color:var(--mute)}
-.rep .g>div{padding:8px 16px 8px 0;display:grid;gap:5px}
-.rep .rl{display:flex;gap:10px;align-items:center;min-height:24px}
-.rep .rl .r{margin-left:auto;font-size:12px;color:var(--mute);display:inline-flex;gap:10px;align-items:center}
-.rep .rl .btn{padding:1px 8px;font-size:12px}
+/* ===== 汇报页：数字条、时间轴、逐件叙述、额度条 ===== */
+.hb{display:grid;gap:36px}
+.hb-tabs{display:flex;gap:0;border:1px solid var(--ink);width:max-content;font-size:12px}
+.hb-tabs span{padding:4px 12px;display:inline-flex;gap:8px;align-items:center;color:var(--mute)}
+.hb-tabs span+span{border-left:1px solid var(--line)}
+.hb-tabs span.on{background:var(--ink);color:var(--bg)}
+.hb-eye{font-size:12px;color:var(--mute);letter-spacing:.04em}
+.hb-sum{display:grid;gap:18px}
+.hb-kpi{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border:1px solid var(--ink);background:var(--panel)}
+.hb-kpi>div{padding:12px 14px 10px;display:grid;gap:2px;align-content:start}
+.hb-kpi>div+div{border-left:1px solid var(--line)}
+.hb-kpi b{font-size:40px;line-height:1;font-weight:700;font-variant-numeric:tabular-nums}
+.hb-kpi b small{font-size:15px;font-weight:400;margin-left:3px}
+.hb-kpi span{font-size:13px}
+.hb-kpi i{font-style:normal;font-size:11px;color:var(--mute)}
+.hb-kpi .me{background:var(--acc-soft)}
+.hb-kpi .me b{color:var(--accent)}
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;border:1px solid var(--ink);padding:0 7px;background:var(--bg)}
+.st i{width:8px;height:8px;flex:none;background:var(--ok)}
+.st.me{border-color:var(--accent);color:var(--accent)} .st.me i{background:var(--accent)}
+.st.warn i{background:var(--warn)}
+.prog{display:inline-flex;gap:3px;vertical-align:-1px;margin:0 4px}
+.prog i{width:10px;height:10px;border:1px solid var(--ink);display:inline-block}
+.prog i.f{background:var(--ink)} .prog i.n{background:var(--ok);border-color:var(--ok)}
+.gantt{border:1px solid var(--ink);background:var(--panel);padding:10px 14px 8px}
+.gantt svg{display:block;width:100%;height:auto;overflow:visible}
+.gantt text{font-family:var(--mono);fill:var(--ink)}
+.gantt .tm{fill:var(--mute)}
+.gantt .grid{stroke:var(--line);stroke-dasharray:2 3}
+.gantt .axis{stroke:var(--ink)}
+.gantt .run-cc{fill:var(--ink)} .gantt .run-cx{fill:var(--mid)}
+.gantt .rev{fill:url(#hatch2);stroke:var(--ink)}
+.gantt .waitme{fill:var(--acc-soft);stroke:var(--accent);stroke-dasharray:4 3}
+.gantt .mk-sec{fill:var(--bg);stroke:var(--ink);stroke-width:1.5}
+.gantt .mk-ok{fill:var(--ok);stroke:var(--panel);stroke-width:2}
+.gantt .mk-stop{stroke:var(--warn);stroke-width:2.5}
+.gantt .mk-me{fill:var(--accent);stroke:var(--panel);stroke-width:2}
+.gantt .mk-out{fill:var(--ink)}
+.gantt .on{fill:var(--bg);font-weight:700}
+.gantt .lane{fill:var(--chip);opacity:.5}
+.gantt .hit:hover{opacity:.8}
+.lg{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12px;color:var(--mute);margin-top:6px;align-items:center}
+.lg span{display:inline-flex;gap:6px;align-items:center}
+.lg svg{width:22px;height:12px;flex:none}
+.gen{font-size:11px;color:var(--mute)}
+.mlg{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap}
+mark.mkd{background:var(--acc-soft);color:inherit;padding:1px 3px;box-shadow:inset 0 -2px 0 var(--accent)}
+mark.mkn{background:transparent;color:inherit;padding:1px 3px;border-bottom:2px dashed var(--accent)}
+u.ac{text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:4px}
+.inl{font:inherit;font-size:11px;border:1px solid var(--line);background:var(--bg);color:var(--mute);padding:0 5px;margin:0 2px 0 5px;cursor:pointer;vertical-align:1px;line-height:1.5}
+.inl:hover{border-color:var(--ink);color:var(--ink)}
+.inl.go{border-color:var(--accent);color:var(--accent)}
+.nar article{border-top:1px solid var(--ink);padding:18px 0 26px}
+.nar article>header{display:flex;gap:12px;align-items:center}
+.nar .no{width:28px;height:28px;display:grid;place-items:center;background:var(--ink);color:var(--bg);font-weight:700;font-size:15px;flex:none}
+.nar h3{font-size:20px}
+.nar .meta{margin-left:auto;font-size:12px;color:var(--mute);display:inline-flex;gap:6px;align-items:center;white-space:nowrap}
+.nar .sign{margin-top:4px}
+.nar .adv{color:var(--mute)}
+.na .grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:36px;margin-top:14px;align-items:start}
+.na dl{margin:0;display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px 16px}
+.na dt{font-size:12px;color:var(--mute);letter-spacing:.04em;padding-top:5px;text-align:right}
+.na dd{margin:0;font-size:15px;line-height:1.85;max-width:44em}
+.na aside{border:1px solid var(--line);padding:12px 14px;display:grid;gap:8px;font-size:14px;background:var(--panel)}
+.na aside.need{border-color:var(--accent);background:var(--acc-soft)}
+.na aside h4{margin:0;font-size:12px;font-weight:400;color:var(--mute);letter-spacing:.04em}
+.na aside.need h4{color:var(--accent)}
+.na aside p{font-size:14px;line-height:1.65}
+.na aside .adv{font-size:13px}
+.na aside .btn{justify-self:start}
+.na aside table{border-collapse:collapse;width:100%;font-size:12px;margin-top:4px}
+.na aside td{padding:4px 0;border-top:1px dashed var(--line);vertical-align:top}
+.na aside td:first-child{color:var(--mute);width:3.4em}
+.qstrip{display:grid;grid-template-columns:260px repeat(2,minmax(0,1fr));gap:36px;align-items:center;border:1px solid var(--ink);background:var(--panel);padding:16px 18px}
+.qstrip h3{font-size:15px;display:flex;gap:8px;align-items:center}
+.qstrip .qh p{font-size:12px;color:var(--mute);margin-top:6px}
+.qstrip .qt{display:flex;justify-content:space-between;align-items:baseline;font-size:13px}
+.qstrip .qt b{font-size:22px}
+.qstrip .track{height:12px;background:var(--chip);position:relative;margin:6px 0}
+.qstrip .track b{position:absolute;top:0;bottom:0}
+.qstrip .was{left:0;background:var(--line)}
+.qstrip .add{background:var(--ink)}
+.qstrip .qs{display:flex;justify-content:space-between;font-size:11px;color:var(--mute)}
 
 /* ===== 主栏 + 窄栏 ===== */
 .split{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:44px;align-items:start}
@@ -381,6 +449,14 @@ const R = {
 const AI=['cc','cx','gp','mg','ag'];
 
 const DECISIONS = [
+  {kind:'合并 PR', tier:'B', tierText:'点一下就做', age:'5 小时前',
+   title:'dt-sandbox#42 · 补反向测试', ask:'GPT 审查通过，CI 全绿。中风险，秘书不能替你合。合并吗？',
+   rows:[['来自','11-18 夜间 · 第 2 件'],['改动','L2 · 4 个文件 · +240 −3'],['测试','全量 1399 项通过']],
+   from:'来源：夜间推进 · 影子合并官建议合并', acts:['合并','退回','打开 PR ↗']},
+  {kind:'交回给我', tier:'D', tierText:'必须问本人', age:'3 小时前',
+   title:'dt-sandbox#43 · 到 2 小时上限停下', ask:'对账脚本改了一半没交。放宽上限不在代批清单里，秘书没替你定。怎么办？',
+   rows:[['来自','11-18 夜间 · 第 3 件'],['已用','2 小时 · 11 轮 · 重派 1 次'],['卡在','要读三处状态，测试没写完']],
+   from:'来源：夜间推进 · 秘书交回', acts:['放宽到 3 小时','拆成两单','不做']},
   {kind:'新建工作流', change:true, tier:'D', tierText:'必须问本人', age:'28 分钟前',
    title:'设计出稿', ask:'你 13:52 在工作台新建了这条工作流。确认后才会启用，之前不会被触发。',
    rows:[['触发','飞书里说「出设计」'],['步骤','6 步 · 2 处停下等我'],['角色','CC · 我 · GP · CX']],
@@ -528,7 +604,7 @@ function heroArt(){
   // 标注：等我拍板（像参考图的 127ms）
   const a=g.pt(P[2]+S-24,P[0]+22,T+34+CH); const bx=a[0]+90, by=a[1]-74;
   g.raw(`<path class="cl" d="M${a[0].toFixed(1)} ${a[1].toFixed(1)} L${a[0].toFixed(1)} ${by} L${bx} ${by}"/><circle cx="${a[0].toFixed(1)}" cy="${a[1].toFixed(1)}" r="2.6" class="dacc"/><circle cx="${bx}" cy="${by}" r="2.6" class="dacc"/>`);
-  g.flat(bx+10,by+7,'■ 4 件',22,'tacc');
+  g.flat(bx+10,by+7,`■ ${DECISIONS.length} 件`,22,'tacc');
   g.flat(bx+10,by+28,'等我拍板 · 2 条是改动',12,'tb');
   // 标注：GPT 未登录
   const w=g.pt(P[2]+S-13,P[1]+12,T+CH); const wx=w[0]+178, wy=w[1]+44;
@@ -605,32 +681,126 @@ function homeDecide(){
       <div class="acts"><button class="btn pri" type="button" data-quick>${d.acts[0]}</button><button class="btn link" type="button" data-page="report">详情</button></div><p class="done"></p></div>`).join('')}
   </section>`;
 }
-/* 汇报页：上面是黑底拍板卡片（第 3 版首页的形式，原样），下面是交班报告 */
+/* ===== 汇报页（常浩 2026-11-19 定）：数字条 + 一夜时间轴 + 等我拍板 + 逐件白话叙述 + 额度条 =====
+   白话由猛鬼兽写；数字和动作由脚本从中台记录、GitHub 回读里取。句子里三种标记：
+   mkd 秘书替我定的（后面跟「推翻」）、mkn 没定留给我的（后面跟「去定」）、ac 做完的动作。 */
+const mm=s=>{const [h,m]=s.split(':').map(Number);return ((h<12?h+24:h)-22)*60+m};
+const hm=n=>`${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;
+const R_NAME=id=>R[id].name;
+/* 时间轴用的数据 */
+const NIGHT={
+  tasks:[
+    {n:1,ex:'cx',ref:'my-skills#110',segs:[['run','22:40','23:55'],['rev','23:55','00:20']],marks:[['ok','00:25','秘书合并 #111']]},
+    {n:2,ex:'cc',ref:'dt-sandbox#41',segs:[['run','00:30','02:10'],['rev','02:10','02:50'],['wait','02:50','08:00']],marks:[]},
+    {n:3,ex:'cc',ref:'dt-sandbox#43',segs:[['run','02:55','03:40'],['run','03:42','04:57'],['wait','04:57','08:00']],marks:[['stop','04:57','到 2 小时上限停下']]}
+  ],
+  sec:[{t:'23:10',kind:'替你回答',a:'只跑改到的部分'},{t:'00:25',kind:'替你合并',a:'合并 #111'},{t:'01:20',kind:'替你回答',a:'不改名，另开一单'},{t:'03:42',kind:'替你重派',a:'重来一次'}],
+  back:{t:'04:57'},
+  outMarks:['23:55','00:25','02:10','00:26','02:51','04:58','08:00']
+};
+const ST=(k,t)=>`<span class="st ${k==='ok'?'':k}"><i></i>${t}</span>`;
+const GEN=`<span class="gen">白话是猛鬼兽写的（opus-5-5）；数字和动作取自中台记录和 GitHub 回读</span>`;
+const hbTabs=()=>`<div class="hb-tabs num"><span class="on">11-18 夜间 <b style="font-weight:400;opacity:.7">3 单</b></span><span>11-18 白天 · 秘书 2 条</span><span>11-17 夜间 · 没开</span><span>11-17 白天 · 秘书 1 条</span><span>更早 ▾</span></div>`;
+const hbKpi=()=>`<div class="hb-kpi">
+    <div><b>3</b><span>派了单</span><i>上限 3 单 / 晚</i></div>
+    <div><b>2</b><span>提交 PR</span><i>#111 · #42</i></div>
+    <div><b>1</b><span>完成合并</span><i>#111，秘书按白名单合的</i></div>
+    <div><b>4</b><span>秘书替你定</span><i>都能推翻</i></div>
+    <div class="me"><b>2</b><span>等你处理</span><i>合并 1 · 交回 1</i></div>
+    <div><b>4<small>小时</small>55<small>分</small></b><span>工人用时</span><i>Claude Code 3:40 · Codex 1:15</i></div>
+  </div>`;
+function gantt(big){
+  const W=1156, L=176, R=14, top=22, rh=big?40:26, bh=big?22:14;
+  const lanes=[...NIGHT.tasks.map(t=>({t})),{lab:'秘书替你定'},{lab:'完成的动作'}];
+  const H=top+lanes.length*rh+6, x=n=>L+n/600*(W-L-R);
+  let o='';
+  for(let h=0;h<=10;h++){const X=x(h*60);o+=`<line class="grid" x1="${X}" x2="${X}" y1="${top}" y2="${H-6}"/><text class="tm" x="${X}" y="13" font-size="11" text-anchor="middle">${String((22+h)%24).padStart(2,'0')}:00</text>`}
+  o+=`<line class="axis" x1="${L}" x2="${W-R}" y1="${top}" y2="${top}"/>`;
+  lanes.forEach((ln,i)=>{
+    const y=top+i*rh, cy=y+rh/2;
+    if(i%2===0) o+=`<rect class="lane" x="0" y="${y}" width="${W}" height="${rh}"/>`;
+    if(ln.t){const t=ln.t;
+      o+=`<text x="0" y="${cy+4}" font-size="12"><tspan font-weight="700">${t.n}</tspan>　${t.ref}</text>`;
+      t.segs.forEach(s=>{const a=x(mm(s[1])), b=x(mm(s[2])), w=b-a-2;
+        const cls=s[0]==='run'?'run-'+t.ex:s[0]==='rev'?'rev':'waitme';
+        const name=s[0]==='run'?`${R_NAME(t.ex)} 在做`:s[0]==='rev'?'审查':'等你';
+        o+=`<rect class="hit ${cls}" x="${a}" y="${cy-bh/2}" width="${w}" height="${bh}" rx="${s[0]==='run'?2:0}"><title>第 ${t.n} 单 · ${name} · ${s[1]} → ${s[2]}</title></rect>`;
+        if(big&&w>(s[0]==='run'?120:70)) o+=`<text class="${s[0]==='run'?'on':''}" x="${a+(s[0]==='wait'?18:7)}" y="${cy+4}" font-size="11">${name}${s[0]==='run'?' '+hm(mm(s[2])-mm(s[1])):''}</text>`;
+        if(!big&&s[0]==='wait'&&w>60) o+=`<text x="${a+18}" y="${cy+4}" font-size="10" fill="var(--accent)">等你</text>`;
+      });
+      t.marks.forEach(mk=>{const X=x(mm(mk[1]));
+        if(mk[0]==='ok') o+=`<circle class="mk-ok" cx="${X}" cy="${cy}" r="6"><title>${mk[1]} ${mk[2]}</title></circle>`+(big?`<text x="${X+11}" y="${cy+4}" font-size="11">已合并</text>`:'');
+        if(mk[0]==='stop') o+=`<g><title>${mk[1]} ${mk[2]}</title><line class="mk-stop" x1="${X-5}" y1="${cy-5}" x2="${X+5}" y2="${cy+5}"/><line class="mk-stop" x1="${X-5}" y1="${cy+5}" x2="${X+5}" y2="${cy-5}"/></g>`;
+      });
+    } else {
+      o+=`<text x="0" y="${cy+4}" font-size="12">${ln.lab}</text>`;
+      if(ln.lab.startsWith('秘书')){
+        NIGHT.sec.forEach(s=>{const X=x(mm(s.t));o+=`<rect class="mk-sec" x="${X-5}" y="${cy-5}" width="10" height="10" transform="rotate(45 ${X} ${cy})"><title>${s.t} ${s.kind}：${s.a}</title></rect>`+(big?`<text class="tm" x="${X+11}" y="${cy+4}" font-size="11">${s.kind.replace('替你','')}</text>`:'')});
+        const X=x(mm(NIGHT.back.t));o+=`<circle class="mk-me" cx="${X}" cy="${cy}" r="6"><title>${NIGHT.back.t} 交回给你</title></circle>`+(big?`<text x="${X+11}" y="${cy+4}" font-size="11" fill="var(--accent)">交回给你</text>`:'');
+      } else NIGHT.outMarks.forEach(tm=>{const X=x(mm(tm));o+=`<rect class="mk-out" x="${X-2}" y="${cy-6}" width="4" height="12"><title>${tm}</title></rect>`});
+    }
+  });
+  const lg=`<div class="lg"><span><svg viewBox="0 0 22 12"><rect width="22" height="12" rx="2" fill="var(--ink)"/></svg>Claude Code 在做</span><span><svg viewBox="0 0 22 12"><rect width="22" height="12" rx="2" fill="var(--mid)"/></svg>Codex 在做</span><span><svg viewBox="0 0 22 12"><rect x=".5" y=".5" width="21" height="11" fill="url(#hatch2)" stroke="var(--ink)"/></svg>审查</span><span><svg viewBox="0 0 22 12"><rect x=".5" y=".5" width="21" height="11" fill="var(--acc-soft)" stroke="var(--accent)" stroke-dasharray="4 3"/></svg>等你</span><span><svg viewBox="0 0 22 12"><rect x="6" y="1" width="10" height="10" transform="rotate(45 11 6)" fill="var(--bg)" stroke="var(--ink)" stroke-width="1.5"/></svg>秘书替你定</span><span><svg viewBox="0 0 22 12"><circle cx="11" cy="6" r="5" fill="var(--ok)"/></svg>合并</span><span><svg viewBox="0 0 22 12"><path d="M6 1l10 10M6 11L16 1" stroke="var(--warn)" stroke-width="2.5"/></svg>停下</span><span><svg viewBox="0 0 22 12"><rect x="9" y="0" width="4" height="12" fill="var(--ink)"/></svg>推分支、开 PR、合并、发飞书</span></div>`;
+  return `<div class="gantt"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="11-18 夜间时间轴：三单依次执行，秘书四次替你定，一次交回">${o}</svg>${lg}</div>`;
+}
+const dc=(s)=>`<mark class="mkd">${s}</mark><button class="inl" type="button">推翻</button>`;
+const dn=(s)=>`<mark class="mkn">${s}</mark><button class="inl go" type="button" data-jump="decide">去定 ↑</button>`;
+const ac=(s)=>`<u class="ac">${s}</u>`;
+const STORY=[
+  {n:1,state:'ok',stateText:'做完了，已合并',ex:'cx',ref:'my-skills#110',mins:75,
+   name:'给 12 个 skill 的说明补上「什么时候不用」',
+   what:'你的 skill（给 AI 用的技能说明）有时会在不该用的场合被 AI 调出来。这一单让 Codex 给 12 个 skill 的说明各补一段「什么情况下不要用我」。起因是 11-18 群学习报告里的行动 1。',
+   story:`Codex 22:40 开始做。中途它问测试是全跑还是只跑改到的部分，${dc('我替你选了只跑改到的部分')}，因为这是只改文字的小改动，你的清单写了小改走快测。23:55 它做完，${ac('推了分支 codex/110-skill-when-not')}，${ac('开了 PR #111')}。审查通过后，${dc('我把它合并了')}，因为只改了说明文字，属于清单里我可以直接合并的那一类。`,
+   result:'12 个 skill 的说明都补上了，14 项检查全部通过。以后 AI 误调这些 skill 的情况应该会变少，12-01 的月度体检会给出补之前和补之后的对比数字。',
+   todo:null,todoText:'不用做什么。',facts:[['PR','#111 已合并'],['改动','+86 −12 · 12 个文件'],['用时','Codex 1:15']]},
+  {n:2,state:'me',stateText:'做完了，等你合并',ex:'cc',ref:'dt-sandbox#41',mins:100,
+   name:'给「替工人发布代码」这一步补上防错测试',
+   what:'工人写完代码后，由一个固定脚本替它把代码推到 GitHub、开 PR。这个脚本在 9 种情况下应该拒绝，比如授权过期了、改到了高风险文件。之前这 9 种情况没有测试守着，改坏了也发现不了。这一单让 Claude Code 把测试补上。',
+   story:`Claude Code 00:30 开始做。中途它问能不能顺手把一个旧函数改个名，${dc('我替你答了不改，要改另开一单')}，因为清单规定不扩大任务范围。02:10 它做完，${ac('推了分支 claude/41-publish-tests')}，${ac('开了 PR #42')}。GPT 独立审过，没提问题，1399 项测试全部通过。这是中风险改动，清单只允许我合并文档类，所以${dn('合并这一步我没替你定')}。`,
+   result:`PR 开着，等你合并。9 种该拒绝的情况现在都有测试守着。合并以后，主线「执行底座」的恢复门就满足了 3 个前置条件里的 2 个 <span class="prog" title="3 项里完成 2 项，绿色是这一晚新完成的"><i class="f"></i><i class="n"></i><i></i></span>。`,
+   todo:'去合并',todoText:'合并 PR #42。',facts:[['PR','#42 等你合并'],['改动','+240 −3 · 4 个文件'],['用时','Claude Code 1:40']]},
+  {n:3,state:'warn',stateText:'没做完，停下了',ex:'cc',ref:'dt-sandbox#43',mins:120,
+   name:'写「重启后先对账」的脚本',
+   what:'电脑睡醒或程序重启后，系统要先核对有没有做到一半的动作，核对完才能继续干活。这一单让 Claude Code 写这个核对脚本。',
+   story:`Claude Code 02:55 开始做。跑到 45 分钟时测试没过，停了，${dc('我让它重来了一次')}，清单允许每单重派 1 次。重来后一直跑到 04:57，累计满了 2 小时的上限，被系统停下。要不要多给时间，清单里没有这一项，${dn('这一步我没替你定')}。`,
+   result:'没有分支，没有 PR。改到一半的东西还留在工人的工作目录里，没有丢。没做完的原因：这个脚本要读三处状态，比预想的复杂，测试没来得及写完。恢复门的第 3 个前置条件没有动。',
+   todo:'去定怎么办',todoText:'定这一单怎么办：多给 1 小时、拆成两单，或者不做。',advice:'我的建议是拆成两单：先做「读状态」，再做「核对和报告」，每单都能在 2 小时内做完。',facts:[['PR','没有'],['改动','没提交'],['用时','Claude Code 2:00，到上限']]}
+];
+const LEGEND=`<span class="mlg"><mark class="mkd">橙底</mark>我替你定的　<mark class="mkn">虚线</mark>我没定、留给你的　<u class="ac">下划线</u>做完的动作</span>`;
+const metaOf=t=>`<span class="meta">${codeChip(t.ex)} ${t.ref} · 用了 ${hm(t.mins)}</span>`;
+const todoBtn=t=>t.todo?`<button class="btn pri" type="button" data-jump="decide">${t.todo} ↑</button>`:'';
+function quotaStrip(){
+  const Q=[['cc','Claude Code',31,37,'5 小时窗口最高用到 44%'],['cx','Codex',20,22,'5 小时窗口最高用到 18%']];
+  return `<section class="qstrip" aria-label="额度消耗"><div class="qh"><h3><i class="sq"></i>花了多少额度</h3><p>这次托管期间用掉的本周额度。GPT 网页的用量取不到，不计。</p></div>
+    ${Q.map(q=>`<div class="qi"><div class="qt"><span>${codeChip(q[0])} ${q[1]}</span><b class="num">+${q[3]-q[2]}%</b></div><div class="track" title="${q[1]}：托管前 ${q[2]}%，托管后 ${q[3]}%"><b class="was" style="width:${q[2]}%"></b><b class="add" style="left:${q[2]}%;width:${q[3]-q[2]}%"></b></div><div class="qs num"><span>本周 ${q[2]}% → ${q[3]}%</span><span>${q[4]}</span></div></div>`).join('')}</section>`;
+}
+const secHead=(extra)=>`<div class="h-sec"><h2><i class="sq"></i>昨晚的经过</h2><span class="hint">${LEGEND}</span>${extra||''}</div>`;
+
+/* 甲：左边小标签，右边一栏「要你做」 */
+function partA(){
+  return `<section class="nar na" aria-label="昨晚的经过">${secHead()}
+    ${STORY.map(t=>`<article class="${t.state}">
+      <header><span class="no num">${t.n}</span><h3>${t.name}</h3>${ST(t.state,t.stateText)}${metaOf(t)}</header>
+      <div class="grid">
+        <dl><dt>这件事</dt><dd>${t.what}</dd><dt>经过</dt><dd>${t.story}</dd><dt>现在的结果</dt><dd>${t.result}</dd></dl>
+        <aside class="${t.todo?'need':''}"><h4>要你做</h4><p>${t.todoText}</p>${t.advice?`<p class="adv">${t.advice}</p>`:''}${todoBtn(t)}
+          <table>${t.facts.map(f=>`<tr><td>${f[0]}</td><td>${f[1]}</td></tr>`).join('')}</table></aside>
+      </div></article>`).join('')}
+    <p class="sign">${GEN}</p></section>${quotaStrip()}`;
+}
 function reportPage(){
-  const led=(k)=>`<span class="led ${k||''}"></span>`;
-  return `<div class="rp"><section class="decide" id="decide" aria-label="等我拍板">
-    <div class="hd"><h2><i class="sq"></i>等我拍板 <span class="count num">${DECISIONS.length}</span></h2><span class="hint">其中 2 条是工作台里的改动，我确认后才生效 · 不处理，对应流程会停着</span></div>
+  return `<div class="hb">
+  <section class="hb-sum" aria-label="交班摘要">
+    ${hbTabs()}
+    <div class="hb-eye num">交班报告 · 11-18 夜间 · 托管 22:30 开 → 08:00 关</div>
+    ${hbKpi()}
+    ${gantt(true)}
+  </section>
+  <section class="decide" id="decide" aria-label="等我拍板">
+    <div class="hd"><h2><i class="sq"></i>等我拍板 <span class="count num">${DECISIONS.length}</span></h2><span class="hint">前 2 张来自 11-18 夜间 · 其中 2 张是工作台里的改动 · 不处理，对应流程会停着</span></div>
     <div class="dcs">${DECISIONS.map(decisionCard).join('')}</div>
   </section>
-  <section aria-label="交班报告">
-    <div class="h-sec"><h2><i class="sq"></i>交班报告</h2><span class="hint">我不在的时候，分身和工人实际做成了什么 · 每次托管、每个晚上一份</span><div class="right"><span class="mute" style="font-size:12px">最近 7 天</span></div></div>
-    <div class="rep">
-      <div class="rh"><b>11-18 夜间</b><span class="mute num">托管 22:30 开 → 08:00 关</span><div class="sum num"><span>派了 3 单</span><span>${led()} 2 单开了 PR</span><span>${led('warn')} 1 单停下</span><span>秘书替我定 4 条</span></div></div>
-      <div class="g"><span>每一单的结果</span><div>
-        <div class="rl">${codeChip('cx')}<span>my-skills#110 · 群学习报告行动 1</span><span class="r">${led()} 开了 PR #111，审查中</span></div>
-        <div class="rl">${codeChip('cc')}<span>dt-sandbox#41 · 补测试</span><span class="r">${led()} 开了 PR #42，审查中</span></div>
-        <div class="rl">${codeChip('cc')}<span>dt-sandbox#43 · 改脚本</span><span class="r">${led('warn')} 到 2 小时上限停下，改了一半没交</span></div></div></div>
-      <div class="g"><span>秘书替我定了 4 条</span><div>
-        <div class="rl"><span>#110 测试范围选了「只跑改动的模块」</span><span class="r">依据：清单里小改走快测<button class="btn" type="button">推翻</button></span></div>
-        <div class="rl"><span>#41 审查没过，退回返修 1 次</span><span class="r">依据：清单开了「退回」<button class="btn" type="button">推翻</button></span></div>
-        <div class="rl"><span>#43 超时后重派 1 次</span><span class="r">依据：每张任务可重派 1 次<button class="btn" type="button">推翻</button></span></div>
-        <div class="rl"><span>#43 要不要放宽到 3 小时：没替我定</span><span class="r">交回给我，还没处理</span></div></div></div>
-      <div class="g"><span>撤不回的动作</span><div><div class="rl"><span>推分支 2 次、开 PR 2 次，都回读核实过</span><span class="r">${led()} 结果不明 0</span></div></div></div>
-      <div class="g"><span>花费</span><div><div class="rl num"><span>Claude Code 1 小时 40 分 · Codex 35 分</span><span class="r">在「记录」里看逐轮流水</span></div></div></div>
-    </div>
-    <div class="rep fold"><div class="rh"><b>11-18 白天</b><span class="mute num">秘书 09:00 开 → 21:00 汇总</span><div class="sum num"><span>秘书替我定 2 条</span><span>${led()} 都已送达</span><span>展开 ▾</span></div></div></div>
-    <div class="rep fold"><div class="rh"><b>11-17 夜间</b><span class="mute num">托管没开</span><div class="sum num"><span>没有派单</span></div></div></div>
-  </section></div>`;
+  ${partA()}</div>`;
 }
 function render(){
   const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
@@ -644,7 +814,7 @@ function render(){
   <section class="hero" aria-label="概览">
     <div class="top">
       <div>
-        <button class="badge" type="button" data-jump="decide"><b class="num">4</b>件事等我拍板 &nbsp;✦</button>
+        <button class="badge" type="button" data-jump="decide"><b class="num">${DECISIONS.length}</b>件事等我拍板 &nbsp;✦</button>
         <h1>数字分身<br>工作台</h1>
       </div>
       <div class="stamp num">2026-11-19 周四<br><b>14:20</b> · 检查于 14:15</div>
