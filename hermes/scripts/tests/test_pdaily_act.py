@@ -36,7 +36,10 @@ class ActTests(unittest.TestCase):
         (self.tmp / f"{DAY}.facts.json").write_text(json.dumps(self.facts, ensure_ascii=False))
         (self.tmp / f"{DAY}.card-fields.json").write_text(json.dumps(self.fields, ensure_ascii=False))
         (self.tmp / f"{DAY}.card.sent.json").write_text(json.dumps(card, ensure_ascii=False))
-        self.deliv = {"stat_day": DAY, "sent": True, "read_back": True, "message_id": "om_abc123", "card_token": TOKEN}
+        snap, sha = A.snapshot(self.facts, self.fields["decisions"])
+        (self.tmp / f"{DAY}.decisions.sent.json").write_text(json.dumps(snap, ensure_ascii=False, indent=1))
+        self.deliv = {"stat_day": DAY, "sent": True, "read_back": True, "message_id": "om_abc123", "card_token": TOKEN,
+                      "decisions_sha": sha}
         (self.tmp / f"{DAY}.delivery.json").write_text(json.dumps(self.deliv))
         self.calls = []
         self.patches = [mock.patch.object(A, "DAILY", self.tmp),
@@ -84,11 +87,44 @@ class ActTests(unittest.TestCase):
         self.assertEqual(self.click(2)[1]["entries"], [])                # 同一条再点：不重复记
         self.assertEqual(len(A.rows()), 1)
 
-    def test_all_means_the_rest(self):
+    def test_all_means_the_rest_that_can_be_done(self):
+        """全部按推荐 = 其余还没定、有推荐、不用常浩亲手做的；③ 是要常浩亲手做的，不算、也没有单独的按钮。"""
         self.click(2)
         rc, out = self.click(0)
-        self.assertEqual([A.entries()[i]["n"] for i in out["entries"]], [1, 3])
-        self.assertIn("①、③ 按推荐", out["inject"])
+        self.assertEqual([A.entries()[i]["n"] for i in out["entries"]], [1])
+        self.assertIn("「① 按推荐」", out["inject"])
+        rc, out = self.click(3)
+        self.assertEqual(rc, 1)
+        self.assertIn("要你亲手做", out["msg"])
+        rc, out = self.click(0)                                          # 都定了：说一句现在的状态
+        self.assertEqual(out["entries"], [])
+        self.assertIn("没有还没定", out["tell"])
+        rc, out = self.click(2)
+        self.assertIn("② 已经定过（按推荐，还没有办理结果）", out["tell"])
+
+    def test_buttons_follow_sent_snapshot_not_rebuilt_draft(self):
+        """审查 P1-1：发卡后重新写稿（card-fields 变了），按钮仍对应发出去的那一版；快照被改就不认。"""
+        swapped = dict(self.fields, decisions=[self.fields["decisions"][2], self.fields["decisions"][0]])
+        (self.tmp / f"{DAY}.card-fields.json").write_text(json.dumps(swapped, ensure_ascii=False))
+        _, out = self.click(2)
+        self.assertEqual(A.entries()[out["entries"][0]]["item"], "#102 去留")
+        snap = json.loads((self.tmp / f"{DAY}.decisions.sent.json").read_text())
+        snap["decisions"][0]["recommendation"] = "改过的"
+        (self.tmp / f"{DAY}.decisions.sent.json").write_text(json.dumps(snap, ensure_ascii=False))
+        rc, out = self.click(1)
+        self.assertEqual(rc, 1)
+        self.assertIn("对不上", out["msg"])
+
+    def test_latest_card_not_read_back_means_no_card(self):
+        """审查 P1-2：最新一张没回读通过，不往前找旧卡。"""
+        newer = dict(self.deliv, stat_day="2026-11-09", read_back=False, card_token="fedcba9876543210")
+        (self.tmp / "2026-11-09.delivery.json").write_text(json.dumps(newer))
+        rc, out = self.click(1)
+        self.assertEqual(rc, 1)
+        self.assertIn("不是最新一张", out["msg"])
+        self.assertEqual(self.run_cmd("todos")[0], 1)
+        (self.tmp / "2026-11-10.delivery.json").write_text(json.dumps({"stat_day": "2026-11-10", "sent": False}))
+        self.assertEqual(self.run_cmd("todos")[0], 1)                    # 更新的一天没发成：跳过它，看 11-09，仍然不往前
 
     def test_after_refreshes_card_and_tells_when_not_injected(self):
         _, out = self.click(2)
@@ -100,7 +136,7 @@ class ActTests(unittest.TestCase):
         tab = [e for e in card["body"]["elements"] if e.get("tag") == "table"][-1]
         self.assertEqual([r["a"] for r in tab["rows"]][1], "✅ 按推荐")
         btns = [c for e in card["body"]["elements"] if e.get("tag") == "column_set" for c in e["columns"]]
-        self.assertEqual([A.btn_value(c)["n"] for c in btns], [0, 1, 3])  # ② 的按钮去掉了
+        self.assertEqual([A.btn_value(c)["n"] for c in btns], [0, 1])     # ② 的按钮去掉了；③ 本来就没有
         self.assertEqual(btns[0]["elements"][0]["text"]["content"], "其余全部按推荐")
         self.assertIn("引用这张日报卡片回一句「办 ②」", say[-1])
         self.assertEqual(json.loads((self.tmp / f"{DAY}.card.sent.json").read_text()), card)
@@ -120,6 +156,9 @@ class ActTests(unittest.TestCase):
         self.assertEqual(self.run_cmd("record", "--n", "2", "--choice", "随便")[0], 1)
         rc, out = self.run_cmd("record", "--n", "2", "--choice", "按推荐", "--note", "只退回不关")
         eid = out["entries"][0]["id"]
+        rc, out = self.run_cmd("record", "--n", "2", "--choice", "不做")      # 已定的不改，照实说
+        self.assertEqual((out["entries"], out["already"][0]["choice"]), ([], "按推荐"))
+        self.assertIn("已经定过", out["msg"])
         self.assertEqual(self.run_cmd("done", "--entry", eid, "--result", "派了 Claude 变基", "--order", "D20261119-3")[0], 0)
         self.assertEqual(self.run_cmd("done", "--entry", "p-nope", "--result", "x")[0], 1)
         rc, out = self.run_cmd("todos")
@@ -130,17 +169,23 @@ class ActTests(unittest.TestCase):
         self.assertEqual(out["decisions"][0]["decided"]["choice"], "先放着")
 
     def test_remembered_for_next_day(self):
-        self.run_cmd("record", "--n", "2", "--choice", "按推荐")
+        _, out = self.run_cmd("record", "--n", "2", "--choice", "按推荐")
         self.run_cmd("record", "--n", "1", "--choice", "先放着")
+        k1, k2 = A.cand_key(self.facts["decisions"][0]), A.cand_key(self.facts["decisions"][1])
         keys, recent, held = A.remembered()
-        self.assertIn(A.cand_key(self.facts["decisions"][1]), keys)
-        self.assertIn(A.cand_key(self.facts["decisions"][0]), keys)
+        self.assertTrue({k1, k2} <= keys)
         self.assertEqual((len(recent), held), (1, 1))
-        later = A.now() + A.dt.timedelta(days=8)
-        keys, _, held = A.remembered(later)
-        self.assertNotIn(A.cand_key(self.facts["decisions"][0]), keys)  # 先放着过了 7 天：重新拿出来问
+        day = A.dt.timedelta(days=1)
+        keys, _, _ = A.remembered(A.now() + 3 * day)
+        self.assertNotIn(k2, keys)                                       # 按推荐但 3 天没办理结果：重新拿出来问（审查 P2-5）
+        self.assertIn(k1, keys)
+        self.run_cmd("done", "--entry", out["entries"][0]["id"], "--result", "派了 Claude", "--order", "D1")
+        keys, _, held = A.remembered(A.now() + 8 * day)
+        self.assertIn(k2, keys)                                          # 办成了：30 天内不再问
+        self.assertNotIn(k1, keys)                                       # 先放着过了 7 天：重新拿出来问
         self.assertEqual(held, 0)
-        self.assertIn(A.cand_key(self.facts["decisions"][1]), keys)
+        self.run_cmd("done", "--entry", out["entries"][0]["id"], "--result", "没办：要合并，超出授权")
+        self.assertNotIn(k2, A.remembered()[0])                          # 最后结果是没办：不算定过
 
     def test_next_day_material_and_check(self):
         self.run_cmd("record", "--n", "2", "--choice", "按推荐")
@@ -148,9 +193,17 @@ class ActTests(unittest.TestCase):
         self.assertTrue(m["decisions"][1].get("already_decided"))
         self.assertFalse(m["decisions"][0].get("already_decided"))
         self.assertEqual(m["ledger"]["recently_decided"][0]["item"], "#102 去留")
-        e = P.check(self.facts, T.card_fields(decisions=[self.fields["decisions"][1]]), T.report_text())
-        self.assertTrue(any("已经定过" in x for x in e), e)
-        self.assertEqual(P.check(self.facts, T.card_fields(), T.report_text()), [])
+        card = T.card_fields(decisions=[self.fields["decisions"][1], self.fields["decisions"][0]],
+                             risks=[dict(T.card_fields()["risks"][0], to_decisions=[1, 2])])
+        w = P.normalize(self.facts, card)                                # 定过的不算核对失败：规整时去掉，风险去向跟着挪（审查 P1-3）
+        self.assertTrue(any("已经定过" in x for x in w), w)
+        self.assertEqual([d["item"] for d in card["decisions"]], ["夜跑收尾"])
+        self.assertEqual(card["risks"][0]["to_decisions"], [1])
+        self.assertEqual(P.check(self.facts, card, T.report_text()), [])
+        fb, _ = P.fallback(self.facts, "x")                              # 事实版也不再列定过的
+        self.assertEqual([d["item"] for d in fb["decisions"]], ["夜跑停机后收尾，授权 72 到期 2026-11-09T06:00"])
+        c = P.build_card(self.facts, fb, "t", token=TOKEN)
+        self.assertFalse([e for e in c["body"]["elements"] if e.get("tag") == "column_set"])   # 降级卡不放按钮
 
     def test_broken_ledger_lines_ignored(self):
         (self.tmp / "decisions.jsonl").write_text("坏行\n[1]\n")

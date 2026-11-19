@@ -90,6 +90,8 @@ def pdaily(value):
             _spawn(PDAILY_SCRIPT, ["say", "--text", out["msg"]], f"pdaily say {n}")
         return None
     if not out.get("entries"):
+        if out.get("tell"):                             # 已经定过：说一句现在的状态（审查 P3）
+            _spawn(PDAILY_SCRIPT, ["say", "--text", out["tell"]], f"pdaily say {n}")
         return None
     injected = False
     if _CTX is not None and out.get("inject"):

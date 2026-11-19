@@ -4,6 +4,8 @@
 merge-buttons 插件把点击转给本脚本 `button`，核对后记账；插件再把一句话注入常浩私聊的会话，由猛鬼兽按 pdaily-act 技能办。
 不做、先放着、改推荐靠常浩引用卡片回一句，由 pdaily-act 技能调 `record` 记账。本脚本不调 AI、不派单、不合并。
 
+按钮和编号只认发卡时存下的拍板快照 DigitalTwin/daily/<统计日>.decisions.sent.json（send 写，哈希记进 delivery.json）：
+发卡后就算重新写过稿，按钮也只对应常浩看到的那一版（#235 独立审查 P1-1）。
 拍板账 DigitalTwin/daily/decisions.jsonl，只追加：每条「定了」一行（id、统计日、编号、事项、推荐、选择、来源），
 办理结果另起一行（ref 指向那条的 id）。读的时候按 id 合并。写账在文件锁里做。
 
@@ -38,8 +40,9 @@ import pdaily_publish as P  # noqa: E402  pdaily_publish 也 import 本模块：
 DAILY = pdaily_facts.DAILY
 TOKEN = re.compile(r"^[0-9a-f]{16}$")
 CHOICES = ("按推荐", "不做", "先放着", "自己做")
-HOLD_DAYS = 7            # 「先放着」7 天内不再展开（常浩 11-19「都按推荐」）
-REMEMBER_DAYS = 30       # 定过的事 30 天内不再问；更久的当新事
+HOLD_DAYS = 7            # 「先放着」「自己做」7 天内不再展开（常浩 11-19「都按推荐」）
+REMEMBER_DAYS = 30       # 定了、办成了的事 30 天内不再问；更久的当新事
+PENDING_DAYS = 2         # 按推荐但还没有办理结果的：2 天内不再问，过了重新拿出来（注入成功不等于办了，审查 P2-5）
 TZ = pdaily_data.TZ
 
 
@@ -127,25 +130,50 @@ def decision_keys(facts, d):
     return ["c" + hashlib.sha1(raw.encode()).hexdigest()[:11]]
 
 
+def snapshot(facts, decisions):
+    """发卡时存的拍板快照：编号、事项、推荐、候选键和出处。返回 (快照 dict, 哈希)。"""
+    cands = facts.get("decisions") or []
+    snap = {"day": facts.get("stat_day"), "decisions": [
+        {"n": n, "project": d.get("project"), "item": d.get("item"), "kind": d.get("kind"), "type": d.get("type"),
+         "recommendation": d.get("recommendation"), "deadline": d.get("deadline"), "keys": decision_keys(facts, d),
+         "sources": [{k: c.get(k) for k in ("kind", "project_id", "item", "source", "evidence", "since")}
+                     for c in P.cand_list(d, cands)]}
+        for n, d in enumerate(decisions, 1)]}
+    text = json.dumps(snap, ensure_ascii=False, sort_keys=True)
+    return snap, hashlib.sha256(text.encode()).hexdigest()
+
+
+def buttonable(d):
+    """哪些拍板放「按推荐」按钮：有推荐、不是要常浩亲手做的（审查 P1-3、P3）。"""
+    return bool(P.s(d.get("recommendation"))) and d.get("kind") != "做"
+
+
 def remembered(at=None):
-    """给第二天写稿用：近期定过的（不再问）和先放着还没到期的（只计数）。返回 (键集合, 摘要列表, 先放着件数)。"""
+    """给第二天写稿用：近期定过的（不再问）和先放着还没到期的（只计数）。返回 (键集合, 摘要列表, 先放着件数)。
+    按推荐：办成了 30 天不再问；还没结果的 2 天不再问；结果是「没办」的不算定过。不做 30 天；先放着、自己做 7 天。"""
     at = at or now()
     keys, recent, held = set(), [], 0
     for e in entries().values():
         try:
-            t = dt.datetime.fromisoformat(e["at"])
+            age = (at - dt.datetime.fromisoformat(e["at"])).days
         except (KeyError, TypeError, ValueError):
             continue
-        age = (at - t).days
-        if e.get("choice") == "先放着":
+        last = (e.get("results") or [{}])[-1]
+        choice, result = e.get("choice"), P.s(last.get("result")) or ""
+        if choice in ("先放着", "自己做"):
             if age < HOLD_DAYS:
                 keys.update(e.get("keys") or [])
-                held += 1
+                held += choice == "先放着"
             continue
-        if age < REMEMBER_DAYS:
+        if choice == "按推荐":
+            if result.startswith("没办"):
+                continue
+            window = REMEMBER_DAYS if result else PENDING_DAYS
+        else:
+            window = REMEMBER_DAYS
+        if age < window:
             keys.update(e.get("keys") or [])
-            last = (e.get("results") or [{}])[-1]
-            recent.append({"day": e.get("day"), "item": e.get("item"), "choice": e.get("choice"),
+            recent.append({"day": e.get("day"), "item": e.get("item"), "choice": choice,
                            "result": last.get("result"), "order": last.get("order")})
     return keys, recent[-20:], held
 
@@ -153,20 +181,30 @@ def remembered(at=None):
 # ---------- 卡片 ----------
 
 def delivered(day=None):
-    """最新一张（或指定统计日）发出且回读过的日报卡片：(统计日, delivery 记录)。"""
+    """最新一张（或指定统计日）发出的日报卡片：(统计日, delivery 记录)。最新一张没回读通过、或没有拍板快照，
+    就当没有，不往前找旧卡（审查 P1-2）。"""
     files = [DAILY / f"{day}.delivery.json"] if day else sorted(DAILY.glob("*.delivery.json"), reverse=True)
     for f in files:
-        with contextlib.suppress(OSError, ValueError):
+        try:
             rec = json.loads(f.read_text(encoding="utf-8"))
-            if rec.get("sent") and rec.get("read_back") and rec.get("message_id"):
-                return rec.get("stat_day") or f.name.split(".")[0], rec
+        except (OSError, ValueError):
+            continue
+        if not rec.get("sent"):
+            continue
+        d = rec.get("stat_day") or f.name.split(".")[0]
+        ok = rec.get("read_back") and rec.get("message_id") and rec.get("decisions_sha")
+        return (d, rec) if ok else (None, None)
     return None, None
 
 
-def card_decisions(day):
-    facts = json.loads((DAILY / f"{day}.facts.json").read_text(encoding="utf-8"))
-    fields = json.loads((DAILY / f"{day}.card-fields.json").read_text(encoding="utf-8"))
-    return facts, P.dicts(fields, "decisions")
+def card_decisions(day, rec=None):
+    """发卡时存的拍板快照；哈希和 delivery 记录对不上就不认。"""
+    snap = json.loads((DAILY / f"{day}.decisions.sent.json").read_text(encoding="utf-8"))
+    if rec is not None:
+        sha = hashlib.sha256(json.dumps(snap, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        if sha != rec.get("decisions_sha"):
+            raise Fail(f"{day} 日报的拍板快照和发卡记录对不上，不认按钮")
+    return snap["decisions"]
 
 
 def state_of(day):
@@ -178,63 +216,69 @@ def state_of(day):
     return out
 
 
-def record_choices(day, ns, choice, via, note=None):
-    """在锁里记账；已经定过的编号不重复记。返回新记的条目。"""
-    facts, decs = card_decisions(day)
+def record_choices(day, rec, ns, choice, via, note=None):
+    """在锁里记账；已经定过的编号不重复记。返回 (新记的条目, 已经定过的条目)。"""
+    decs = card_decisions(day, rec)
     if not decs:
         raise Fail(f"{day} 的日报卡片上没有拍板")
-    want = [n for n in ns if 1 <= n <= len(decs)]
     bad = [n for n in ns if not 1 <= n <= len(decs)]
     if bad:
         raise Fail(f"编号 {'、'.join(map(str, bad))} 不在 {day} 的日报卡片上（只有 1–{len(decs)}）")
-    new = []
+    new, old = [], []
     with locked():
         st = state_of(day)
-        for n in want:
+        for n in dict.fromkeys(ns):
             if n in st:
+                old.append(st[n])
                 continue
             d = decs[n - 1]
             e = {"id": f"p-{day[2:].replace('-', '')}-{n}-{secrets.token_hex(2)}", "at": now().isoformat(timespec="seconds"),
-                 "day": day, "n": n, "keys": decision_keys(facts, d), "project": d.get("project"), "item": d.get("item"),
+                 "day": day, "n": n, "keys": d.get("keys") or [], "project": d.get("project"), "item": d.get("item"),
                  "kind": d.get("kind"), "recommendation": d.get("recommendation"), "choice": choice, "via": via}
             if note:
                 e["note"] = P.clip(note, 200)
             append(e)
             new.append(e)
-    return new
+    return new, old
+
+
+def status_line(e):
+    last = (e.get("results") or [{}])[-1]
+    tail = f"，办理：{last['result']}" if last.get("result") else "，还没有办理结果"
+    return f"{label(e['n'])} 已经定过（{e.get('choice')}{tail}）"
 
 
 MARKS = {"按推荐": "✅ 按推荐", "不做": "✖ 不做", "先放着": "⏸ 先放着", "自己做": "✅ 你来做"}
 
 
 def refresh_card(day, rec):
-    """把发出去的卡片原地改：定了的那行「已挂」换成选择，按钮去掉；全部定了，按钮整排去掉。"""
-    sent = DAILY / f"{day}.card.sent.json"
-    card = json.loads(sent.read_text(encoding="utf-8"))
-    st = state_of(day)
-    els = card["body"]["elements"]
-    for e in els:
-        if e.get("tag") == "table" and [c["name"] for c in e["columns"]] == ["n", "i", "r", "a"]:
-            for k, row in enumerate(e["rows"], 1):
-                if k in st:
-                    row["a"] = MARKS.get(st[k].get("choice"), "✅ 已定")
-    keep = []
-    for e in els:
-        if e.get("tag") == "column_set" and any(btn_value(c).get("pdaily") for c in e.get("columns") or []):
-            cols = [c for c in e["columns"] if btn_value(c).get("n") not in st]
-            undecided = [c for c in cols if btn_value(c).get("n")]
-            if not undecided:
-                continue
-            for c in cols:
-                if btn_value(c).get("n") == 0 and st:
-                    c["elements"][0]["text"]["content"] = "其余全部按推荐"
-            e = dict(e, columns=cols)
-        keep.append(e)
-    card["body"]["elements"] = keep
-    text = json.dumps(card, ensure_ascii=False)
-    P.lark(["im", "messages", "patch", "--message-id", rec["message_id"],
-            "--data", json.dumps({"content": text}, ensure_ascii=False)], "改卡片", "bot")
-    sent.write_text(text, encoding="utf-8")
+    """把发出去的卡片原地改：定了的那行「已挂」换成选择，按钮去掉；没有可点的了，按钮整排去掉。整段在锁里（审查 P2-4）。"""
+    with locked():
+        sent = DAILY / f"{day}.card.sent.json"
+        card = json.loads(sent.read_text(encoding="utf-8"))
+        st = state_of(day)
+        els = card["body"]["elements"]
+        for e in els:
+            if e.get("tag") == "table" and [c["name"] for c in e["columns"]] == ["n", "i", "r", "a"]:
+                for k, row in enumerate(e["rows"], 1):
+                    if k in st:
+                        row["a"] = MARKS.get(st[k].get("choice"), "✅ 已定")
+        keep = []
+        for e in els:
+            if e.get("tag") == "column_set" and any(btn_value(c).get("pdaily") for c in e.get("columns") or []):
+                cols = [c for c in e["columns"] if btn_value(c).get("n") not in st]
+                if not [c for c in cols if btn_value(c).get("n")]:
+                    continue
+                for c in cols:
+                    if btn_value(c).get("n") == 0 and st:
+                        c["elements"][0]["text"]["content"] = "其余全部按推荐"
+                e = dict(e, columns=cols)
+            keep.append(e)
+        card["body"]["elements"] = keep
+        text = json.dumps(card, ensure_ascii=False)
+        P.lark(["im", "messages", "patch", "--message-id", rec["message_id"],
+                "--data", json.dumps({"content": text}, ensure_ascii=False)], "改卡片", "bot")
+        sent.write_text(text, encoding="utf-8")
 
 
 def btn_value(col):
@@ -272,12 +316,18 @@ def cmd_button(a):
     day, rec = delivered()
     if not rec or rec.get("card_token") != a.token:
         raise Fail("这不是最新一张日报卡片上的按钮：旧卡片的按钮不再算数，请在最新一张上点")
-    _, decs = card_decisions(day)
+    decs = card_decisions(day, rec)
     st = state_of(day)
-    ns = [n for n in range(1, len(decs) + 1) if n not in st] if a.n == 0 else [a.n]
-    new = record_choices(day, ns, "按推荐", "按钮")
+    if a.n == 0:
+        ns = [d["n"] for d in decs if buttonable(d) and d["n"] not in st]
+    elif 1 <= a.n <= len(decs) and buttonable(decs[a.n - 1]):
+        ns = [a.n]
+    else:
+        raise Fail(f"{label(a.n)} 不能按推荐办（没有推荐，或是要你亲手做的），请引用卡片回一句怎么定")
+    new, old = record_choices(day, rec, ns, "按推荐", "按钮")
     if not new:
-        return done(True, "这几条已经定过了", day=day, entries=[])
+        return done(True, "这几条已经定过了", day=day, entries=[],
+                    tell="；".join(status_line(e) for e in old) or "没有还没定、能按推荐办的了")
     what = "、".join(label(e["n"]) for e in new)
     return done(True, f"记下：{day} 日报 {what} 按推荐", day=day, entries=[e["id"] for e in new],
                 inject=f"【日报按钮】我在 {day} 的日报卡片上点了「{what} 按推荐」（拍板账 {'、'.join(e['id'] for e in new)}）。"
@@ -287,7 +337,7 @@ def cmd_button(a):
 def cmd_after(a):
     day, rec = delivered(a.day)
     if not rec:
-        raise Fail(f"找不到 {a.day} 发出的日报卡片")
+        raise Fail(f"找不到 {a.day} 发出、回读过的日报卡片")
     try:
         refresh_card(day, rec)
     except (P.SendError, OSError, ValueError, KeyError) as e:
@@ -302,17 +352,14 @@ def cmd_after(a):
 def cmd_todos(a):
     day, rec = delivered(a.day)
     if not rec:
-        raise Fail("还没有发出过日报卡片" if not a.day else f"找不到 {a.day} 发出的日报卡片")
-    facts, decs = card_decisions(day)
+        raise Fail("最新一张日报卡片没发成或没回读通过" if not a.day else f"找不到 {a.day} 发出、回读过的日报卡片")
+    decs = card_decisions(day, rec)
     st = state_of(day)
-    cands = facts.get("decisions") or []
     out = []
-    for n, d in enumerate(decs, 1):
-        e = st.get(n) or {}
-        out.append({"n": n, "mark": label(n), "project": d.get("project"), "item": d.get("item"), "kind": d.get("kind"),
-                    "recommendation": d.get("recommendation"), "deadline": d.get("deadline"),
-                    "sources": [{k: c.get(k) for k in ("kind", "project_id", "item", "source", "evidence", "since")}
-                                for c in P.cand_list(d, cands)],
+    for d in decs:
+        e = st.get(d["n"]) or {}
+        out.append({**{k: d.get(k) for k in ("n", "project", "item", "kind", "recommendation", "deadline", "sources")},
+                    "mark": label(d["n"]),
                     "decided": {k: e.get(k) for k in ("id", "choice", "via", "at", "note", "results")} if e else None})
     return done(True, f"{day} 日报共 {len(out)} 件拍板，{len(st)} 件已定", day=day, report=str(DAILY / f"{day}.report.md"),
                 decisions=out)
@@ -324,13 +371,14 @@ def cmd_record(a):
         raise Fail(f"选择只能是 {'/'.join(CHOICES)}")
     day, rec = delivered(a.day)
     if not rec:
-        raise Fail(f"找不到 {a.day} 发出的日报卡片")
-    new = record_choices(day, ns, a.choice, "回复", a.note)
+        raise Fail(f"找不到 {a.day or '最新'} 发出、回读过的日报卡片")
+    new, old = record_choices(day, rec, ns, a.choice, "回复", a.note)
     with contextlib.suppress(P.SendError, OSError, ValueError, KeyError):
         if new:
             refresh_card(day, rec)
-    return done(True, f"记下 {len(new)} 条" + ("（其余已经定过）" if len(new) < len(ns) else ""),
-                entries=[{"id": e["id"], "n": e["n"], "choice": e["choice"]} for e in new])
+    return done(True, f"记下 {len(new)} 条" + (f"；{'；'.join(status_line(e) for e in old)}，没改" if old else ""),
+                entries=[{"id": e["id"], "n": e["n"], "choice": e["choice"]} for e in new],
+                already=[{"id": e["id"], "n": e["n"], "choice": e.get("choice")} for e in old])
 
 
 def cmd_done(a):
