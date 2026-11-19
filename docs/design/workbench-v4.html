@@ -1,11 +1,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>数字分身工作台首页</title>
+<title>数字分身工作台</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap">
 <style>
-/* 版式：侧栏外壳；首屏是刊头 + 等距系统图（执行方就画在图里），往下黑底拍板横条，再分主栏（工作流）和窄栏（今日运行、托管、自动化） */
+/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：黑底拍板卡片横条 + 交班报告 */
 @font-face{font-family:"BM";src:local("Berkeley Mono"),local("BerkeleyMono-Regular"),local("TX-02"),local("TX-02 Regular"),local("TX02-Regular");font-weight:400;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:"BM";src:local("Berkeley Mono Bold"),local("BerkeleyMono-Bold"),local("TX-02 Bold"),local("TX02-Bold");font-weight:700;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 :root{
@@ -63,10 +63,12 @@ p{margin:0}
 .nav .n{margin-left:auto;font-size:12px;color:var(--mute)}
 .nav a[aria-current="page"] .n{color:var(--bg)}
 .nav .n.hot{background:var(--accent);color:var(--on-accent);padding:0 6px}
-.nav .grp{font-size:11px;color:var(--mute);padding:14px 10px 4px;letter-spacing:.06em}
+.nav .grp{font-size:11px;color:var(--mute);padding:14px 10px 4px;letter-spacing:.06em;display:flex;gap:8px;align-items:center}
+.nav .grp i{flex:1;height:1px;background:var(--line)}
 .side .foot{margin-top:auto;padding:14px 18px 0;border-top:1px solid var(--line);font-size:11px;color:var(--mute);display:grid;gap:8px}
 .side .leds{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.side .leds span{display:inline-flex;align-items:center;gap:4px}
+.side .leds span,.side .sys span{display:inline-flex;align-items:center;gap:4px}
+.side .sys{display:flex;gap:10px;flex-wrap:wrap}
 
 .main{overflow:auto;min-width:0;scroll-behavior:smooth}
 .bar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--ink)}
@@ -174,6 +176,45 @@ p{margin:0}
 .dc .done{display:none;font-size:12px;color:var(--ok);min-height:32px;align-items:center}
 .dc[data-done] .acts{display:none}
 .dc[data-done] .done{display:flex}
+
+
+/* ===== 首页的等我拍板：清单行（黑底四卡的形式在汇报页） ===== */
+.btn.inv{border-color:var(--on-strip);color:var(--on-strip)}
+.btn.inv:hover{background:var(--on-strip);color:var(--strip)}
+.dlist{border:1px solid var(--ink);scroll-margin-top:60px}
+.dlist .hd{background:var(--strip);color:var(--on-strip);display:flex;align-items:center;gap:14px;padding:10px 16px}
+.dlist .hd h2{font-size:17px;display:flex;gap:10px;align-items:center}
+.dlist .hd .count{background:var(--accent);color:var(--on-accent);padding:0 7px;font-size:14px}
+.dlist .hd .hint{font-size:12px;opacity:.65}
+.dlist .hd .btn{margin-left:auto}
+.drow{display:grid;grid-template-columns:96px minmax(0,1fr) 124px 84px 200px;gap:16px;align-items:center;padding:10px 16px;border-top:1px solid var(--line);background:var(--bg)}
+.drow.change{box-shadow:inset 3px 0 0 var(--accent)}
+.drow .kind{background:var(--ink);color:var(--bg);padding:1px 6px;font-size:12px;justify-self:start;white-space:nowrap}
+.drow.change .kind{background:var(--accent);color:var(--on-accent)}
+.drow .tx{min-width:0}
+.drow .tx b{display:block;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.drow .tx span{display:block;font-size:12px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.drow .age{font-size:12px;color:var(--mute);white-space:nowrap}
+.drow .acts{display:flex;gap:8px;justify-content:flex-end;align-items:center}
+.drow .done{display:none;font-size:12px;color:var(--ok);justify-content:flex-end}
+.drow[data-done] .acts{display:none}
+.drow[data-done] .done{display:flex}
+
+/* ===== 汇报页：交班报告 ===== */
+.rp{display:grid;gap:40px}
+.rep{border:1px solid var(--ink);background:var(--panel);font-size:13px}
+.rep+.rep{margin-top:12px}
+.rep .rh{display:flex;gap:14px;align-items:baseline;padding:9px 16px;border-bottom:1px solid var(--ink)}
+.rep .rh b{font-size:16px}
+.rep .rh .sum{margin-left:auto;display:flex;gap:14px;font-size:12px;color:var(--mute)}
+.rep.fold .rh{border-bottom:0}
+.rep .g{display:grid;grid-template-columns:170px minmax(0,1fr);border-bottom:1px dashed var(--line)}
+.rep .g:last-child{border-bottom:0}
+.rep .g>span{padding:10px 16px;color:var(--mute)}
+.rep .g>div{padding:8px 16px 8px 0;display:grid;gap:5px}
+.rep .rl{display:flex;gap:10px;align-items:center;min-height:24px}
+.rep .rl .r{margin-left:auto;font-size:12px;color:var(--mute);display:inline-flex;gap:10px;align-items:center}
+.rep .rl .btn{padding:1px 8px;font-size:12px}
 
 /* ===== 主栏 + 窄栏 ===== */
 .split{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:44px;align-items:start}
@@ -310,6 +351,7 @@ svg.iso .led-ok{fill:var(--ok)} svg.iso .led-warn{fill:var(--warn)}
     <div class="brand"><svg viewBox="0 0 26 26" aria-hidden="true"><polygon points="13,2 24,8 13,14 2,8" fill="var(--panel)" stroke="var(--ink)"/><polygon points="2,8 13,14 13,25 2,19" fill="var(--ink)" stroke="var(--ink)"/><polygon points="24,8 13,14 13,25 24,19" fill="var(--accent)" stroke="var(--ink)"/></svg><div>数字分身<small>工作台</small></div></div>
     <ul class="nav" id="nav"></ul>
     <div class="foot">
+      <div class="sys"><span><span class="led"></span>中台</span><span><span class="led"></span>飞书通道</span><span><span class="led"></span>已对账</span></div>
       <div>执行方</div>
       <div class="leds" id="sideLeds"></div>
       <div>字体 Berkeley Mono（本机未装时用 JetBrains Mono 代替）</div>
@@ -342,7 +384,7 @@ const DECISIONS = [
   {kind:'新建工作流', change:true, tier:'D', tierText:'必须问本人', age:'28 分钟前',
    title:'设计出稿', ask:'你 13:52 在工作台新建了这条工作流。确认后才会启用，之前不会被触发。',
    rows:[['触发','飞书里说「出设计」'],['步骤','6 步 · 2 处停下等我'],['角色','CC · 我 · GP · CX']],
-   from:'来源：工作台 · 你的修改', acts:['确认生效','退回修改','看完整对比']},
+   from:'来源：工作台 · 你的修改', acts:['确认','退回修改','看完整对比']},
   {kind:'合并 PR', tier:'B', tierText:'点一下就做', age:'40 分钟前',
    title:'digital-twin#222 · LESSONS 写明状态词「关闭」', ask:'Codex 测试通过，CI 全绿。标准开发停在最后一步，合并吗？',
    rows:[['工作流','标准开发 · 第 5 步'],['改动','L0 文档 · 1 个文件'],['测试','Codex 13:40 通过']],
@@ -354,7 +396,7 @@ const DECISIONS = [
   {kind:'规则改动', change:true, tier:'D', tierText:'必须问本人', age:'昨天',
    title:'常设授权清单 v1 → v2', ask:'把「L0–L1 文档类 PR 合并」从 B 档升到 A 档。确认后才生效。',
    rows:[['依据','同类 21 次，一致率 95%'],['档位','<del>B 点一下</del> → <ins>A 自主做</ins>'],['影响','标准开发第 5 步不再等我']],
-   from:'来源：每周提案', acts:['确认生效','不改','看全文']}
+   from:'来源：每周提案', acts:['确认','不改','看全文']}
 ];
 
 const WF = [
@@ -553,10 +595,49 @@ function wfRow(w){
     <div class="mini">${strip(w)}<div class="caps">${caps}</div></div>
   </div>`;
 }
+/* 侧栏只有首页和汇报两页有稿；其余六页（主线、协同、执行、分身、记录、沉淀）还没设计 */
+const state={page:'home'};
+/* 首页：清单行。能一眼定的在这里点主按钮，要看详情的去汇报 */
+function homeDecide(){
+  return `<section class="dlist" id="decide" aria-label="等我拍板">
+    <div class="hd"><h2><i class="sq"></i>等我拍板 <span class="count num">${DECISIONS.length}</span></h2><span class="hint">能一眼定的在这里点；要看详情的去汇报</span><button class="btn inv" type="button" data-page="report">在汇报里逐条看 →</button></div>
+    ${DECISIONS.map(d=>`<div class="drow ${d.change?'change':''}"><span class="kind">${d.kind}</span><div class="tx"><b title="${d.title}">${d.title}</b><span title="${d.ask}">${d.ask}</span></div>${tier(d)}<span class="age">${d.age}</span>
+      <div class="acts"><button class="btn pri" type="button" data-quick>${d.acts[0]}</button><button class="btn link" type="button" data-page="report">详情</button></div><p class="done"></p></div>`).join('')}
+  </section>`;
+}
+/* 汇报页：上面是黑底拍板卡片（第 3 版首页的形式，原样），下面是交班报告 */
+function reportPage(){
+  const led=(k)=>`<span class="led ${k||''}"></span>`;
+  return `<div class="rp"><section class="decide" id="decide" aria-label="等我拍板">
+    <div class="hd"><h2><i class="sq"></i>等我拍板 <span class="count num">${DECISIONS.length}</span></h2><span class="hint">其中 2 条是工作台里的改动，我确认后才生效 · 不处理，对应流程会停着</span></div>
+    <div class="dcs">${DECISIONS.map(decisionCard).join('')}</div>
+  </section>
+  <section aria-label="交班报告">
+    <div class="h-sec"><h2><i class="sq"></i>交班报告</h2><span class="hint">我不在的时候，分身和工人实际做成了什么 · 每次托管、每个晚上一份</span><div class="right"><span class="mute" style="font-size:12px">最近 7 天</span></div></div>
+    <div class="rep">
+      <div class="rh"><b>11-18 夜间</b><span class="mute num">托管 22:30 开 → 08:00 关</span><div class="sum num"><span>派了 3 单</span><span>${led()} 2 单开了 PR</span><span>${led('warn')} 1 单停下</span><span>秘书替我定 4 条</span></div></div>
+      <div class="g"><span>每一单的结果</span><div>
+        <div class="rl">${codeChip('cx')}<span>my-skills#110 · 群学习报告行动 1</span><span class="r">${led()} 开了 PR #111，审查中</span></div>
+        <div class="rl">${codeChip('cc')}<span>dt-sandbox#41 · 补测试</span><span class="r">${led()} 开了 PR #42，审查中</span></div>
+        <div class="rl">${codeChip('cc')}<span>dt-sandbox#43 · 改脚本</span><span class="r">${led('warn')} 到 2 小时上限停下，改了一半没交</span></div></div></div>
+      <div class="g"><span>秘书替我定了 4 条</span><div>
+        <div class="rl"><span>#110 测试范围选了「只跑改动的模块」</span><span class="r">依据：清单里小改走快测<button class="btn" type="button">推翻</button></span></div>
+        <div class="rl"><span>#41 审查没过，退回返修 1 次</span><span class="r">依据：清单开了「退回」<button class="btn" type="button">推翻</button></span></div>
+        <div class="rl"><span>#43 超时后重派 1 次</span><span class="r">依据：每张任务可重派 1 次<button class="btn" type="button">推翻</button></span></div>
+        <div class="rl"><span>#43 要不要放宽到 3 小时：没替我定</span><span class="r">交回给我，还没处理</span></div></div></div>
+      <div class="g"><span>撤不回的动作</span><div><div class="rl"><span>推分支 2 次、开 PR 2 次，都回读核实过</span><span class="r">${led()} 结果不明 0</span></div></div></div>
+      <div class="g"><span>花费</span><div><div class="rl num"><span>Claude Code 1 小时 40 分 · Codex 35 分</span><span class="r">在「记录」里看逐轮流水</span></div></div></div>
+    </div>
+    <div class="rep fold"><div class="rh"><b>11-18 白天</b><span class="mute num">秘书 09:00 开 → 21:00 汇总</span><div class="sum num"><span>秘书替我定 2 条</span><span>${led()} 都已送达</span><span>展开 ▾</span></div></div></div>
+    <div class="rep fold"><div class="rh"><b>11-17 夜间</b><span class="mute num">托管没开</span><div class="sum num"><span>没有派单</span></div></div></div>
+  </section></div>`;
+}
 function render(){
-  const nav=[['首页','fill','',true],['等我拍板','',`<span class="n hot num">${DECISIONS.length}</span>`],['工作流','',`<span class="n num">${WF.length}</span>`],['自动化','',`<span class="n num">${AUTO.length}</span>`],['grp','设置'],['执行方','',`<span class="n"><span class="led warn"></span></span>`],['授权规则','',''],['托管 · 秘书','',`<span class="n">关</span>`],['运行记录','','']];
-  $('#nav').innerHTML=nav.map(n=>n[0]==='grp'?`<li class="grp">${n[1]}</li>`:`<li><a href="#" ${n[3]?'aria-current="page"':''}><span class="ico ${n[1]}"></span>${n[0]}${n[2]}</a></li>`).join('');
+  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
+  $('#nav').innerHTML=nav.map(n=>n[0]==='grp'?`<li class="grp">${n[1]}<i></i></li>`:`<li><a href="#" ${n[3]?`data-page="${n[3]}"`:''} ${n[3]===state.page?'aria-current="page"':''}><span class="ico ${n[1]}"></span>${n[0]}${n[2]}</a></li>`).join('');
+  document.querySelector('.bar h1').textContent=state.page==='report'?'汇报':'首页';
   $('#sideLeds').innerHTML=AI.map(id=>`<span title="${R[id].full||R[id].name} ${R[id].stateText}"><span class="led ${R[id].state==='ok'?'':'warn'}"></span>${R[id].code}</span>`).join('');
+  if(state.page==='report'){ $('#content').innerHTML=reportPage(); return }
 
   const done=RUNS.filter(r=>r[3]!=='wait').length, warn=RUNS.filter(r=>r[3]==='warn').length, wait=RUNS.filter(r=>r[3]==='wait').length;
   $('#content').innerHTML=`
@@ -591,10 +672,7 @@ function render(){
     </div>
   </section>
 
-  <section class="decide" id="decide" aria-label="等我拍板">
-    <div class="hd"><h2><i class="sq"></i>等我拍板 <span class="count num">${DECISIONS.length}</span></h2><span class="hint">其中 2 条是工作台里的改动，我确认后才生效 · 不处理，对应流程会停着</span></div>
-    <div class="dcs">${DECISIONS.map(decisionCard).join('')}</div>
-  </section>
+  ${homeDecide()}
 
   <div class="split">
     <section aria-label="工作流">
@@ -645,6 +723,8 @@ render();
 
 document.addEventListener('click',e=>{
   if(e.target.closest('a[href="#"]')) e.preventDefault();
+  const p=e.target.closest('[data-page]'); if(p){state.page=p.dataset.page;render();document.getElementById('main').scrollTop=0;return}
+  const q=e.target.closest('[data-quick]'); if(q){const r=q.closest('.drow');r.dataset.done='';r.querySelector('.done').textContent='预览：你选了「'+q.textContent.trim()+'」';return}
   const j=e.target.closest('[data-jump]'); if(j){document.getElementById(j.dataset.jump)?.scrollIntoView({behavior:'smooth'});return}
   const b=e.target.closest('.dc .acts .btn'); if(!b) return;
   const c=b.closest('.dc'); c.dataset.done=''; c.querySelector('.done').textContent='预览：你选了「'+b.textContent.trim()+'」';
