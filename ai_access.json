@@ -117,7 +117,7 @@
       "id": "proposal-digest",
       "name": "每周待决提案的推荐（Hermes 带模型定时任务，每周一 10:00）",
       "executor": "hermes",
-      "reads": "~/session-retro/*/提案.md、牛马之家每周整理（proposal_digest_draft.py 取草稿）",
+      "reads": "~/session-retro/*/提案.md、牛马之家每周整理、agent-kit 每周汇总的再犯与待提升（node tools/weekly-review.mjs --json）（proposal_digest_draft.py 取草稿）",
       "writes": "推荐文件、飞书私聊卡片；常浩回复后写回各来源的结论",
       "note": "仅支持 Hermes（Hermes 定时任务）。"
     },

@@ -1,4 +1,5 @@
-"""每周提案收口（#61）自测：回复解析、三类来源汇总、卡片发送（假 lark-cli）和写回；全部用临时目录，不碰真实提案和飞书。"""
+"""每周提案收口（#61）自测：回复解析、四类来源汇总、卡片发送（假 lark-cli）和写回；全部用临时目录，不碰真实提案和飞书。
+再犯与待提升（#216）用假 node 回放 agent-kit 每周汇总 --json 的输出，不跑真的 agent-kit。"""
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
@@ -25,6 +26,44 @@ if (root / "fail").exists():
     print(json.dumps({"ok": False, "error": {"message": "bot 不在会话里"}}, ensure_ascii=False)); sys.exit(1)
 print(json.dumps({"ok": True, "data": {"message_id": "om_digest_1"}}))
 '''
+
+# 假 node：只认「<脚本> --json」，回放 FAKE_DIR/weekly.json；有 weekly-fail 就像脚本出错那样退出 1
+FAKE_NODE = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ["FAKE_DIR"])
+with open(root / "node-calls.jsonl", "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:], ensure_ascii=False) + "\n")
+if (root / "weekly-fail").exists():
+    sys.stderr.write("每周汇总中断：ENOENT: no such file\n"); sys.exit(1)
+sys.stdout.write((root / "weekly.json").read_text(encoding="utf-8"))
+'''
+
+EMPTY_WEEKLY = {"schema": 1, "day": "2026-11-09", "scanned": {"projects": 0, "files": 0}, "recurrences": [], "promotions": [],
+                "noUpgradeLine": 0}
+
+
+def promo(project, lid, proposed, upgrade):
+    return {"project": project, "file": "docs/LESSONS.md", "id": lid, "title": f"{project} 的坑 {lid}", "proposed": proposed,
+            "upgrade": upgrade}
+
+
+# 假项目坑记录里四种条目经 agent-kit weekly-review.mjs --json 汇总后的样子（字段照 agent-kit#80）：
+# 再犯 3 条（G-09 再犯次数最多但在〔机检〕层，不是升级首选，要排在两条〔文字〕〔提醒〕之后）；
+# 等批 alpha L-01 再犯行所在的条目只写「未升级」、L-03 只写未升级（都不列），L-02 和 delta 的 6 条写了提议提升；
+# 没有升级行的只体现在 noUpgradeLine 里，本来就不在 promotions。合计可列 3 + 7 = 10 条，超出 7 条。
+WEEKLY = {"schema": 1, "day": "2026-11-09", "scanned": {"projects": 4, "files": 4}, "noUpgradeLine": 1,
+          "recurrences": [
+              {"id": "G-04", "title": "并行会话共用一个工作区", "level": "文字", "status": "已升级", "prime": True, "count": 2,
+               "projects": ["alpha", "beta"]},
+              {"id": "G-11", "title": "截图验证不等页面画完", "level": "提醒", "status": "未升级", "prime": True, "count": 1,
+               "projects": ["gamma"]},
+              {"id": "G-09", "title": "强调色写死", "level": "机检", "status": "已升级", "prime": False, "count": 5,
+               "projects": ["beta", "gamma"]}],
+          "promotions": [promo("alpha", "L-01", False, "未升级。"),
+                         promo("alpha", "L-02", True, "未升级。换个项目也成立，提议提升为全局 G-xx。"),
+                         promo("alpha", "L-03", False, "未升级。"),
+                         *[promo("delta", f"L-1{k}", True, "未升级，可提议提升为全局坑。") for k in range(1, 7)]]}
 
 RETRO = """# 会话复盘提案：2026-10-30 至 2026-11-05
 
@@ -177,11 +216,19 @@ class Digest(unittest.TestCase):
         (t / "fake").mkdir()
         (t / "fake/lark-cli").write_text(FAKE, encoding="utf-8")
         (t / "fake/lark-cli").chmod(0o755)
+        (t / "fake/node").write_text(FAKE_NODE, encoding="utf-8")
+        (t / "fake/node").chmod(0o755)
+        self.weekly(EMPTY_WEEKLY)
+        (t / "agent-kit/tools").mkdir(parents=True)
+        (t / "agent-kit/tools/weekly-review.mjs").write_text("// 替身，由假 node 回放\n", encoding="utf-8")
         self.shadow = t / "shadow"
         self.state = t / "prop/digest.json"
 
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
+
+    def weekly(self, data):
+        (self.tmp / "fake/weekly.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def env(self, now="2026-11-09T10:00:00+08:00", chat=CHAT, lessons="2"):
         t = self.tmp
@@ -189,7 +236,8 @@ class Digest(unittest.TestCase):
                "DT_LESSONS": str(t / "LESSONS.md"), "AGENT_KIT_STATE_DIR": str(t / "kit"), "DT_ROSTER": str(t / "projects.json"),
                "DT_PROPOSAL_DIR": str(t / "prop"), "DT_SHADOW_DIR": str(self.shadow), "DT_LARK_CLI": str(t / "fake/lark-cli"),
                "FAKE_DIR": str(t / "fake"), "DT_NOW": now, "FEISHU_HOME_CHANNEL": chat,
-               "DT_HERMES_ENV": str(t / "hermes.env")}
+               "DT_HERMES_ENV": str(t / "hermes.env"), "DT_WEEKLY_REVIEW": str(t / "agent-kit/tools/weekly-review.mjs"),
+               "PATH": str(t / "fake") + os.pathsep + os.environ.get("PATH", "")}
         if lessons is not None:
             env["DT_LESSONS_MIN_PROJECTS"] = lessons
         return env
@@ -385,6 +433,128 @@ class Digest(unittest.TestCase):
         r = self.run_cli("send")
         self.assertEqual((r.returncode, r.stdout), (0, ""))
         self.assertEqual(self.calls(), [])
+
+    # ---------- 再犯与待提升（#216） ----------
+
+    def numbered(self, text):
+        return [line.split(". ", 1)[1].replace("⏰ ", "").split(" ")[0] for line in text.splitlines() if line[:1].isdigit()]
+
+    def test_guards_only_two_kinds_capped_at_seven(self):
+        self.weekly(WEEKLY)
+        r = self.run_cli("send", "--dry-run", lessons=None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = self.card_text(r.stdout)
+        ids = self.numbered(text)
+        # 原三类照旧在前（LESSONS 默认不列）；再犯与待提升在最后：升级首选 G-04、G-11 最前，G-09 次之，再接提议提升，合计 7 条
+        self.assertEqual(ids, ["A1", "B1", "W2026-10-23-6", "W2026-10-23-9", "W2026-10-30-1", "W2026-10-30-3",
+                               "G-04", "G-11", "G-09", "alpha/L-02", "delta/L-11", "delta/L-12", "delta/L-13"])
+        self.assertIn("**再犯与待提升**", text)
+        self.assertIn("7. G-04 并行会话共用一个工作区 · 〔文字〕又再犯 2 次（alpha、beta） · 升级首选", text)
+        self.assertIn("9. G-09 强调色写死 · 〔机检〕又再犯 5 次（beta、gamma）\n", text)
+        self.assertIn("10. alpha/L-02 alpha 的坑 L-02 · 提议提升为全局坑", text)
+        for not_listed in ("alpha/L-01", "alpha/L-03", "delta/L-14", "delta/L-16"):   # 只写未升级的不列；超出 7 条的不列
+            self.assertNotIn(not_listed, text)
+        self.assertIn("再犯与待提升另有 3 条没列（每期最多 7 条），清单在 DigitalTwin/proposals/digest.json 本期的 more", text)
+        self.assertNotIn("LESSONS 升级候选", text)                       # DT_LESSONS_MIN_PROJECTS 为 0：hook 命中那类照旧不列
+        self.assertEqual(json.loads((self.tmp / "fake/node-calls.jsonl").read_text().splitlines()[0])[1:], ["--json"])
+
+    def test_guards_with_lessons_on_keep_both(self):
+        self.weekly(WEEKLY)
+        text = self.card_text(self.run_cli("send", "--dry-run").stdout)   # lessons="2"：LESSONS 候选照旧打开
+        ids = self.numbered(text)
+        self.assertEqual(ids[6:8], ["G-01", "G-04"])                       # LESSONS 候选在前，再犯与待提升接着编号
+        self.assertEqual(len(ids), 6 + 1 + 7)
+
+    def test_guards_end_to_end_apply_then_next_week(self):
+        self.weekly(WEEKLY)
+        keys = {i["id"]: i for i in json.loads(self.run_cli("draft", lessons=None).stdout)["items"]}
+        self.assertEqual(keys["G-04"]["key"], "recur:G-04")
+        self.assertEqual(keys["G-04"]["group"], "再犯与待提升")
+        self.assertIn("升级首选：是", keys["G-04"]["body"])
+        self.assertIn("现在的层级：〔提醒〕，状态：未升级", keys["G-11"]["body"])
+        self.assertIn("升级行：未升级。换个项目也成立，提议提升为全局 G-xx。", keys["alpha/L-02"]["body"])
+        draft = json.loads(self.run_cli("draft", lessons=None).stdout)
+        self.assertEqual((draft["more"], len(draft["notes"])), (3, 1))
+        rec = self.recommend({keys["G-04"]["key"]: {"verdict": "采纳", "why": "〔文字〕层两个项目又踩"},
+                              keys["alpha/L-02"]["key"]: {"verdict": "延期", "why": "只有一个项目"}})
+        r = self.run_cli("send", "--recommend", rec, lessons=None)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        issue = json.loads(self.state.read_text())["issues"][0]
+        self.assertEqual([i["id"] for i in issue["more"]], ["delta/L-14", "delta/L-15", "delta/L-16"])
+        listing = self.run_cli("list", lessons=None).stdout
+        self.assertIn("13. [guards] delta/L-13", listing)
+        self.assertIn("再犯与待提升超出没列的 3 条", listing)
+        self.assertIn("- delta/L-16 delta 的坑 L-16 · 提议提升为全局坑", listing)
+
+        # 「按推荐」+ 逐条 对新来源同样生效：7 G-04 采纳（推荐）、10 alpha/L-02 延期（推荐）、8 G-11 否、9 改采纳
+        r = self.run_cli("apply", "按推荐，否 8，采纳 9", lessons=None)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("采纳 7（G-04）、9（G-09）", r.stdout)
+        self.assertIn("否 8（G-11）", r.stdout)
+        self.assertIn("延期 10（alpha/L-02）", r.stdout)
+        ledger = (self.shadow / "guards-decisions.md").read_text(encoding="utf-8")
+        self.assertTrue(ledger.startswith("# 再犯与待提升的结论"))
+        self.assertIn("- G-04　采纳　2026-11-09　常浩飞书回复（提案收口第 1 期）", ledger)
+        self.assertIn("- alpha/L-02　待定　2026-11-09", ledger)
+        self.assertFalse((self.shadow / "lessons-decisions.md").exists())   # 不和 LESSONS 候选的结论混记
+        r = self.run_cli("apply", "采纳 11 12 13", lessons=None)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+        # 下周：定了的不再列，延期的再列，超出的往上补
+        r = self.run_cli("send", "--dry-run", now="2026-11-16T10:00:00+08:00", lessons=None)
+        text = self.card_text(r.stdout)
+        guards = self.numbered(text)[len(self.numbered(text)) - 4:]
+        self.assertEqual(guards, ["alpha/L-02", "delta/L-14", "delta/L-15", "delta/L-16"])
+        for gone in ("G-04", "G-11", "G-09", "delta/L-11"):
+            self.assertNotIn(gone + " ", text)
+        self.assertNotIn("另有", text)
+
+    def test_guards_unavailable_other_sources_still_sent(self):
+        cases = {"fail": "每周汇总出错（退出码 1：每周汇总中断：ENOENT: no such file）",
+                 "notjson": "每周汇总的输出不是 JSON（agent-kit 主目录可能还没有 --json",
+                 "schema": "每周汇总的 schema 不是 1（2）",
+                 "noscript": "找不到 agent-kit 每周汇总脚本"}
+        for case, why in cases.items():
+            with self.subTest(case=case):
+                self.weekly(WEEKLY)
+                (self.tmp / "fake/weekly-fail").unlink(missing_ok=True)
+                env = {}
+                if case == "fail":
+                    (self.tmp / "fake/weekly-fail").write_text("1")
+                elif case == "notjson":
+                    (self.tmp / "fake/weekly.json").write_text("# 每周整理输入（老版本只出 Markdown）\n", encoding="utf-8")
+                elif case == "schema":
+                    self.weekly({**WEEKLY, "schema": 2})
+                script = self.tmp / "agent-kit/tools/weekly-review.mjs"
+                moved = script.with_suffix(".bak")
+                if case == "noscript":
+                    script.rename(moved)
+                try:
+                    r = self.run_cli("send", "--dry-run", lessons=None)
+                finally:
+                    if moved.exists():
+                        moved.rename(script)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                text = self.card_text(r.stdout)
+                self.assertEqual(self.numbered(text)[:2], ["A1", "B1"])          # 其他来源照常
+                self.assertIn("⚠️ 再犯与待提升本期没取到：" + why, text)
+                self.assertNotIn("**再犯与待提升**", text)
+        (self.tmp / "fake/weekly-fail").unlink(missing_ok=True)
+
+    def test_guards_unavailable_alone_still_sends_notice(self):
+        for d in ("retro", "niuma"):
+            subprocess.run(["rm", "-rf", str(self.tmp / d)], check=True)
+        (self.tmp / "fake/weekly-fail").write_text("1")
+        d = json.loads(self.run_cli("draft", lessons=None).stdout)        # 草稿也带上，Hermes 不会回「无」
+        self.assertEqual(d["items"], [])
+        self.assertIn("再犯与待提升本期没取到", d["notes"][0])
+        r = self.run_cli("send", lessons=None)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        (call,) = self.calls()
+        card = json.loads(call[call.index("--content") + 1])
+        text = card["body"]["elements"][0]["content"]
+        self.assertTrue(text.startswith("本期没有待决提案。\n\n⚠️ 再犯与待提升本期没取到：每周汇总出错"))
+        self.assertNotIn("回复写法", text)
 
 
 if __name__ == "__main__":
