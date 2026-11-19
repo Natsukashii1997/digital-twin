@@ -1,6 +1,6 @@
 # hermes/scripts 自测
 
-名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`。一律用系统自带的 `/usr/bin/python3`（3.9，和 Hermes 定时任务、CI 同版本）：3.10 以后的写法（如 `fromisoformat` 认结尾的 Z）在 3.9 上会失败，本机 3.14 全过不算数。
+名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`。一律用系统自带的 `/usr/bin/python3`（3.9，和 Hermes 定时任务、CI 同版本）：3.10 以后的写法（如 `fromisoformat` 认结尾的 Z）在 3.9 上会失败，本机 3.14 全过不算数。用别的版本跑，输出最后会提示一句（`test_python_version.py`），不判失败。
 
 ## 统一测试隔离（_isolation，#212）
 
