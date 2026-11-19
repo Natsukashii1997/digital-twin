@@ -659,6 +659,7 @@ class BridgeLock(Base):
         self.hub_now = None                                                     # 中台库里这张卡现在的版本；None = 读不到
         self.hub_ok = True                                                      # 领卡前中台库能不能读
         self.gets = 0
+        self.fail_post = None                                                   # 设成异常时，报 failed 抛它
         self.alerts = []                                                        # 私聊提醒的文字
         self.flushed = []                                                       # (卡片号, 提交时桥接锁是不是空着)
         for target, name, fake in ((F, "hub", self.fake_hub), (A, "flush", self.fake_flush),
@@ -691,6 +692,8 @@ class BridgeLock(Base):
         if method == "GET":
             self.gets += 1
             return {"card": self.leases[threading.current_thread().name]}
+        if path.endswith("/failed") and self.fail_post is not None:
+            raise self.fail_post
         self.posts.append((path, body))
         return {}
 
@@ -728,14 +731,49 @@ class BridgeLock(Base):
         self.assertEqual([b["version"] for _, b in self.posts], [3])
         self.assertEqual({b["behaviors"][0]["value"]["v"] for b in self.patches()[0]["body"]["elements"] if b["tag"] == "button"}, {3})
 
-    def test_local_newer_than_hub_is_skipped_not_failed(self):
-        """本地已登记更高版本（比如中台库被恢复成旧快照）：跳过，不改消息、不向中台报失败。"""
+    def test_local_newer_than_hub_reports_failed_with_reason(self):
+        """第 6 轮 P2-01：本地已登记更高版本（中台库被恢复成旧快照）：中台下次还是递这一版，所以报 failed 写明冲突
+        （走中台退避，不是 1 分钟一跳地用掉次数），不改消息，每张卡 1 小时最多提醒 1 次。"""
         F.deliver({**CARD, "ref": "om_fixture_1", "version": 3})
         self.hub_now = 2
+        for _ in range(2):
+            self.lease(2)
+            out = F.once()
+            self.assertFalse(out["ok"])
+        self.assertEqual(self.posts, [("/v1/cards/7/failed", {"version": 2, "error": "本地已登记第 3 版，比中台的第 2 版还新"
+                                                              "（中台库可能被恢复成旧快照），这次没发"})] * 2)
+        self.assertEqual(len(self.patches()), 1)                                 # 只有最早那次第 3 版
+        self.assertEqual(len(self.alerts), 1)
+        self.assertIn("中台会稍后重试", self.alerts[0])
+        self.assertEqual(self.flushed, [])
+
+    def test_report_failed_error_still_alerts(self):
+        """第 6 轮 P2-02：报 failed 本身出错（卡不在 404、中台 500、没回应），不抛出、照样提醒，写明请人工核查。"""
+        for i, err in enumerate((F.HubError("HTTP 404", status=404), F.HubError("HTTP 500", status=500),
+                                 F.HubError("没等到回应"))):
+            with self.subTest(err=str(err)):
+                self.fail_post = err
+                self.hub_now = None
+                self.lease(2)
+                out = F.once()
+                self.assertFalse(out["ok"])
+                self.assertIn(str(err), out["report_error"])
+                self.assertEqual(len(self.alerts), i + 1)
+                self.assertIn("请人工核查", self.alerts[-1])
+                self.assertIn(str(err), self.alerts[-1])
+                with F.db(write=True) as con:                                   # 下一种错误当成另一次（提醒键按卡片 1 小时限频）
+                    con.execute("DELETE FROM alerts")
+        self.assertEqual((self.patches(), self.flushed), ([], []))
+
+    def test_report_failed_alert_not_suppressed_by_unreadable_alert(self):
+        """中台读不到的提醒刚发过（1 小时限频）时，报 failed 也失败的那条照样发：单独的提醒键。"""
+        self.hub_now = None
         self.lease(2)
-        out = F.once()
-        self.assertIn("本地已登记第 3 版", out["skipped"])
-        self.assertEqual((self.posts, len(self.patches())), ([], 1))
+        F.once()                                                                # 报 failed 成功：发「中台会稍后重试」
+        self.fail_post = F.HubError("HTTP 500", status=500)
+        F.once()
+        self.assertEqual(len(self.alerts), 2)
+        self.assertIn("请人工核查", self.alerts[1])
 
     def test_hub_unreadable_before_lease_does_not_lease(self):
         """第 5 轮 P1-01：领卡前中台库读不到，这轮不领（不用掉中台的尝试次数），私聊提醒，同一原因 1 小时最多 1 次。"""

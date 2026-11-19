@@ -34,9 +34,10 @@ cards.db.bridge.lock，进程级排他锁，不可重入：锁里只调带下划
 中台库读不到（PR #218 第 5 轮 P1-01，常浩 11-19 选甲）：中台每递一次卡（GET /cards/next）都算一次尝试、1 分钟后再递，9 次后
 永久放弃（given_up，改版也不再递，ask 卡没有恢复入口；见中台 kernel/decide.ts 的 nextCard、failed）。所以：
   - 领卡前先确认中台库能读（hub_readable），读不到这轮不领、不用掉尝试次数，私聊提醒常浩（同一原因 1 小时最多 1 次）；
-  - 领到后仍读不到这张卡的版本（极小窗口、或卡不见了）：不发，向中台报 failed 并写明原因（中台按 1、3、7…分钟退避重试，
-    状态里能看到原因），同样提醒；
-  - 确认是旧版本（中台已是更新版本、或本地已登记更高版本）：不发、不报，中台 1 分钟后递最新版本；
+  - 领到后仍读不到这张卡的版本（极小窗口、或卡不见了），或本地登记的版本比中台的还新（中台库被恢复成旧快照，中台下次还是递
+    这一版，第 6 轮 P2-01）：不发，向中台报 failed 并写明原因（中台按 1、3、7…分钟退避重试，状态里能看到原因），放锁后提醒；
+    报 failed 本身出错（卡不在、5xx、没回应）也照样提醒，写明中台可能没记上、请人工核查（单独的提醒键，第 6 轮 P2-02）；
+  - 中台已是更新的版本：不发、不报，中台 1 分钟后递最新版本；
   - run 每轮只读扫一次中台里 feishu 通道已放弃送达的卡，每张私聊告诉常浩一次（哪张、标题、试了几次、最后原因），请他手动处理；
     自动恢复要中台扩展点，和规格第 9 节验收 12 一起向上游要。
 提醒记在 cards.db 的 alerts 表（提醒键 → 上次提醒时间），发不出去不记、下次再试。
@@ -318,7 +319,8 @@ def _deliver(card):
 
 def newer_elsewhere(card):
     """这次领到的卡能不能处理：返回 None（核过了），或 (种类, 原因)。种类 unreadable：中台库读不到这张卡或版本不是整数
-    （读不到不等于没有新版本：不发，fail-closed）；stale：中台已是更新的版本、或本地已登记更高的版本（别的桥接进程送过了）。"""
+    （读不到不等于没有新版本：不发，fail-closed）；stale：中台已是更新的版本（中台 1 分钟后递最新版）；conflict：本地登记的
+    版本比中台的还新（中台库可能被恢复成旧快照：中台下次还是递这一版，要报 failed 走退避、写明原因，#218 第 6 轮 P2-01）。"""
     import autoloop_publish as P
     cur = P.hub_card(card["id"])
     if not cur or type(cur.get("version")) is not int:
@@ -328,7 +330,7 @@ def newer_elsewhere(card):
     with db() as con:
         r = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
     if r and r["version"] > card["version"]:
-        return "stale", f"本地已登记第 {r['version']} 版"
+        return "conflict", f"本地已登记第 {r['version']} 版，比中台的第 {card['version']} 版还新（中台库可能被恢复成旧快照）"
     return None
 
 
@@ -409,9 +411,13 @@ def once(wait=50):
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
             return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
-        if got:                                  # 领到后才读不到：报 failed 写明原因（中台退避重试、状态里看得到）
+        if got:                                  # 领到后读不到 / 版本冲突：报 failed 写明原因（中台退避重试、状态里看得到）
             why = f"{got[1]}，这次没发"
-            hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why})
+            try:                                 # 报失败本身出错也不能吞掉提醒（#218 第 6 轮 P2-02）
+                hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why})
+                reported = None
+            except Fail as e:
+                reported = str(e)[:80]
         else:
             try:
                 ref = _deliver(card)
@@ -420,8 +426,13 @@ def once(wait=50):
                 return {"card": card["id"], "ok": False, "why": str(e)}
             _report_delivered(card["id"])
     if got:                                      # 放锁后再提醒（不占着锁发消息）
-        alert("hub-unreadable", f"飞书桥接：卡片 {card['id']} {why}；中台会稍后重试。")
-        return {"card": card["id"], "ok": False, "why": why}
+        if reported is None:
+            key = "hub-unreadable" if got[0] == "unreadable" else f"version-conflict:{card['id']}"
+            alert(key, f"飞书桥接：卡片 {card['id']} {why}；中台会稍后重试。")
+        else:                                    # 中台没记上：单独的提醒键，不被上面的限频压掉
+            alert(f"report-failed:{card['id']}", f"飞书桥接：卡片 {card['id']} {why}；向中台报「没发成」也失败了"
+                  f"（{reported}），中台可能没记上这次失败，请人工核查这张卡。")
+        return {"card": card["id"], "ok": False, "why": why, **({"report_error": reported} if reported else {})}
     _flush(card["id"])                           # 锁外提交（第 5 轮 P2 建议）
     return {"card": card["id"], "ok": True, "ref": ref}
 
