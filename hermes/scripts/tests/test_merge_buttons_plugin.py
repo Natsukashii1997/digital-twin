@@ -22,7 +22,7 @@ def load():
 class MergeButtonsPlugin(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_AUTOLOOP_ANSWER": "/x/autoloop_answer.py", "DT_MERGE_PYTHON": "/x/python3",
+        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_AUTOLOOP_ANSWER": "/x/autoloop_answer.py", "DT_PDAILY_ACT": "/x/pdaily_act.py", "DT_MERGE_PYTHON": "/x/python3",
                "HERMES_SESSION_CHAT_ID": "oc_home", "DT_PROBE_DIR": self.tmp.name + "/probe",
                "HERMES_SESSION_USER_ID": "ou_owner", "HERMES_SESSION_USER_ID_ALT": "on_owner", "HERMES_SESSION_USER_NAME": "常浩",
                "HERMES_SESSION_CHAT_TYPE": "dm", "HERMES_SESSION_PLATFORM": "feishu", "HERMES_SESSION_MESSAGE_ID": "c-callbacktoken123"}
@@ -133,6 +133,57 @@ class MergeButtonsPlugin(unittest.TestCase):
             out, popen = self.click(raw)
             self.assertIsNone(out)
             popen.assert_not_called()
+
+    def pdaily_click(self, raw, out, inject=True):
+        """日报按钮：脚本同步跑（换成假结果），注入换成记录器，后台的 after / say 记在 Popen 上。"""
+        ctx = mock.Mock()
+        ctx.inject_message.return_value = inject
+        self.mod.register(ctx)
+        done = mock.Mock(stdout=json.dumps(out, ensure_ascii=False) + "\n")
+        with mock.patch.object(self.mod.subprocess, "run", return_value=done) as run, \
+                mock.patch.object(self.mod.subprocess, "Popen") as popen:
+            ret = self.mod.handle(raw)
+        return ret, run, popen, ctx
+
+    def test_pdaily_click_records_then_injects_then_refreshes(self):
+        ok = {"ok": True, "msg": "记下", "day": "2026-11-18", "entries": ["p-261118-2-ab12"], "inject": "【日报按钮】……"}
+        ret, run, popen, ctx = self.pdaily_click('button {"pdaily": "0123456789abcdef", "n": 2}', ok)
+        self.assertIsNone(ret)
+        self.assertEqual(run.call_args[0][0], ["/x/python3", "/x/pdaily_act.py", "button", "0123456789abcdef", "2",
+                                               "--chat", "oc_home", "--operator", "ou_owner"])
+        self.assertEqual(ctx.inject_message.call_args[0][0], "【日报按钮】……")
+        self.assertEqual(ctx.inject_message.call_args[1]["origin"],
+                         {"platform": "feishu", "chat_id": "oc_home", "chat_type": "dm", "user_id": "ou_owner"})
+        self.assertEqual(popen.call_args[0][0], ["/x/python3", "/x/pdaily_act.py", "after", "--day", "2026-11-18",
+                                                 "--entries", "p-261118-2-ab12", "--injected", "1"])
+
+    def test_pdaily_injection_not_allowed_still_records(self):
+        ok = {"ok": True, "msg": "记下", "day": "2026-11-18", "entries": ["p-1"], "inject": "x"}
+        _, _, popen, _ = self.pdaily_click('button {"pdaily": "0123456789abcdef", "n": 0}', ok, inject=False)
+        self.assertEqual(popen.call_args[0][0][-2:], ["--injected", "0"])
+
+    def test_pdaily_refused_or_failed(self):
+        _, _, popen, ctx = self.pdaily_click('button {"pdaily": "0123456789abcdef", "n": 1}', {"ok": False, "msg": "不认"})
+        popen.assert_not_called()                                 # 不是常浩：不回话
+        ctx.inject_message.assert_not_called()
+        _, _, popen, ctx = self.pdaily_click('button {"pdaily": "0123456789abcdef", "n": 1}',
+                                             {"ok": False, "msg": "这不是最新一张日报卡片上的按钮"})
+        self.assertEqual(popen.call_args[0][0][2:], ["say", "--text", "这不是最新一张日报卡片上的按钮"])
+        ctx.inject_message.assert_not_called()
+        _, _, popen, ctx = self.pdaily_click('button {"pdaily": "0123456789abcdef", "n": 1}',
+                                             {"ok": True, "msg": "定过了", "day": "x", "entries": []})
+        popen.assert_not_called()
+        ctx.inject_message.assert_not_called()
+
+    def test_pdaily_rejects_bad_values(self):
+        for raw in ('button {"pdaily": "0123", "n": 1}', 'button {"pdaily": "0123456789abcdef", "n": "1"}',
+                    'button {"pdaily": "0123456789abcdef", "n": true}', 'button {"pdaily": "0123456789abcdef", "n": 21}',
+                    'button {"pdaily": "0123456789abcdef", "n": -1}', 'button {"pdaily": "0123456789abcdef"}',
+                    'button {"pdaily": "0123456789abcdef", "n": 1, "by": "ou_x"}'):
+            _, run, popen, ctx = self.pdaily_click(raw, {"ok": True})
+            run.assert_not_called()
+            popen.assert_not_called()
+            ctx.inject_message.assert_not_called()
 
     def test_registers_card_command(self):
         ctx = mock.Mock()

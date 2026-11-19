@@ -395,7 +395,7 @@ class CardTests(unittest.TestCase):
         btn = [e for e in c["body"]["elements"] if e["tag"] == "button"][0]
         self.assertEqual(btn["behaviors"][0]["default_url"], "https://x.feishu.cn/docx/abc")
         self.assertNotIn("今日推进", self.text(c))
-        self.assertNotIn("callback", self.text(c))          # 第 1 批没有回调按钮
+        self.assertNotIn("callback", self.text(c))          # 没给令牌（预览）：没有按钮
 
     def test_no_doc_drops_button_and_says_why(self):
         c = self.card(doc_error="云文档接口超时")
@@ -698,6 +698,11 @@ class SendTests(unittest.TestCase):
         d = self.deliv()
         self.assertTrue(d["sent"] and d["read_back"])
         self.assertEqual(d["message_id"], "om_1")
+        cols = [c for e in sent["body"]["elements"] if e.get("tag") == "column_set" for c in e["columns"]]
+        values = [c["elements"][0]["behaviors"][0]["value"] for c in cols]
+        self.assertEqual(values, [{"pdaily": d["card_token"], "n": 0}, {"pdaily": d["card_token"], "n": 1}])   # #235
+        self.assertRegex(d["card_token"], r"^[0-9a-f]{16}$")
+        self.assertEqual([c["elements"][0]["text"]["content"] for c in cols], ["全部按推荐", "① 按推荐"])
         send_args = json.loads(self.calls.read_text().splitlines()[1])
         self.assertEqual(send_args[send_args.index("--as") + 1], "bot")
         self.assertEqual(send_args[send_args.index("--chat-id") + 1], pp.CHAT)

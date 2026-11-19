@@ -28,6 +28,7 @@ import datetime as dt
 import json
 import os
 import re
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import pdaily_data  # noqa: E402
 import pdaily_facts  # noqa: E402
+import pdaily_act  # noqa: E402  拍板账（#235）；它反过来 import 本模块，Python 会给它半初始化的本模块，它只在函数里用
 
 DAILY = pdaily_facts.DAILY
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
@@ -119,15 +121,26 @@ def material(facts):
             routine[key] = routine.get(key, 0) + 1
             continue
         actions.append({k: (clip(v, ACT_CLIP) if isinstance(v, str) else v) for k, v in a.items() if k != "action_id"})
-    decisions = [dict(d, candidate=i) for i, d in enumerate(facts.get("decisions") or [])]
+    keys, recent, held = remembered()
+    decisions = [dict(d, candidate=i, **({"already_decided": True} if pdaily_act.cand_key(d) in keys else {}))
+                 for i, d in enumerate(facts.get("decisions") or []) if isinstance(d, dict)]
     return {
         "stat_day": facts.get("stat_day"), "window": facts.get("window"), "fetched_at": facts.get("fetched_at"),
         "projects": projects,
         "actions": actions, "routine_cron": routine,
-        "decisions": decisions, "risks": facts.get("risks"), "cross_refs": facts.get("cross_refs"),
+        "decisions": decisions, "ledger": {"recently_decided": recent, "on_hold": held},
+        "risks": facts.get("risks"), "cross_refs": facts.get("cross_refs"),
         "observations": facts.get("observations"), "counts": facts.get("counts"),
         "activity": facts.get("activity"), "coverage": facts.get("coverage"), "notes": facts.get("notes"),
     }
+
+
+def remembered():
+    """拍板账（#235）：近期定过的候选键、定过的事摘要、先放着的件数；账读不了就当空的，不挡写稿。"""
+    try:
+        return pdaily_act.remembered()
+    except (OSError, ValueError):
+        return set(), [], 0
 
 
 # ---------- 写稿 ----------
@@ -496,7 +509,13 @@ def check(facts, card, report):
     decs = need_list("decisions", ("project", "item", "recommendation"), {"type": DECISION_TYPES, "kind": DECISION_KINDS})
     ach = need_list("achievements", ("project", "text"))
     risks = need_list("risks", ("cause", "scope"), {"level": tuple(LEVELS)})
+    keys = remembered()[0]
+    cands = facts.get("decisions") or []
     for i, d in enumerate(decs):
+        mine = [pdaily_act.cand_key(c) for c in cand_list(d, cands)]
+        if mine and all(k in keys for k in mine):
+            errs.append(f"decisions[{i}]「{clip(d.get('item'), 30)}」常浩已经定过（或说了先放着），不再问；"
+                        "办理结果写进完整报告就行")
         if NO_MATERIAL.search(s(d.get("recommendation")) or ""):
             errs.append(f"decisions[{i}]「{clip(d.get('item'), 30)}」的推荐说给不出倾向：缺材料的事不进拍板，"
                         "放到风险里写「只观察」，等材料齐了再问")
@@ -763,11 +782,22 @@ def risk_rows(risks, degraded):
     return rows
 
 
-def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None):
+def decision_buttons(token, n):
+    """拍板表下一排按钮（乙版定稿的排法）：全部按推荐 + ① 按推荐…；按钮只带 {"pdaily": 令牌, "n": 编号}，0 = 其余全部。"""
+    def b(text, value, kind):
+        return {"tag": "column", "width": "auto", "elements": [{
+            "tag": "button", "text": {"tag": "plain_text", "content": text}, "type": kind, "size": "small",
+            "behaviors": [{"type": "callback", "value": {"pdaily": token, "n": value}}]}]}
+    cols = [b("全部按推荐", 0, "primary_filled")] + [b(f"{num_mark(k)} 按推荐", k, "primary") for k in range(1, n + 1)]
+    return {"tag": "column_set", "flex_mode": "flow", "horizontal_spacing": "8px", "columns": cols}
+
+
+def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None, token=None):
     """乙版卡片 JSON 2.0（常浩 2026-11-19 在私聊三版预览里选定，#226）；默认宽度。四板块：
     核心数据速览 → 昨日关键成果 → 风险与阻塞（按原因一类一行，带去向；项目明细在折叠面板里）→ 需要你拍板（表格）。
     selfcheck：工程自检结果（#159）。None 不显示（预览）；"" 表示正常，只在底部灰字写一句；有内容就并进风险表
-    最后一行「猛鬼兽自检有问题」，原文放进折叠面板。"""
+    最后一行「猛鬼兽自检有问题」，原文放进折叠面板。
+    token：卡片令牌（#235）。给了就在拍板表下加一排「按推荐」按钮；预览不给，不放按钮。"""
     sub = [f"统计日 {window_text(facts)}"]
     if unread(facts):
         sub.append(f"{len(unread(facts))} 个项目未读到")
@@ -802,8 +832,13 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None)
     if decs:
         els.append(table((("n", "#", "8%"), ("i", "事项", "34%"), ("r", "推荐", "43%"), ("a", "已挂", "15%")),
                          decision_rows(facts, decs)))
-        els.append(md("<font color='grey'>想定哪条，引用这张卡片回一句，例如「① 按推荐」「③ 不做」「都按推荐」。"
-                      "回了才算你定了，只管点到的那几条。</font>"))
+        if token and len(decs) <= 20:
+            els.append(decision_buttons(token, len(decs)))
+            els.append(md("<font color='grey'>点「按推荐」就交给猛鬼兽办；不做、先放着或想改，引用这张卡片回一句，"
+                          "例如「③ 不做」「④ 先放着」。点了或回了才算你定了，只管点到的那几条，只做到开 PR。</font>"))
+        else:
+            els.append(md("<font color='grey'>想定哪条，引用这张卡片回一句，例如「① 按推荐」「③ 不做」「都按推荐」。"
+                          "回了才算你定了，只管点到的那几条。</font>"))
     else:
         els.append(md("今天没有要你拍板的事"))
     els.append({"tag": "hr"})
@@ -1019,7 +1054,7 @@ def send(day, out, force=False):
         except ValueError:
             pass
     rec = {"stat_day": day, "channel": CHAT, "sent": False, "at": None, "doc_url": None, "message_id": None,
-           "read_back": False, "error": None}
+           "read_back": False, "error": None, "card_token": secrets.token_hex(8)}   # 按钮令牌（#235）：只认最新一张卡
     try:
         meta = json.loads((out / f"{day}.build.json").read_text(encoding="utf-8"))
         ff = out / f"{day}.facts.json"
@@ -1044,7 +1079,7 @@ def send(day, out, force=False):
         except SendError as e:
             doc_error = str(e)
         card = build_card(facts, fields, meta.get("trace") or trace_line(facts, meta.get("model"), meta.get("degraded")),
-                          doc_url=doc_url, doc_error=doc_error, selfcheck=run_self_check())
+                          doc_url=doc_url, doc_error=doc_error, selfcheck=run_self_check(), token=rec["card_token"])
     text = json.dumps(card, ensure_ascii=False)
     bad = work_content(text)
     if bad or not card["header"]["title"]["content"].startswith("📅 猛鬼兽日报 · "):
