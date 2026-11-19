@@ -117,3 +117,15 @@
 - 证据：#10 `6cb05c9`；PR #91 `decf3b3`；PR #162 `3d1b76c`（正文「没收回（待常浩定）」两处）；漂移检查 PR #22 `1249192`（`ops/self_check.py` 的 `check_drift`）。
 - 升级：〔体检〕部分升级（2026-10-27，PR #22 `1249192`）：工程自检每天比对仓库 main 和安装副本，有漂移才报；只能事后发现，拦不住直接改。最硬能升到〔结构〕：安装副本由安装脚本单向生成、直接写入被 hook 拦（复盘第六节）；未做。
 - 触发：`/\.hermes\/(skills|scripts|prompts|workspace)\//`
+
+## L-09 本机跑全量测试以为卡死，其实是 test_multica_night 慢（约 16 分钟），被短超时截断后误报「卡住」（2026-11-19、11-20）
+
+- 现象：11-19 为 PR #231 跑 `hermes/scripts/tests` 全量，33 分钟没跑完，以为卡死，用宽泛的 `pkill -f` 停掉（犯了 G-32）；按文件加短超时重跑，`test_multica_night` 每次都在同一个用例附近被截断，就记成「这个测试会卡住、CI 会超时」写进了 PR 正文。实际 PR #231 的 CI 通过，11-20 本机不设超时整文件跑完：112 个全过，用时 955 秒。
+- 根因：这个文件每个用例都要真起子进程走一遍夜跑命令（`start` 约 27 次、`stop` 约 49 次假 multica 调用），每次子进程在本机 50～120 毫秒，单个用例 4～30 秒；跑的时候本机 load average 13～31（10 核），所以整文件要十几分钟。Linux CI 上子进程便宜，整套约 5.5 分钟。超时设成几分钟，截断点又总落在耗时最长的停机类用例上，看起来像卡在某一个测试。
+- 正确做法：
+  - 本机跑 `hermes/scripts/tests` 全量放后台跑，不设短超时；按文件限时时，`test_multica_night.py` 至少给 30 分钟。
+  - 判断「卡住」前先看是在等什么：卡住时看子进程链（是否一直是同一个进程、`etime` 在涨），或在用例里打 faulthandler 调用栈；子进程一直在换就是慢，不是卡。
+  - 停自己的测试按绝对路径或进程号停，不按命令名广撒（G-32）。
+- 证据：`~/Library/Application Support/DigitalTwin/evidence/multica-night-slow-20261120/`（整文件日志、cProfile 剖析脚本、README）；PR #231 CI 通过。
+- 升级：〔提醒〕未升级。
+- 触发：`test_multica_night`、`unittest discover -s hermes/scripts/tests`
