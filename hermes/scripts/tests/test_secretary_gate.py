@@ -8,6 +8,7 @@
 rules.json、config.json、hub.db），必须一致。不联网、不发飞书。
 单跑：python3 -B -m unittest discover -s hermes/scripts/tests -p test_secretary_gate.py -v
 """
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import datetime as dt
 import hashlib
@@ -52,8 +53,9 @@ TEXT = {"context": "给示例服务加超时", "question": "超时设 30 秒还�
         "basis": "只影响沙盒里的示例服务，和现有配置一致"}
 
 # ---------- 正式文件：开始、结束各算一次 sha256 ----------
-SUPPORT = Path("~/Library/Application Support/DigitalTwin").expanduser()
-HUB_HOME = Path("~/.agent-autoloop").expanduser()
+# 统一隔离把 HOME 换成了临时目录，正式目录按系统账号的家目录取（同 test_exec_gate_e2e）
+SUPPORT = _isolation.REAL_HOME / "Library/Application Support/DigitalTwin"
+HUB_HOME = _isolation.REAL_HOME / ".agent-autoloop"
 
 
 def real_files():
