@@ -64,10 +64,9 @@
   claims 记 unknown、不重答。回读（中台库只读）看到 decided、by = 秘书、choice 一致 → finish(done)，outcome 记 ref 和
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
-  ① 停在 executing 而 cards.db 里没有这个决定号的获准记录（claim_log 的 approved，和 claims 同一事务写）：获准没落盘，送达只在
-  获准之后，确定没发 → failed（审查 P2-02：账本先提交 executing、cards.db 还没提交时被杀）。查的时候持 cards.db 写锁，不会读到
-  正在获准、还没提交的那一刻。只认获准前记下身份的那一份 cards.db（received.cards_db = meta 里的库身份），用不新建、不补表的
-  方式打开；文件不在、结构不全、身份对不上 → 不下结论（第 2 轮 P1-04：证据库没了不等于没有这条记录）。
+  ① 停在 executing 超过 2 分钟、回读给不出结论的（中台库读不到，或卡片还开着）一律转 unreconciled：额度保留、冻结这张任务、
+  交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
+  换成旧快照，推断不可靠；① 现在整体关着，多冻结没有实际代价。frozen_task 也把超时的 executing 算进去，同任务第二张卡不能再获准。
 lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自己的 ref（cards.db 的 secretary_cards），报 delivered（同一 ref 重报幂等），
   中台收下后记「中台确认送达」；领到新版本时先清掉旧版本的确认时间，只有这一版报送达成功才记（审查 P1-02）；以后由常驻进程调（本批不装）。
 
@@ -381,10 +380,11 @@ def handoff_text(category, snap, why):
 
 # ---------- 账本 ----------
 def frozen_task(st, task_id, but=None):
-    """这张任务有没有结果不明 / 对账不清的秘书决定（规格第 7 节：冻结后续代批，从账本现算）。"""
-    rows = st.conn.execute("SELECT id FROM secretary_decisions WHERE task_id = ? AND status IN ('unknown','unreconciled')"
-                           " AND id != ?", (task_id, but or "")).fetchall()
-    return [r[0] for r in rows]
+    """这张任务有没有结果不明 / 对账不清 / 卡在 executing 超过 STALE 的秘书决定（规格第 7 节：冻结后续代批，从账本现算；
+    超时的 executing 也算：它可能已经送出去了，#218 第 3 轮 P1-05）。"""
+    rows = st.conn.execute("SELECT id, status, updated_at FROM secretary_decisions WHERE task_id = ? AND id != ? AND "
+                           "status IN ('unknown','unreconciled','executing')", (task_id, but or "")).fetchall()
+    return [r[0] for r in rows if r[1] != "executing" or _age(r[2]) >= STALE]
 
 
 def record_handoff(st, ctx, reason, why, now):
@@ -407,7 +407,7 @@ def format_errors(p, cat):
     want = COMMON_KEYS | KEYS[cat] | ({"run"} if cat == "ask" else set())
     if set(p) - want:
         errs.append(f"多了不认识的字段：{'、'.join(sorted(set(p) - want))}")
-    if p.get("schema") != 1:
+    if type(p.get("schema")) is not int or p["schema"] != 1:     # 严格整数：True、1.0 都不算（第 3 轮 P2-02）
         errs.append("schema 要是 1")
     for k in KEYS[cat]:
         v = p.get(k)
@@ -588,7 +588,6 @@ def wait_gate(ctx, t):
     if ctx["category"] == "ask":
         with F.db() as con:
             sc = secretary_card(con, card["id"])
-            ctx["received"] = {**ctx["received"], "cards_db": F.db_id(con)}   # 对账时核对是不是同一份 cards.db
         if not secretary_delivered(sc, card["version"]):
             raise NotReady("秘书通道还没领到这张卡的这一版（或中台还没确认送达），过一会再交")
     return sent
@@ -991,6 +990,8 @@ def reconcile(card=None, now=None):
             if d["status"] == "executing" and _age(d["updated_at"]) < STALE:
                 continue                                     # 可能正在送
             got = _verdict(st, d)
+            if not got and d["action"] == "ask" and d["status"] == "executing":   # ① 卡住又核不出：一律说不清（第 3 轮 P1-04 / P1-05）
+                got = ("unreconciled", {"checked": "卡在送达中超过 2 分钟，中台库读不到这张卡，核不清是否已送出"})
             if not got or (got[0] == "unreconciled" and d["status"] == "unreconciled"):
                 continue
             SL.reconcile(st, did, got[0], got[1], now=now)
@@ -1004,19 +1005,6 @@ def reconcile(card=None, now=None):
 def _verdict(st, d):
     """按回读证据给结论：(结论, 证据)；读不到返回 None（不动）。"""
     if d["action"] == "ask":
-        if d["status"] == "executing":                       # 审查 P2-02：获准记录没落盘就确定没发（持写锁读，见头注释）
-            want = ((L.read_raw(d) or {}).get("received") or {}).get("cards_db")
-            try:                                             # 第 2 轮 P1-04：只认获准时那一份、结构完整的 cards.db，不新建
-                with F.db(write=True, create=False) as con:
-                    if not want or F.db_id(con) != want:
-                        return None
-                    approved = con.execute("SELECT 1 FROM claim_log WHERE card_id = ? AND who = 'secretary' AND attempt = ? "
-                                           "AND state = 'approved'", (d["card_id"], d["id"])).fetchone()
-            except (F.Fail, sqlite3.Error):
-                return None                                  # 证据库不在、不全或换了：核不了，不下结论
-            if not approved:
-                return "failed", {"checked": "cards.db 里没有这个决定的获准记录：获准没落盘，送达只在获准之后，确定没发",
-                                  "found": False}
         raw = L.read_raw(d) or {}
         choice = (raw.get("reply") or {}).get("choice")
         c = P.hub_card(d["card_id"])

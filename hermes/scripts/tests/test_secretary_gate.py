@@ -358,12 +358,15 @@ class AskTests(Base):
         self.assertEqual((stats["delivered"], stats["waited_seconds"], stats["waited_count"]), (1, 2400, 1))
 
     def test_bad_format_hands_off_as_model(self):
-        for p in (self.prop(extra=1), self.prop(choice="1"), self.prop(model={"name": "x", "fallback": False}),
-                  self.prop(schema=2), self.prop(run=DEL), self.prop(run={"session": ""}), self.prop(run={"session": "a b"}),
-                  self.prop(run={"session": "x", "model": MAIN}),
-                  self.prop(text={**TEXT, "summary": ""}), self.prop(text={**TEXT, "basis": "按 HEAD 合并"})):
-            with self.subTest(p=p):
+        """每个提议在 setUp 之后现造（运行记录随 setUp 重置，先造好会因没有运行记录被拦，测不到格式检查本身）。"""
+        for kw in ({"extra": 1}, {"choice": "1"}, {"model": {"name": "x", "fallback": False}},
+                   {"schema": 2}, {"schema": True}, {"schema": 1.0}, {"schema": DEL}, {"run": DEL}, {"run": {"session": ""}},
+                   {"run": {"session": "a b"}}, {"run": {"session": "x", "model": MAIN}},
+                   {"text": {**TEXT, "summary": ""}}, {"text": {**TEXT, "basis": "按 HEAD 合并"}}):
+            with self.subTest(kw=kw):
                 self.setUp()
+                p = self.prop(**kw)
+                self.assertTrue(SG.format_errors(p, "ask"))                     # 拦下它的是格式检查本身
                 self.handoff(self.submit(p), "model")
 
     def test_self_reported_error_and_abstain_only_hand_off(self):
@@ -1070,8 +1073,9 @@ class TaskLockTests(Base):
 
 
 class KillRecoveryTests(Base):
-    """审查 P2-02：账本已提交 executing、cards.db 的获准还没提交时被杀——确定没发，对账记没做成，不冻结。"""
-    def test_killed_between_ledger_begin_and_cards_commit(self):
+    """#218 第 3 轮 P1-04 / P1-05（常浩 11-19 选甲）：① 卡在 executing 超过 2 分钟、核不出结论的，一律对账不清：
+    额度不退、冻结这张任务、交常浩；不再拿 cards.db 有没有获准记录推断「肯定没发」。"""
+    def kill_between_ledger_begin_and_cards_commit(self):
         real = SL.begin
 
         def begin(*a, **kw):
@@ -1081,11 +1085,52 @@ class KillRecoveryTests(Base):
             self.submit()
         self.assertEqual(self.decisions()[0][3], "executing")
         self.assertIsNone(self.claim())                                          # cards.db 回滚了
+        return self.decisions()[0][0]
+
+    def sibling_card(self, cid=70):
+        """同一张任务的另一张卡（复制卡 7），飞书送达 40 分钟、秘书通道已领到。"""
+        self.hub("INSERT INTO cards SELECT ?, key, kind, state, version, title, text, options, choice, \"by\", rule, lane, source, "
+                 "run_id, created_at, decided_at, closed_at FROM cards WHERE id = 7", (cid,))
+        self.feishu(cid, T - dt.timedelta(minutes=40))
+        self.leased(cid, f"sec-{cid}")
+        return self.prop(card=cid)
+
+    def test_killed_between_ledger_begin_and_cards_commit_is_unreconciled(self):
+        did = self.kill_between_ledger_begin_and_cards_commit()
         with mock.patch.object(SG, "STALE", -1):
-            self.assertEqual([r for _, r in SG.reconcile(now=T)], ["failed"])
-        self.assertEqual(self.held(), [])                                        # 额度释放
+            self.assertEqual(SG.reconcile(now=T), [(did, "unreconciled")])      # 卡还开着：核不清，不再判「没发」
+            self.assertEqual(SG.reconcile(now=T), [])                            # 已是对账不清：不重复记
+        self.assertEqual(self.decisions()[0][3], "unreconciled")
+        self.assertNotEqual(self.held(), [])                                     # 额度不退
+        self.assertEqual(self.answers(), [])                                     # 不重答
+        out = self.submit(self.sibling_card())                                   # 同任务第二张卡：交常浩
+        self.assertEqual((out["result"], out["reason"]), ("handoff", "gate"))
         self.assertEqual(self.answers(), [])
-        self.assertEqual(self.submit()["result"], "done")                        # 不冻结：这张卡还能正常代批
+
+    def test_stale_executing_freezes_task_before_reconcile(self):
+        """P1-05：还没对账、只是卡在 executing 超过 STALE，同任务第二张卡也不能获准。"""
+        did = self.kill_between_ledger_begin_and_cards_commit()
+        with SL.open_store(T) as st:
+            with mock.patch.object(SG, "STALE", 10 ** 9):                       # 还没卡够 STALE：可能正在送，不算
+                self.assertEqual(SG.frozen_task(st, TASK), [])
+            with mock.patch.object(SG, "STALE", -1):
+                self.assertEqual(SG.frozen_task(st, TASK), [did])
+                self.assertEqual(SG.frozen_task(st, TASK, but=did), [])
+        with mock.patch.object(SG, "STALE", -1):
+            out = self.submit(self.sibling_card())
+        self.assertEqual((out["result"], out["reason"]), ("handoff", "gate"))
+        self.assertEqual(self.answers(), [])
+        self.assertEqual(self.get(did)["status"], "executing")                  # 拦卡不替它对账
+
+    def test_cards_db_gone_or_hub_unreadable_still_unreconciled(self):
+        """证据库没了 / 换了，或中台库读不到这张卡：都核不清，一律对账不清（第 2 轮 P1-04 那套身份核对已删）。"""
+        did = self.kill_between_ledger_begin_and_cards_commit()
+        Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).unlink()
+        with mock.patch.object(SG, "STALE", -1), mock.patch.object(SG.P, "hub_card", lambda cid: None):
+            self.assertEqual(SG.reconcile(now=T), [(did, "unreconciled")])
+        self.assertEqual(self.get(did)["status"], "unreconciled")
+        self.assertNotEqual(self.held(), [])
+        self.assertEqual(self.answers(), [])
 
     def test_killed_after_approval_is_still_unknown_while_card_open(self):
         real = F.log_claim
@@ -1126,44 +1171,6 @@ class AskSwitchTests(Base):
         self.assertEqual(self.answers(), [])
         self.assertEqual(self.held(), [])
         self.assertIsNone(self.claim())
-
-
-class EvidenceDbTests(Base):
-    """#218 第 2 轮 P1-04：对账只认获准时那一份、结构完整的 cards.db；证据库没了、换了、不全都不下结论。"""
-    def killed_before_cards_commit(self):
-        real = SL.begin
-
-        def begin(*a, **kw):
-            real(*a, **kw)
-            raise KeyboardInterrupt
-        with mock.patch.object(SL, "begin", begin), self.assertRaises(KeyboardInterrupt):
-            self.submit()
-        self.assertEqual(self.decisions()[0][3], "executing")
-
-    def still_executing(self):
-        with mock.patch.object(SG, "STALE", -1):
-            self.assertEqual(SG.reconcile(now=T), [])
-        self.assertEqual(self.decisions()[0][3], "executing")
-        self.assertEqual(sorted(self.held()), [("day", "reserved"), ("task", "reserved")])
-
-    def test_cards_db_deleted(self):
-        self.killed_before_cards_commit()
-        Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).unlink()
-        self.still_executing()
-        self.assertFalse(Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).exists())      # 对账没有顺手新建
-
-    def test_cards_db_replaced(self):
-        self.killed_before_cards_commit()
-        Path(os.environ["DT_AUTOLOOP_CARDS_DB"]).unlink()
-        with F.db():                                                            # 别处新建了一份同名空库
-            pass
-        self.still_executing()
-
-    def test_cards_db_incomplete(self):
-        self.killed_before_cards_commit()
-        with contextlib.closing(sqlite3.connect(os.environ["DT_AUTOLOOP_CARDS_DB"])) as con, con:
-            con.execute("DROP TABLE claim_log")
-        self.still_executing()
 
 
 class LateOwnerNoteTests(unittest.TestCase):
@@ -1330,7 +1337,7 @@ class SecretaryEndToEnd(HubFixture):
         self.assertEqual(out["result"], "done", out["msg"])
         c = self.hub_card()
         self.assertEqual((c["state"], c["by"], c["choice"]), ("decided", "秘书", 1))
-        code, said, _ = A.answer(self.token, 0, CHAT, OWNER)                      # 常浩迟到的点击
+        code, said, _ = A.answer(self.token, 0, CHAT, OWNER, F.card_by_token(self.token)["version"])                    # 常浩迟到的点击
         self.assertEqual(code, 1)
         self.assertIn("秘书替你选了「绿色」", said)
         self.assertIn("推翻", said)
@@ -1351,7 +1358,7 @@ class SecretaryEndToEnd(HubFixture):
 
     def test_owner_click_already_here_wins(self):
         card = F.card_by_token(self.token)
-        attempt, _ = A.claim(card, 0)                                             # 常浩的点击已到本机（排队）
+        attempt, _ = A.claim(card, 0, card["version"])                                           # 常浩的点击已到本机（排队）
         out = SG.submit(self.prop())
         self.assertEqual(out["result"], "yielded", out["msg"])
         self.assertEqual(A.submit(self.card)[0], 0)

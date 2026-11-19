@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """常浩点中台卡片按钮后的处理（批 0B-4 第 4a 批，#195；规格 docs/秘书代批-规格.md §6、§7「本人点击锁」，0B-3 实测）。
 
-merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
-  autoloop_answer.py <令牌> <选项号> --chat <网关给的聊天号> --operator <网关给的点击人>
+merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号, "v": 按钮所在那一版的版本号} 的点击转来：
+  autoloop_answer.py <令牌> <选项号> --version <版本> --chat <网关给的聊天号> --operator <网关给的点击人>
   autoloop_answer.py reconcile [--card <卡片号>]        对账（桥接常驻时每轮也跑）
   autoloop_answer.py release --card <卡片号> --confirm  放开一张「结果不明」的卡，只在常浩明确同意后跑
 核对（缺一样就不答）：点击人 = 常浩 open_id、聊天号 = 常浩私聊（网关报的聊天类型不可信，不看）、本机配了这两样——
@@ -23,7 +23,10 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号} 的点击转来：
 卡已不开着就把排队的结算掉（从没发过）；inflight 超过 2 分钟且进程不在（或超过 10 分钟，防进程号复用）、unknown →
 只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
 回读只认中台的四种卡片状态；缺字段或认不出的状态一律当结果不明，不结算、不放开（PR #202 审查 P1-08）。
-版本（#218 第 2 轮 P1-03）：排队的选择记着点击时卡片在飞书上的版本；提交前卡片已改版（feishu_cards.version 变了）就作废、
+版本（#218 第 3 轮 P1-03）：按钮带着它所在那一版的版本号，回调版本 ≠ 登记的当前版本（旧版本按钮的迟到点击、或桥接还没登记
+完的新版本）直接拒、不排队，请常浩在最新的卡上重点；没带版本的旧样式按钮一律拒（0B-4a 起发的卡没有版本号）。登记时在写锁里
+再核一次，排队的那一行记的是回调携带的版本。
+（#218 第 2 轮 P1-03）排队的选择记着点击时卡片在飞书上的版本；提交前卡片已改版（feishu_cards.version 变了）就作废、
 请常浩在新版上重点，不转到新版本；中台确认送达也按版本记（autoloop_feishu）。剩余：领到发送资格到 POST 之间中台改版，
 中台 answer 不核版本，要中台版本核对（规格第 9 节验收 12）才能堵住。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
@@ -71,7 +74,7 @@ def identities():
     return owner, home
 
 
-def check(token, option, chat, operator):
+def check(token, option, chat, operator, version=None):
     owner, home = identities()
     if not operator or operator != owner:
         raise Quiet("点按钮的不是常浩本人")
@@ -86,7 +89,16 @@ def check(token, option, chat, operator):
         raise F.Fail("这张卡登记的私聊和现在的对不上")
     if not (0 <= option < card["options"]):
         raise F.Fail("选项号不在这张卡的选项里")
+    version_ok(card, version)
     return card
+
+
+def version_ok(card, version):
+    """回调携带的版本必须等于登记的当前版本（#218 第 3 轮 P1-03）。"""
+    if version is None:
+        raise F.Fail("这个按钮是旧样式，没带版本号，确认不了你点的是哪一版；请在最新的卡片上点")
+    if version != card["version"]:
+        raise F.Fail(f"你点的是第 {version} 版卡片上的按钮，现在登记的是第 {card['version']} 版，这次不算；请在最新的卡片上重点")
 
 
 # ---------- 状态（一律按尝试号 + 预期状态条件更新） ----------
@@ -140,9 +152,11 @@ def release(card_id, attempt, expect, note):
         return True
 
 
-def claim(card, option):
-    """登记本人这一答（排队），返回 (尝试号, 附言)。已有本人的行就不再登记。"""
+def claim(card, option, version):
+    """登记本人这一答（排队），返回 (尝试号, 附言)。已有本人的行就不再登记。写锁里再核一次版本（check 之后桥接可能刚改了版）。"""
     with F.db(write=True) as con:
+        cur = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card["card_id"],)).fetchone()
+        version_ok({"version": cur["version"] if cur else None}, version)
         r = owner_row(con, card["card_id"])
         if r and r["state"] == "answered":
             raise F.Fail("这张卡你已经点过了，以第一次为准")
@@ -154,10 +168,10 @@ def claim(card, option):
             raise F.Fail("上一次点击还在处理，先别重复点")
         sec = con.execute("SELECT state FROM claims WHERE card_id = ? AND who = 'secretary'", (card["card_id"],)).fetchone()
         note = "秘书已获准替你回答，以中台先受理的为准" if sec and sec["state"] in SECRETARY_LIVE else None
-        attempt = secrets.token_hex(6)                  # 记下点的是飞书上的第几版（按钮在那一版的消息上）
+        attempt = secrets.token_hex(6)                  # 记下点的是第几版：回调携带的版本（按钮在那一版的消息上）
         con.execute("INSERT INTO claims (card_id, who, state, choice, at, pid, note, attempt, version) "
                     "VALUES (?, 'owner', 'queued', ?, ?, NULL, ?, ?, ?)",
-                    (card["card_id"], option, F.now(), note, attempt, card["version"]))
+                    (card["card_id"], option, F.now(), note, attempt, version))
         F.log_claim(con, card["card_id"], "owner", "queued", option, note, attempt)
     return attempt, note
 
@@ -344,10 +358,10 @@ def release_unknown(card_id):
 
 
 # ---------- 入口 ----------
-def answer(token, option, chat, operator):
+def answer(token, option, chat, operator, version=None):
     """返回 (退出码, 给常浩的话或 None（不回话）, 记录)。"""
     try:
-        card = check(token, option, chat, operator)
+        card = check(token, option, chat, operator, version)
     except Quiet as e:
         return 1, None, {"ok": False, "quiet": True, "why": str(e)}
     except F.Fail as e:
@@ -355,7 +369,7 @@ def answer(token, option, chat, operator):
     try:
         F.hub_target()                           # 钥匙、配置读不到就先说，不登记
         reconcile(card["card_id"])               # 上一次在途或结果不明的，先对一次账
-        attempt, note = claim(card, option)
+        attempt, note = claim(card, option, version)
     except F.Fail as e:
         return 1, f"这次点击没有交给中台：{e}。", {"ok": False, "card": card["card_id"], "why": str(e)}
     got = submit(card["card_id"])
@@ -397,11 +411,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("token")
     ap.add_argument("option", type=int)
+    ap.add_argument("--version", type=int, default=None, help="按钮所在那一版的版本号（没带就是旧样式按钮，一律拒）")
     ap.add_argument("--chat", default="")
     ap.add_argument("--operator", default="")
     ap.add_argument("--no-reply", action="store_true", help="不在私聊回话（测试用）")
     a = ap.parse_args(argv)
-    code, said, rec = answer(a.token, a.option, a.chat, a.operator)
+    code, said, rec = answer(a.token, a.option, a.chat, a.operator, a.version)
     print(json.dumps({"at": F.now(), **rec}, ensure_ascii=False), flush=True)
     if said and not a.no_reply:                  # 只回常浩私聊，不回点击来的那个聊天
         tell(identities()[1], said)

@@ -5,7 +5,8 @@
 猛鬼兽网关的 merge-buttons 插件把按钮点击转给 autoloop_answer.py（这里只负责发卡和登记）。
 
 0B-3 实测：网关转来的点击里有点击人 open_id 和聊天号，**没有原消息号**。所以每张卡发出前先登记一个随机令牌，
-按钮里只带 {"autoloop": 令牌, "o": 选项号}；点击回来按令牌找到卡片号和送达的消息号（中台要求 ref 和送达的那条一致）。
+按钮里只带 {"autoloop": 令牌, "o": 选项号, "v": 这条消息展示的版本}；点击回来按令牌找到卡片号和送达的消息号（中台要求 ref 和
+送达的那条一致），按 v 核对点的是不是登记的当前版本（#218 第 3 轮 P1-03：旧版本按钮的迟到点击直接拒，不排队）。
 同一张卡只有一个令牌：送达报告丢了、中台再给一次时，用同一个幂等键重发，飞书回原消息，令牌也不变。
 
 卡片库 cards.db（DigitalTwin/autoloop/，600）：
@@ -14,7 +15,6 @@
                 中台确认送达时间（报 delivered 成功后才有；没有之前本人的点击只排队，不提交，见 autoloop_answer；也按版本：
                 改版时清空，只给报过的那一版记，#218 第 2 轮 P1-03）
   claims 的 version：本人点击时卡片在飞书上的版本；改版后旧版本排队的选择不转到新版本（autoloop_answer.submit 作废、请常浩重点）
-  meta          库身份（建库时随机生成）：秘书获准时记下，对账时核对，见 db(create=False)
   claims        每张卡每方一行（owner 本人 / secretary 秘书）和进度；claim_log 只追加，记每次状态变化
   secretary_cards  秘书控制面（secretary_gate.py，第 4c 批）在 secretary 通道领到的卡片：卡片号 → 版本、自己生成的 ref、
                 领到时间、中台确认送达时间（报 delivered 成功后才有；没有之前秘书不答这张卡）
@@ -27,11 +27,15 @@
   autoloop_feishu.py once         只领一次（测试、手动补发）
   autoloop_feishu.py show [--json]  只读：登记过的卡片、答卷进度和最近的变化记录
 环境变量：DT_AUTOLOOP_CARDS_DB、DT_AUTOLOOP_CHANNEL_KEY_DIR（同 autoloop_config）、AGENT_AUTOLOOP_HOME、DT_LARK_CLI。
+单写入者（#218 第 3 轮 P2-01）：once（run 也走它）领到卡后先拿桥接锁（cards.db 同目录的 cards.db.bridge.lock，进程级
+排他锁），锁里按中台库现读这张卡：中台已经是更新的版本、或本地已登记更高的版本，就不处理这次领到的旧版本（不改消息、
+不报送达）；写登记一律带「版本不回退」条件。
 不调用 AI。
 """
 import argparse
 import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -40,7 +44,6 @@ import sqlite3
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -63,12 +66,7 @@ CREATE TABLE IF NOT EXISTS claim_log (id INTEGER PRIMARY KEY AUTOINCREMENT, card
   at TEXT NOT NULL, state TEXT NOT NULL, choice INTEGER, note TEXT, attempt TEXT);
 CREATE TABLE IF NOT EXISTS secretary_cards (card_id INTEGER PRIMARY KEY, version INTEGER NOT NULL, ref TEXT NOT NULL UNIQUE,
   leased_at TEXT NOT NULL, hub_delivered_at TEXT);
-CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 """
-REQUIRED = {"feishu_cards": {"card_id", "version", "delivered_at", "hub_delivered_at"},
-            "claims": {"card_id", "who", "state", "attempt", "version"},
-            "claim_log": {"card_id", "who", "state", "attempt"},
-            "secretary_cards": {"card_id", "version", "ref", "hub_delivered_at"}, "meta": {"k", "v"}}
 
 
 class Fail(Exception):
@@ -103,36 +101,21 @@ def db_file():
 
 
 @contextlib.contextmanager
-def db(write=False, create=True):
-    """write=True 时开 BEGIN IMMEDIATE：本人点击和秘书获准送达靠这把写锁互斥。
-    create=False 给对账当证据用（#218 第 2 轮 P1-04）：文件不在不新建、不补表，结构不全或没有库身份就抛 Fail——
-    「证据库没了」不能当成「证据库里没有这条」。"""
+def db(write=False):
+    """write=True 时开 BEGIN IMMEDIATE：本人点击和秘书获准送达靠这把写锁互斥。"""
     f = db_file()
-    if not create:
-        if not f.is_file():
-            raise Fail(f"{f} 不在，当不了证据")
-        con = sqlite3.connect(f"file:{urllib.parse.quote(str(f))}?mode=rw", uri=True, timeout=10, isolation_level=None)
-    else:
-        f.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(f.parent, 0o700)
-        if not f.exists():
-            os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-        con = sqlite3.connect(f, timeout=10, isolation_level=None)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(f.parent, 0o700)
+    if not f.exists():
+        os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    con = sqlite3.connect(f, timeout=10, isolation_level=None)
     con.row_factory = sqlite3.Row
     try:
         for table in ("claims", "claim_log"):    # 先查后建：旧结构直接拒用，旧库一点不动（不迁移、不补表）
             cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
             if cols and ("attempt" not in cols or (table == "claims" and "version" not in cols)):
                 raise Fail(f"{f} 是旧结构（{table} 缺 attempt / version 列），拒绝使用；要迁移请单独处理")
-        if create:
-            con.executescript(SCHEMA)
-            con.execute("INSERT OR IGNORE INTO meta VALUES ('id', ?)", (secrets.token_hex(8),))
-        else:
-            for table, need in REQUIRED.items():
-                if not need <= {r[1] for r in con.execute(f"PRAGMA table_info({table})")}:
-                    raise Fail(f"{f} 结构不全（{table}），当不了证据")
-            if not db_id(con):
-                raise Fail(f"{f} 没有库身份，当不了证据")
+        con.executescript(SCHEMA)
         if write:
             con.execute("BEGIN IMMEDIATE")
         yield con
@@ -146,13 +129,17 @@ def db(write=False, create=True):
         con.close()
 
 
-def db_id(con):
-    """cards.db 的身份（建库时随机生成）：秘书获准时记下，对账时核对，库被换成别的（新建的、别处的）就对不上。"""
+@contextlib.contextmanager
+def bridge_lock():
+    """桥接单写入者锁（#218 第 3 轮 P2-01）：同一时间只有一个桥接进程在发卡、改卡、报送达，后来的等着。"""
+    f = db_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(f"{f}.bridge.lock", os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        r = con.execute("SELECT v FROM meta WHERE k = 'id'").fetchone()
-    except sqlite3.Error:
-        return None
-    return r[0] if r else None
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)                             # 关掉文件描述符即释放锁
 
 
 def card_by_token(token):
@@ -221,12 +208,12 @@ def outcome(card):
 
 
 def render(card, token):
-    """卡片现在的样子：开着时每个选项一个按钮（按钮只带令牌和选项号），结束后写结果、不再有按钮。
+    """卡片现在的样子：开着时每个选项一个按钮（按钮只带令牌、选项号和这一版的版本号），结束后写结果、不再有按钮。
     不放文字输入框：网关转不来表单内容，秘书也不写自由文字。"""
     is_open = card["state"] == "open"
     buttons = [{"tag": "button", "text": {"tag": "plain_text", "content": label},
                 "type": "primary" if i == card.get("recommend") else "default", "width": "fill",
-                "behaviors": [{"type": "callback", "value": {"autoloop": token, "o": i}}]}
+                "behaviors": [{"type": "callback", "value": {"autoloop": token, "o": i, "v": card["version"]}}]}
                for i, label in enumerate(card.get("options") or [])] if is_open and card.get("kind") != "fyi" else []
     done = outcome(card)
     header = {"title": {"tag": "plain_text", "content": card.get("title") or "中台卡片"},
@@ -291,8 +278,9 @@ def deliver(card):
         with db(write=True) as con:                    # 开着的卡改版送到了：送达时间从这一版起算（结束的卡不再计时）
             con.execute("UPDATE feishu_cards SET delivered_at = CASE WHEN ? AND version != ? THEN ? ELSE delivered_at END, "
                         "hub_delivered_at = CASE WHEN version != ? THEN NULL ELSE hub_delivered_at END, "
-                        "version = ? WHERE card_id = ?",
-                        (card["state"] == "open", card["version"], now(), card["version"], card["version"], card["id"]))
+                        "version = ? WHERE card_id = ? AND version <= ?",          # 版本不回退（P2-01）
+                        (card["state"] == "open", card["version"], now(), card["version"], card["version"], card["id"],
+                         card["version"]))
         return card["ref"]
     chat = owner_chat()
     token = token_for(card, chat)
@@ -301,21 +289,40 @@ def deliver(card):
         con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, "
                     "delivered_at = CASE WHEN delivered_at IS NULL OR version != ? THEN ? ELSE delivered_at END, "
                     "hub_delivered_at = CASE WHEN version != ? THEN NULL ELSE hub_delivered_at END "
-                    "WHERE card_id = ?", (mid, card["version"], card["version"], now(), card["version"], card["id"]))
+                    "WHERE card_id = ? AND version <= ?",                        # 版本不回退（P2-01）
+                    (mid, card["version"], card["version"], now(), card["version"], card["id"], card["version"]))
     return mid
 
 
+def newer_elsewhere(card):
+    """这次领到的版本是不是已经旧了：中台库里这张卡已是更新的版本，或本地已登记更高的版本（别的桥接进程送过了）。
+    返回原因或 None。中台库读不到时只按本地登记判。"""
+    import autoloop_publish as P
+    cur = P.hub_card(card["id"])
+    if cur and isinstance(cur.get("version"), int) and cur["version"] > card["version"]:
+        return f"中台这张卡已经是第 {cur['version']} 版"
+    with db() as con:
+        r = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
+    if r and r["version"] > card["version"]:
+        return f"本地已登记第 {r['version']} 版"
+    return None
+
+
 def once(wait=50):
-    """领一张、处理一张；没有卡片返回 None。"""
+    """领一张、处理一张；没有卡片返回 None。处理在桥接锁里做，锁里先看领到的是不是旧版本（P2-01）。"""
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
-    try:
-        ref = deliver(card)
-    except (SendError, Fail) as e:
-        hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
-        return {"card": card["id"], "ok": False, "why": str(e)}
-    confirm(card["id"])
+    with bridge_lock():
+        stale = newer_elsewhere(card)
+        if stale:                                # 旧版本：不改消息、不报送达，新版本由中台另行派发
+            return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{stale}，不处理"}
+        try:
+            ref = deliver(card)
+        except (SendError, Fail) as e:
+            hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
+            return {"card": card["id"], "ok": False, "why": str(e)}
+        confirm(card["id"])
     return {"card": card["id"], "ok": True, "ref": ref}
 
 

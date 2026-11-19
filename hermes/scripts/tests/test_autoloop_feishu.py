@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -69,11 +70,11 @@ class Base(unittest.TestCase):
 
 
 class Render(Base):
-    def test_open_card_buttons_carry_only_token_and_option(self):
-        c = F.render(CARD, "0123456789abcdef")
+    def test_open_card_buttons_carry_only_token_option_and_version(self):
+        c = F.render({**CARD, "version": 3}, "0123456789abcdef")
         buttons = [e for e in c["body"]["elements"] if e["tag"] == "button"]
-        self.assertEqual([b["behaviors"][0]["value"] for b in buttons], [{"autoloop": "0123456789abcdef", "o": 0},
-                                                                         {"autoloop": "0123456789abcdef", "o": 1}])
+        self.assertEqual([b["behaviors"][0]["value"] for b in buttons], [{"autoloop": "0123456789abcdef", "o": 0, "v": 3},
+                                                                         {"autoloop": "0123456789abcdef", "o": 1, "v": 3}])
         self.assertEqual([b["type"] for b in buttons], ["default", "primary"])            # 推荐项高亮
         self.assertEqual(c["header"]["subtitle"]["content"], "来源：规则A")
         self.assertNotIn("form", json.dumps(c))                                           # 不放文字输入框
@@ -205,6 +206,12 @@ class Answer(Base):
     def answers(self):
         return [c for c in self.hub_calls if c[0].endswith("/answer")]
 
+    def ver(self, card_id=7):
+        """登记的当前版本（按钮回调带的版本号，#218 第 3 轮 P1-03）。"""
+        with F.db() as con:
+            r = con.execute("SELECT version FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
+        return r["version"] if r else 1
+
     def claim(self):
         with F.db() as con:
             r = con.execute("SELECT * FROM claims WHERE card_id = 7 AND who = 'owner'").fetchone()
@@ -224,13 +231,68 @@ class Answer(Base):
 
     def unknown_claim(self):
         self.hub_reply = F.HubError("没等到回应")
-        A.answer(self.tok, 1, CHAT, OWNER)
+        A.answer(self.tok, 1, CHAT, OWNER, self.ver())
         self.hub_reply = {"changed": True}
         self.assertEqual(self.claim()["state"], "unknown")
         return self.claim()["attempt"]
 
+    def patched_buttons(self):
+        """最后一次改卡的按钮回调值。"""
+        a = [c for c in self.lark.calls if c[:3] == ["im", "messages", "patch"]][-1]
+        content = json.loads(json.loads(a[a.index("--data") + 1])["content"])
+        return [e["behaviors"][0]["value"] for e in content["body"]["elements"] if e["tag"] == "button"]
+
+    def test_late_click_on_old_version_button_is_refused(self):
+        """#218 第 3 轮 P1-03：第 1 版按钮的点击迟到，卡片已改成第 2 版：直接拒、不排队；第 2 版的新按钮正常。"""
+        v1 = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]
+        self.assertEqual(v1["v"], 1)
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})                  # 飞书上已改成第 2 版
+        self.confirm()
+        code, said, _ = A.answer(v1["autoloop"], 1, CHAT, OWNER, v1["v"])
+        self.assertEqual(code, 1)
+        self.assertIn("第 1 版", said)
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.log(), [])                                         # 不排队
+        self.assertEqual(self.answers(), [])
+        with self.assertRaisesRegex(F.Fail, "第 1 版"):                          # 点击一到就拒（不靠登记时那道再核）
+            A.check(v1["autoloop"], 1, CHAT, OWNER, v1["v"])
+        v2 = self.patched_buttons()
+        self.assertEqual({b["v"] for b in v2}, {2})
+        self.assertEqual(A.answer(v2[1]["autoloop"], 1, CHAT, OWNER, v2[1]["v"])[0], 0)
+        self.assertEqual((self.claim()["version"], self.claim()["state"]), (2, "answered"))
+
+    def test_old_style_button_without_version_is_refused(self):
+        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER)
+        self.assertEqual(code, 1)
+        self.assertIn("旧样式", said)
+        with mock.patch("sys.stdout"):
+            self.assertEqual(A.main([self.tok, "1", "--chat", CHAT, "--operator", OWNER]), 1)
+        self.assertIn("旧样式", self.tell.call_args[0][1])
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.answers(), [])
+
+    def test_newer_version_than_registered_is_refused(self):
+        """按钮比登记的新（飞书改好了、登记还没写上）：也不算，请重点。"""
+        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, 2)
+        self.assertEqual(code, 1)
+        self.assertIn("第 2 版卡片上的按钮", said)
+        self.assertIn("这次不算", said)
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.log(), [])                                         # 不排队（不是排了队再因改版作废）
+        with self.assertRaisesRegex(F.Fail, "这次不算"):
+            A.check(self.tok, 1, CHAT, OWNER, 2)
+
+    def test_version_changed_between_check_and_claim_is_refused(self):
+        """核对过了、登记前桥接刚改了版：写锁里再核一次，不按旧版本排队。"""
+        card = A.check(self.tok, 1, CHAT, OWNER, 1)
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET version = 2 WHERE card_id = 7")
+        with self.assertRaisesRegex(F.Fail, "第 1 版"):
+            A.claim(card, 1, 1)
+        self.assertIsNone(self.claim())
+
     def test_owner_click_answers_with_registered_ref(self):
-        code, said, rec = A.answer(self.tok, 1, CHAT, OWNER)
+        code, said, rec = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
         self.assertEqual(code, 0, said)
         self.assertEqual(self.answers(), [("/v1/cards/7/answer", {"choice": 1, "by": OWNER, "ref": "om_fixture_1"})])
         self.assertEqual((self.claim()["state"], self.claim()["choice"], self.claim()["attempt"]), ("answered", 1, rec["attempt"]))
@@ -239,10 +301,10 @@ class Answer(Base):
     def test_wrong_source_is_quiet_and_never_calls_hub(self):
         for args in ((self.tok, 0, CHAT, "ou_someone_else"), (self.tok, 0, "oc_group", OWNER), (self.tok, 0, CHAT, ""),
                      ("bad", 0, CHAT, OWNER)):
-            code, said, rec = A.answer(*args)
+            code, said, rec = A.answer(*args, self.ver())
             self.assertEqual((code, said, rec["quiet"]), (1, None, True))
         with mock.patch("sys.stdout"):
-            self.assertEqual(A.main([self.tok, "0", "--chat", "oc_group", "--operator", OWNER]), 1)
+            self.assertEqual(A.main([self.tok, "0", "--version", "1", "--chat", "oc_group", "--operator", OWNER]), 1)
         self.tell.assert_not_called()                                           # 别处来的点击不回话
         self.assertEqual(self.hub_calls, [])
         self.assertIsNone(self.claim())
@@ -250,17 +312,17 @@ class Answer(Base):
     def test_owner_checks_that_reply(self):
         for args, why in ((("ffffffffffffffff", 0, CHAT, OWNER), "没有登记"), ((self.tok, 2, CHAT, OWNER), "选项号"),
                           ((self.tok, -1, CHAT, OWNER), "选项号")):
-            code, said, _ = A.answer(*args)
+            code, said, _ = A.answer(*args, self.ver())
             self.assertEqual(code, 1)
             self.assertIn(why, said)
         with F.db(write=True) as con:                                           # 登记的私聊和现在的不一致
             con.execute("UPDATE feishu_cards SET chat_id = 'oc_old' WHERE card_id = 7")
-        self.assertIn("私聊和现在的对不上", A.answer(self.tok, 0, CHAT, OWNER)[1])
+        self.assertIn("私聊和现在的对不上", A.answer(self.tok, 0, CHAT, OWNER, self.ver())[1])
         self.assertEqual(self.hub_calls, [])
 
     def test_missing_identity_stops_everything(self):
         with mock.patch.dict(os.environ, {"DT_OWNER_CHAT_ID": "", "DT_OWNER_CHAT_FILE": self.tmp.name + "/none"}):
-            self.assertEqual(A.answer(self.tok, 0, "", OWNER)[:2], (1, None))
+            self.assertEqual(A.answer(self.tok, 0, "", OWNER, self.ver())[:2], (1, None))
             with self.assertRaisesRegex(A.Quiet, "没配置"):
                 A.identities()
             with self.assertRaisesRegex(F.Fail, "setup-chat"):
@@ -275,7 +337,7 @@ class Answer(Base):
         with F.db(write=True) as con:                                           # 令牌登记了、消息号还没落盘（审查 P2-05）
             con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
                         "VALUES (8, 'aaaaaaaaaaaaaaaa', ?, 'ask', 2, 1)", (CHAT,))
-        self.assertEqual(A.answer("aaaaaaaaaaaaaaaa", 0, CHAT, OWNER)[0], 3)
+        self.assertEqual(A.answer("aaaaaaaaaaaaaaaa", 0, CHAT, OWNER, 1)[0], 3)
         with F.db(write=True) as con:
             con.execute("UPDATE claims SET card_id = card_id WHERE card_id = 8")
             con.execute("UPDATE feishu_cards SET message_id = 'om_8' WHERE card_id = 8")
@@ -292,7 +354,7 @@ class Answer(Base):
         """#218 第 2 轮 P1-03：在第 1 版点的、还在排队的选择，卡片改成第 2 版后作废、请常浩重点，不交到第 2 版。"""
         with F.db(write=True) as con:
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)                 # 第 1 版还没确认送达：排队
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 3)                 # 第 1 版还没确认送达：排队
         self.assertEqual(self.claim()["version"], 1)
         F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})                  # 改成第 2 版、飞书改好了
         self.confirm()
@@ -303,14 +365,14 @@ class Answer(Base):
         self.assertIsNone(self.claim())
         self.assertEqual(self.log()[-1], "released")
         self.hub_card = {"id": 7, "state": "decided", "choice": 0, "by": OWNER}
-        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER)[0], 0)                 # 在第 2 版上重点：照常交
+        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER, self.ver())[0], 0)                 # 在第 2 版上重点：照常交
         self.assertEqual(self.claim()["version"], 2)
 
     def test_version_change_clears_hub_confirmation_and_confirms_only_reported_version(self):
         """#218 第 2 轮 P1-03：改版时清掉中台确认；报第 1 版送达期间改成了第 2 版，第 1 版的确认不记到第 2 版头上。"""
         F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})
         self.assertIsNone(F.card_by_token(self.tok)["hub_delivered_at"])
-        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)                 # 没确认第 2 版：只排队
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 3)                 # 没确认第 2 版：只排队
         self.assertEqual(self.answers(), [])
 
         def hub(method, path, body=None, timeout=20):
@@ -329,7 +391,7 @@ class Answer(Base):
                 con.execute("DELETE FROM claims")
             self.hub_calls.clear()
             self.gate, self.entered = threading.Event(), threading.Event()
-            t = threading.Thread(target=A.answer, args=(self.tok, 1, CHAT, OWNER))    # 本人点击领到资格、请求卡在半路
+            t = threading.Thread(target=A.answer, args=(self.tok, 1, CHAT, OWNER, self.ver()))    # 本人点击领到资格、请求卡在半路
             t.start()
             self.assertTrue(self.entered.wait(5))
             second()                                                            # 送达后的 flush / 对账 / 再一次提交
@@ -343,7 +405,7 @@ class Answer(Base):
         import threading
         with F.db(write=True) as con:
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 3)
         self.confirm()
         self.gate, self.entered = threading.Event(), threading.Event()
         t = threading.Thread(target=A.flush, args=(7,))
@@ -358,7 +420,7 @@ class Answer(Base):
     def test_delivered_accepted_but_not_recorded_is_rereported_then_submitted(self):
         with F.db(write=True) as con:                                           # 中台已收下送达报告，本地没来得及记
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 3)
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 3)
         self.assertEqual(self.hub_calls, [])
         notes = A.reconcile()                                                   # 重启后对账：按登记原样重报，再提交
         self.assertEqual([c[0] for c in self.hub_calls], ["/v1/cards/7/delivered", "/v1/cards/7/answer"])
@@ -369,7 +431,7 @@ class Answer(Base):
     def test_queued_on_card_that_already_ended_is_settled_without_sending(self):
         with F.db(write=True) as con:
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        A.answer(self.tok, 1, CHAT, OWNER)
+        A.answer(self.tok, 1, CHAT, OWNER, self.ver())
         self.hub_card = {"id": 7, "state": "closed"}
         with mock.patch.object(F, "report_delivered", side_effect=F.HubError("中台回 HTTP 409", status=409)):
             A.reconcile()                                                       # 中台不收这份送达、卡已结束
@@ -379,7 +441,7 @@ class Answer(Base):
     def test_queued_on_open_card_stays_queued_when_delivery_refused(self):
         with F.db(write=True) as con:
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        A.answer(self.tok, 1, CHAT, OWNER)
+        A.answer(self.tok, 1, CHAT, OWNER, self.ver())
         self.hub_card = {"id": 7, "state": "open"}
         with mock.patch.object(F, "report_delivered", side_effect=F.HubError("中台回 HTTP 409", status=409)):
             self.assertEqual(A.reconcile(), [])
@@ -387,8 +449,8 @@ class Answer(Base):
         self.assertEqual(self.answers(), [])
 
     def test_token_is_single_use(self):
-        A.answer(self.tok, 1, CHAT, OWNER)
-        code, said, _ = A.answer(self.tok, 0, CHAT, OWNER)
+        A.answer(self.tok, 1, CHAT, OWNER, self.ver())
+        code, said, _ = A.answer(self.tok, 0, CHAT, OWNER, self.ver())
         self.assertEqual(code, 1)
         self.assertIn("已经点过", said)
         self.assertEqual(len(self.answers()), 1)
@@ -396,7 +458,7 @@ class Answer(Base):
     def test_secretary_rows_are_never_touched(self):
         with F.db(write=True) as con:
             con.execute("INSERT INTO claims (card_id, who, state, choice, at) VALUES (7, 'secretary', 'approved', 0, 'x')")
-        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER)                      # 秘书已获准：本人照样提交，中台先受理的算
+        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, self.ver())                      # 秘书已获准：本人照样提交，中台先受理的算
         self.assertEqual(code, 0)
         self.assertIn("以中台先受理的为准", said)
         with F.db() as con:
@@ -405,7 +467,7 @@ class Answer(Base):
 
     def test_secretary_first_settles_owner(self):
         self.hub_reply, self.hub_card = {"changed": False}, {"id": 7, "state": "decided", "choice": 0, "by": "秘书"}
-        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER)
+        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
         self.assertEqual((code, self.claim()["state"]), (1, "settled"))
         self.assertIn("秘书选了第 0 项", said)
 
@@ -418,7 +480,7 @@ class Answer(Base):
                                  (F.HubError("没等到回应"), 2, "unknown"),
                                  (RuntimeError("意外"), 2, "unknown")):
             self.hub_reply = err
-            got = A.answer(self.tok, 1, CHAT, OWNER)
+            got = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
             self.assertEqual(got[0], code, (err, got))
             self.assertEqual((self.claim() or {}).get("state"), state, err)
             if state is None:
@@ -429,7 +491,7 @@ class Answer(Base):
             with F.db(write=True) as con:
                 con.execute("DELETE FROM claims")
         self.hub_reply, self.hub_card = {"changed": True}, {"id": 7, "state": "open"}
-        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER)[0], 2)             # 说收下了但回读对不上：结果不明
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 2)             # 说收下了但回读对不上：结果不明
         self.assertEqual(self.claim()["state"], "unknown")
 
     def test_unknown_with_open_card_is_never_released_automatically(self):
@@ -438,13 +500,13 @@ class Answer(Base):
         self.age(10_000, pid=None)                                              # 进程早没了、过了很久、卡仍开着
         self.assertEqual(A.reconcile(), [])
         self.assertEqual(self.claim()["state"], "unknown")                      # 不放开（原请求可能晚到）
-        self.assertIn("结果不明", A.answer(self.tok, 0, CHAT, OWNER)[1])
+        self.assertIn("结果不明", A.answer(self.tok, 0, CHAT, OWNER, self.ver())[1])
         self.assertEqual(len(self.answers()), 1)                                # 也从不重答
         with mock.patch("sys.stdout"):
             self.assertEqual(A.main(["release", "--card", "7"]), 1)             # 没写 --confirm 不放
         self.assertIn("已放开", A.release_unknown(7))
         self.hub_card = {"id": 7, "state": "decided", "choice": 0, "by": OWNER}
-        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER)[0], 0)
+        self.assertEqual(A.answer(self.tok, 0, CHAT, OWNER, self.ver())[0], 0)
 
     def test_release_unknown_settles_instead_if_card_has_result(self):
         self.unknown_claim()
@@ -481,7 +543,7 @@ class Answer(Base):
         for c in self.BAD_CARDS:
             with F.db(write=True) as con:
                 con.execute("DELETE FROM claims")
-            att = A.claim(F.card_by_token(self.tok), 1)[0]
+            att = A.claim(F.card_by_token(self.tok), 1, self.ver())[0]
             self.age(10_000, pid=None, state="inflight")                        # 发到一半进程没了
             self.hub_card = c
             notes = A.reconcile()
@@ -492,7 +554,7 @@ class Answer(Base):
     def test_unrecognised_state_never_settles_queued(self):
         with F.db(write=True) as con:
             con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
-        A.answer(self.tok, 1, CHAT, OWNER)
+        A.answer(self.tok, 1, CHAT, OWNER, self.ver())
         att = self.claim()["attempt"]
         for c in self.BAD_CARDS:
             self.hub_card = c
@@ -527,30 +589,11 @@ class Answer(Base):
             with F.db():
                 pass
 
-    def test_evidence_open_never_creates_or_repairs(self):
-        """#218 第 2 轮 P1-04：给对账当证据的打开方式不新建、不补表，缺身份也不认。"""
-        missing = Path(self.tmp.name) / "none/cards.db"
-        with mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(missing)}), self.assertRaisesRegex(F.Fail, "不在"):
-            with F.db(write=True, create=False):
-                pass
-        self.assertFalse(missing.exists())
-        with F.db() as con:
-            self.assertRegex(F.db_id(con), r"^[0-9a-f]{16}$")
-            con.execute("DROP TABLE claim_log")
-        with self.assertRaisesRegex(F.Fail, "结构不全"):
-            with F.db(create=False):
-                pass
-        with F.db() as con:                                                     # 平常打开会补表：补回来
-            con.execute("DELETE FROM meta")
-        with self.assertRaisesRegex(F.Fail, "没有库身份"):
-            with F.db(create=False):
-                pass
-
     def test_stale_writes_never_touch_a_newer_attempt(self):
         old = self.unknown_claim()
         self.hub_card = {"id": 7, "state": "open"}
         self.assertTrue(A.release(7, old, "unknown", "常浩同意放开"))
-        A.claim(F.card_by_token(self.tok), 0)                                   # 常浩再点：新的尝试
+        A.claim(F.card_by_token(self.tok), 0, self.ver())                                   # 常浩再点：新的尝试
         new = self.claim()["attempt"]
         self.assertNotEqual(new, old)
         self.assertFalse(A.release(7, old, "unknown", "过期的对账"))            # 拿着旧快照的对账：删不掉新尝试
@@ -562,7 +605,7 @@ class Answer(Base):
             self.assertTrue(F.owner_holds(con, 7))
 
     def test_reconcile_after_kill(self):
-        A.claim(F.card_by_token(self.tok), 1)
+        A.claim(F.card_by_token(self.tok), 1, self.ver())
         self.age(30, pid=os.getpid(), state="inflight")                         # 领到资格后进程被杀
         self.assertEqual(A.reconcile(), [])                                     # 进程还在、没超时：不动
         self.age(30, pid=999999)
@@ -575,7 +618,7 @@ class Answer(Base):
         self.assertEqual(A.reconcile()[0][1], "对账结果：你上次的回答中台已经收下了。")
         with F.db(write=True) as con:
             con.execute("DELETE FROM claims")
-        A.claim(F.card_by_token(self.tok), 1)
+        A.claim(F.card_by_token(self.tok), 1, self.ver())
         self.age(700, pid=os.getpid(), state="inflight")                        # 进程号像是活的但超过 10 分钟：照样对账
         self.hub_card = None                                                    # 读不到中台：改成结果不明
         A.reconcile()
@@ -597,11 +640,94 @@ class Answer(Base):
 
     def test_main_replies_to_home_chat(self):
         with mock.patch("sys.stdout"):
-            self.assertEqual(A.main([self.tok, "1", "--chat", CHAT, "--operator", OWNER]), 0)
+            self.assertEqual(A.main([self.tok, "1", "--version", "1", "--chat", CHAT, "--operator", OWNER]), 0)
         self.assertEqual(self.tell.call_args[0][0], CHAT)
         with mock.patch("sys.stdout") as out:
             self.assertEqual(A.main(["reconcile"]), 0)
         self.assertIn("notes", "".join(str(c.args[0]) for c in out.write.call_args_list))
+
+
+class BridgeLock(Base):
+    """#218 第 3 轮 P2-01：桥接单写入者锁；领到的旧版本不处理，登记的版本不回退。"""
+    def setUp(self):
+        super().setUp()
+        self.register()
+        self.posts = []
+        self.leases = {}
+        for target, name, fake in ((F, "hub", self.fake_hub), (A, "flush", lambda cid: None)):
+            p = mock.patch.object(target, name, fake)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_hub(self, method, path, body=None, timeout=20):
+        if method == "GET":
+            return {"card": self.leases[threading.current_thread().name]}
+        self.posts.append((path, body))
+        return {}
+
+    def lease(self, version, name=None):
+        self.leases[name or threading.current_thread().name] = {**CARD, "ref": "om_fixture_1", "version": version}
+
+    def registered(self):
+        with F.db() as con:
+            return con.execute("SELECT version FROM feishu_cards WHERE card_id = 7").fetchone()[0]
+
+    def patches(self):
+        return [json.loads(json.loads(a[a.index("--data") + 1])["content"]) for a in self.lark.calls
+                if a[:3] == ["im", "messages", "patch"]]
+
+    def test_out_of_order_old_lease_is_skipped(self):
+        self.lease(3)
+        self.assertTrue(F.once()["ok"])
+        self.lease(2)                                                            # 第 2 版的领取迟到
+        out = F.once()
+        self.assertIn("第 3 版", out["skipped"])
+        self.assertEqual(self.registered(), 3)
+        self.assertEqual(len(self.patches()), 1)                                 # 没把消息改回第 2 版
+        self.assertEqual([b["version"] for _, b in self.posts], [3])             # 只报过第 3 版送达
+
+    def test_hub_already_newer_skips_lease(self):
+        self.lease(2)
+        with mock.patch("autoloop_publish.hub_card", lambda cid: {"id": 7, "version": 3, "state": "open"}):
+            out = F.once()
+        self.assertIn("中台这张卡已经是第 3 版", out["skipped"])
+        self.assertEqual((self.registered(), self.patches(), self.posts[1:]), (1, [], []))
+
+    def test_registry_never_goes_back(self):
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 3})
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})                 # 绕过 once 直接送旧版本：登记也不回退
+        self.assertEqual(self.registered(), 3)
+
+    def test_concurrent_v2_v3_are_serialised(self):
+        """第 3 版的桥接正在改卡（持锁），第 2 版的桥接领到卡后只能等；等到时登记已是第 3 版，跳过。"""
+        entered, release = threading.Event(), threading.Event()
+        real = self.lark
+
+        def lark(args, what, cwd=None):
+            if args[:3] == ["im", "messages", "patch"] and threading.current_thread().name == "v3":
+                entered.set()
+                release.wait(5)
+            return real(args, what, cwd)
+        self.lease(3, "v3")
+        self.lease(2, "v2")
+        out = {}
+        with mock.patch.object(F, "lark", lark):
+            t3 = threading.Thread(target=lambda: out.setdefault("v3", F.once()), name="v3")
+            t3.start()
+            self.assertTrue(entered.wait(5))
+            t2 = threading.Thread(target=lambda: out.setdefault("v2", F.once()), name="v2")
+            t2.start()
+            time.sleep(0.3)
+            self.assertNotIn("v2", out)                                         # 第 2 版在等锁
+            release.set()
+            t3.join(5)
+            t2.join(5)
+        self.assertTrue(out["v3"]["ok"])
+        self.assertIn("skipped", out["v2"])
+        self.assertEqual(self.registered(), 3)
+        self.assertEqual(len(self.patches()), 1)
+        self.assertEqual({b["v"] for e in self.patches()[0]["body"]["elements"] if e["tag"] == "button"
+                          for b in [e["behaviors"][0]["value"]]}, {3})
 
 
 class HubCall(unittest.TestCase):
@@ -703,15 +829,16 @@ class FeishuEndToEnd(HubFixture):
         subprocess.run([CLI, "try"], env=env, capture_output=True, timeout=60)
         got = self.wait_card()
         self.assertEqual((got["ok"], got["ref"]), (True, "om_e2e_1"))
-        tok = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["autoloop"]
+        val = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]
+        tok, ver = val["autoloop"], val["v"]
 
-        self.assertEqual(A.answer(tok, 1, CHAT, "ou_intruder")[0], 1)           # 别人点：不交中台
-        code, said, rec = A.answer(tok, 1, CHAT, OWNER)
+        self.assertEqual(A.answer(tok, 1, CHAT, "ou_intruder", ver)[0], 1)           # 别人点：不交中台
+        code, said, rec = A.answer(tok, 1, CHAT, OWNER, ver)
         self.assertEqual(code, 0, said)
         st = C.state()
         card = next(c for c in st.get("cards", []) + st.get("recentCards", []) if c["id"] == got["card"])
         self.assertEqual((card["choice"], card["by"]), (1, OWNER))
-        self.assertEqual(A.answer(tok, 0, CHAT, OWNER)[0], 1)                    # 再点：以第一次为准
+        self.assertEqual(A.answer(tok, 0, CHAT, OWNER, ver)[0], 1)                    # 再点：以第一次为准
 
         for _ in range(30):                                                     # 中台把状态变了的卡再给桥接：改原消息
             if F.once(wait=1) and any(a[:3] == ["im", "messages", "patch"] for a in self.lark.calls):
@@ -737,12 +864,13 @@ class FeishuEndToEnd(HubFixture):
                 break
         self.assertTrue(card, "中台没出卡片")
         ref = F.deliver(card)                                                   # 飞书已发，送达报告还没交
-        tok = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["autoloop"]
+        val = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]
+        tok, ver = val["autoloop"], val["v"]
         with self.assertRaises(F.HubError) as early:                            # 审查 P1-02 的前提：没报送达时中台明确拒绝
             F.hub("POST", f"/v1/cards/{card['id']}/answer", {"choice": 0, "by": OWNER, "ref": ref})
         self.assertIn(early.exception.status, A.DEFINITE)
         with mock.patch.object(A, "tell") as tell:
-            self.assertEqual(A.answer(tok, 0, CHAT, OWNER)[0], 3)              # 只排队，不先发注定失败的回答
+            self.assertEqual(A.answer(tok, 0, CHAT, OWNER, ver)[0], 3)              # 只排队，不先发注定失败的回答
             st = C.state()
             self.assertEqual(next(c for c in st["cards"] if c["id"] == card["id"])["state"], "open")
             F.confirm(card["id"])                                              # 送达报告交上：自动提交排队的那一答
@@ -772,9 +900,10 @@ class FeishuEndToEnd(HubFixture):
         self.assertTrue(card, "中台没出卡片")
         ref = F.deliver(card)
         F.hub("POST", f"/v1/cards/{card['id']}/delivered", {"version": card["version"], "ref": ref})   # 中台收下了，桥接随即崩溃
-        tok = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["autoloop"]
+        val = self.lark.sent()[-1]["body"]["elements"][1]["behaviors"][0]["value"]
+        tok, ver = val["autoloop"], val["v"]
         with mock.patch.object(A, "tell"):
-            self.assertEqual(A.answer(tok, 1, CHAT, OWNER)[0], 3)              # 本地不知道已送达：排队
+            self.assertEqual(A.answer(tok, 1, CHAT, OWNER, ver)[0], 3)              # 本地不知道已送达：排队
             self.assertIsNone(F.hub("GET", "/v1/cards/next?wait=1", timeout=30).get("card"))   # 中台不会再把它给桥接
             notes = A.reconcile()                                               # 重启后对账：按登记原样重报 → 提交
         self.assertEqual(notes, [(card["id"], "收到，已交给中台。")])
