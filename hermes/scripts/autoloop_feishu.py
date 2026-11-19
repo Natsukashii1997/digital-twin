@@ -407,19 +407,19 @@ def once(wait=50):
         return None
     with bridge_lock():
         got = newer_elsewhere(card)
-        if got and got[0] == "unreadable":       # 领到后才读不到：报 failed 写明原因（中台退避重试、状态里看得到）
+        if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
+            return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
+        if got:                                  # 领到后才读不到：报 failed 写明原因（中台退避重试、状态里看得到）
             why = f"{got[1]}，这次没发"
             hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why})
-        elif got:                                  # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
-            return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
-        if not got:
+        else:
             try:
                 ref = _deliver(card)
             except (SendError, Fail) as e:
                 hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
                 return {"card": card["id"], "ok": False, "why": str(e)}
             _report_delivered(card["id"])
-    if got:                                      # 只剩「领到后读不到」：放锁后再提醒（不占着锁发消息）
+    if got:                                      # 放锁后再提醒（不占着锁发消息）
         alert("hub-unreadable", f"飞书桥接：卡片 {card['id']} {why}；中台会稍后重试。")
         return {"card": card["id"], "ok": False, "why": why}
     _flush(card["id"])                           # 锁外提交（第 5 轮 P2 建议）
