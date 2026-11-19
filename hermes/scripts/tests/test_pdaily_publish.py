@@ -710,6 +710,15 @@ class SendTests(unittest.TestCase):
         self.assertEqual(len(d["decisions_sha"]), 64)
         self.assertIn(f"卡片 {d['card_token'][-6:]}", sent["body"]["elements"][-1]["content"])
 
+    def test_failed_resend_keeps_original_record(self):
+        """复审 P3-C：当天已发出的卡，再 --force 重发没发出去，原来的发卡记录、卡片、快照都不动。"""
+        self.assertIsNone(pp.send(DAY, self.out))
+        before = {n: (self.out / f"{DAY}.{n}").read_text() for n in ("delivery.json", "card.sent.json", "decisions.sent.json")}
+        with mock.patch.object(pp, "lark", side_effect=pp.SendError("发卡片失败：网络")):
+            self.assertIn("网络", pp.send(DAY, self.out, force=True))
+        self.assertEqual({n: (self.out / f"{DAY}.{n}").read_text() for n in before}, before)
+        self.assertIn("网络", (self.out / f"{DAY}.delivery.retry.json").read_text())
+
     def test_read_back_must_see_card_mark(self):
         """飞书回读不带按钮的值：靠页脚的令牌尾号认出发出去的是这一张；看不到就不算回读通过（按钮不认）。"""
         with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}):

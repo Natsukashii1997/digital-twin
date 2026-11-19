@@ -115,6 +115,22 @@ class ActTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("对不上", out["msg"])
 
+    def test_resent_card_does_not_inherit_old_records(self):
+        """复审 P2-B：当天重发（新快照）后，旧卡上 ② 的记录不安到新卡的 ②。"""
+        self.click(2)
+        swapped = [self.fields["decisions"][0], self.fields["decisions"][2]]
+        snap, sha = A.snapshot(self.facts, swapped)
+        (self.tmp / f"{DAY}.decisions.sent.json").write_text(json.dumps(snap, ensure_ascii=False))
+        (self.tmp / f"{DAY}.delivery.json").write_text(json.dumps(dict(self.deliv, decisions_sha=sha)))
+        _, out = self.run_cmd("todos")
+        self.assertEqual([d["decided"] for d in out["decisions"]], [None, None])
+
+    def test_card_lock_separate_from_ledger_lock(self):
+        """复审 P2-A：改卡片（调飞书）期间记账不被挡。"""
+        with A.locked("card"):
+            rc, out = self.click(2)
+        self.assertEqual((rc, len(out["entries"])), (0, 1))
+
     def test_latest_card_not_read_back_means_no_card(self):
         """审查 P1-2：最新一张没回读通过，不往前找旧卡。"""
         newer = dict(self.deliv, stat_day="2026-11-09", read_back=False, card_token="fedcba9876543210")

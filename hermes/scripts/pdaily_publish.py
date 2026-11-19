@@ -1147,10 +1147,13 @@ def send(day, out, force=False):
         rec["error"] = f"卡片里有工作内容（{'、'.join(bad) or '标题不对'}），拒发"
         deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
         return rec["error"]
-    (out / f"{day}.card.sent.json").write_text(text, encoding="utf-8")
+    snap = None
     if fields is not None:                       # 拍板快照（#235 审查 P1-1）：按钮和编号只认常浩看到的这一版
         snap, rec["decisions_sha"] = pdaily_act.snapshot(facts, dicts(fields, "decisions"))
-        (out / f"{day}.decisions.sent.json").write_text(json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        prev_sent = bool(json.loads(deliv.read_text(encoding="utf-8")).get("sent"))
+    except (OSError, ValueError):
+        prev_sent = False
     rec["doc_url"], rec["doc_error"] = doc_url, doc_error
     try:
         data = lark(["im", "+messages-send", "--chat-id", CHAT, "--msg-type", "interactive", "--content", text,
@@ -1165,7 +1168,13 @@ def send(day, out, force=False):
             # 带令牌的卡：回读要见到这张卡的令牌尾号（飞书回读不带按钮的值，同托管汇报卡）
     except SendError as e:
         rec["error"] = str(e)
-    deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    if not rec["sent"] and prev_sent:            # 重发没发出去：原来那张卡的记录、卡片、快照都不动（复审 P3-C）
+        (out / f"{day}.delivery.retry.json").write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    else:
+        (out / f"{day}.card.sent.json").write_text(text, encoding="utf-8")
+        if snap is not None:
+            (out / f"{day}.decisions.sent.json").write_text(json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8")
+        deliv.write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
     if not rec["sent"]:
         return rec["error"] or "发卡片没拿到消息号"
     if not rec["read_back"]:
