@@ -30,9 +30,11 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(HERE))
 import autoloop_answer as A  # noqa: E402
 import autoloop_config as AC  # noqa: E402
+import autoloop_exits as E  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
+import autoloop_recovery as R  # noqa: E402
 import custody as CU  # noqa: E402
 import custody_ledger as L  # noqa: E402
 import secretary as S  # noqa: E402
@@ -161,7 +163,7 @@ class Base(unittest.TestCase):
                    DT_HUB="http://127.0.0.1:9", DT_HERMES_SOURCE_KEY_FILE=str(root / "dt/autoloop/hermes-source.key"),
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT, DT_AUTOLOOP_EVIDENCE=str(root / "evidence"),
                    DT_AUTOLOOP_LOCK=str(root / "dt/autoloop/config.lock"), DT_READONLY_TOKEN_FILE=str(root / "ro.token"),
-                   HERMES_HOME=str(root / "hermes"))
+                   HERMES_HOME=str(root / "hermes"), DT_EXITS_DB=str(root / "dt/autoloop/exits.db"))
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)
@@ -188,6 +190,9 @@ class Base(unittest.TestCase):
         p = mock.patch.object(SG, "TEST_ASK", True)                            # ① 的送达开关在测试里打开（正式关着）
         p.start()
         self.addCleanup(p.stop)
+        for gate in (mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 RecoveryGateTests）
+            gate.start()
+            self.addCleanup(gate.stop)
         self.posted = []
         p = mock.patch.object(G, "post_event", self.fake_post)
         p.start()
@@ -615,6 +620,50 @@ class AskTests(Base):
         with mock.patch.object(F, "hub", hub):
             out = self.submit()
         self.assertEqual(out["result"], "unknown")
+
+
+class RecoveryGateTests(Base):
+    """批 0D（常浩 11-19「都按推荐」）：秘书的三条写入路径（① 回答、② 续派、③ 留言）和领卡都过恢复闸；
+    获准（账本 begin）的同一把锁里再核开闸资格；秘书结果不明关闸，秘书账本里还有结果不明的就不开闸。"""
+    CLOSED = E.Refused("恢复闸关着：电脑睡醒过，要先对账")
+
+    def test_closed_gate_is_not_ready_and_records_nothing(self):
+        with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED):
+            self.nothing(self.submit(), "not_ready")
+        self.assertEqual(self.held(), [])
+        self.assertEqual(self.submit()["result"], "done")                        # 开闸后照常
+
+    def test_gate_closing_before_approval_voids_and_sends_nothing(self):
+        with mock.patch.object(R, "admit", side_effect=self.CLOSED):          # 看一眼时开着，领资格那一刻关了
+            out = self.submit()
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertIn("睡醒", out["msg"])
+        self.assertEqual(self.answers(), [])
+        self.assertEqual(self.held(), [])                                       # 额度释放
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.decisions()[0][3], "void")
+
+    def test_unknown_closes_gate_and_gate_stays_closed_until_secretary_reconciles(self):
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        out = self.submit()
+        self.assertEqual(out["result"], "unknown")
+        with E.db(write=False) as con:
+            gate = con.execute("SELECT dirty, dirty_reason FROM gate WHERE id = 1").fetchone()
+        self.assertEqual((gate[0] > 0, "秘书代批" in gate[1]), (True, True))
+        bad, _ = R._secretary()
+        self.assertIn(out["decision"], bad)                                      # 恢复闸对账：秘书还有结果不明 → 不开
+        self.hub_error = None
+        self.hub("UPDATE cards SET state = 'decided', choice = 0, \"by\" = '秘书'")
+        SG.reconcile(now=T + dt.timedelta(minutes=5))                            # 秘书自己的对账结掉它
+        self.assertEqual(R._secretary(), (None, "秘书账本没有结果不明的代批"))
+        self.assertEqual(len(self.answers()), 1)                                 # 从不重答
+
+    def test_lease_waits_while_gate_closed(self):
+        self.calls.clear()
+        with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED):
+            out = SG.lease(wait=0)
+        self.assertIn("睡醒", out["paused"])
+        self.assertEqual(self.calls, [])                                        # 没领卡、没报送达
 
 
 class ReconcileTests(Base):
@@ -1255,7 +1304,8 @@ class SecretaryEndToEnd(HubFixture):
                "DT_CUSTODY_FILE": str(root / "custody.json"), "DT_CUSTODY_POLICY": str(root / "custody-policy.md"),
                "DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"), "DT_GRANTS_STATUS": str(root / "shared/status.json"),
                "DT_GRANTS_TASKS": str(root / "shared/tasks"), "DT_PUBLISH_LOG": str(root / "dt/autoloop/publish.jsonl"),
-               "DT_PUBLISH_OUTBOX": str(root / "outbox"), "DT_PUBLISH_MIRRORS": str(root / "mirrors")}
+               "DT_PUBLISH_OUTBOX": str(root / "outbox"), "DT_PUBLISH_MIRRORS": str(root / "mirrors"),
+               "DT_EXITS_DB": str(root / "dt/autoloop/exits.db"), "DT_HUB_PIN": str(root / "dt/autoloop/hub-pin.json")}
         for p in (mock.patch.dict(os.environ, env), mock.patch.object(AC.G, "ROSTER", self.roster)):
             p.start()
             self.addCleanup(p.stop)
@@ -1276,6 +1326,7 @@ class SecretaryEndToEnd(HubFixture):
             self.addCleanup(p.stop)
         self.workdir = root / "work"
         self.workdir.mkdir()
+        R.pin(R.healthz(), confirm=True)                     # 真的恢复闸（批 0D）：锁定这个临时中台的版本，入口自己对账开闸
         self.prepare_hub()
 
     def status(self, now=None):

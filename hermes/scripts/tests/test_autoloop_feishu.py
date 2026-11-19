@@ -187,8 +187,28 @@ class RecoveryGate(Base):
         with mock.patch.object(Rv, "ensure_open", side_effect=E.Refused("恢复闸关着：中台重启过，要先对账")), \
                 mock.patch.object(F, "hub") as hub:
             out = F.once()
-        self.assertEqual((out["ok"], "中台重启过" in out["why"]), (False, True))
+        self.assertEqual((out["ok"], "中台重启过" in out["paused"]), (False, True))   # 和中台库读不到一样：歇一会再看
         hub.assert_not_called()
+
+    def test_card_taken_then_gate_closes_is_deferred_not_failed(self):
+        """审查 P1-04：领到卡以后闸关了（发新卡的出口账本拒绝），是「暂缓」：不发、不向中台报 failed，中台过一会儿再递。"""
+        calls, checks = [], []
+
+        def hub(method, path, body=None, timeout=20, channel=F.CHANNEL):
+            calls.append((method, path))
+            return {"card": dict(CARD)} if path.startswith("/v1/cards/next") else {}
+
+        def ensure(readers=None):                                    # 领卡前看一眼：开着；发卡时：刚关
+            checks.append(1)
+            if len(checks) > 1:
+                raise E.Refused("恢复闸关着：中台重启过，要先对账")
+        with mock.patch.object(Rv, "ensure_open", ensure), mock.patch.object(F, "hub", hub), \
+                mock.patch.object(F, "hub_readable", return_value=True), \
+                mock.patch.object(F, "newer_elsewhere", return_value=None):
+            out = F.once()
+        self.assertEqual((out["ok"], out.get("deferred")), (False, True))
+        self.assertEqual([c for c in calls if c[0] == "POST"], [])    # 没报 failed、没报送达
+        self.assertEqual(self.lark.keys(), [])                        # 没发飞书
 
     def test_unknown_send_is_frozen_then_reconciled_without_resending(self):
         def timeout(args, what, cwd=None):
@@ -296,6 +316,19 @@ class Answer(Base):
         self.hub_reply = {"changed": True}
         self.assertEqual(self.claim()["state"], "unknown")
         return self.claim()["attempt"]
+
+    def test_gate_closed_compensation_reports_nothing_to_hub(self):
+        """审查 P1-04：恢复闸关着时，对账里的送达补报和排队提交都不碰中台；开闸后各做一次。"""
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET hub_delivered_at = NULL WHERE card_id = 7")
+        self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 3)        # 只排队
+        with mock.patch.object(Rv, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账")):
+            A.reconcile()
+        self.assertEqual(self.hub_calls, [])
+        self.assertEqual(self.claim()["state"], "queued")
+        A.reconcile()
+        self.assertEqual([c[0] for c in self.hub_calls], ["/v1/cards/7/delivered", "/v1/cards/7/answer"])
+        self.assertEqual(self.claim()["state"], "answered")
 
     def patched_buttons(self):
         """最后一次改卡的按钮回调值。"""
@@ -558,7 +591,7 @@ class Answer(Base):
     def test_closed_gate_keeps_click_queued_then_submits_once(self):
         """批 0D：恢复闸关着时本人点击只排队，不交中台；开闸后提交一次。"""
         with mock.patch.object(Rv, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账")):
-            code, said, _ = A.answer(self.tok, 1, CHAT, OWNER)
+            code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
             self.assertEqual(code, 3)
             self.assertIn("睡醒", said)
             self.assertEqual(A.flush(7)[0], 3)

@@ -328,14 +328,15 @@ def _run(cmd, timeout=60):
 
 
 def read_push(t, row, now):
-    """远端分支正好是这次的头提交 → 做成；远端没有这条分支 → 没做成；是别的提交 → 核不清。"""
+    """远端分支正好是这次的头提交 → 做成；远端还是推之前的样子（target 的 before：没有这条分支，或续推前的旧提交）→ 没做成；
+    别的情况（推之前有分支、现在没了，或是别的提交）→ 核不清。"""
     out = _run(["git", "-c", "core.hooksPath=/dev/null", "ls-remote", t["remote"], f"refs/heads/{t['branch']}"])
     sha = out.split()[0] if out.split() else None
     if sha == t["head"]:
         return "done", {"remote_head": sha}
-    if sha is None:
-        return "failed", {"remote_head": None}
-    return None, {"remote_head": sha}
+    if sha == t.get("before"):
+        return "failed", {"remote_head": sha}
+    return None, {"remote_head": sha, "before": t.get("before")}
 
 
 def _gh():

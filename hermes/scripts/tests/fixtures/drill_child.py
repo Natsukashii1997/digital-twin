@@ -25,6 +25,15 @@ if mode == "push":
     E.guard("push_branch", p["key"], p["scope"], p["target"], then_hang(lambda: subprocess.run(
         ["git", "push", "-q", p["target"]["remote"], f"{p['target']['head']}:refs/heads/{p['target']['branch']}"],
         cwd=p["cwd"], check=True)))
+elif mode == "slow_push":                              # 一直活着、一直在做：等父进程放行才推（审查 P1-02 真并发）
+    def slow():
+        go = Path(p["go"])
+        while not go.exists():
+            time.sleep(0.2)
+        subprocess.run(["git", "push", "-q", p["target"]["remote"],
+                        f"{p['target']['head']}:refs/heads/{p['target']['branch']}"], cwd=p["cwd"], check=True)
+        return {"pushed": p["target"]["head"]}
+    E.guard("push_branch", p["key"], p["scope"], p["target"], slow)
 elif mode == "pr":
     E.guard("open_pr", p["key"], p["scope"], p["target"], then_hang(lambda: subprocess.run(
         [p["gh"], "pr", "create", "-R", p["target"]["github"], "-B", "main", "-H", p["target"]["branch"], "-t", "t",
@@ -47,10 +56,10 @@ elif mode == "answer":
     import autoloop_feishu as F
     real = F.hub
 
-    def hub(method, path, body=None, timeout=20):      # 中台已经收下回答，回应还没回来就被强杀
-        out = real(method, path, body, timeout)
+    def hub(method, path, body=None, timeout=20, **kw):   # 中台已经收下回答，回应还没回来就被强杀
+        out = real(method, path, body, timeout, **kw)
         if path.endswith("/answer"):
             time.sleep(120)
         return out
     F.hub = hub
-    A.answer(p["token"], p["option"], p["chat"], p["owner"])
+    A.answer(p["token"], p["option"], p["chat"], p["owner"], p.get("version"))

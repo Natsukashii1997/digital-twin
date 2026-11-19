@@ -9,15 +9,19 @@
   - 动手前核对：中台目录不能是 ~/.agent-autoloop、端口不能是 3350，否则直接拒绝。
 
 演练的「升级流程」（以后真升级照这个顺序，真升级要停正式服务，是 D 档，由常浩说了才做）：
-  1. 记下挂起的东西（开着的卡片、等回答的轮次）；
-  2. 中台开着做快照（agent-autoloop backup：数据库、主密钥、配置、规则、secrets.env）；
-  3. 停旧版、起新版；新版的提交号和锁定版本对不上，恢复闸自动关着，期间不发飞书、不发布、不回答（autoloop_recovery）；
-  4. 核对：/healthz 是新版本、挂起的卡片和轮次一个不少；
-  5. 通过 → 改锁定版本（autoloop_recovery.py pin），恢复闸对账后开；不通过 → 停新版、用旧版程序 restore 快照、起旧版，
-     再核对一次挂起的东西。
-  锁定新版本、开闸以后，**不再用升级前的快照回滚**（之后的卡片、轮次、对外动作会丢，卡片号会被复用）；要退回旧版另做一次升级。
+  1. 停写（autoloop_recovery.hold，审查 P1-06）：恢复闸关上，发飞书、发布、回答、派单一律停；登记恢复点
+     （快照目录、旧版本提交号、此刻中台里最大的卡片号）；
+  2. 排空：等还在做的写（出口账本 executing、本人回答在途、派单事件在途）全部结束，排不空不快照；
+  3. 记下挂起的东西（开着的卡片、等回答的轮次），中台开着做快照（agent-autoloop backup）；
+  4. 停旧版、起新版；核对：/healthz 是新版本、挂起的卡片和轮次一个不少；
+  5. 通过 → 改锁定版本（pin）、维护结束（release retired：升级前的快照作废，restorable 再也不认）；
+     不通过 → 先核这个恢复点还能用（restorable），停新版、用旧版程序 restore 快照、起旧版、再核对挂起的东西，
+     维护结束（release rolled_back：先核快照之后没有发出过卡片，卡片库、出口账本里有比快照时最大号还大的卡片就保持停写，交常浩）。
+  快照之后、停旧版之前中台还可能出新卡片：停写期间桥接不领卡、不发，所以回滚丢掉这张卡时本地账本里也没有它，卡片号复用不会撞上旧消息。
+  锁定新版本、维护结束以后，**不再用升级前的快照回滚**（之后的卡片、轮次、对外动作会丢，卡片号会被复用）；要退回旧版另做一次升级。
 
-搬家演练（模拟 0E-2 把中台搬进 dt-gate）：快照 → 停 → 恢复到另一个目录 → 在新目录起 → 挂起的东西照常恢复。
+搬家演练（模拟 0E-2 把中台搬进 dt-gate）：停写 → 排空 → 快照 → 停 → 恢复到另一个目录 → 在新目录起 → 挂起的东西照常恢复 → 维护结束。
+演练时恢复闸、出口账本、卡片库、凭证库、状态库都指到演练自己的临时目录（run_all 自己设好环境变量），不碰正式状态目录。
 真跨账号（文件属主、权限、钥匙串）在 0E-2 用真实 dt-gate 账号再验一次，这里只验「换了目录、数据还能接着跑」。
 
   python3 ops/autoloop_drill.py run [--out <证据目录>]    全套演练一遍，结果写成 JSON（默认只打印）
@@ -210,29 +214,71 @@ class Hub:
 
 
 # ---------- 流程 ----------
-def upgrade(hub, old, new, snapshot, damage=None):
-    """按「升级流程」做一次：快照 → 停旧 → 起新 → 核对挂起的东西 → 通过就留在新版，不通过用快照回滚到旧版。
-    damage(hub) 用来模拟坏升级把数据弄坏。返回过程记录。"""
+def recovery():
+    """恢复闸模块（hermes/scripts/autoloop_recovery）。路径由调用方的环境变量指定（演练里指到临时目录）。"""
+    scripts = str(Path(__file__).resolve().parents[1] / "hermes/scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import autoloop_recovery as R
+    return R
+
+
+def max_card(hub):
+    st = hub.state()
+    return max([c["id"] for c in st.get("cards", []) + st.get("recentCards", [])] or [0])
+
+
+def begin_maintenance(hub, point, snapshot, commit, wait=60):
+    """停写、登记恢复点、排空在做的写（审查 P1-06）。排不空就结束维护（retired 不会发生在这里：恢复点没用过）并报错。"""
+    R = recovery()
+    R.hold(point, snapshot, commit, max_card(hub))
+    end = time.time() + wait
+    while True:
+        writes = R.in_flight_writes()
+        if not writes:
+            return {"point": point, "max_card": R.restorable(point)["max_card"]}
+        if time.time() > end:
+            raise DrillError(f"停写后还有在做的写，排不空，不快照：{writes[:5]}")
+        time.sleep(0.5)
+
+
+def upgrade(hub, old, new, snapshot, damage=None, window=None, point=None):
+    """按「升级流程」做一次：停写 → 排空 → 快照 → 停旧 → 起新 → 核对挂起的东西 → 通过就锁定新版、维护结束；
+    不通过核过恢复点后用快照回滚到旧版、核对卡片号、维护结束。damage(hub) 模拟坏升级把数据弄坏；
+    window(hub) 在快照之后、停旧版之前跑（模拟这段时间里中台又出了新卡片）。返回过程记录。"""
+    R = recovery()
+    point = point or f"up-{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
+    out = {"from": old.commit, "to": new.commit, **begin_maintenance(hub, point, snapshot, old.commit)}
     before = hub.pending()
+    out["pending_before"] = before
     hub.backup(old, snapshot)
+    if window:
+        out["window"] = window(hub)
     hub.stop()
-    out = {"from": old.commit, "to": new.commit, "pending_before": before}
     if hub.start(new) and hub.pending() == before:
+        R.pin(new.commit, confirm=True)
+        R.release(point, "retired", "新版本核对通过、已锁定")
         out.update(ok=True, on=new.commit)
         return out
     hub.stop()
+    R.restorable(point)                                    # 只用仍在维护的恢复点回滚
     if damage:
         damage(hub)
     hub.restore(old, snapshot)
     if not hub.start(old):
         raise DrillError("回滚后旧版本起不来")
-    out.update(ok=False, rolled_back=True, on=old.commit, pending_after=hub.pending())
+    out.update(ok=False, rolled_back=True, on=old.commit, pending_after=hub.pending(),
+               mismatched=R.mismatched_after(out["max_card"]))
+    R.release(point, "rolled_back", "坏升级，用恢复点回滚")
     return out
 
 
-def move(hub, engine, new_home, snapshot):
-    """搬家：快照 → 停 → 恢复到新目录（同一个端口）→ 在新目录起。返回新的 Hub。"""
-    before = hub.pending()
+def move(hub, engine, new_home, snapshot, point=None):
+    """搬家：停写 → 排空 → 快照 → 停 → 恢复到新目录（同一个端口）→ 在新目录起 → 维护结束。返回新的 Hub。
+    维护结束前调用方要把恢复闸指到新目录（中台地址不变，AGENT_AUTOLOOP_HOME 变）。"""
+    point = point or f"mv-{time.strftime('%Y%m%d%H%M%S')}-{os.getpid()}"
+    out = begin_maintenance(hub, point, snapshot, engine.commit)
+    out["pending_before"] = hub.pending()
     hub.backup(engine, snapshot)
     hub.stop()
     moved = Hub(new_home, hub.port)
@@ -240,7 +286,10 @@ def move(hub, engine, new_home, snapshot):
     moved.restore(engine, snapshot)
     if not moved.start(engine):
         raise DrillError("搬家后中台起不来")
-    return moved, {"pending_before": before, "pending_after": moved.pending()}
+    out["pending_after"] = moved.pending()
+    if out["pending_after"] == out["pending_before"]:
+        recovery().release(point, "retired", "搬家核对通过")
+    return moved, out
 
 
 def corrupt(hub):
@@ -253,23 +302,37 @@ def corrupt(hub):
 def run_all(root, old_ref="v1.8.4", new_ref="v1.8.5"):
     """全套：升级成功、升级失败回滚、搬家，每一步都核对挂起的卡片和轮次能接着跑完。"""
     root = Path(root)
+    state = root / "dt"                                    # 恢复闸和各账本都指到演练自己的目录
+    os.environ.update({"DT_EXITS_DB": str(state / "exits.db"), "DT_HUB_PIN": str(state / "hub-pin.json"),
+                       "DT_GRANTS_DB": str(state / "grants.db"), "DT_AUTOLOOP_CARDS_DB": str(state / "cards.db"),
+                       "DT_GRANTS_STATUS": str(state / "status.json"), "DT_GRANTS_TASKS": str(state / "tasks"),
+                       "DT_STATE_DB": str(state / "twin-state.db")})
     old, new = Engine(root, old_ref), Engine(root, new_ref)
     report = {}
     hub = Hub(root / "a/hub")
     hub.init(old)
     try:
         assert hub.start(old), "旧版本起不来"
+        os.environ.update({"DT_HUB": hub.url, "AGENT_AUTOLOOP_HOME": str(hub.home)})
+        R = recovery()
+        R.pin(old.commit, confirm=True)
+        R.ensure_open()
         card = hub.ask(old)
         up = upgrade(hub, old, new, root / "snap-1")
+        R.ensure_open()
         up["resumed"] = hub.answer_and_finish(card) if up["ok"] else None
         report["upgrade"] = up
         card = hub.ask(new)
         bad = new.broken_copy(root)
         down = upgrade(hub, new, bad, root / "snap-2", damage=corrupt)
+        R.ensure_open()
         down["resumed"] = hub.answer_and_finish(card)
         report["failed_upgrade"] = down
+        R.ensure_open()
         card = hub.ask(new)
+        os.environ["AGENT_AUTOLOOP_HOME"] = str(root / "b/hub")   # 恢复闸跟着搬到新目录
         hub, mv = move(hub, new, root / "b/hub", root / "snap-3")
+        R.ensure_open()
         mv["resumed"] = hub.answer_and_finish(card)
         report["move"] = mv
     finally:

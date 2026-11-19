@@ -1,5 +1,6 @@
 """恢复闸（#195 批 0D 恢复门）自测：什么时候关、对账顺序、对完才开、仍冻结的范围继续拒绝、对账期间新出的不明不被清掉。
 纪元（开机、睡醒、中台）在单元测试里打桩；真中台的重启、升级、搬家在 test_autoloop_drill。不碰正式中台、正式状态目录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import io
 import json
@@ -146,6 +147,130 @@ class Order(Base):
                 mock.patch.object(A, "submit") as submit:
             R.ensure_open()
         submit.assert_not_called()
+
+
+class AdmissionRace(Base):
+    """审查 P1-03：ensure_open() 只是先看一眼；它放行之后闸立刻被关（别的进程登记了结果不明、或开始维护），
+    领写入资格的那个写事务里的 admit 必须拦住，外部动作一次也不做。"""
+
+    def close_right_after_check(self, how="dirty"):
+        real = R.ensure_open
+
+        def racing(readers=None):
+            epoch = real(readers)                                # A 看过：开着
+            with E.db() as con:                                  # B 抢在 A 领资格之前关了闸
+                if how == "dirty":
+                    E.mark_dirty(con, "别的进程刚出了一个结果不明")
+                else:
+                    con.execute("UPDATE gate SET hold = 'p-race' WHERE id = 1")
+            return epoch
+        return mock.patch.object(R, "ensure_open", racing)
+
+    def test_exit_is_refused_when_gate_closes_after_check(self):
+        R.ensure_open()
+        done = []
+        for how, word in (("dirty", "结果不明"), ("hold", "维护中")):
+            with self.close_right_after_check(how), self.assertRaisesRegex(E.Refused, word):
+                E.guard("merge", f"merge:o/r:{how}:h", "repo:o/r", {}, lambda: done.append(1) or {})
+            with E.db() as con:
+                con.execute("UPDATE gate SET hold = NULL WHERE id = 1")
+            R.ensure_open()
+        self.assertEqual(done, [])
+        with E.db(write=False) as con:                           # 一条 executing 都没落盘
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM exits").fetchone()[0], 0)
+
+    def test_owner_answer_stays_queued_when_gate_closes_after_check(self):
+        import autoloop_answer as A
+        import autoloop_feishu as F
+        with F.db(write=True) as con:
+            con.execute("INSERT INTO feishu_cards (card_id, token, message_id, chat_id, kind, options, version, "
+                        "hub_delivered_at) VALUES (5, 'aaaaaaaaaaaaaaaa', 'om_5', 'oc_x', 'ask', 2, 1, 'x')")
+            con.execute("INSERT INTO claims (card_id, who, state, choice, at, attempt, version) VALUES "
+                        "(5, 'owner', 'queued', 0, 'x', 'a1', 1)")
+        R.ensure_open()
+        with self.close_right_after_check(), mock.patch.object(F, "hub") as hub, \
+                mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": "ou_o", "DT_OWNER_CHAT_ID": "oc_x"}):
+            code, said = A.submit(5)
+        self.assertEqual(code, 3)
+        hub.assert_not_called()                                  # 没交中台
+        with F.db() as con:
+            self.assertEqual(con.execute("SELECT state FROM claims WHERE card_id = 5").fetchone()[0], "queued")
+
+    def test_send_pending_stops_mid_loop_when_gate_closes(self):
+        """长循环每发一个都在领取的写事务里再核：发完第一个后闸关了，第二个不领取、不发。"""
+        sent = []
+
+        def post(body):
+            sent.append(body["id"])
+            with E.db() as con:                                  # 发第一个的同时，别处出了结果不明
+                E.mark_dirty(con, "别处结果不明")
+            return len(sent)
+        R.ensure_open()
+        epoch = json.loads(R.gate_row()["epoch"])
+        add_grant()
+        add_grant("t-20261118-bbbbbb")
+        with G.tx() as con:
+            for tid in (TASK, "t-20261118-bbbbbb"):
+                row = con.execute("SELECT * FROM grants WHERE task_id = ?", (tid,)).fetchone()
+                G.record_event(con, row, "start", f"{tid}:g1:start", G.now_tz())
+        with mock.patch.object(R, "ensure_open", lambda readers=None: epoch):   # 「看一眼」一直说开着：只靠 admit 拦
+            out = G.send_pending(post=post)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(out[0]["sent"], True)
+        self.assertIn("开闸后 send-pending 补发", out[-1]["why"])
+
+
+class Maintenance(Base):
+    """审查 P1-06：维护（升级、回滚、搬家）先停写、排空，再快照；回滚只能用仍在维护的恢复点，回滚后核对卡片号；
+    新版本锁定后升级前的快照作废。"""
+
+    def test_hold_stops_every_entry_until_release(self):
+        R.ensure_open()
+        R.hold("p1", self.root / "snap", C1, 7)
+        with self.assertRaisesRegex(E.Refused, "维护中"):
+            R.ensure_open()
+        self.assertIn("维护中", R.reconcile()["why"])                 # 对账也不开
+        with self.assertRaisesRegex(E.Refused, "维护中"):
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, dict)
+        with self.assertRaisesRegex(E.Refused, "已经在维护"):
+            R.hold("p2", self.root / "snap2", C1, 7)
+        R.release("p1", "retired")
+        self.assertIn("维护结束", R.status()["why"])               # 结束后要先对账
+        R.ensure_open()
+        self.assertTrue(R.status()["open"])
+
+    def test_drain_lists_in_flight_writes(self):
+        now = E.now_tz()
+        with E.db() as con:                                       # 一个还活着的执行者（本进程）
+            con.execute("INSERT INTO exits (key, kind, scope, target, state, pid, proc, boot, created_at, started_at, "
+                        "updated_at) VALUES ('merge:o/r:1:h', 'merge', 'repo:o/r', '{}', 'executing', ?, ?, ?, ?, ?, ?)",
+                        (os.getpid(), E.proc_start(os.getpid()), E.boot_id(), E.iso(now), E.iso(now), E.iso(now)))
+        R.hold("p1", self.root / "snap", C1, 7)
+        self.assertEqual(R.in_flight_writes(), ["出口 merge:o/r:1:h"])   # 排空前不许快照
+
+    def test_retired_snapshot_can_never_be_restored(self):
+        R.hold("p1", self.root / "snap", C1, 7)
+        self.assertEqual(R.restorable("p1")["max_card"], 7)
+        R.release("p1", "retired")
+        with self.assertRaisesRegex(E.Refused, "retired"):
+            R.restorable("p1")
+        with self.assertRaisesRegex(E.Refused, "没有登记"):
+            R.restorable("nope")
+
+    def test_rollback_checks_cards_sent_after_snapshot(self):
+        import autoloop_feishu as F
+        R.hold("p1", self.root / "snap", C1, 7)
+        with F.db(write=True) as con:                             # 快照之后又发过卡片 8（停写没守住）
+            con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
+                        "VALUES (8, 'bbbbbbbbbbbbbbbb', 'oc_x', 'ask', 2, 1)")
+        with self.assertRaisesRegex(E.Refused, "错位"):
+            R.release("p1", "rolled_back")
+        self.assertIn("维护中", R.status()["why"])                  # 保持停写，交常浩
+        with F.db(write=True) as con:
+            con.execute("DELETE FROM feishu_cards WHERE card_id = 8")
+        R.release("p1", "rolled_back")
+        R.ensure_open()
+        self.assertTrue(R.status()["open"])
 
 
 class Cli(Base):

@@ -8,7 +8,7 @@
 **闸什么时候关**（任一变化都关，记的「纪元」对不上就关）：
   - 开机（kern.boottime 变了；Linux 上读 boot_id）、睡醒（kern.waketime 变了）；
   - 中台重启或换版本（中台 up.pid 的进程号或进程启动时间变了、/healthz 的提交号变了）；中台连不上、认不出中台进程也算关着；
-  - 任何账本里出现「结果不明」（出口账本 exits、本人点击 claims 的 unknown）——断网、超时、强杀都会走到这里；
+  - 任何账本里出现「结果不明」（出口账本 exits、本人点击 claims 的 unknown、秘书代批的 unknown）——断网、超时、强杀都会走到这里；
   - 维护停写（hold：升级、回滚、搬家），只由 release 结束。
 
 **检查和领资格之间没有空隙**（审查 P1-03）：ensure_open() 只是先看一眼、需要时对账；真正领写入资格的那个写事务里再
@@ -20,7 +20,8 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
   2. 凭证与镜像：按凭证库已提交的状态重写工人只读镜像，并回读核对（任务、状态、代次、作废代次）；对不上不开闸；
   3. 中台：/healthz 通、提交号等于锁定的版本（hub-pin.json，升级流程验证通过后才改）；不是就不开闸；
   4. 外部回读：出口账本里结果不明的逐条只读回读 GitHub / 飞书；本人点击里结果不明、在途过久的只读回读中台卡片；
-     连不上的留着下次，对不上的记「核不清」交常浩；
+     连不上的留着下次，对不上的记「核不清」交常浩；秘书账本里还有结果不明、核不清、还在送的代批就不开闸
+     （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩定）；
   5. 结算开闸：记下这次的纪元和报告。仍冻结的范围（结果不明、核不清）各自继续拒绝，别的照常放行。
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
 
@@ -349,6 +350,32 @@ def _answers():
         return [f"本人点击对账没做成：{e}"]
 
 
+def _secretary():
+    """秘书账本里结果不明、核不清、还在送的代批（常浩 11-19「都按推荐」：有就不开闸；秘书自己的对账逻辑不改，
+    由 secretary_gate.reconcile 结掉，核不清的由常浩定）。库不在、还没有秘书表就是没有（不新建）；读不了不开闸。
+    返回 (不开闸的原因或 None, 说明)。"""
+    import sqlite3
+    import twin_state as TS
+    p = Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser()
+    if not p.exists():
+        return None, "还没有状态库，跳过"
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=10)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secretary_decisions'").fetchone():
+                return None, "还没有秘书账本，跳过"
+            rows = con.execute("SELECT id, status FROM secretary_decisions WHERE action != 'handoff' AND status IN "
+                               "('executing', 'unknown', 'unreconciled') ORDER BY created_at").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return f"秘书账本读不了（{type(e).__name__}）", None
+    if rows:
+        listed = "、".join(f"{r[0]}（{r[1]}）" for r in rows[:5])
+        return f"秘书账本里有 {len(rows)} 个代批结果不明或还在送（{listed}），秘书对完账才开闸", None
+    return None, "秘书账本没有结果不明的代批"
+
+
 def reconcile(readers=None):
     """按顺序对账一次，开闸或说明为什么不开。不做任何外部写（只重写本机的工人镜像）。"""
     steps, why = [], None
@@ -379,7 +406,9 @@ def reconcile(readers=None):
         why = why or str(e)
     exits = E.reconcile(readers)                                          # 4 外部回读
     answers = _answers()
-    steps.append({"step": "外部回读", "exits": exits, "answers": answers})
+    sec_bad, sec_note = _secretary()
+    steps.append({"step": "外部回读", "exits": exits, "answers": answers, "secretary": sec_bad or sec_note})
+    why = why or sec_bad
     with E.db() as con:                                                   # 5 结算开闸
         frozen = E.frozen_scopes(con)
         report = {"steps": steps, "frozen": frozen}

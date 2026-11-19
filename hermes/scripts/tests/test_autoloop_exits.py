@@ -1,5 +1,6 @@
 """出口账本（#195 批 0D 恢复门）自测：先记账再动手、做成的不重做、结果不明冻结、强杀后扫描、和凭证冻结串行、只读对账。
 全部在临时目录；恢复闸换成放行（闸本身在 test_autoloop_recovery 测）；不碰正式中台、正式状态目录。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
 import json
 import os

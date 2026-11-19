@@ -63,6 +63,10 @@
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
   claims 记 unknown、不重答。回读（中台库只读）看到 decided、by = 秘书、choice 一致 → finish(done)，outcome 记 ref 和
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
+恢复闸（批 0D，常浩 11-19「都按推荐」）：提议先看一眼 autoloop_recovery.ensure_open()，关着 → not_ready（不记账、不占额度，
+  开闸后再提）；获准在 cards.db 写锁里再拿出口账本写锁核开闸资格（R.admission，锁顺序 cards.db → 出口账本 → 账本库），
+  关了 → 作废、释放额度、不送；秘书决定记成结果不明时同时关闸（finish），恢复闸对账看到秘书账本里还有结果不明、核不清、
+  还在送的代批就不开闸，由下面的 reconcile 结掉（对账逻辑不变），核不清的由常浩定；lease（报送达）关着时不领卡。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
   ① 停在 executing 超过 2 分钟、回读给不出结论的（中台库读不到，或卡片还开着）一律转 unreconciled：额度保留、冻结这张任务、
   交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
@@ -99,9 +103,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import ai_access as AA  # noqa: E402
 import autoloop_config as AC  # noqa: E402
+import autoloop_exits as E  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
+import autoloop_recovery as R  # noqa: E402
 import custody as CU  # noqa: E402
 import custody_ledger as L  # noqa: E402
 import secretary as S  # noqa: E402
@@ -741,6 +747,15 @@ def task_locked(task_id):
     finally:
         lock.__exit__(None, None, None)
 
+def finish(st, decision_id, result, outcome=None, now=None):
+    """记秘书决定的结果；结果不明时同时关上恢复闸（批 0D，常浩 11-19「都按推荐」）：秘书账本里有结果不明、
+    核不清的代批时，恢复闸对账不开闸，所有受保护的写都停下，直到秘书自己的对账（reconcile）把它结掉。"""
+    SL.finish(st, decision_id, result, outcome, now=now)
+    if result == "unknown":
+        with E.db() as con:
+            E.mark_dirty(con, f"秘书代批 {decision_id} 结果不明")
+
+
 def _yield(st, d, con, card_id, choice, note, now):
     SL.void(st, d["id"], note, now=now)
     F.log_claim(con, card_id, "secretary", "yielded", choice, note, d["id"])
@@ -753,7 +768,16 @@ def approve(st, d, ctx, now):
     card = ctx.get("card")
     card_id = card["id"] if card else 0
     choice = ctx.get("hub_choice")
-    with F.db(write=True) as con:
+    try:
+        return _approve_locked(st, d, ctx, now, t, card, card_id, choice)
+    except E.Refused as e:                                   # 恢复闸刚关：作废、释放额度，不送
+        with contextlib.suppress(L.LedgerError):
+            SL.void(st, d["id"], f"获准前现读：{e}", now=now)
+        return "failed", f"获准前现读：{e}"
+
+
+def _approve_locked(st, d, ctx, now, t, card, card_id, choice):
+    with F.db(write=True) as con, R.admission(ctx.get("epoch")):   # 恢复闸（批 0D 审查 P1-03）：和领资格同一把出口账本写锁
         why = None
         cur = P.hub_card(card_id) if card else None
         if card and (not cur or cur["state"] != "open" or cur["version"] != card["version"]
@@ -828,37 +852,37 @@ def deliver_ask(st, d, ctx, now):
     try:                                                     # 开关在获准后被关：确定没发
         ask_switch()
     except SwitchOff as e:
-        SL.finish(st, d["id"], "failed", {"error": str(e)}, now=now)
+        finish(st, d["id"], "failed", {"error": str(e)}, now=now)
         set_claim(card_id, d["id"], None, str(e))
         return {"ok": False, "result": "failed", "decision": d["id"], "msg": str(e)}
     try:
         out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": SECRETARY, "ref": ref}, channel=CHANNEL)
     except F.HubError as e:
         if not e.sent or e.status in DEFINITE:
-            SL.finish(st, d["id"], "failed", {"error": str(e)}, now=now)
+            finish(st, d["id"], "failed", {"error": str(e)}, now=now)
             set_claim(card_id, d["id"], None, str(e))
             return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"中台没有受理：{e}"}
-        SL.finish(st, d["id"], "unknown", {"error": str(e)}, now=now)
+        finish(st, d["id"], "unknown", {"error": str(e)}, now=now)
         set_claim(card_id, d["id"], "unknown", str(e))
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": f"结果不明（{e}），不重答，等对账"}
     except Exception as e:                                   # 请求可能已发出：按结果不明处理
-        SL.finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
+        finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
         set_claim(card_id, d["id"], "unknown", type(e).__name__)
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "结果不明，不重答，等对账"}
     c = P.hub_card(card_id)
     if not out.get("changed"):
         first = bool(c) and c.get("state") in ANSWERED and c.get("by") not in (None, SECRETARY)
         note = "你先答了" if first else f"中台说这张卡已经有结果（{(c or {}).get('state')}）"
-        SL.finish(st, d["id"], "failed", {"note": note}, now=now)
+        finish(st, d["id"], "failed", {"note": note}, now=now)
         set_claim(card_id, d["id"], None, note)
         return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"没答上：{note}"}
     if readback_ok(c, choice):
         t = now or CU.now_tz()
         waited = max(0, int((t - ctx["feishu_at"]).total_seconds()))
-        SL.finish(st, d["id"], "done", {"ref": ref, "answered_at": CU.iso(t), "waited_seconds": waited}, now=now)
+        finish(st, d["id"], "done", {"ref": ref, "answered_at": CU.iso(t), "waited_seconds": waited}, now=now)
         set_claim(card_id, d["id"], "delivered")
         return {"ok": True, "result": "done", "decision": d["id"], "msg": f"已替你答了卡片 {card_id}，回读核实"}
-    SL.finish(st, d["id"], "unknown", {"error": "回读没对上"}, now=now)
+    finish(st, d["id"], "unknown", {"error": "回读没对上"}, now=now)
     set_claim(card_id, d["id"], "unknown", "回读没对上")
     return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "已交给中台，但回读没对上，等对账"}
 
@@ -871,18 +895,18 @@ def _resume(st, d, kind, reason, now, partial=False):
         out = G.resume_dispatch(d["task_id"], kind, reason, now=now)
     except G.Rejected as e:
         result = "unknown" if partial else "failed"
-        SL.finish(st, d["id"], result, {"error": str(e), **({"note": "留言已发出、返修没派出"} if partial else {})}, now=now)
+        finish(st, d["id"], result, {"error": str(e), **({"note": "留言已发出、返修没派出"} if partial else {})}, now=now)
         return {"ok": False, "result": result, "decision": d["id"], "msg": f"网关没有续接：{e}" + ("（留言已发出）" if partial else "")}
     except Exception as e:                                   # 可能已记了事件：按结果不明处理
-        SL.finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
+        finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "续接结果不明，等对账"}
     key = out["event_key"]
     sent = out["send"]
     hit = next((x for x in sent if x.get("event_key") == key), None) if isinstance(sent, list) else None
     if hit and hit.get("sent") is True:
-        SL.finish(st, d["id"], "done", {"ref": key, "event_key": key, "hub_event": hit.get("hub_event")}, now=now)
+        finish(st, d["id"], "done", {"ref": key, "event_key": key, "hub_event": hit.get("hub_event")}, now=now)
         return {"ok": True, "result": "done", "decision": d["id"], "msg": f"已经由网关续接（{kind}）"}
-    SL.finish(st, d["id"], "unknown", {"event_key": key, "send": sent if isinstance(sent, dict) else hit}, now=now)
+    finish(st, d["id"], "unknown", {"event_key": key, "send": sent if isinstance(sent, dict) else hit}, now=now)
     return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "续接事件已记账、还没确认发到中台，等对账"}
 
 
@@ -891,10 +915,10 @@ def deliver_reject(st, d, ctx, now):
     try:                                                     # 留言前再读一次 PR（审查 P2-01）：关了或推了新提交就不留言
         state, head = pr_now(rec["github"], pr)
     except Refused as e:
-        SL.finish(st, d["id"], "failed", {"error": str(e)[:200]}, now=now)
+        finish(st, d["id"], "failed", {"error": str(e)[:200]}, now=now)
         return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"留言前查不了 PR，没留言：{e}"}
     if state != "OPEN" or head != rec["head"]:
-        SL.finish(st, d["id"], "failed", {"note": f"留言前现读：PR {state}，头提交 {str(head)[:12]}"}, now=now)
+        finish(st, d["id"], "failed", {"note": f"留言前现读：PR {state}，头提交 {str(head)[:12]}"}, now=now)
         return {"ok": False, "result": "failed", "decision": d["id"], "msg": "留言前现读：PR 已经不开着或有了新提交，没留言"}
     body = (f"秘书按常浩签的代批清单退回这个 PR，派工人返修一轮。\n\n{d['summary']}\n\n{d['basis']}\n\n"
             f"<!-- dt-secretary {d['id']} -->")
@@ -904,17 +928,26 @@ def deliver_reject(st, d, ctx, now):
         r = subprocess.run([gh_cmd(), "pr", "comment", str(pr), "-R", rec["github"], "-F", f.name],
                            capture_output=True, text=True, timeout=120)
     except (OSError, Refused) as e:                          # gh 根本没跑起来：确定没留言
-        SL.finish(st, d["id"], "failed", {"error": str(e)[:200]}, now=now)
+        finish(st, d["id"], "failed", {"error": str(e)[:200]}, now=now)
         return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"留言没发出去：{e}"}
     except subprocess.SubprocessError as e:
-        SL.finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
+        finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "留言结果不明，等对账"}
     finally:
         os.unlink(f.name)
     if r.returncode != 0:                                    # gh 报错分不清发没发：结果不明，不重发
-        SL.finish(st, d["id"], "unknown", {"error": r.stderr.strip()[:200]}, now=now)
+        finish(st, d["id"], "unknown", {"error": r.stderr.strip()[:200]}, now=now)
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "留言结果不明，等对账"}
     return _resume(st, d, "rework", f"秘书代批 {d['id']}：审查没过，退回返修", now, partial=True)
+
+
+def recovery_open():
+    """恢复闸（批 0D）：开机、睡醒、中台重启或换版本、任何账本里出现结果不明之后，对账走完才代批。关着 → NotReady
+    （不记账、不占额度，开闸后再提）。返回核过的纪元，获准时在同一把锁里再核（approve）。"""
+    try:
+        return R.ensure_open()
+    except E.Refused as e:
+        raise NotReady(str(e))
 
 
 # ---------- 入口 ----------
@@ -935,6 +968,7 @@ def submit(proposal, now=None):
             try:
                 if ctx["category"] in ("redispatch", "reject"):     # 从前闸到续接发出全程持锁（审查 P1-03）
                     held.enter_context(task_locked(ctx["task"]))
+                ctx["epoch"] = recovery_open()
                 front_gates(proposal, ctx, st_status, t, st)
             except Handoff as h:
                 return record_handoff(st, ctx, h.reason, h.why, now)
@@ -1043,7 +1077,12 @@ def _verdict(st, d):
 
 
 def lease(wait=50):
-    """从 secretary 通道领一张卡：第一次领到时生成并落盘自己的 ref，报送达；中台收下后记「中台确认送达」。没有卡返回 None。"""
+    """从 secretary 通道领一张卡：第一次领到时生成并落盘自己的 ref，报送达；中台收下后记「中台确认送达」。没有卡返回 None。
+    恢复闸关着（批 0D）就不领卡，返回 paused（报送达、报失败都是往中台写）。"""
+    try:
+        R.ensure_open()
+    except E.Refused as e:
+        return {"ok": False, "paused": str(e)}
     card = F.hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20, channel=CHANNEL).get("card")
     if not card:
         return None

@@ -6,6 +6,7 @@ lark-cli（消息落进一个文件）；中台是临时目录里起的真中台
 强杀：子进程（fixtures/drill_child.py）真的做完动作、还没记结果时被 SIGKILL。
 升级、回滚、搬家：ops/autoloop_drill.py 从本机中台程序只读克隆出 v1.8.4、v1.8.5 两个版本（没有就跳过）。
 全部在临时目录；不碰 127.0.0.1:3350 和 ~/.agent-autoloop；模块前后由 prod_guard 核对正式环境。"""
+import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import importlib.util
 import json
 import os
@@ -185,6 +186,30 @@ class PushBranch(Drill):
         self.assertEqual(R.status()["frozen"], [])
 
 
+    def test_live_executor_past_hard_stale_is_never_retried(self):
+        """审查 P1-02：做的进程还活着、只是跑了超过 30 分钟（真进程，时钟拨快 31 分钟看）：只报疑似卡住，
+        对账不改它、同一动作和同一范围的别的动作都拒绝；它做完以后再来，直接回原结果。远端只收到一次推送。"""
+        bare, work, t = self.repo()
+        go = self.root / "go"
+        p = self.child("slow_push", {"key": self.key(t), "scope": f"task:{TASK}", "target": t, "cwd": str(work),
+                                     "go": str(go)})
+        wait_for(lambda: (E.in_flight(f"task:{TASK}") or [{}])[0].get("state") == "executing", what="子进程登记 executing")
+        later = E.now_tz() + E.HARD_STALE + E.dt.timedelta(minutes=1)
+        with mock.patch.object(E, "now_tz", lambda: later):
+            self.assertEqual(R.status()["stalled"], [self.key(t)])          # 报疑似卡住
+            self.assertEqual(E.reconcile(), [])                              # 对账不碰还活着的
+            with self.assertRaisesRegex(E.Refused, "还在进行"):
+                E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
+            with self.assertRaisesRegex(E.Refused, "正在进行"):
+                E.guard("open_pr", f"open_pr:{TASK}:x:y", f"task:{TASK}", {}, dict)
+        self.assertEqual((p.poll(), self.push_count()), (None, 0))         # 它还活着，谁都没推
+        go.write_text("x")
+        self.assertEqual(p.wait(30), 0)
+        out = E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
+        self.assertEqual((out["again"], out["pushed"]), (True, t["head"]))
+        self.assertEqual(self.push_count(), 1)
+
+
 class OpenPrAndMerge(Drill):
     def pr_target(self, head="h" * 40):
         return {"github": "o/dt-sandbox", "branch": f"claude/{TASK}", "head": head}
@@ -294,7 +319,8 @@ class Cards(Drill):
 
     def test_kill_after_answer_accepted_then_hub_restart(self):
         cid, tok = self.delivered()
-        p = self.child("answer", {"token": tok, "option": 1, "chat": CHAT, "owner": OWNER})
+        p = self.child("answer", {"token": tok, "option": 1, "chat": CHAT, "owner": OWNER,
+                                   "version": F.card_by_token(tok)["version"]})
         self.kill_when(p, lambda: self.hub_card(cid).get("state") != "open", "中台收下回答")
         self.assertEqual(self.claim(cid)["state"], "inflight")
         with F.db(write=True) as con:                                          # 过了在途窗口
@@ -306,14 +332,14 @@ class Cards(Drill):
         c = self.hub_card(cid)
         self.assertEqual((c["choice"], c["by"]), (1, OWNER))
         with mock.patch.object(A, "tell"):
-            self.assertEqual(A.answer(tok, 0, CHAT, OWNER)[0], 1)              # 再点：中台只认第一次
+            self.assertEqual(A.answer(tok, 0, CHAT, OWNER, F.card_by_token(tok)['version'])[0], 1)              # 再点：中台只认第一次
         self.assertEqual(self.hub_card(cid)["choice"], 1)
 
     def test_hub_down_click_waits_in_queue_then_goes_once(self):
         cid, tok = self.delivered()
         self._stop()                                                           # 断网：中台连不上，恢复闸跟着关
         with mock.patch.object(A, "tell"):
-            self.assertEqual(A.answer(tok, 1, CHAT, OWNER)[0], 3)              # 只排队，不发注定不明的请求
+            self.assertEqual(A.answer(tok, 1, CHAT, OWNER, F.card_by_token(tok)['version'])[0], 3)              # 只排队，不发注定不明的请求
         self.restart_hub()
         R.ensure_open()                                                        # 对账不提交排队的
         self.assertEqual(self.claim(cid)["state"], "queued")
@@ -327,13 +353,13 @@ class Cards(Drill):
         lost = F.HubError("连不上中台或没等到回应（ConnectionResetError）")     # 过了闸，请求在路上断了
         with mock.patch.object(F, "hub", side_effect=lambda m, p, b=None, timeout=20: (_ for _ in ()).throw(lost)
                                if p.endswith("/answer") else {}), mock.patch.object(A, "tell"):
-            self.assertEqual(A.answer(tok, 1, CHAT, OWNER)[0], 2)              # 结果不明，不重答
+            self.assertEqual(A.answer(tok, 1, CHAT, OWNER, F.card_by_token(tok)['version'])[0], 2)              # 结果不明，不重答
         R.ensure_open()                                                        # 对账：卡还开着 → 仍不明，不自动放开
         self.assertEqual(self.claim(cid)["state"], "unknown")
         self.assertEqual(self.hub_card(cid)["state"], "open")
         A.release_unknown(cid)                                                 # 常浩明确同意放开
         with mock.patch.object(A, "tell"):
-            self.assertEqual(A.answer(tok, 1, CHAT, OWNER)[0], 0)
+            self.assertEqual(A.answer(tok, 1, CHAT, OWNER, F.card_by_token(tok)['version'])[0], 0)
         c = self.hub_card(cid)
         self.assertEqual((c["choice"], c["by"]), (1, OWNER))
 
@@ -347,7 +373,7 @@ class Cards(Drill):
                 raise F.HubError("连不上中台或没等到回应（TimeoutError）")
             return out
         with mock.patch.object(F, "hub", slow), mock.patch.object(A, "tell"):
-            self.assertEqual(A.answer(tok, 0, CHAT, OWNER)[0], 2)
+            self.assertEqual(A.answer(tok, 0, CHAT, OWNER, F.card_by_token(tok)['version'])[0], 2)
         self.assertFalse(self.gate_open())                                     # 结果不明关闸
         R.ensure_open()
         self.assertEqual(self.claim(cid)["state"], "answered")
@@ -392,42 +418,71 @@ class Upgrade(unittest.TestCase):
     def point_at(self, hub):
         p = mock.patch.dict(os.environ, {"DT_HUB": hub.url, "AGENT_AUTOLOOP_HOME": str(hub.home),
                                          "DT_EXITS_DB": str(self.case / "exits.db"),
-                                         "DT_HUB_PIN": str(self.case / "hub-pin.json")})
+                                         "DT_HUB_PIN": str(self.case / "hub-pin.json"),
+                                         "DT_AUTOLOOP_CARDS_DB": str(self.case / "cards.db"),
+                                         "DT_GRANTS_DB": str(self.case / "grants.db"),
+                                         "DT_STATE_DB": str(self.case / "twin-state.db")})
         p.start()
         self.addCleanup(p.stop)
 
-    def refused(self):
+    def refused(self, card=1):
         with self.assertRaises(E.Refused) as e:
-            E.guard("send_feishu", "send_feishu:card-1", "card:1", {}, dict)
+            E.guard("send_feishu", f"send_feishu:card-{card}", f"card:{card}", {}, dict)
         return str(e.exception)
 
-    def test_upgrade_keeps_pending_and_gate_waits_for_pin(self):
+    def window(self, hub):
+        """快照之后、停旧版之前（审查 P1-06）：停写还在，桥接不领卡、出口账本不发任何卡片。"""
+        nxt = D.max_card(hub) + 1
+        return {"bridge": F.once(wait=0), "send": self.refused(nxt)}
+
+    def test_upgrade_holds_writes_then_retires_snapshot(self):
         card = self.hub.ask(self.old)
-        out = D.upgrade(self.hub, self.old, self.new, self.case / "snap")
+        out = D.upgrade(self.hub, self.old, self.new, self.case / "snap", window=self.window, point="up-1")
         self.assertTrue(out["ok"])
+        self.assertIn("维护中", out["window"]["bridge"]["paused"])            # 停写期间桥接没领卡
+        self.assertIn("维护中", out["window"]["send"])
         self.assertEqual(self.hub.pending(), out["pending_before"])
-        self.assertIn("不是锁定的", self.refused())                         # 新版没锁定：发飞书等动作都停着
-        R.pin(self.new.commit, confirm=True)                                  # 核对通过才改锁定版本
+        self.assertEqual(R.pinned(), self.new.commit)                         # 核对通过才锁定新版本
+        with self.assertRaisesRegex(E.Refused, "retired"):                   # 升级前的快照作废，不能再拿来回滚
+            R.restorable("up-1")
+        self.assertIn("维护结束", R.status()["why"])
         R.ensure_open()
         self.assertIn("试跑通过", self.hub.answer_and_finish(card))           # 挂起的轮次接着跑完
 
-    def test_failed_upgrade_rolls_back_from_snapshot(self):
+    def test_failed_upgrade_rolls_back_from_held_point(self):
         card = self.hub.ask(self.old)
         bad = self.new.broken_copy(self.root)
-        out = D.upgrade(self.hub, self.old, bad, self.case / "snap", damage=D.corrupt)
+        out = D.upgrade(self.hub, self.old, bad, self.case / "snap", damage=D.corrupt, window=self.window, point="up-2")
         self.assertEqual((out["ok"], out["rolled_back"], out["on"]), (False, True, self.old.commit))
         self.assertEqual(out["pending_after"], out["pending_before"])
+        self.assertEqual(out["mismatched"], [])                                # 快照之后没有发出过卡片：卡片号对得上
         self.assertTrue(list(self.hub.home.glob("restore-before-*")))         # 被替换的坏库留着备查
-        self.assertIn("中台重启", R.status()["why"])
+        self.assertEqual(R.pinned(), self.old.commit)
+        with self.assertRaisesRegex(E.Refused, "rolled_back"):
+            R.restorable("up-2")
         R.ensure_open()                                                       # 版本仍是锁定的旧版：对账后开
         self.assertIn("试跑通过", self.hub.answer_and_finish(card))
 
+    def test_rollback_refused_when_a_card_went_out_after_snapshot(self):
+        """停写没守住（快照后有卡片发出，本地卡片库里有比快照时最大号还大的卡）：回滚后保持停写，交常浩。"""
+
+        def leaked(hub):
+            with F.db(write=True) as con:
+                con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
+                            "VALUES (?, 'cccccccccccccccc', 'oc_x', 'ask', 2, 1)", (D.max_card(hub) + 1,))
+        bad = self.new.broken_copy(self.root)
+        with self.assertRaisesRegex(E.Refused, "错位"):
+            D.upgrade(self.hub, self.old, bad, self.case / "snap", damage=D.corrupt, window=leaked, point="up-3")
+        self.assertIn("维护中", R.status()["why"])
+
     def test_move_to_another_home_keeps_pending(self):
         card = self.hub.ask(self.old)
-        moved, out = D.move(self.hub, self.old, self.case / "b/hub", self.case / "snap")
+        p = mock.patch.dict(os.environ, {"AGENT_AUTOLOOP_HOME": str(self.case / "b/hub")})   # 恢复闸跟着搬到新目录
+        p.start()
+        self.addCleanup(p.stop)
+        moved, out = D.move(self.hub, self.old, self.case / "b/hub", self.case / "snap", point="mv-1")
         self.hub = moved
         self.assertEqual(out["pending_after"], out["pending_before"])
-        self.point_at(moved)                                                  # 搬家后读新目录
         self.assertFalse(R.status()["open"])
         R.ensure_open()
         self.assertIn("试跑通过", moved.answer_and_finish(card))
