@@ -19,6 +19,7 @@ hermes/
     pdaily_data.py     个人项目日报取数（#110，PRD D22）：按统计日（04:00→04:00，Asia/Shanghai）给名册每个项目出一条记录（阶段目标、里程碑、昨日增量、工程 / 交付 / 验收三项、当前状态、新鲜度），JSON 输出；交付、验收一律记「未核实」，只附自述摘录（当天 CURRENT 节、PR 标题），等 #110 1b 的行动记录再判；目标、CURRENT、新鲜度读主分支在统计日结束时的快照，不读工作区；取不到记 null 不当 0；GitHub 遇到网络问题（唤醒后代理没通）最多等 300 秒重试（DT_GH_WAIT_SECONDS，#176）；只读，未安装
     actions.py         代理行动记录（#110 1b，V2 5.4）：actions.jsonl 的结构（定稿不再改）和 record() 记录函数；--date 按统计日列出行动：actions.jsonl 加六个来源现读现转（合并官、merge-runs、派单台账、定时任务库、夜跑 run-log、裁决文件），每条带授权档位、来源，低于应有档位的标 auth_gap；裁决文件只摘原文不判批准拒绝；安装只认 record() 写的；只读，未安装，暂无脚本调用 record()
     pdaily_publish.py  个人项目日报写稿与核对（#111 批 2a；#226 改乙版）：读 facts.json，经 hermes chat 单次让 Hermes 写卡片要素和完整报告（提示词 prompts/pdaily_report.md），脚本核对编号、百分比、PR 数、「已安装 / 已验收」说法、三个数和六段，另核对每类风险有去向、指向的拍板存在、同一类不拆两条、缺材料的事不进拍板（「同一件事在风险和拍板两处各说各的」判不准，只记提醒）；写法问题自动修并记提醒，不通过就带着问题让模型重写一次，再不过出「分析降级」事实版，再坏出最小卡片；按乙版定稿（常浩 2026-11-19 选定：四板块 核心数据速览 → 昨日关键成果 → 风险与阻塞 → 需要你拍板；风险按原因一类一行、带去向「→ 拍板 N」或「只观察」，项目明细在折叠面板；拍板是 #、事项、推荐、已挂四列的表，已挂几天由脚本按候选起始时间算；没有今日推进；速览表列宽 25/15/60 是 11-10 定稿）生成卡片 JSON；send 建完整报告云文档、拦工作内容（台账编号、工作日报文档等一律拒发）、以猛鬼兽机器人发常浩私聊并回读，记 delivery.json，同一统计日只发一次（#155）；工程自检有问题时并进风险表的一行、原文进折叠面板，正常时页脚一句
+    pdaily_act.py      日报拍板账与按钮（#235，从 #226 拆出的第 2 批）：卡片拍板表下一排「全部按推荐」「① 按推荐」…按钮只带 {"pdaily": 卡片令牌, "n": 编号}；button 只认常浩本人、常浩私聊（twin_state 的 owner 配置）、最新一张发出且回读过的日报卡（令牌记在 delivery.json，页脚写尾号供回读核对；最新一张没回读通过就不认，不退回旧卡），编号只认发卡时存的拍板快照 <统计日>.decisions.sent.json（哈希记进 delivery.json），只给有推荐、不用常浩亲手做的条目放按钮，记进只追加的拍板账 DigitalTwin/daily/decisions.jsonl，插件再把一句话注入私聊会话交猛鬼兽按 pdaily-act 技能办（要 Hermes 配置 plugins.entries.merge-buttons.allow_gateway_injection，常浩点头才开；没开照样记账、私聊说请引用卡片回「办 ①」）；after 把卡片原地改成「已定」、去掉按钮；record（引用卡片回「③ 不做」「④ 先放着」时技能调）、done（记办理结果和单号）、todos；第二天写稿时定过的候选标 already_decided、脚本挡回，先放着 7 天内只计数；不调 AI、不派单、不合并；未安装
     pdaily_build_job.py / pdaily_send_job.py  个人项目日报定时任务入口（#155）：Hermes 无模型定时任务 09:15 写稿、10:00 发送（#159，原 09:00 / 09:45）；发送成功不输出，没发成输出一句原因发到私聊
     pdaily_facts.py    个人项目日报事实快照（#110 1c）：把 pdaily_data 的项目记录和 actions 的行动合成 DigitalTwin/daily/<统计日>.facts.json，给 Hermes 写日报用；含拍板候选、风险四类、跨项目明文引用（查被引用方关没关）、观察池（每次现算）、覆盖与可信度；只给候选和出处，不定级、不排序、不推荐；取不到写 null 不当 0；--dry-run 只打印；未安装
     report_data.py     工作日报 / 周报取数（T7，新结构并跑；2026-11-11 常浩定从猛鬼兽撤下，定时任务已暂停，PRD D20）；report_daily.py、report_weekly.py 是定时任务入口；开跑前先等主模型通道连通，最多 300 秒，到时间照常放行交给回退（#140，记录在 evidence/reports/model-route-wait.jsonl）
@@ -58,8 +59,9 @@ hermes/
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
     proposal-digest/   记下常浩对每周待决提案的选择（#61，调 proposal_digest.py apply）
+    pdaily-act/        日报拍板办理（#235）：常浩点日报卡片的「按推荐」按钮（插件核对记账后注入会话）或引用卡片回「① 按推荐」「③ 不做」「④ 先放着」时，调 pdaily_act.py 记账，按推荐派单（点击 / 回复即对点到的几条的逐项授权，同 D25）、采纳提案或告诉常浩要他自己做的，只做到开 PR，办完回执带单号
     groupdigest-act/   群学习报告回复即派单（#192）：常浩回「都派」「派 1 3，2 不做」时，把选中的行动写成任务说明，经车间派单交给 Claude（回复即这几条的 D 档逐项授权，同 D23），调 groupdigest.py todos / mark 记账
-  plugins/merge-buttons/ 卡片按钮（#78、#133、#195）：注册 /card，把 PR 卡片的「合并 / 退回」点击转给 merge_act.py button，托管汇报卡的「推翻 / 合并 revert PR」连同卡片令牌（--card）转给 custody_report.py button；中台卡片 {"autoloop": 令牌, "o": 选项号, "v": 版本号}（多带字段不认；没带 v 的旧样式按钮照样转、不带 --version，由脚本拒绝并在私聊说明，#218 第 3 轮 P1-03）连同版本号（--version）、聊天号、点击人（HERMES_SESSION_USER_ID）转给 autoloop_answer.py（#195 0B-4）；按钮实测探针 {"probe": 令牌} 不起脚本，只把网关给的点击人、聊天、消息号的样子（不落回调 token 原文）记进 evidence/button-probe/clicks.jsonl（#195 0B-3）（都不经过模型）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
+  plugins/merge-buttons/ 卡片按钮（#78、#133、#195、#235）：注册 /card，把 PR 卡片的「合并 / 退回」点击转给 merge_act.py button，托管汇报卡的「推翻 / 合并 revert PR」连同卡片令牌（--card）转给 custody_report.py button；中台卡片 {"autoloop": 令牌, "o": 选项号, "v": 版本号}（多带字段不认；没带 v 的旧样式按钮照样转、不带 --version，由脚本拒绝并在私聊说明，#218 第 3 轮 P1-03）连同版本号（--version）、聊天号、点击人（HERMES_SESSION_USER_ID）转给 autoloop_answer.py（#195 0B-4）；按钮实测探针 {"probe": 令牌} 不起脚本，只把网关给的点击人、聊天、消息号的样子（不落回调 token 原文）记进 evidence/button-probe/clicks.jsonl（#195 0B-3）（都不经过模型）；日报拍板按钮 {"pdaily": 令牌, "n": 编号} 先同步跑 pdaily_act.py button 核对记账，认了才用 ctx.inject_message 往常浩私聊会话注入一句话交猛鬼兽办（#235）；安装在 ~/.hermes/plugins/，config.yaml 的 plugins.enabled 里启用
   plugins/workdesk-gate/ 亚古兽工具拦截（#142）：飞书里发起人不是常浩（open_id 或企业 user_id `e9cgcf77`）时只放行安全工具（提问、读文档、文档评论、网页、技能查看、生图、语音、待办），本机命令行和定时任务不受限；牛马之家只在常浩本人私聊可用并写入真实提问人；安装在 ~/.hermes/profiles/agumon/plugins/，测试 hermes/scripts/tests/test_workdesk_gate_plugin.py
   prompts/             定时任务等用的提示词和项目词表；安装在 ~/.hermes/prompts/
   workspace/HERMES.md  猛鬼兽工作规程（源文件）；安装在 ~/.hermes/workspace/HERMES.md，只在工作目录是 workspace 时加载；第 5 节是个人项目日报规则（猛鬼兽只报个人项目）
@@ -104,7 +106,7 @@ ops/
 |---|---|---|---|---|---|
 | `workshop` | 车间派单 | 常浩点名的；没点名跟随默认执行方（出厂 Codex） | 本机 CLI | worktree、任务文件 | 分支提交、PR、issue、派单回执、状态库 |
 | `scheduler` | 持久调度自动开单（默认关闭） | 每个任务的负责方 claude / codex | 本机 CLI（经派单脚本） | 状态库 | 同车间派单 |
-| `chat` | 飞书对话（含 progress、vault、merge-officer、proposal-digest 技能） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、Vault（MCP vault-read 只读）、名册、仓库 | 飞书回复、Hermes 记忆 |
+| `chat` | 飞书对话（含 progress、vault、merge-officer、proposal-digest、pdaily-act 技能） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、Vault（MCP vault-read 只读）、名册、仓库 | 飞书回复、Hermes 记忆 |
 | `hermes-aux` | Hermes 辅助任务（压缩、审批判断、后台复盘） | Hermes | Hermes 派单 | 当前会话 | Hermes 记忆和技能 |
 | `report` | 工作日报 / 周报并跑（**已暂停**：2026-11-11 从猛鬼兽撤下，PRD D20） | Hermes，仅支持 Hermes | Hermes 派单 | 飞书私聊、群、会议妙记、日程、任务、项目进展 | 飞书并跑文档、evidence/reports |
 | `pdaily` | 个人项目日报 V2（#111、#155、#159：09:15 写稿、10:00 发私聊，带工程自检） | Hermes（主模型 Opus 5.5，思考 medium，#157），仅支持 Hermes；失败出脚本事实版，不换家 | Hermes 派单（`hermes chat` 单次） | 事实快照 facts.json、提示词 pdaily_report.md | DigitalTwin/daily/ 的卡片、完整报告、模型原稿、build.json、delivery.json；飞书完整报告云文档；常浩私聊卡片 |
