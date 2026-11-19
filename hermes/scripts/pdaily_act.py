@@ -77,9 +77,9 @@ def done(ok, msg, **kw):
 # ---------- 拍板账 ----------
 
 @contextlib.contextmanager
-def locked():
+def locked(name="decisions"):
     DAILY.mkdir(parents=True, exist_ok=True)
-    with open(DAILY / "decisions.lock", "a") as lk:
+    with open(DAILY / f"{name}.lock", "a") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         yield
 
@@ -207,11 +207,12 @@ def card_decisions(day, rec=None):
     return snap["decisions"]
 
 
-def state_of(day):
-    """这张卡上每个编号现在的状态：编号 → 最近一条记录。"""
+def state_of(day, rec):
+    """这张卡上每个编号现在的状态：编号 → 最近一条记录。只认记在这一版快照上的记录：当天重发过，
+    旧卡上的记录不会安到新卡的同号事项上（复审 P2-B）。"""
     out = {}
     for e in entries().values():
-        if e.get("day") == day:
+        if e.get("day") == day and e.get("snap") == rec.get("decisions_sha"):
             out[e.get("n")] = e
     return out
 
@@ -226,14 +227,14 @@ def record_choices(day, rec, ns, choice, via, note=None):
         raise Fail(f"编号 {'、'.join(map(str, bad))} 不在 {day} 的日报卡片上（只有 1–{len(decs)}）")
     new, old = [], []
     with locked():
-        st = state_of(day)
+        st = state_of(day, rec)
         for n in dict.fromkeys(ns):
             if n in st:
                 old.append(st[n])
                 continue
             d = decs[n - 1]
             e = {"id": f"p-{day[2:].replace('-', '')}-{n}-{secrets.token_hex(2)}", "at": now().isoformat(timespec="seconds"),
-                 "day": day, "n": n, "keys": d.get("keys") or [], "project": d.get("project"), "item": d.get("item"),
+                 "day": day, "snap": rec.get("decisions_sha"), "n": n, "keys": d.get("keys") or [], "project": d.get("project"), "item": d.get("item"),
                  "kind": d.get("kind"), "recommendation": d.get("recommendation"), "choice": choice, "via": via}
             if note:
                 e["note"] = P.clip(note, 200)
@@ -252,11 +253,12 @@ MARKS = {"按推荐": "✅ 按推荐", "不做": "✖ 不做", "先放着": "⏸
 
 
 def refresh_card(day, rec):
-    """把发出去的卡片原地改：定了的那行「已挂」换成选择，按钮去掉；没有可点的了，按钮整排去掉。整段在锁里（审查 P2-4）。"""
-    with locked():
+    """把发出去的卡片原地改：定了的那行「已挂」换成选择，按钮去掉；没有可点的了，按钮整排去掉。
+    整段在卡片锁里（审查 P2-4）；卡片锁和记账锁分开，改卡片时调飞书再慢也不挡常浩记账（复审 P2-A）。"""
+    with locked("card"):
         sent = DAILY / f"{day}.card.sent.json"
         card = json.loads(sent.read_text(encoding="utf-8"))
-        st = state_of(day)
+        st = state_of(day, rec)
         els = card["body"]["elements"]
         for e in els:
             if e.get("tag") == "table" and [c["name"] for c in e["columns"]] == ["n", "i", "r", "a"]:
@@ -317,7 +319,7 @@ def cmd_button(a):
     if not rec or rec.get("card_token") != a.token:
         raise Fail("这不是最新一张日报卡片上的按钮：旧卡片的按钮不再算数，请在最新一张上点")
     decs = card_decisions(day, rec)
-    st = state_of(day)
+    st = state_of(day, rec)
     if a.n == 0:
         ns = [d["n"] for d in decs if buttonable(d) and d["n"] not in st]
     elif 1 <= a.n <= len(decs) and buttonable(decs[a.n - 1]):
@@ -354,7 +356,7 @@ def cmd_todos(a):
     if not rec:
         raise Fail("最新一张日报卡片没发成或没回读通过" if not a.day else f"找不到 {a.day} 发出、回读过的日报卡片")
     decs = card_decisions(day, rec)
-    st = state_of(day)
+    st = state_of(day, rec)
     out = []
     for d in decs:
         e = st.get(d["n"]) or {}
