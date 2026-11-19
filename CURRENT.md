@@ -42,7 +42,7 @@
 
 ---
 
-## 主线：猛鬼兽日报改版（#226）｜完成 6/7
+## 主线：猛鬼兽日报改版（#226）｜完成 7/7
 
 常浩 2026-11-19 反馈日报「形式大于使用价值，没有行动指引」；当天在私聊三版真卡片预览里选乙版，对实施计划回「都按推荐」，第 1 批合并时说「合并并安装，继续直到完成任务」。定稿登记在 [docs/DECIDED.md](docs/DECIDED.md)，规格在 [docs/个人项目日报-V2-设计.md](docs/个人项目日报-V2-设计.md) 4.0，PRD D22。
 
@@ -51,7 +51,7 @@
 - ✅ 第 2 批拍板按钮和回复闭环（#235）：PR #241 已合并 `3d2f790`（独立审查三轮，第三轮「可以合并」；CI 通过，锁定 `9de2fcd`）
 - ✅ 第 3 批猛鬼兽查只读单、自检按计划不装的不报（#236）：PR #243 已合并 `a867612`（合 main 解决 7 处冲突，均为第 2 批压缩合并所致；全量 1524 条在 `df40eb2` 上通过，合并后相关 4 组 172 条通过；CI 通过，锁定 `647b600`）
 - ✅ 安装（2026-11-19 23:02）：pdaily_publish.py、pdaily_act.py、self_check.py → ~/.hermes/scripts/；pdaily_report.md → ~/.hermes/prompts/；HERMES.md → ~/.hermes/workspace/；pdaily-act 技能 → ~/.hermes/skills/autonomous-ai-agents/pdaily-act/；merge-buttons 插件 → ~/.hermes/plugins/merge-buttons/。旧版备份和全量测试日志在 evidence/2026-11-19-pdaily-b23-install/；装后逐个 cmp 与 main 一致；网关已重启，飞书 23:03:42 重连成功（第一次连接超时，重试连上）。工程自检不再报按计划不装的 13 个脚本，输出存 evidence/2026-11-19-pdaily-b23-install/self_check.out。下一次 10:00 日报起带按钮，风险表可能出现「猛鬼兽派只读单查，明天报」——**未在真卡片上验证**
-- ❓ Hermes 配置 `plugins.entries.merge-buttons.allow_gateway_injection: true`：等常浩点头（现在没设，等于关；不开时点按钮照样记账，私聊提示引用卡片回「办 ①」）。按钮的具体样子等常浩在 11-20 的真卡片上看过再登记进 DECIDED
+- ✅ Hermes 配置 `plugins.entries.merge-buttons.allow_gateway_injection: true`：常浩 11-19 回「开」，用 `hermes config set` 写入（回读 true），23:07 重启网关，飞书 23:09:10 连上；点「按推荐」后由插件注入私聊会话交猛鬼兽办。按钮的具体样子等常浩在 11-20 的真卡片上看过再登记进 DECIDED（📌，不挡主线）
 - ✅ 车间 Claude 只读单改成真正只读：另一会话 PR #242 已合并 `4f79eaa`，run_worker.py 安装副本和 main 一致；第 3 批的只读单仍写死 Codex（要不要放开 Claude 另议）
 
 工程自检剩 9 项安装副本和 main 不一致，都不是这两批碰过的文件：prompts/README.md、ai_access.py、custody.py、twin_state.py、groupdigest-act、workshop 技能（早于本批的漂移），亚古兽的 sidebar_reports.py 和 sales-sidebar 两份（主目录有另一会话没提交的改动）。要不要补装另行确认（custody.py、twin_state.py 补装会改变运行中的行为）。
