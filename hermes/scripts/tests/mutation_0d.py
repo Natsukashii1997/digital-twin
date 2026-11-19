@@ -64,7 +64,8 @@ M = [
     ("autoloop_recovery.py", '    if r is None or r["state"] != "held":', '    if r is None:', "P1-06 作废的恢复点不能回滚", [RC + ".Maintenance"]),
     ("autoloop_recovery.py", '        if bad:\n            raise E.Refused(f"回滚后卡片号可能错位', '        if False:\n            raise E.Refused(f"回滚后卡片号可能错位',
      "P1-06 回滚后核卡片号", [RC + ".Maintenance"]),
-    ("autoloop_recovery.py", '    why = why or sec_bad\n', '', "秘书账本有结果不明不开闸", [SG + ".RecoveryGateTests"]),
+    ("autoloop_recovery.py", '    why = why or sec_bad\n', '', "秘书账本有结果不明不开闸",
+     [RC + ".Order.test_secretary_unknown_keeps_gate_closed", SG + ".RecoveryGateTests"]),
     # ---------- 接线 ----------
     ("autoloop_grants.py", '            with tx(path) as con, R.admission(epoch):', '            with tx(path) as con:',
      "P1-03 派单事件逐个领取时核闸", [RC + ".AdmissionRace"]),
@@ -100,6 +101,9 @@ M = [
 ]
 
 
+TIMEOUT = 600   # 秒：单组测试正常几秒到五分钟（受信发布那组约五分钟）
+
+
 def run(tests):
     """按模块分组跑（discover -p 模块.py，测试目录先导入 _isolation）；带类名 / 方法名的用 -k 只跑那几个。"""
     worst, tails = 0, []
@@ -112,8 +116,12 @@ def run(tests):
         for n in names:
             if n:
                 args += ["-k", n]
-        r = subprocess.run([sys.executable, "-B", "-m", "unittest", *args], cwd=W, capture_output=True, text=True,
-                           timeout=1800)
+        try:
+            r = subprocess.run([sys.executable, "-B", "-m", "unittest", *args], cwd=W, capture_output=True, text=True,
+                               timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:                  # 改坏后测试挂住（例如同一进程里重复拿恢复锁）：也算没通过
+            worst, tails = worst or 124, tails + [f"{mod} 超过 {TIMEOUT} 秒没跑完（挂住）"]
+            continue
         worst = worst or r.returncode
         tails += [x for x in r.stderr.strip().splitlines() if x.startswith(("Ran ", "OK", "FAILED"))][-2:]
     return worst, " ".join(tails)

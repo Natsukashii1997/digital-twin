@@ -135,6 +135,33 @@ class Order(Base):
         self.assertTrue(rep["open"])
         self.assertEqual(R.status()["last_report"]["frozen"], [])
 
+    def test_secretary_unknown_keeps_gate_closed(self):
+        """常浩 11-19 定：秘书账本里还有结果不明、核不清、还在送的代批，恢复闸对账不开闸；秘书自己结掉之后才开。
+        交常浩（handoff）的不算；状态库在、还没有秘书表的不算。"""
+        import sqlite3
+        db = self.root / "twin-state.db"
+        with mock.patch.dict(os.environ, {"DT_STATE_DB": str(db)}):
+            with sqlite3.connect(db) as con:
+                con.execute("CREATE TABLE other (x)")
+            R.ensure_open()                                       # 没有秘书表：照常开
+            with sqlite3.connect(db) as con:
+                con.execute("CREATE TABLE secretary_decisions (id TEXT, action TEXT, status TEXT, created_at TEXT)")
+                con.executemany("INSERT INTO secretary_decisions VALUES (?, ?, ?, 'x')",
+                                [("sd-1", "ask", "unknown"), ("sd-2", "handoff", "handoff"), ("sd-3", "ask", "done")])
+            with E.db() as con:
+                E.mark_dirty(con, "秘书代批 sd-1 结果不明")
+            with self.assertRaisesRegex(E.Refused, "秘书账本里有 1 个"):
+                R.ensure_open()
+            for status in ("unreconciled", "executing"):
+                with sqlite3.connect(db) as con:
+                    con.execute("UPDATE secretary_decisions SET status = ? WHERE id = 'sd-1'", (status,))
+                with self.assertRaisesRegex(E.Refused, "sd-1"):
+                    R.ensure_open()
+            with sqlite3.connect(db) as con:                      # 秘书自己的对账结掉了
+                con.execute("UPDATE secretary_decisions SET status = 'done' WHERE id = 'sd-1'")
+            R.ensure_open()
+            self.assertTrue(R.status()["open"])
+
     def test_queued_owner_answer_is_not_submitted_during_reconcile(self):
         import autoloop_answer as A
         import autoloop_feishu as F
