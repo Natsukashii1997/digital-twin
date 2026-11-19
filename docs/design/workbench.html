@@ -375,6 +375,109 @@ svg.iso .led-ok{fill:var(--ok)} svg.iso .led-warn{fill:var(--warn)}
   @keyframes bob{50%{transform:translateY(-4px)}}
 }
 
+/* ---------- 协同页（11-19 定稿：工作流泳道 + 规则接在下面；自动化按负责人分组） ---------- */
+.cb{display:grid;gap:52px}
+.cb-bad{color:var(--bad)}
+.cb-out{display:inline-block;border:1px solid var(--ink);background:var(--bg);padding:0 6px;font-size:12px;white-space:nowrap}
+.cb-rules{display:grid;grid-template-columns:auto minmax(0,1fr);gap:16px;align-items:start;border:1px solid var(--ink);background:var(--panel);padding:12px 16px;margin-bottom:18px}
+.cb-rules .lb{font-size:12px;background:var(--ink);color:var(--bg);padding:1px 8px;white-space:nowrap}
+.cb-rules ol{margin:0;padding:0;list-style:none;counter-reset:r;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 28px;font-size:13px}
+.cb-rules li{counter-increment:r;padding-left:1.6em;position:relative}
+.cb-rules li::before{content:counter(r);position:absolute;left:0;color:var(--mute);font-size:12px}
+.cb-tabs{display:flex;border:1px solid var(--ink);margin-bottom:18px}
+.cb-tabs button{flex:1;border:0;border-right:1px solid var(--ink);background:var(--panel);padding:8px 10px;font-size:14px;font-weight:700;cursor:pointer;text-align:left}
+.cb-tabs button:hover{background:var(--chip)}
+.cb-tabs button:last-child{border-right:0;flex:0 0 auto;font-weight:400;color:var(--mute)}
+.cb-tabs button[aria-current="true"]{background:var(--ink);color:var(--bg)}
+.cb-tabs small{display:block;font-weight:400;font-size:11px;opacity:.7}
+.cb-tabs em{font-style:normal;font-weight:400;font-size:11px;background:var(--accent);color:var(--on-accent);padding:0 5px;margin-left:8px}
+.cb-wfh{display:grid;grid-template-columns:300px minmax(0,1fr);gap:28px;align-items:start;margin-bottom:16px}
+.cb-wfh h3{font-size:20px;font-weight:800}
+.cb-wfh h3 .flag{margin-left:10px;vertical-align:3px;font-weight:400}
+.cb-wfh p{font-size:13px;margin-top:6px;line-height:1.65}
+.cb-ver{font-size:12px;font-weight:400;border:1px solid var(--ink);padding:0 6px;margin-left:10px;vertical-align:3px}
+.cb-meta{margin:0;display:grid;grid-template-columns:1fr 1.15fr .9fr;border:1px solid var(--line);background:var(--panel)}
+.cb-meta>div{padding:9px 12px;border-right:1px dashed var(--line)}
+.cb-meta>div:last-child{border-right:0}
+.cb-meta dt{font-size:12px;color:var(--mute);margin-bottom:3px}
+.cb-meta dd{margin:0;font-size:13px;line-height:1.6}
+.cb-meta ol{margin:0;padding-left:1.4em}
+.cb-modbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;background:var(--bg);border:1px solid var(--ink);border-bottom:0;padding:7px 10px;font-size:12px}
+.cb-modbar .lb{background:var(--ink);color:var(--bg);padding:1px 8px;margin-right:4px}
+.cb-mod{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--ink);background:var(--panel);padding:2px 7px;cursor:grab;user-select:none}
+.cb-mod:hover{background:var(--f-top)}
+.cb-mod i{font-style:normal;color:var(--mute)}
+.cb-jmp{margin-left:auto;border:1px solid var(--ok);color:var(--ok);background:transparent;font-size:12px;padding:1px 9px;cursor:pointer}
+.cb-jmp.no{border-color:var(--bad);color:var(--bad)}
+.cb-swim{display:grid;position:relative;border:1px solid var(--ink);background:var(--panel)}
+.cb-swim .hc{display:flex;justify-content:space-between;align-items:center;gap:6px;white-space:nowrap;font-size:12px;color:var(--mute);padding:5px 10px;border-bottom:1px solid var(--ink);border-left:1px dashed var(--line)}
+.cb-swim .hc:first-child{border-left:0}
+.cb-swim .hc.add{justify-content:center}
+.cb-mv{display:inline-flex;gap:3px}
+.cb-mv button{border:1px solid var(--line);background:transparent;min-width:18px;height:18px;line-height:1;font-size:11px;cursor:pointer;padding:0 4px;color:var(--ink)}
+.cb-mv button:hover:not(:disabled){border-color:var(--ink);background:var(--chip)}
+.cb-mv button:disabled{opacity:.3;cursor:default}
+.cb-swim .ln{display:flex;gap:8px;align-items:center;padding:0 10px;font-size:13px;border-top:1px dashed var(--line);border-right:1px solid var(--ink);background:var(--bg)}
+.cb-swim .ln svg{width:24px;height:auto;flex:none}
+.cb-swim .ln.me,.cb-cell.me{background:var(--acc-soft)}
+.cb-cell{min-height:66px;border-top:1px dashed var(--line);border-left:1px dashed var(--line);padding:8px 10px;display:grid;align-items:center}
+.cb-cell.add,.cb-swim .rc.add{padding:0;background:repeating-linear-gradient(135deg,transparent 0 5px,var(--line) 5px 6px)}
+.cb-blk{position:relative;z-index:1;border:1px solid var(--ink);background:var(--f-top);padding:6px 9px;cursor:grab;display:grid;gap:2px;user-select:none}
+.cb-blk b{font-size:13.5px;line-height:1.3}
+.cb-blk>span{font-size:11px;color:var(--mute)}
+.cb-blk .cb-out{font-size:11px;padding:0 4px}
+.cb-blk.me{border-color:var(--accent)}
+.cb-blk.bad{border-color:var(--bad);box-shadow:inset 0 3px 0 var(--bad)}
+.cb-swim.draft .cb-blk{border-style:dashed}
+.cb-swim .rl{font-size:12px;color:var(--mute);padding:10px;border-top:1px dashed var(--line);border-right:1px solid var(--ink);background:var(--bg)}
+.cb-swim .rc{padding:10px 12px;border-top:1px dashed var(--line);border-left:1px dashed var(--line);font-size:13px;line-height:1.65;background:var(--bg);min-width:0}
+.cb-swim .rc.me{background:var(--acc-soft)}
+.cb-swim .rl.first,.cb-swim .rc.first{border-top:1px solid var(--ink)}
+.cb-swim .rc.bad.first{box-shadow:inset 0 3px 0 var(--bad)}
+.cb-swim .rc ol{margin:0;padding-left:1.5em}
+.cb-wire{position:absolute;left:0;top:0;pointer-events:none}
+.cb-wire path{fill:none;stroke:var(--ink);stroke-width:1.3}
+.cb-wire path.hd{fill:var(--ink);stroke:none}
+.cb-dragging{opacity:.35}
+.cb-drop{background:var(--acc-soft)!important;outline:1.5px dashed var(--accent);outline-offset:-3px}
+.cb-ghost{position:fixed;z-index:99;pointer-events:none;background:var(--ink);color:var(--bg);font-family:var(--mono);font-size:13px;font-weight:700;padding:3px 10px;border:1px solid var(--bg)}
+.cb-msg{margin-top:10px;font-size:13px;color:var(--bad);border:1px solid var(--bad);padding:6px 12px}
+.cb-chg{border:1px solid var(--ink);background:var(--ink);color:var(--bg);padding:14px 18px;margin-top:14px;display:grid;gap:10px}
+.cb-chg .hd{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+.cb-chg .hd b{font-size:15px}
+.cb-chg .hd span{font-size:12px;opacity:.8}
+.cb-chg .cmp{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;align-items:center;font-size:12px}
+.cb-chg .lb{opacity:.7}
+.cb-chg .ch{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center}
+.cb-chg .ch span{background:var(--bg);color:var(--ink);padding:1px 7px;display:inline-flex;gap:6px;align-items:center}
+.cb-chg .ch.old span{opacity:.6}
+.cb-chg .ch i{font-style:normal;opacity:.7}
+.cb-chg .bts{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.cb-chg .btn{border-color:var(--bg);color:var(--bg)}
+.cb-chg .btn:hover{background:transparent;text-decoration:underline}
+.cb-chg .btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.cb-chg .btn:disabled{opacity:.45;cursor:not-allowed;text-decoration:none}
+.cb-chg .tip{font-size:12px;opacity:.8}
+.cb-chg.sent{background:var(--panel);color:var(--ink);grid-template-columns:minmax(0,1fr) auto;align-items:center}
+.cb-chg.sent .btn{border-color:var(--ink);color:var(--ink)}
+.cb-chk{list-style:none;margin:0;padding:0;display:grid;gap:5px;font-size:13px}
+.cb-chk li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:6px;line-height:1.55}
+.cb-chk i{font-style:normal;color:var(--ok);font-weight:700}
+.cb-chk li.no,.cb-chk li.no i{color:var(--accent)}
+.cb-og+.cb-og{margin-top:18px}
+.cb-og .oh{display:flex;gap:10px 16px;align-items:center;padding:8px 12px;background:var(--ink);color:var(--bg);font-size:12px}
+.cb-og .oh b{font-size:14px}
+.cb-og .oh .code{color:var(--ink)}
+.cb-og .oh .code.ink,.cb-og .oh .code.mid,.cb-og .oh .code.none{color:var(--bg);border-color:var(--bg)}
+.cb-at{border-collapse:collapse;width:100%;font-size:13px;border:1px solid var(--ink);border-top:0;background:var(--panel);table-layout:fixed}
+.cb-at td{padding:9px 12px;border-top:1px dashed var(--line);vertical-align:top;line-height:1.55}
+.cb-at tr:first-child td{border-top:0}
+.cb-at td:nth-child(2){width:300px}
+.cb-at td:nth-child(3){width:200px}
+.cb-at td b{font-size:14px}
+.cb-at td small{display:block;color:var(--mute);font-size:12px;margin-top:1px}
+.cb-at tr.off td{color:var(--mute)}
+.cb-at tr.off td b{font-weight:400}
 @media (max-width:1240px){
   .split{grid-template-columns:minmax(0,1fr)}
   .rail{position:static;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
@@ -671,8 +774,8 @@ function wfRow(w){
     <div class="mini">${strip(w)}<div class="caps">${caps}</div></div>
   </div>`;
 }
-/* 侧栏只有首页和汇报两页有稿；其余六页（主线、协同、执行、分身、记录、沉淀）还没设计 */
-const state={page:'home'};
+/* 侧栏首页、汇报、协同三页有稿；其余五页（主线、执行、分身、记录、沉淀）还没设计 */
+const state={page:'home',cw:0,msg:''};
 /* 首页：清单行。能一眼定的在这里点主按钮，要看详情的去汇报 */
 function homeDecide(){
   return `<section class="dlist" id="decide" aria-label="等我拍板">
@@ -802,12 +905,250 @@ function reportPage(){
   </section>
   ${partA()}</div>`;
 }
+/* ---------- 协同页（11-19 定稿）：只放规则。工作流是示例数据；自动化是 11-19 从各家实际定时任务盘出来的 ---------- */
+const S=(id,r,t,k,need,out,d,rub,fail)=>({id,r,t,k,need,out,do:d,rub,fail});
+const WF2=[
+ {name:'标准开发',ver:3,state:'on',goal:'把一个开发的活，从一句话做到合并进主分支。',
+  start:'你在飞书里派一个活，或者给 issue 贴上 ready-for-agent。',
+  done:['PR 合并进主分支','全量测试通过','任务单关掉，回执发到飞书'],cap:'返修满 3 轮还不过，停下交给你',
+  hist:[['v3','11-12','把测试挪到审查后面：审过的才花时间测'],['v2','11-03','审查从 Codex 换成 GPT，和写的人不是一家'],['v1','10-28','第一版']],
+  steps:[
+   S('a1','mg','拆单派单','plan',[],'任务单','把你说的话整理成任务单：做什么、在哪个仓库、谁来做、做到什么样算完。',['目标、范围、验收标准、不做什么，四样都写了','仓库在项目名册里','要改文件的活，你确认过才派出去'],[null,'缺哪样就回头问你，不猜']),
+   S('a2','cc','写代码 · 开 PR','make',['任务单'],'PR','在自己的工作目录里改代码、补测试，做完开 PR。',['只动任务单范围内的东西','本地全量测试通过','PR 里分开列「你要求的」和「顺手改的」'],[null,'做不下去就写清卡在哪，停下交给你']),
+   S('a3','gp','独立审','review',['PR'],'审查意见','不看作者怎么说，自己读改动，判断有没有问题。',['每条意见指到具体文件和行','分清「必须改」和「建议」','结论只有两种：通过，或退回'],['a2','有「必须改」就退回']),
+   S('a4','cx','测试','test',['PR'],'测试结果','跑全量测试，再把改动实际用一遍。',['全量测试通过','按任务单的验收标准逐条试过','结果贴在 PR 里'],['a2','有一条不过就退回']),
+   S('a5','me','合并','merge',['审查意见','测试结果'],'合并','你在卡片上点「合并」。',['审查通过、测试通过、CI 全绿，卡片才会发给你','中高风险的只能你点；低风险文档类秘书可以代点'],['a2','你点「退回」并写一句原因'])]},
+ {name:'方案评审',ver:2,state:'on',goal:'动手之前，先让另一家独立看看方向对不对。',
+  start:'你说「思维评审」，或者 Claude 判断这个方向需要先论证。',
+  done:['你做出决定：做、不做，或换方向','决定和理由记进项目'],cap:'评审最多来回 2 轮，谈不拢的原样列给你',
+  hist:[['v2','11-05','加了「处理意见」一步，评审意见不再直接甩给你'],['v1','10-30','第一版']],
+  steps:[
+   S('b1','cc','起草方案','make',[],'方案','把要做的事写成方案。',['目标、前提、取舍都写了','没选的做法也写了，写明为什么没选','一页内说完'],[null,'信息不够就先问你']),
+   S('b2','gp','独立评审','review',['方案'],'评审意见','不看 Claude 的结论，自己判断这个方向对不对。',['先看全局，再看细节','指出最可能错的那个前提','结论三选一：可以做、要改、不该做'],['b1','方案缺东西就退回补']),
+   S('b3','cc','处理意见','make',['评审意见'],'改后的方案','逐条回应评审意见，改方案。',['每条意见都有回应：采纳，或不采纳和理由','不悄悄跳过任何一条'],[null,'两边谈不拢的，原样列给你定']),
+   S('b4','me','拍板','gate',['改后的方案'],'你的决定','你定做不做、怎么做。',['给你的是两三个选项加一个推荐','用白话写，不堆术语'],['b3','你说「再想想」并写一句要补什么'])]},
+ {name:'群学习派单',ver:1,state:'on',goal:'把群学习报告里值得做的事，变成真的改动。',
+  start:'你在群学习报告下面回复「派 1 3」。',
+  done:['选中的每一条都有一个合并了的 PR','没选的记成「不做」'],cap:'同一条在同一个项目只派一次',
+  hist:[['v1','11-16','第一版']],
+  steps:[
+   S('c1','mg','整理行动','plan',[],'行动清单','从当天的群学习报告里挑出值得做的几条，写成行动清单。',['每条写清做什么、在哪个项目、谁来做','只列值得学的，纯资讯不列'],[null,'当天没有值得做的，就写「今天没有」']),
+   S('c2','me','选派','gate',['行动清单'],'派哪几条','你回「派 1 3」或「都派」。',['没点到的不做','同一条在同一个项目不派两次'],[null,'你不回就不派']),
+   S('c3','cc','开 PR','make',['派哪几条'],'PR','按选中的行动改，开 PR。',['一条行动一个 PR','本地全量测试通过'],[null,'做不下去就写清卡在哪，停下交给你']),
+   S('c4','cx','审查','review',['PR'],'审查意见','看一遍改动对不对。',['每条意见指到具体文件和行','结论只有两种：通过，或退回'],['c3','有「必须改」就退回']),
+   S('c5','me','合并','merge',['审查意见'],'合并','你在卡片上点「合并」。',['审查通过、CI 全绿，卡片才会发给你'],['c3','你点「退回」并写一句原因'])]},
+ {name:'夜间推进',ver:4,state:'on',goal:'你睡觉的时候，把说好的几件事推进到「开好 PR 等你看」。',
+  start:'每天 22:30 自动开始。',
+  done:['当晚授权的每一单：开了 PR，或者写清停在哪','早上 8 点前交班报告发到飞书'],cap:'一晚最多 3 单，每单最多 2 小时，同时只跑 1 单',
+  hist:[['v4','11-14','加了「复审」：夜里开的 PR，早上先有人看过'],['v3','11-09','每单上限从 3 小时改成 2 小时'],['v2','11-08','授权截止从 23:30 放到 00:30'],['v1','11-06','第一版']],
+  steps:[
+   S('d1','mg','提今晚可做的事','plan',[],'今晚的清单','把今晚可以替你推进的事列出来，发到飞书。',['只列已有任务单、范围清楚的','每条写明大概多久、会动哪里'],[null,'没有合适的就说「今晚没有」']),
+   S('d2','me','回复授权','gate',['今晚的清单'],'当晚的授权','你回「做 1 3」。',['只对今晚有效','00:30 前没回，今晚就不做'],[null,'你不回就不做']),
+   S('d3','cx','夜跑 · 开 PR','make',['当晚的授权'],'PR','夜里按清单做，只做到开 PR。',['一晚最多 3 单，每单最多 2 小时，同时只跑 1 单','不合并、不发布'],[null,'到上限就停下，写清做到哪']),
+   S('d4','cc','复审','review',['PR'],'审查意见','复看夜里开出来的 PR。',['每条意见指到具体文件和行','结论只有两种：通过，或退回'],[null,'不通过的夜里不返修，留到早上给你看']),
+   S('d5','mg','早上汇报','report',['PR','审查意见'],'交班报告','早上 8 点写交班报告，发到飞书和汇报页。',['一件事一件事讲，用白话','要你做的单独标出来','数字取自记录，不凭印象'],[null,'写不出就发只有事实的版本'])]},
+ {name:'销售需求落地',ver:1,state:'on',goal:'把测试群里的一条反馈，做成上线的功能，再回群里说一声。',
+  start:'你在需求反馈卡片上点「转开发」。',
+  done:['功能上线','测试反馈群里同步过'],cap:'范围没定清楚不开工',
+  hist:[['v1','11-19','第一版']],
+  steps:[
+   S('e1','ag','整理需求','plan',[],'需求说明','把测试群里的反馈整理成一条能开发的需求。',['写清谁提的、要解决什么','看得出怎样算做完'],[null,'说不清的回群里问提出人']),
+   S('e2','me','确认范围','gate',['需求说明'],'范围','你定做到哪、不做哪。',['范围写成能打勾的几条'],['e1','你说「没说清」就退回']),
+   S('e3','cc','开发 · 开 PR','make',['范围'],'PR','按范围开发，开 PR。',['只做范围里的','本地全量测试通过'],[null,'做不下去就写清卡在哪，停下交给你']),
+   S('e4','cx','测试','test',['PR'],'测试结果','跑测试，再按范围逐条实测。',['范围里每一条都试过','结果贴在 PR 里'],['e3','有一条不过就退回']),
+   S('e5','ag','回群同步','report',['测试结果'],'群里的同步','上线后回测试反馈群说一声。',['先私发给你，你回「发群」才发','写清改了什么、怎么用'],[null,'你不回就不发'])]},
+ {name:'设计出稿',ver:0,state:'draft',goal:'从一句「出设计」，做到你验收过的定稿页面。',
+  start:'你在飞书里说「出设计」。',
+  done:['你验收通过','当天登记进已定内容，存好基线截图'],cap:'三版都不满意可以重出，重出满 2 次先停下问你方向',
+  hist:[['草稿','11-19','你 13:52 新建，还没确认，不会被触发']],
+  steps:[
+   S('f1','cc','出三版','make',[],'三版预览','按要求出三版明显不同的方案，做成能点开的页面。',['三版差在思路，不差在花样','只做电脑版','自己先在浏览器里看过'],[null,'信息不够就先问你']),
+   S('f2','me','选一版','gate',['三版预览'],'选定的版本','你挑一版，说要改哪里。',['都不满意就说哪里不对'],['f1','你说「都不行」就退回重出']),
+   S('f3','cc','细化','make',['选定的版本'],'定稿页面','把选定的版本做细。',['你说要改的每一条都改了','没碰已经定稿的部分'],[null,'要碰已定内容，先单独问你']),
+   S('f4','gp','审','review',['定稿页面'],'审查意见','独立看一遍。',['指到具体位置','结论只有两种：通过，或退回'],['f3','有「必须改」就退回']),
+   S('f5','cx','截图回归','test',['定稿页面'],'截图对比','在真实浏览器里截图，和基线对比。',['页面画完、字体加载完再截','已定稿的部分没有变'],['f3','有变化就退回']),
+   S('f6','me','验收','gate',['审查意见','截图对比'],'定稿登记','你验收。',['验收通过当天登记'],['f3','你说哪里不对就退回'])]}
+];
+const cl=o=>JSON.parse(JSON.stringify(o));
+const WF0=cl(WF2);
+const MODS=[['plan','mg','整理成任务单','任务单','把一句话变成能照做的单子'],['make','cc','做 · 开 PR','PR','改文件，做完开 PR'],['review','gp','独立审','审查意见','另一家看一遍'],['test','cx','测试','测试结果','跑测试并实际用一遍'],['gate','me','停下等我','你的确认','到这里停，等你点头'],['merge','me','合并','合并','你点合并'],['report','mg','汇报','报告','把结果讲给你听']];
+const RULES=['要改文件的活，你确认过才派出去','审的人和做的人不能是同一家','每一步都有判定标准，不过就退回，不带着问题往下走','返修到上限就停下交给你，不无限重试','改规则先进「等我拍板」；已经在跑的单按旧规则跑完'];
+
+/* 自动化：从各家实际的定时任务里盘出来的（2026-11-19 本机现状） */
+const OW={mg:'猛鬼兽',ag:'亚古兽',cx:'Codex',cc:'Claude Code',pc:'本机'};
+const OWN=['mg','ag','cx','cc','pc'];
+const AUTOS=[
+ ['mg','个人项目日报','把各个个人项目昨天的进展写成一张卡片，发到你的飞书私聊，顺带报工程自检','每天 09:15 写稿，10:00 发',1],
+ ['mg','AI 前沿群学习报告','读群里前一天的消息，挑出值得学的，写成报告和行动清单发给你','每天 10:00 写稿，10:45 发',1],
+ ['mg','AI HOT 热点榜','取热点榜前 10 条，排成卡片发到你的私聊','工作日 09:45',1],
+ ['mg','Tidings 周报','把 GitHub 周报卡片转发到你的私聊','每周一 19:30',1],
+ ['mg','skill 月度体检','统计每个 skill 这个月用了几次、有没有出问题','每月 1 号 10:30',1],
+ ['mg','影子合并官','给每个新 PR 判「建议合并」还是「退回」，发卡片给你','09:00–23:30 每 30 分钟',0,'11-11 起暂停'],
+ ['mg','工程自检','比对仓库和装到电脑上的副本对不对得上','每天 09:50',0,'已并进个人项目日报'],
+ ['mg','夜跑主控','盯着夜里的任务一步步往下放，到上限就停','每 5 分钟',0,'11-09 起暂停'],
+ ['ag','记忆日报','把你前一天的工作往来写进记忆文档，写完私聊告诉你','每天 07:30',1],
+ ['ag','销售侧边栏 · 需求反馈','整理测试群里的反馈，先私发给你，你回「发群」才发','每天 18:00',1],
+ ['ag','销售侧边栏 · 推进进度','把这一周的项目进度写成卡片，私发给你','每周三 18:30',1],
+ ['cx','GET 知识库同步提醒','提醒你把 GET 的内容同步进 Obsidian','每周一 11:00',1],
+ ['cx','AIHOT 每日资讯精选','挑过去 24 小时的 AI 资讯，写成精选','每天 10:30',0],
+ ['cx','留学 1v1 辅导行业周报','写一份行业简报，帮你判断要不要调整策略','每周一 10:00',0],
+ ['cx','ChatGPT 会话空间巡检','查 Codex 的会话空间够不够用，必要时做无损迁移','每 3 天 10:00',0],
+ ['cx','数码世界板块精简接续','接着做之前没做完的板块精简','每 5 分钟',0,'临时任务，做完没删'],
+ ['cc','牛马之家说明书整理提案','读一周的坑和巡检日志，只出整理提案，不改仓库','每周五 18:00',1],
+ ['cc','磁盘空间巡检','查磁盘还剩多少，不够就清可以再生成的缓存','每天 10:00',0],
+ ['pc','数字分身每日巡检','查网关、飞书连接、定时任务有没有异常，有异常才发飞书','每天 09:45',1],
+ ['pc','牛马之家巡检','查牛马之家的服务是不是正常','每天 08:30',1],
+ ['pc','Tidings 每日更新','到你设的时间拉取 GitHub 动态，更新 Tidings','09:00–23:45 每 15 分钟看一次',1]
+].map(a=>({o:a[0],name:a[1],what:a[2],when:a[3],on:!!a[4],note:a[5]||''}));
+const ownChip=o=>o==='pc'?'<span class="code none">机</span>':codeChip(o);
+
+/* ---------- 规则检查：每次拖完都重算 ---------- */
+const sig=w=>w.steps.map(s=>s.id+':'+s.r).join('>');
+const dirty=i=>sig(WF2[i])!==sig(WF0[i]);
+function checks(w){
+  const out=[],badAt=new Set(),st=w.steps;
+  let bad=[];
+  st.forEach((s,i)=>s.need.forEach(n=>{if(!st.slice(0,i).some(p=>p.out===n)){bad.push(`第 ${i+1} 步「${s.t}」要用「${n}」，可它前面没有人交出`);badAt.add(i)}}));
+  bad.length?bad.forEach(t=>out.push({ok:0,text:t})):out.push({ok:1,text:'每一步要用的东西，前面都有人交出'});
+  bad=[];let hasBack=0;
+  st.forEach((s,i)=>{if(!s.fail[0])return;hasBack=1;const j=st.findIndex(p=>p.id===s.fail[0]);
+    if(j<0){bad.push(`第 ${i+1} 步「${s.t}」不过时要退回的那一步被删了`);badAt.add(i)}
+    else if(j>i){bad.push(`第 ${i+1} 步「${s.t}」不过时要退回「${st[j].t}」，可它排到后面去了`);badAt.add(i)}});
+  bad.length?bad.forEach(t=>out.push({ok:0,text:t})):hasBack&&out.push({ok:1,text:'不过的时候，都退得回前面的步骤'});
+  bad=[];let hasRev=0;
+  st.forEach((s,i)=>{if(s.k!=='review')return;hasRev=1;const mk=st.slice(0,i).filter(p=>p.k==='make').pop();
+    if(mk&&mk.r===s.r){bad.push(`第 ${i+1} 步审的是自己做的东西（都是 ${R[s.r].name}），不算独立审`);badAt.add(i)}});
+  bad.length?bad.forEach(t=>out.push({ok:0,text:t})):hasRev&&out.push({ok:1,text:'审的人和做的人不是同一家'});
+  st.forEach((s,i)=>{if(s.r==='gp'&&s.k!=='review'){out.push({ok:0,text:`GPT 只接了网页，只能审；第 ${i+1} 步「${s.t}」它做不了`});badAt.add(i)}});
+  const mi=st.findIndex(s=>s.k==='merge');
+  if(mi>=0){const later=st.findIndex((s,i)=>i>mi&&s.k==='make');
+    if(later>=0){out.push({ok:0,text:`合并排在第 ${mi+1} 步，可第 ${later+1} 步还在改东西`});badAt.add(mi)}else out.push({ok:1,text:'合并排在所有改动之后'})}
+  return {list:out,badAt,bad:out.filter(c=>!c.ok).length};
+}
+const needText=(w,i)=>{const s=w.steps[i];return s.need.length?s.need.map(n=>{const j=w.steps.findIndex((p,k)=>k<i&&p.out===n);return j>=0?`第 ${j+1} 步交出的 <b>${n}</b>`:`<b class="cb-bad">${n}（前面没有人交出）</b>`}).join('、'):'从触发直接开始，不用接别人的东西'};
+const failText=(w,i)=>{const s=w.steps[i];if(!s.fail[0])return s.fail[1];const j=w.steps.findIndex(p=>p.id===s.fail[0]);return j<0?`${s.fail[1]}，<b class="cb-bad">可要退回的那一步被删了</b>`:j>i?`${s.fail[1]}，<b class="cb-bad">可「${w.steps[j].t}」排到后面去了</b>`:`${s.fail[1]}，回到第 ${j+1} 步「${w.steps[j].t}」`};
+const chainText=w=>w.steps.map(s=>`<span>${codeChip(s.r)} ${s.t}</span>`).join('<i>→</i>');
+function changes(i){
+  const w=WF2[i],o=WF0[i],out=[];
+  const oid=o.steps.map(s=>s.id),nid=w.steps.map(s=>s.id);
+  w.steps.filter(s=>!oid.includes(s.id)).forEach(s=>out.push(`加了一步「${s.t}」`));
+  o.steps.filter(s=>!nid.includes(s.id)).forEach(s=>out.push(`删了「${s.t}」`));
+  w.steps.forEach(s=>{const p=o.steps.find(x=>x.id===s.id);if(p&&p.r!==s.r)out.push(`「${s.t}」从 ${R[p.r].name} 换成 ${R[s.r].name}`)});
+  const a=oid.filter(x=>nid.includes(x)).join(),b=nid.filter(x=>oid.includes(x)).join();
+  if(a!==b)out.push('顺序变了');
+  return out;
+}
+function checkList(w){const c=checks(w);return `<ul class="cb-chk">${c.list.map(x=>`<li class="${x.ok?'':'no'}"><i>${x.ok?'✓':'✕'}</i>${x.text}</li>`).join('')}</ul>`}
+function changeBar(i){
+  const w=WF2[i];
+  if(w.sent) return `<div class="cb-chg sent"><p><b>「${w.name}」的改动已送去「等我拍板」。</b>你确认后成为 v${w.ver+1}；已经在跑的单按 v${w.ver} 跑完。</p><div class="bts"><button class="btn" type="button" data-undo="${i}">撤回</button></div></div>`;
+  if(!dirty(i)) return '';
+  const c=checks(w);
+  return `<div class="cb-chg" id="cbChg">
+    <p class="hd"><b>「${w.name}」改了，还没生效</b><span>${changes(i).join('；')}</span></p>
+    <div class="cmp"><span class="lb">原来</span><div class="ch old">${chainText(WF0[i])}</div><span class="lb">现在</span><div class="ch">${chainText(w)}</div></div>
+    ${checkList(w)}
+    <div class="bts"><button class="btn pri" type="button" data-send="${i}" ${c.bad?'disabled':''}>送去等我拍板</button><button class="btn" type="button" data-undo="${i}">撤销改动</button>
+      <span class="tip">${c.bad?`有 ${c.bad} 处对不上，改好才能送`:`确认后成为 v${w.ver+1}；已经在跑的单按 v${w.ver} 跑完`}</span></div>
+  </div>`;
+}
+const wfMeta=w=>`<dl class="cb-meta"><div><dt>什么时候开始</dt><dd>${w.start}</dd></div><div><dt>整条怎样算做完</dt><dd><ol>${w.done.map(d=>`<li>${d}</li>`).join('')}</ol></dd></div><div><dt>上限</dt><dd>${w.cap}</dd></div></dl>`;
+const verTag=w=>w.state==='draft'?'<span class="flag">草稿 · 待你确认</span>':`<span class="cb-ver num">v${w.ver}</span>`;
+const onTag=a=>a.on?'<span class="res"><i></i>在跑</span>':`<span class="res off"><i></i>已暂停</span>`;
+const autoOn=AUTOS.filter(a=>a.on).length;
+function autoSec(){
+  return `<section aria-label="自动化"><div class="h-sec"><h2><i class="sq"></i>自动化</h2><span class="hint num">${AUTOS.length} 个 · ${autoOn} 个在跑 · ${AUTOS.length-autoOn} 个已暂停</span></div>
+    ${OWN.map(o=>{const L=AUTOS.filter(a=>a.o===o);return `<div class="cb-og">
+      <div class="oh">${ownChip(o)}<b>${OW[o]}</b><span class="num">${L.length} 个 · ${L.filter(a=>a.on).length} 个在跑</span></div>
+      <table class="cb-at"><tbody>${L.map(a=>`<tr class="${a.on?'':'off'}"><td><b>${a.name}</b><small>${a.what}</small></td><td class="num">${a.when}</td><td>${onTag(a)}${a.note?`<small>${a.note}</small>`:''}</td></tr>`).join('')}</tbody></table>
+    </div>`}).join('')}
+  </section>`;
+}
+/* 泳道：上半是一家一条道，下半每一列接着这一步的规则；最右一列是「加在最后」 */
+const LANES=['me','mg','ag','cc','cx','gp'];
+const RROWS=[['做什么',(w,i)=>w.steps[i].do],['用什么',(w,i)=>needText(w,i)],['怎样算过',(w,i)=>`<ol>${w.steps[i].rub.map(r=>`<li>${r}</li>`).join('')}</ol>`],['不过怎么办',(w,i)=>failText(w,i)]];
+function swim(w,wi,c){
+  const n=w.steps.length;
+  return `<div class="cb-swim ${w.state==='draft'?'draft':''}" id="cbSwim" style="grid-template-columns:112px repeat(${n},minmax(0,1fr)) 40px">
+    <div class="hc"></div>${w.steps.map((s,i)=>`<div class="hc num">第 ${i+1} 步<span class="cb-mv"><button type="button" data-mv="${wi}:${i}:-1" aria-label="往前挪" ${i===0?'disabled':''}>‹</button><button type="button" data-mv="${wi}:${i}:1" aria-label="往后挪" ${i===n-1?'disabled':''}>›</button><button type="button" data-del="${wi}:${i}" aria-label="删掉这一步" ${n===1?'disabled':''}>×</button></span></div>`).join('')}<div class="hc add">＋</div>
+    ${LANES.map(r=>`<div class="ln ${r==='me'?'me':''}">${cubeIcon(r)}<span>${R[r].name}</span></div>
+      ${w.steps.map((s,i)=>`<div class="cb-cell ${r==='me'?'me':''}" data-drop="${wi}:${r}:${i}">${s.r===r?`<div class="cb-blk ${r==='me'?'me':''} ${c.badAt.has(i)?'bad':''}" id="cbk${i}" data-drag="s:${i}"><b>${s.t}</b><span>交出 <span class="cb-out">${s.out}</span></span></div>`:''}</div>`).join('')}<div class="cb-cell add ${r==='me'?'me':''}" data-drop="${wi}:${r}:${n}"></div>`).join('')}
+    ${RROWS.map((rr,k)=>`<div class="rl ${k?'':'first'}">${rr[0]}</div>${w.steps.map((s,i)=>`<div class="rc ${k?'':'first'} ${s.r==='me'?'me':''} ${c.badAt.has(i)?'bad':''}">${rr[1](w,i)}</div>`).join('')}<div class="rc add ${k?'':'first'}"></div>`).join('')}
+    <svg class="cb-wire" id="cbWire" aria-hidden="true"></svg>
+  </div>`;
+}
+function collabPage(){
+  const wi=state.cw,w=WF2[wi],c=checks(w),on=WF2.filter(x=>x.state==='on').length;
+  return `<div class="cb">
+  <section aria-label="工作流"><div class="h-sec"><h2><i class="sq"></i>工作流</h2><span class="hint num">${WF2.length} 条 · ${on} 条启用 · ${WF2.length-on} 条草稿</span></div>
+    <div class="cb-rules"><span class="lb">所有工作流都守的</span><ol>${RULES.map(r=>`<li>${r}</li>`).join('')}</ol></div>
+    <div class="cb-tabs">${WF2.map((x,i)=>`<button type="button" data-cw="${i}" aria-current="${i===wi}">${x.name}${dirty(i)&&!x.sent?'<em>改了</em>':''}<small>${x.steps.length} 步 · ${x.state==='draft'?'草稿':'v'+x.ver}</small></button>`).join('')}<button type="button" class="nw">+ 新建</button></div>
+    <div class="cb-wfh"><div class="nm"><h3>${w.name}${verTag(w)}</h3><p>${w.goal}</p></div>${wfMeta(w)}</div>
+    <div class="cb-modbar"><span class="lb">模块</span>${MODS.map((m,i)=>`<span class="cb-mod" data-drag="m:${i}"><i>⠿</i><b>${m[2]}</b></span>`).join('')}${dirty(wi)&&!w.sent?`<button type="button" class="cb-jmp ${c.bad?'no':''}" data-jump="cbChg">${c.bad?`✕ ${c.bad} 处对不上`:'✓ 改了，检查通过'} ↓</button>`:''}</div>
+    ${swim(w,wi,c)}
+    ${state.msg?`<p class="cb-msg">${state.msg}</p>`:''}
+    ${changeBar(wi)}
+  </section>
+  ${autoSec()}</div>`;
+}
+/* 连线：按块的实际位置画，渲染后、窗口变化后、字体加载后都重画 */
+function cbPost(){
+  const sw=document.getElementById('cbSwim'),sv=document.getElementById('cbWire');if(!sw||!sv)return;
+  const W=sw.offsetWidth,H=sw.offsetHeight;sv.setAttribute('viewBox',`0 0 ${W} ${H}`);sv.setAttribute('width',W);sv.setAttribute('height',H);
+  const pos=el=>{let x=0,y=0,e=el;while(e&&e!==sw){x+=e.offsetLeft;y+=e.offsetTop;e=e.offsetParent}return{x,y,w:el.offsetWidth,h:el.offsetHeight}};
+  let d='';const n=WF2[state.cw].steps.length;
+  for(let i=0;i<n-1;i++){const a=document.getElementById('cbk'+i),b=document.getElementById('cbk'+(i+1));if(!a||!b)continue;
+    const p=pos(a),q=pos(b),x1=p.x+p.w,y1=p.y+p.h/2,x2=q.x,y2=q.y+q.h/2,mx=(x1+x2)/2;
+    d+=`<path d="M${x1} ${y1}H${mx}V${y2}H${x2-5}"/><path class="hd" d="M${x2-6} ${y2-4}L${x2} ${y2}L${x2-6} ${y2+4}Z"/>`}
+  sv.innerHTML=d;
+}
+addEventListener('resize',()=>{if(state.page==='collab')cbPost()});
+document.fonts&&document.fonts.ready.then(()=>{if(state.page==='collab')cbPost()});
+
+/* ---------- 改工作流：挪、拖、删、加（示例里只改页面上的这份，送去等我拍板也只是演示） ---------- */
+function mvStep(wi,from,to){const st=WF2[wi].steps;if(to<0||to>st.length)return;const [s]=st.splice(from,1);st.splice(to>from?to-1:to,0,s);WF2[wi].sent=false}
+let nid=0;
+function addMod(wi,mi,at,lane){const m=MODS[mi],need={review:['PR'],test:['PR'],merge:['审查意见']}[m[0]]||[],mine=m[0]==='gate'||m[0]==='merge';
+  WF2[wi].steps.splice(at,0,S('n'+(++nid),mine?'me':lane==='me'?m[1]:lane,m[2],m[0],need,m[3],'（新加的一步，做什么待你写）',['（判定标准先用模块自带的，待你改）'],[null,'（待你写）']));WF2[wi].sent=false}
+/* 拖动用指针事件做：鼠标和触控笔能拖；手指触屏留给滚动，用列头的小箭头挪 */
+let pd=null,noClick=false;
+const clearDrop=()=>document.querySelectorAll('.cb-drop').forEach(n=>n.classList.remove('cb-drop'));
+const dropAt=e=>document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-drop]')||null;
+function pdEnd(){if(!pd)return;pd.ghost&&pd.ghost.remove();pd.el.classList.remove('cb-dragging');document.body.style.userSelect='';clearDrop();pd=null}
+document.addEventListener('pointerdown',e=>{if(e.pointerType==='touch'||e.button!==0)return;const d=e.target.closest('[data-drag]');if(!d||e.target.closest('button'))return;pd={key:d.dataset.drag,el:d,x:e.clientX,y:e.clientY,on:false}});
+document.addEventListener('pointermove',e=>{if(!pd)return;
+  if(!pd.on){if(Math.hypot(e.clientX-pd.x,e.clientY-pd.y)<6)return;pd.on=true;pd.el.classList.add('cb-dragging');document.body.style.userSelect='none';
+    pd.ghost=document.createElement('div');pd.ghost.className='cb-ghost';pd.ghost.textContent=pd.el.querySelector('b').textContent;document.body.appendChild(pd.ghost)}
+  pd.ghost.style.left=e.clientX+12+'px';pd.ghost.style.top=e.clientY+10+'px';
+  clearDrop();const t=dropAt(e);if(t)t.classList.add('cb-drop')});
+document.addEventListener('pointerup',e=>{if(!pd)return;if(!pd.on){pd=null;return}
+  const t=dropAt(e),[kind,idx]=pd.key.split(':');noClick=true;setTimeout(()=>noClick=false,0);
+  if(t){const[w,lane,c]=t.dataset.drop.split(':'),wi=+w,col=+c,st=WF2[wi].steps;state.msg='';
+    if(kind==='m'){addMod(wi,+idx,col,lane)}
+    else{const from=+idx,s=st[from],mine=s.k==='gate'||s.k==='merge';
+      if(mine&&lane!=='me')state.msg=`「${s.t}」是要你点头的一步，不能交给 AI。想去掉它，就把这一步删掉。`;
+      else if(!mine&&lane==='me')state.msg=`「${s.t}」是 AI 干的活。要在这里停下等你，加一步「停下等我」。`;
+      else{s.r=lane;WF2[wi].sent=false;const[x]=st.splice(from,1);st.splice(col,0,x)}}}
+  pdEnd();if(t)render()});
+document.addEventListener('pointercancel',pdEnd);
+document.addEventListener('click',e=>{if(noClick){e.stopPropagation();e.preventDefault()}},true);
+document.addEventListener('click',e=>{
+  if(state.page!=='collab')return;
+  const q=s=>e.target.closest(s);let m;
+  if(m=q('[data-mv]')){const[w,i,d]=m.dataset.mv.split(':').map(Number);mvStep(w,i,d<0?i-1:i+2);state.msg='';render();return}
+  if(m=q('[data-del]')){const[w,i]=m.dataset.del.split(':').map(Number);if(WF2[w].steps.length>1){WF2[w].steps.splice(i,1);WF2[w].sent=false}state.msg='';render();return}
+  if(m=q('[data-send]')){WF2[+m.dataset.send].sent=true;render();return}
+  if(m=q('[data-undo]')){const i=+m.dataset.undo;WF2[i]=cl(WF0[i]);state.msg='';render();return}
+  if(m=q('[data-cw]')){state.cw=+m.dataset.cw;state.msg='';render();return}
+});
+
 function render(){
-  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
+  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
   $('#nav').innerHTML=nav.map(n=>n[0]==='grp'?`<li class="grp">${n[1]}<i></i></li>`:`<li><a href="#" ${n[3]?`data-page="${n[3]}"`:''} ${n[3]===state.page?'aria-current="page"':''}><span class="ico ${n[1]}"></span>${n[0]}${n[2]}</a></li>`).join('');
-  document.querySelector('.bar h1').textContent=state.page==='report'?'汇报':'首页';
+  document.querySelector('.bar h1').textContent={report:'汇报',collab:'协同'}[state.page]||'首页';
   $('#sideLeds').innerHTML=AI.map(id=>`<span title="${R[id].full||R[id].name} ${R[id].stateText}"><span class="led ${R[id].state==='ok'?'':'warn'}"></span>${R[id].code}</span>`).join('');
   if(state.page==='report'){ $('#content').innerHTML=reportPage(); return }
+  if(state.page==='collab'){ $('#content').innerHTML=collabPage(); cbPost(); return }
 
   const done=RUNS.filter(r=>r[3]!=='wait').length, warn=RUNS.filter(r=>r[3]==='warn').length, wait=RUNS.filter(r=>r[3]==='wait').length;
   $('#content').innerHTML=`
