@@ -56,11 +56,11 @@ hermes/
     merge_officer.py   影子合并官（#61，只读）：按 merge_rules.json（带版本号）对名册活跃仓库的 open PR 给「建议合并 / 退回 / 问常浩」，读真实结局算一致率，记在 ~/Library/Application Support/DigitalTwin/shadow/agreement.csv（PR 状态快照 facts.jsonl）；replay 回放改规则前后的一致率；只报告是否达到同类 20 次、≥90%，不合并、不放权
     merge_act.py       飞书一句话合并（#67）：merge_officer.py 给 merge_rules.json 的 act.repos 里的仓库每个新「PR × 版本」发卡片；常浩点卡片上的「合并」按钮或引用卡片回「合并」，merge-officer 技能调本脚本核对版本 / 冲突 / 落后 / 本机主分支 / 风险档（L3 不走飞书），要求这个版本的 CI 全部通过（主账号不执行 PR 里的代码，没 CI 的仓库不走飞书合并，#190），带 --match-head-commit 合并；点「退回」或回「退回 原因」就在 PR 留言。决定记在 agreement.csv 的 owner 列；托管合并（#136）只能调 run_custody_merge，凭据在函数里从本机钥匙串取合并执行器专用令牌（#132）；托管合并被推翻后 run_custody_revert 用同一凭据开 revert PR（#133，只开不合，本机 git 配置隔离）
     proposal_digest.py 每周提案收口（#61）：每周一把会话复盘、牛马之家每周整理的待决提案按编号发到常浩私聊（LESSONS 升级候选默认不列，DT_LESSONS_MIN_PROJECTS 打开）；另有「再犯与待提升」（#216，常浩 11-18 定）：调 agent-kit 主目录的 `node tools/weekly-review.mjs --json`（agent-kit#80，认条目只在那边做），只列写了「再犯：G-xx」的全局坑和〔提议〕提升的项目坑，每期最多 7 条，结论记在 DigitalTwin/shadow/guards-decisions.md，取不到时卡片明写原因；每条附 Hermes 的推荐（带模型定时任务经 proposal_digest_draft.py 取草稿、写推荐后 send --recommend），常浩回「按推荐」或逐条回复后由 proposal-digest 技能调用 apply 写回各来源的结论；期号状态在 DigitalTwin/proposals/digest.json
-  skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/（亚古兽的技能见 self_check 的 AGUMON_SKILLS，装在 ~/.hermes/profiles/agumon/skills/productivity/<名>/）
+  skills/<名>/SKILL.md Hermes 技能（仓库副本；猛鬼兽、亚古兽可以在安装位置自己改，改了就算，以安装副本为准，常浩 2026-11-20 定；工程自检不比对技能）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/（亚古兽的 sales-sidebar、thinking-mainline、evidence-check 装在 ~/.hermes/profiles/agumon/skills/productivity/<名>/）
     workshop/          车间派单（F5）
     sales-sidebar/     亚古兽：销售 AI 侧边栏的需求反馈、进度卡片、功能同步通知和项目问答（2026-11-19）；项目档案在亚古兽工作目录（不进仓库）；两个定时任务挂这个技能
     thinking-mainline/ 亚古兽：思考主线（2026-11-19）：项目诊断、梳理分析、方案、调研先按常浩的五个思考模型走六步（问、铺、抓、挖和破、立、落），定出主要矛盾再列核验清单；回答里要看得到目标、主要矛盾及排除理由、根因、取舍
-    evidence-check/    亚古兽：证据核验（2026-11-19，前身是亚古兽自建的 business-analysis-coaching）：只回答「某个说法能不能成立」，由思考主线交来核验清单，或常浩直接要盘点、核对、设计调研、整理诉求时用；两份技能都不许亚古兽自己改，改源文件
+    evidence-check/    亚古兽：证据核验（2026-11-19，前身是亚古兽自建的 business-analysis-coaching）：只回答「某个说法能不能成立」，由思考主线交来核验清单，或常浩直接要盘点、核对、设计调研、整理诉求时用
     progress/          项目进展现查（F6）
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
@@ -89,7 +89,7 @@ orca/
   chatgpt_relay.py     在 ORCA 内嵌浏览器的 ChatGPT 聊天里送审、收回执、REWORK 时交回 ORCA 终端里的 Claude（#35）；测试 `python3 -B -m unittest discover -s orca/tests`
 ops/
   health_check.py      每日巡检（launchd 09:45）：网关、飞书连接、24 小时内异常退出、回退模型、辅助任务失败（猛鬼兽、亚古兽各查一遍，#147）、定时任务、网关 launchd plist 里的代理变量齐不齐（只核对变量名，不读值、不读进程环境，G-19 / G-42）、定时任务最近一次晚点或失败时附那段时间 pmset 的睡眠 / 唤醒记录（G-20，P9）、工人账号的过滤代理和门卫规则（#190），另提醒飞书 lark-* 技能源头比机器人副本新；有异常才发飞书；安装在 ~/Library/Application Support/DigitalTwin/bin/
-  self_check.py        工程自检（main 上 hermes/install_hold.txt 列着「按计划先不装」的文件，没装不报、装了但不同照报，#236；#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只在页脚写一句，有问题并进「风险与阻塞」表的一行、原文放折叠面板，#226）：每天比对仓库 main 和安装副本，并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
+  self_check.py        工程自检（main 上 hermes/install_hold.txt 列着「按计划先不装」的文件，没装不报、装了但不同照报，#236；写了「@blob 号」钉住旧版的，装着那一版也不报，#251；#159 起不单独发：每天 10:00 个人项目日报发送时调用，结果并进日报卡片，正常只在页脚写一句，有问题并进「风险与阻塞」表的一行、原文放折叠面板，#226）：每天比对仓库 main 和安装副本（脚本、提示词；技能不比对，常浩 2026-11-20 定），并跑 github-center 的 bin/health.js（Github·Tidings 有问题才有输出）、custody.py status（托管没关、策略失效或快到期才有输出，#131）、ai_access.py status（车间默认执行方不能用、Hermes 主模型走的本机 Claude 没登录才有输出，#180）；每月 1 号（或 --monthly）再查沙盒和仓库；安装时与 check_repos.py 同放 ~/.hermes/scripts/
   cn.digital-twin.health.plist  巡检 launchd 配置的副本
   dt_worktree.py       工人侧启动脚本（#205 批 0C）：装在 /Users/Shared/dt-autoloop/bin/（归主账号，工人只能运行），以 dt-worktree-claude / dt-worktree-codex 的名字挂在中台 Agent dt-claude / dt-codex 的 program 上（引擎零补丁），用 /usr/bin/python3；每轮先准入：门卫规则在生效（root 写的 pf-dt-worker.status 是 state=ok、10 分钟内刷新、管着 dt-worker；ADR-015 0E-1 L3 第 3 轮 P1-03，常浩 11-20 定，交接前重核时也查），事件都来自 hermes 来源、同一任务单号，按工人只读的凭证镜像和任务单（0E-2 起默认在 /Users/Shared/dt-gate/，由 dt-gate 写）核状态、到期、改文件动作、代次（回答 / 复查沿用上次派单的代次）、执行方 / 仓库 / 规则、五要素哈希，续接时还要等于第一轮钉下的范围，每单跨轮累计 2 小时；不过就不启动 CLI，交一条「停下了」通知（中台按本轮结束，不重派）；临时问题写「没跑成」，中台判 failed、5 分钟后重派；CLI 在独立进程组里跑，取消时转发信号、7 秒内整组强杀，超时同样整组停，CLI 退出后清掉剩下的后代再提交；接单程序的取消覆盖整轮（提交后、换交接包和清单前各看一次），掐着上限自己退出的也按超时算；工作目录固定 ~/dt-work/<仓库>/wt/<单号>、分支 <执行方>/<单号>，续接回同一目录；提示词末尾补一段「只改文件、不推不开 PR 不切分支」；CLI 输出原样交给中台；退出后提交改动；只有正常结束（不是取消、不是超时）、后代清干净、再核一次凭证有效，才把交接包写进 ~/dt-outbox/<单号>/；出了问题没交接的一轮（准入不过、取消含落在换清单之后、超时、进程没清干净、交接前凭证失效、提交或交接出错）以「停下了」给中台结论（取消不带通知卡），受信发布据此不认这一轮；正常结束只是没改动的一轮不补「停下了」（会盖掉 CLI 的回执），记成剩余风险，0D 结果账本补；换清单是提交点，最后检查和换清单之间屏蔽取消信号；不推、不碰 GitHub 写凭据；未安装
   autoloop_isolation_check.py  0A 隔离门反向测试（#190）：在工人账号 dt-worker 里运行，逐项尝试越权（读主账号文件、改 rules.json、用接单密钥看全局 / 回答卡片 / 触发规则 / 冒充来源、GitHub 凭据、sudo、连主账号其他本机服务、连加速器代理、经过滤代理绕回本机、往主账号会执行的目录里写），每项都应被挡住；读不到监听端口判出错不判通过；结果写 /Users/Shared/dt-autoloop/results/；共享副本在 /Users/Shared/dt-autoloop/（连同 dt-worker 安装脚本 setup-dt-worker.sh（源文件 ops/dt_worker_setup.sh，可重复跑）、门卫脚本 dt_worker_pf.sh、只读引擎副本）
@@ -159,6 +159,7 @@ single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见
 
 - **DT-ORC 的唯一工程架构基线为 `docs/DT-ORC/ARCHITECTURE.md`**；实施需遵守其中角色分工、A+ 双运行模式、版本绑定和现行授权边界。具体能力是否已放行，以 CURRENT.md 和当前独立验收 / 授权证据为准。改基线走它第 12 节的流程，不另起平行总方案。
 - **改了源文件要同步到安装位置**，并在 CURRENT 里写明。Hermes 的技能、SOUL 改了要重启网关：`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`。
+- **技能以安装副本为准**（常浩 2026-11-20「全部放开，hermes自己改了就算」）：猛鬼兽、亚古兽改技能不用问。Claude / Codex 要改技能时，先把安装副本和仓库比一遍，有自改就原样收回仓库，再在上面改、装回；不拿仓库版整份覆盖安装副本。脚本、提示词、工作规程照旧以仓库为准。
 - 改 Hermes 设置用 `hermes config set`（会自动备份），不直接改 YAML。
 - 信息边界以 PRD 第 8 节为准：受限内容只给常浩本人；只有常浩本人说的话算指令。
 - **测试一律用 `/usr/bin/python3`**（系统自带 3.9，和 Hermes 定时任务、CI、名册里的测试命令同版本）：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`、`… -s orca/tests`。本机 `python3` 是 3.14，3.10 以后的写法在 3.9 上会失败（M5 #5：`fromisoformat` 不认结尾的 Z）。交接写实际跑出的 `Ran N tests`，不抄旧数。
