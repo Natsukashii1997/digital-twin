@@ -134,10 +134,12 @@ def tier_of(repo, paths, rules):
 
 def exception_reasons(f, rules):
     """例外（仍然问常浩，不按策略合并）的理由；空列表就是不属于例外。
-    L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签。"""
+    L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签；
+    规则里收窄了 auto.tiers 时，风险档不在里面的也算。"""
     paths = f.get("paths") or []
     ask = []
-    if tier_of(f["repo"], paths, rules) == "L3":
+    tier = tier_of(f["repo"], paths, rules)
+    if tier == "L3":
         name = f["repo"].split("/")[-1]
         sens = rules["sensitive"] + rules.get("repo_sensitive", {}).get(name, [])
         ask.append("改动敏感路径：" + "、".join([p for p in paths if _any(sens, p)][:5]))
@@ -147,6 +149,9 @@ def exception_reasons(f, rules):
     labels = sorted(set(f.get("labels") or []) & set(rules.get("ask_labels") or []))
     if labels:
         ask.append("标签 " + "、".join(labels))
+    tiers = (rules.get("auto") or {}).get("tiers")
+    if tiers and not ask and tier not in tiers:
+        ask.append(f"风险档 {tier} 不在按策略合并的范围里")
     return ask
 
 
@@ -347,9 +352,10 @@ def scan(verbose, act):
         import merge_act
         import merge_policy
         on = merge_policy.active(rules)[0]
-        cards = [r for r in added if not on or r["suggestion"] == ASK]     # 策略生效时只有例外发卡片（#257）
+        by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in facts}
+        # 策略生效时只有例外发卡片（#257）。按例外理由判，不按「问常浩」判：例外同时有退回理由时建议是「退回」，照样要发
+        cards = [r for r in added if not on or exception_reasons(by_key[(r["repo"], r["pr"], r["head_sha"])], rules)]
         if cards:
-            by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in facts}
             errors += merge_act.send_cards(cards, by_key)
         if on:
             said = merge_act.auto_scan(rules, open_now, settled, listed)

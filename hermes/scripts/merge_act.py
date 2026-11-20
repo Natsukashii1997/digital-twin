@@ -231,7 +231,10 @@ def find_card(ref):
 
 def record_owner(card, decision):
     """卡片合并 / 退回成功后写 owner 列。和合并官巡视、按策略合并用同一把锁，免得互相覆盖 agreement.csv。"""
-    with MP.locked():
+    try:
+        with MP.locked():
+            _mark_owner(card["repo"], card["pr"], card["head"], decision)
+    except MP.Rejected:                      # 合并官巡视占着锁太久：合并 / 退回已经做完，记录不能因此丢，照旧直接写
         _mark_owner(card["repo"], card["pr"], card["head"], decision)
 
 
@@ -705,8 +708,6 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
         raise Stop(f"PR 现在的版本是 {head[:7]}，不是交出的 {want[:7]}（之后又有提交）", "")
     tier, sug, reasons = mo.evaluate(f, rules)
     exc = mo.exception_reasons(f, rules)
-    if not exc and tier not in (MP.auto_conf(rules).get("tiers") or []):
-        exc = [f"风险档 {tier} 不在策略里"]
     if exc:
         return _res("exception", f"{ref} 属于例外，不按策略合并，仍要常浩决定：{'；'.join(exc)}。"
                                  + ("L3 不走飞书合并，在电脑上处理。" if tier == "L3" else "合并官巡视时会发卡片给常浩。"),

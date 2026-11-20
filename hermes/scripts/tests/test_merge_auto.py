@@ -88,6 +88,7 @@ class Auto(Fixture, unittest.TestCase):
             changed = {**self.rules_now(), key: value}
             self.assertNotEqual(MP.scope_sha(changed), MP.scope_sha(self.rules_now()), key)
         same = {**self.rules_now(), "note": "改说明不算", "return_when": {}}
+        same["auto"] = {**same["auto"], "note": "这里的说明也不算"}
         self.assertEqual(MP.scope_sha(same), MP.scope_sha(self.rules_now()))
 
     def test_corrupt_policy_file_is_not_authority(self):
@@ -156,7 +157,9 @@ class Auto(Fixture, unittest.TestCase):
         self.update_pr(files=[{"path": "src/a.py"}])
         r = self.auto()
         self.assertEqual(r.returncode, 3)
-        self.assertIn("风险档 L1 不在策略里", r.stdout)
+        self.assertIn("风险档 L1 不在按策略合并的范围里", r.stdout)
+        self.scan()                                                  # 收窄以后，范围外的档位和例外一样发卡片问常浩
+        self.assertEqual(len(self.calls("lark.jsonl")), 1)
 
     def test_uncovered_repo(self):
         self.sign()
@@ -247,6 +250,15 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(self.ledger()[0]["owner"], "合并")
         self.assertEqual(self.book(), [])                            # 卡片合并不进策略账本
+
+    def test_exception_with_return_reason_still_gets_card(self):
+        """例外同时有退回理由（建议是「退回」）：既不会按策略合并，也不能漏发卡片。"""
+        self.sign()
+        self.update_pr(files=[{"path": "PRD.md"}], body="没有关联 issue")
+        self.scan()
+        self.assertEqual(self.ledger()[0]["suggestion"], mo.RETURN)
+        self.assertEqual(len(self.calls("lark.jsonl")), 1)
+        self.assertEqual(self.auto().returncode, 3)
 
     # ---------- 上限 ----------
 

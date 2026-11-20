@@ -109,6 +109,7 @@ def locked(wait=None):
 def scope(rules):
     """决定「哪些 PR 能按策略合并」的全部内容：改了其中任何一项都要常浩重签。"""
     out = {k: rules.get(k) for k in SCOPE_KEYS}
+    out["auto"] = {k: v for k, v in (rules.get("auto") or {}).items() if k != "note"}     # 说明文字不算范围
     out["repos"] = (rules.get("act") or {}).get("repos") or {}
     return out
 
