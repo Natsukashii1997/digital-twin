@@ -778,6 +778,35 @@ class RedispatchTests(Base):
         self.stop_card(cid=18, run=19)                                            # 又放弃了一次：每张任务最多 1 次
         self.handoff_quota(self.submit(self.prop(card=18)))
 
+    def test_redispatch_unknown_does_not_deadlock_the_gate(self):
+        """第 2 轮预审 P1-A（常浩 11-20 选甲）：② 发往中台结果不明 → 秘书记结果不明、关闸。原来恢复闸看到秘书结果不明就不开，
+        补发 send-pending 又要过闸，秘书对账等事件发出——死循环。现在只差网关补发的不挡闸：真恢复闸对账开闸，补发送到
+        （中台按 id 去重），秘书对账记 done。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        bad, note = R._secretary()
+        self.assertIsNone(bad)
+        self.assertIn("网关补发", note)
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40):
+            with E.db(write=False) as con:
+                self.assertTrue(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0])   # 结果不明关了闸
+            sent = G.send_pending(now=T + dt.timedelta(minutes=5))
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["redispatch"])
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
+        self.assertEqual(self.get(out["decision"])["status"], "done")
+
+    def test_redispatch_without_a_gateway_event_still_blocks(self):
+        """只差网关补发的才放：这次续接的事件已作废（或找不到、已送达）照常挡闸，由秘书对账结掉。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = -1 WHERE kind = 'redispatch'")
+        self.assertIn(out["decision"], R._secretary()[0])
+
     def handoff_quota(self, out):
         self.assertEqual((out["result"], out["reason"]), ("handoff", "gate"), out["msg"])
         self.assertIn("已用完", out["msg"])

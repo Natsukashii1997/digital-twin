@@ -93,6 +93,10 @@ M = [
     ("secretary_gate.py", '    try:\n        epoch = R.ensure_open()\n    except E.Refused as e:\n        return {"ok": False, "paused": str(e)}\n    card = F.hub("GET"',
      '    epoch = None\n    card = F.hub("GET"', "秘书领卡过闸", [SG + ".RecoveryGateTests"]),
     # ---------- 第 2 轮预审（Claude 子 agent）补的 ----------
+    ("autoloop_recovery.py", "    waiting = [r[0] for r in rows if _waits_on_gateway(r)]", "    waiting = []",
+     "P1-A 秘书 ② 只差网关补发不挡闸（否则死锁）", [SG + ".RedispatchTests.test_redispatch_unknown_does_not_deadlock_the_gate"]),
+    ("autoloop_recovery.py", "    return len(evs) == 1 and evs[0][0] in (0, 2)", "    return len(evs) == 1",
+     "P1-A 事件作废或已送达的照常挡闸", [SG + ".RedispatchTests.test_redispatch_without_a_gateway_event_still_blocks"]),
     ("secretary_gate.py", '        if d["status"] != "unreconciled":\n            raise Refused(f"只有', '        if False:\n            raise Refused(f"只有',
      "P1-A 秘书人工结算只认核不清", [SG + ".RecoveryGateTests.test_unreconciled_is_settled_by_owner_and_then_stops_blocking"]),
     ("autoloop_feishu.py", "        try:\n            _still_open(epoch)\n        except Deferred as e:                    # 领卡之后",

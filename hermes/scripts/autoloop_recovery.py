@@ -21,7 +21,9 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
   3. 中台：/healthz 通、提交号等于锁定的版本（hub-pin.json，升级流程验证通过后才改）；不是就不开闸；
   4. 外部回读：出口账本里结果不明的逐条只读回读 GitHub / 飞书；本人点击里结果不明、在途过久的只读回读中台卡片；
      连不上的留着下次，对不上的记「核不清」交常浩；秘书账本里还有结果不明、核不清、还在送的代批就不开闸
-     （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩 secretary_gate settle 定）；
+     （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩 secretary_gate settle 定）——
+     例外（常浩 11-20 选甲）：② 重派 / ③ 返修只差网关补发派单事件的不挡（补发要过闸，挡了就是死循环；中台按 id 去重，
+     补发不会多派）；
   5. 结算开闸：记下这次的纪元和报告。仍冻结的范围（结果不明、核不清）各自继续拒绝，别的照常放行。
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
 
@@ -397,16 +399,47 @@ def _secretary():
         try:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secretary_decisions'").fetchone():
                 return None, "还没有秘书账本，跳过"
-            rows = con.execute("SELECT id, status FROM secretary_decisions WHERE action != 'handoff' AND status IN "
-                               "('executing', 'unknown', 'unreconciled') ORDER BY created_at").fetchall()
+            rows = con.execute("SELECT id, status, action, task_id, outcome, created_at FROM secretary_decisions "
+                               "WHERE action != 'handoff' AND status IN ('executing', 'unknown', 'unreconciled') "
+                               "ORDER BY created_at").fetchall()
         finally:
             con.close()
     except sqlite3.Error as e:
         return f"秘书账本读不了（{type(e).__name__}）", None
+    waiting = [r[0] for r in rows if _waits_on_gateway(r)]
+    rows = [r for r in rows if r[0] not in waiting]
     if rows:
         listed = "、".join(f"{r[0]}（{r[1]}）" for r in rows[:5])
         return f"秘书账本里有 {len(rows)} 个代批结果不明或还在送（{listed}），秘书对完账才开闸", None
+    if waiting:
+        return None, f"秘书账本有 {len(waiting)} 个续接只差网关补发（{'、'.join(waiting[:5])}），开闸后 send-pending 补发、秘书对账结掉"
     return None, "秘书账本没有结果不明的代批"
+
+
+def _waits_on_gateway(r):
+    """秘书的 ② 重派、③ 返修只差网关补发：这次续接的派单事件已在凭证库记账、还没确认送到中台（sent 0 或 2）。
+    这种不挡闸（第 2 轮预审 P1-A，常浩 11-20 选甲）：事件的结果由网关自己记着，中台按同一来源同一 id 去重，补发不会多派；
+    而补发 send-pending 本身要过闸——挡闸就成了死循环（秘书等事件发出、事件等开闸）。开闸后补发送到，秘书对账记 done。
+    找不到事件、事件不止一条、已作废或已送达的照常挡闸，由秘书对账结掉（核不清的由常浩 secretary_gate settle 定）。"""
+    did, status, action, task_id, outcome, created = r
+    if action not in ("redispatch", "reject") or status not in ("executing", "unknown") or not G.db_path().exists():
+        return False
+    try:
+        key = (json.loads(outcome or "{}") or {}).get("event_key")
+    except ValueError:
+        return False
+    kind = "redispatch" if action == "redispatch" else "rework"
+    try:
+        with G.tx() as gcon:
+            if key:
+                evs = gcon.execute("SELECT sent, at FROM hub_events WHERE event_key = ?", (key,)).fetchall()
+            else:                                        # 进程在记结果前没了：按这张单这类续接、决定之后记的事件找
+                evs = gcon.execute("SELECT sent, at FROM hub_events WHERE task_id = ? AND kind = ?",
+                                   (task_id, kind)).fetchall()
+                evs = [e for e in evs if G.parse_iso(e[1]) >= G.parse_iso(created)]
+    except (sqlite3.Error, ValueError, TypeError):
+        return False
+    return len(evs) == 1 and evs[0][0] in (0, 2)
 
 
 def reconcile(readers=None):

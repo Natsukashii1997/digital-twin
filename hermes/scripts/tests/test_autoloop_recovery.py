@@ -146,7 +146,8 @@ class Order(Base):
                 con.execute("CREATE TABLE other (x)")
             R.ensure_open()                                       # 没有秘书表：照常开
             with sqlite3.connect(db) as con:
-                con.execute("CREATE TABLE secretary_decisions (id TEXT, action TEXT, status TEXT, created_at TEXT, updated_at TEXT)")
+                con.execute("CREATE TABLE secretary_decisions (id TEXT, action TEXT, status TEXT, task_id TEXT DEFAULT 't', "
+                            "outcome TEXT DEFAULT '{}', created_at TEXT, updated_at TEXT)")
                 con.executemany("INSERT INTO secretary_decisions (id, action, status, created_at) VALUES (?, ?, ?, 'x')",
                                 [("sd-1", "ask", "unknown"), ("sd-2", "handoff", "handoff"), ("sd-3", "ask", "done")])
             with E.db() as con:
