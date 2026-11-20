@@ -244,9 +244,11 @@ class Base(unittest.TestCase):
             self.assertEqual((channel, body["by"]), ("secretary", "秘书"))
             cid = int(path.split("/")[3])
             with contextlib.closing(sqlite3.connect(self.hubdb)) as con, con:
-                st = con.execute("SELECT state FROM cards WHERE id = ?", (cid,)).fetchone()[0]
+                st, ver = con.execute("SELECT state, version FROM cards WHERE id = ?", (cid,)).fetchone()
                 if st != "open":
                     return {"changed": False, "state": st}
+                if body.get("version") is not None and body["version"] != ver:    # 引擎 #10：带了版本、对不上 → 409，不产生决定
+                    raise F.HubError(f"中台回 HTTP 409（POST {path}）", status=409)
                 con.execute("UPDATE cards SET state = 'decided', choice = ?, \"by\" = ?, version = version + 1 WHERE id = ?",
                             (body["choice"], body["by"], cid))
             return {"changed": True, "state": "decided"}
@@ -374,8 +376,8 @@ class AskTests(Base):
     def test_ask_done_and_read_back(self):
         out = self.submit()
         self.assertEqual(out["result"], "done", out["msg"])
-        self.assertEqual(self.answers(), [("POST", "/v1/cards/7/answer", {"choice": 0, "by": "秘书", "ref": "sec-0123456789abcdef"},
-                                           "secretary")])
+        self.assertEqual(self.answers(), [("POST", "/v1/cards/7/answer",
+                                           {"choice": 0, "by": "秘书", "ref": "sec-0123456789abcdef", "version": 1}, "secretary")])
         d = self.get(out["decision"])
         self.assertEqual((d["status"], d["card_id"], d["card_version"]), ("done", 7, 1))
         self.assertEqual(d["outcome"]["waited_seconds"], 40 * 60)
@@ -623,6 +625,22 @@ class AskTests(Base):
                 else:
                     self.assertEqual(sorted(self.held()), [("day", "frozen"), ("task", "frozen")])
                     self.assertEqual(self.claim()["state"], "unknown")
+
+    def test_card_changed_version_after_approval_is_not_answered(self):
+        """#278：获准之后、送达之前卡片改了版：回答带着获准时的版本，中台拒绝（409）→ 没做成、额度释放、不落到新版本上。"""
+        self.hub_side = lambda m, p, b: self.hub("UPDATE cards SET version = version + 1") if p.endswith("/answer") else None
+        out = self.submit()
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertIn("已经不是秘书获准时的第 1 版", out["msg"])
+        self.assertIn("没有算数", out["msg"])
+        self.assertNotIn("HTTP", out["msg"])
+        self.assertEqual(self.answers()[0][2]["version"], 1)
+        self.assertEqual(self.hub("SELECT state, choice, version FROM cards WHERE id = 7"), [("open", None, 2)])
+        self.assertEqual(self.held(), [])
+        self.assertIsNone(self.claim())
+        d = self.get(out["decision"])
+        self.assertEqual(d["status"], "failed")
+        self.assertIn("已经不是秘书获准时的第 1 版", d["outcome"]["error"])
 
     def test_owner_answered_first(self):
         self.hub_side = lambda m, p, b: self.hub("UPDATE cards SET state = 'decided', choice = 1, \"by\" = ?", (OWNER,)) \
@@ -1391,12 +1409,15 @@ class OrphanTests(Base):
 
 
 class AskSwitchTests(Base):
-    """#218 第 2 轮 P1-01（常浩 11-19 选甲）：中台还不能按版本核对回答，① 的送达开关正式关着：前闸全过也交常浩。"""
+    """#218 第 2 轮 P1-01（常浩 11-19 选甲）：① 的送达开关正式关着：前闸全过也交常浩。#278 起中台能按版本核对回答、
+    请求也带版本了，但开关要常浩单独点头才开（DECIDED 11-20 第 3 条），照旧关着。"""
     def test_switch_off_hands_off_and_sends_nothing(self):
         self.assertFalse(SG.REAL_ASK)
         with mock.patch.object(SG, "TEST_ASK", False):
             d = self.handoff(self.submit(), "gate")
         self.assertIn("暂时整体关闭", d["basis"])
+        self.assertIn("开关还没打开", d["basis"])
+        self.assertNotIn("还不能按卡片版本核对", d["basis"])                 # 这句已经不是事实（引擎 30f5a8e 起能核）
         self.assertIsNone(self.claim())
 
     def test_switch_off_hands_off_at_the_door(self):
@@ -1647,6 +1668,26 @@ class SecretaryEndToEnd(HubFixture):
         self.assertIn("秘书替你选了「绿色」", said)
         self.assertIn("推翻", said)
         self.assertEqual(self.hub_card()["by"], "秘书")
+
+    def test_real_hub_refuses_stale_version_and_card_stays_open(self):
+        """#278：真中台按版本核对。秘书的回答带着决定里记的版本；让它带错一版 → 中台 409 → 没做成、卡照旧开着、额度释放。"""
+        real, sent = F.hub, []
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            if path.endswith("/answer"):
+                sent.append(dict(body))
+                body = {**body, "version": body["version"] + 1}                  # 模拟「获准之后卡片改了版」
+            return real(method, path, body, timeout, channel)
+        want = self.hub_card()["version"]
+        with mock.patch.object(F, "hub", hub):
+            out = SG.submit(self.prop())
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertIn(f"已经不是秘书获准时的第 {want} 版", out["msg"])
+        self.assertEqual([b["version"] for b in sent], [want])                  # 脚本自己带的是决定里记的那一版
+        c = self.hub_card()
+        self.assertEqual((c["state"], c["version"]), ("open", want))
+        with SL.open_store() as st:
+            self.assertEqual(SL.decisions(st)[-1]["status"], "failed")
 
     def test_forged_answerers_are_refused_by_hub(self):
         with F.db() as con:
