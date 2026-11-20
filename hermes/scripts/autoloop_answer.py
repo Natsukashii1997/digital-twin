@@ -91,6 +91,8 @@ def check(token, option, chat, operator, version=None, message_id=None):
         raise F.Fail("这张卡登记的私聊和现在的对不上")
     if not (0 <= option < card["options"]):
         raise F.Fail("选项号不在这张卡的选项里")
+    if message_id is not None and not card["message_id"]:   # 卡已发出、消息号还没写进登记（审查 P2-7）
+        raise F.Fail("这张卡还在登记，稍后再点一次")
     if message_id is not None and message_id != card["message_id"]:
         raise F.Fail("点的这条消息不是登记的那张卡")
     version_ok(card, version)

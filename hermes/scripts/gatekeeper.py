@@ -65,7 +65,6 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 BIND_TTL = 600                           # 秒：绑定卡有效期
 EVENT_KEEP = 30 * 86400                  # 秒：回调去重记录留这么久（飞书重投远短于这个）
 DEFAULT_LARK = "/Library/Application Support/DigitalTwin/bin/lark-cli"
-PASS_ENV = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "all_proxy", "no_proxy")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY CHECK (id = 1), open_id TEXT NOT NULL, chat_id TEXT NOT NULL,
   bound_at TEXT NOT NULL, event_id TEXT NOT NULL, message_id TEXT NOT NULL);
@@ -118,8 +117,23 @@ def setup(app):
     return {"ok": True, "app_id": app, "file": str(f)}
 
 
+def allow_acl(path):
+    """macOS 的 ACL 能在权限位之外单独给别的账号放行（读、写、加文件）：有放行条目、或读不出 ACL 都返回 True（不认）。
+    和 ops/dt_root_guard.sh 的 no_allow_acl 同一判法（拒绝类条目只会收紧，不管）。不是 macOS 返回 False。"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(["/bin/ls", "-led", str(path)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if r.returncode != 0:
+        return True
+    return any(" allow " in line for line in r.stdout.splitlines()[1:])
+
+
 def read_secret():
     """门卫应用密钥：属本账号、600、普通文件（不认链接）、一行。内容只交给 lark-cli 子进程的环境，不打印、不写日志。"""
+    code_trusted()
     f = secret_file()
     try:
         fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
@@ -127,16 +141,61 @@ def read_secret():
         raise F.Fail(f"读不到门卫应用密钥 {f}（不存在、是链接或没权限）：请常浩亲手放进 dt-gate")
     with os.fdopen(fd, "r", encoding="utf-8") as fh:
         st = os.fstat(fh.fileno())
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
-            raise F.Fail(f"门卫应用密钥 {f} 必须是本账号的普通文件、权限 600")
-        v = fh.read().strip()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077 or allow_acl(f):
+            raise F.Fail(f"门卫应用密钥 {f} 必须是本账号的普通文件、权限 600、没有放行别人的 ACL")
+        try:
+            v = fh.read().strip()
+        except UnicodeDecodeError:
+            raise F.Fail(f"门卫应用密钥 {f} 不是 UTF-8 文字")
     if not v or len(v) > 128 or any(c.isspace() for c in v):
         raise F.Fail(f"门卫应用密钥 {f} 内容格式不对")
     return v
 
 
+def trusted(path, what, checked=None):
+    """从 / 起每一级（含 path 本身）只有 root 或本账号能改：属主是 root 或本账号，组和其他人不能写（带粘滞位的上级目录
+    除外：别人删不掉、换不掉里面不属于他的条目），没有放行别人的 ACL。不过就抛 Fail。返回解析掉链接后的真实路径。
+    checked：同一轮里已经核过的目录（集合），共同的上级只核一次。"""
+    real = Path(path).resolve()
+    for q in (real, *real.parents):
+        if checked is not None and q != real and q in checked:
+            break
+        try:
+            st = os.stat(q)
+        except OSError:
+            raise F.Fail(f"{what}：找不到 {q}")
+        sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real
+        if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky) or allow_acl(q):
+            raise F.Fail(f"{what}：路径上的 {q} 别人能改（属主、权限位或 ACL），不用（换掉它就能拿到门卫密钥）")
+        if checked is not None and q != real:
+            checked.add(q)
+    return real
+
+
+def code_trusted():
+    """门卫自己跑的代码别人换不掉（审查 P1-1）：Python 解释器、本脚本所在目录、从这个目录导入的每个模块和它们的
+    __pycache__ 都要过 trusted。读密钥前查（所以 doctor、发卡、收点击之前都会查）；放在别人能改的目录里就不读密钥。"""
+    done = set()
+    trusted(sys.executable, "Python 解释器", done)
+    trusted(HERE, "门卫脚本目录", done)
+    done.add(HERE.resolve())
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if not f:
+            continue
+        f = Path(f).resolve()
+        if HERE.resolve() in f.parents:
+            trusted(f, f"门卫导入的 {f.name}", done)
+    cache = HERE / "__pycache__"
+    if cache.exists():
+        trusted(cache, "门卫的 __pycache__", done)
+        done.add(cache.resolve())
+        for f in cache.iterdir():
+            trusted(f, f"门卫的 __pycache__/{f.name}", done)
+
+
 def lark_cli():
-    """lark-cli 的路径：绝对路径，从 / 起每一级只有 root 或本账号能改（组、其他人不能写，带粘滞位的目录除外）。"""
+    """lark-cli 的路径：绝对路径，从 / 起每一级只有 root 或本账号能改（见 trusted）。"""
     p = Path(os.environ.get("DT_GATE_LARK_CLI") or DEFAULT_LARK)
     if not p.is_absolute():
         raise F.Fail("DT_GATE_LARK_CLI 必须是绝对路径")
@@ -147,28 +206,24 @@ def lark_cli():
         raise F.Fail(f"找不到 lark-cli：{real}")
     if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
         raise F.Fail(f"{real} 不是能执行的文件")
-    for q in (real, *real.parents):
-        st = os.stat(q)
-        sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real
-        if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky):
-            raise F.Fail(f"lark-cli 路径上的 {q} 别人能改，不用（换掉它就能拿到门卫密钥）")
-    return str(real)
+    return str(trusted(real, "lark-cli"))
 
 
 # ---------- 门卫机器人 ----------
 class GateBot(F.Bot):
     name = "门卫"
     unbound = "门卫还没绑定常浩（gatekeeper.py bind start），绑定前一律不认点击"
+    no_chat = unbound
 
     def env(self):
-        """lark-cli 子进程的环境：只给凭据、单独的配置目录和代理变量（G-19：服务的代理写进 plist），不继承别的。"""
+        """lark-cli 子进程的环境：只给凭据和单独的配置目录，不继承别的，也不传代理变量（审查 P2-10：经主账号的
+        加速器代理出去，代理若解 TLS 就能看到换令牌请求里的密钥；飞书直连即可，0E-1 的探针测过 dt-gate 直连）。"""
         home = private_dir(gate_home())
         env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8",
                "LARKSUITE_CLI_APP_ID": app_id(), "LARKSUITE_CLI_APP_SECRET": read_secret(),
                "LARKSUITE_CLI_BRAND": "feishu", "LARKSUITE_CLI_CONFIG_DIR": str(private_dir(home / "lark-cli")),
                "LARKSUITE_CLI_LOG_DIR": str(private_dir(home / "lark-cli-log")),
                "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1", "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1"}
-        env.update({k: os.environ[k] for k in PASS_ENV if os.environ.get(k)})
         return env
 
     def command(self, args):
@@ -189,6 +244,9 @@ class GateBot(F.Bot):
     def owner(self):
         b = binding()
         return (b["open_id"], b["chat_id"]) if b else (None, None)
+
+    def owner_chat(self):
+        return self.owner()[1]
 
 
 GATE = GateBot()
@@ -221,13 +279,6 @@ def binding():
     with db() as con:
         r = con.execute("SELECT * FROM binding WHERE id = 1").fetchone()
     return dict(r) if r else None
-
-
-def _age(at):
-    try:
-        return (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(at)).total_seconds()
-    except (TypeError, ValueError):
-        return float("inf")
 
 
 def bind_card(nonce, done=None):
@@ -294,11 +345,11 @@ def handle_bind(ev, nonce):
         p = con.execute("SELECT * FROM bind_pending WHERE nonce = ?", (nonce,)).fetchone()
         if not p:
             raise Quiet("没有这次绑定（绑定码不对、已用过或已被新的绑定取代）")
-        if _age(p["sent_at"]) > BIND_TTL:
+        if A._age(p["sent_at"]) > BIND_TTL:
             raise Quiet("绑定卡已过期")
         if p["message_id"] != mid:
             raise Quiet("点的不是这次发出的绑定卡")
-        old = con.execute("SELECT open_id FROM binding WHERE id = 1").fetchone()
+        old = con.execute("SELECT open_id, chat_id FROM binding WHERE id = 1").fetchone()
         if old and not p["replace_ok"]:
             raise Quiet("已经绑定过，这次绑定没带 --replace")
         con.execute("DELETE FROM bind_pending WHERE nonce = ?", (nonce,))
@@ -313,6 +364,12 @@ def handle_bind(ev, nonce):
                                         ensure_ascii=False)], "改绑定卡")
     except F.SendError:
         GATE.send_text(chat, done, f"gate-bound-{nonce}")
+    if old and old["chat_id"] != chat:           # 换绑到别的私聊：告诉旧的那个（审查 P2-4，不是常浩发起的换绑他能马上看到）
+        try:
+            GATE.send_text(old["chat_id"], f"门卫已改绑到另一个人（open_id 尾号 {operator[-6:]}），以后不再认你在这里点的卡片。"
+                           "不是你在 dt-gate 里发起的换绑，请马上停门卫并核查。", f"gate-rebound-{nonce}")
+        except F.SendError:
+            pass
     return {"ok": True, "bound": operator[-6:]}
 
 
@@ -351,7 +408,13 @@ def handle_event(ev):
         return {"ok": False, "quiet": True, "why": "回调没有 event_id"}
     if seen(eid):
         return {"ok": False, "quiet": True, "event": eid, "why": "这条回调已经处理过（重投或重放）"}
-    rec = _handle(ev)
+    try:
+        rec = _handle(ev)
+    except Exception as e:                       # 记过 event_id 了：核对过是常浩本人才回一句，让他再点（审查 P2-8）
+        rec = {"ok": False, "why": f"{type(e).__name__}: {str(e)[:200]}"}
+        b = binding()
+        if b and ev.get("operator_id") == b["open_id"] and ev.get("chat_id") == b["chat_id"]:
+            A.tell(b["chat_id"], "门卫这次没处理成你的点击（内部出错），请稍后在卡片上再点一次。")
     note_outcome(eid, rec)
     return {"event": eid, **rec}
 
@@ -426,16 +489,21 @@ def not_ready():
 
 
 def run():
-    """常驻：后台线程领中台卡片（没绑定时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟）。"""
+    """常驻：后台线程领中台卡片（没绑定时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟）。
+    领卡线程死了就整个退出（退出码 3），交给系统服务重启，不留一个只收点击、不发卡的半死进程（审查 P2-3）。"""
     F.use(GATE)
-    threading.Thread(target=F.run, kwargs={"ready": not_ready}, daemon=True).start()
+    cards = threading.Thread(target=F.run, kwargs={"ready": not_ready}, daemon=True, name="gate-cards")
+    cards.start()
     wait = 10
     while True:
+        if not cards.is_alive():
+            print(json.dumps({"at": F.now(), "ok": False, "why": "领卡线程停了，退出等重启"}, ensure_ascii=False), flush=True)
+            sys.exit(3)
         started = time.monotonic()
         try:
             code = consume_once()
             why = f"长连接进程退出（退出码 {code}）"
-        except F.Fail as e:
+        except (F.Fail, F.SendError, OSError) as e:
             why = str(e)
         print(json.dumps({"at": F.now(), "ok": False, "why": why, "retry_in": wait}, ensure_ascii=False), flush=True)
         time.sleep(wait)
@@ -456,6 +524,8 @@ def doctor(online=False):
             info = GATE.lark(["api", "GET", "/open-apis/bot/v3/info"], "查机器人")
             bot = info.get("bot") or info
             out["bot"] = {"app_name": bot.get("app_name"), "activate_status": bot.get("activate_status")}
+            if not bot.get("app_name"):          # 返回结构没实测（审查 P2-5）：读不到名字就判不过，不当成功
+                out["bot"]["error"] = "没读到机器人名字（返回结构和预期不同，或凭据不对）"
         except F.SendError as e:
             out["bot"] = {"error": str(e)}
     out["ok"] = all(not isinstance(out.get(k), dict) for k in ("app_id", "secret", "lark_cli")) and b is not None \

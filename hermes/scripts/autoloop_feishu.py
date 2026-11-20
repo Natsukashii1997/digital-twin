@@ -101,6 +101,7 @@ class Bot:
     默认是猛鬼兽：lark-cli 用猛鬼兽应用（tidings_weekly），身份读 twin_state（twin_identity.py setup / setup-chat 配的）。"""
     name = "猛鬼兽"
     unbound = "本机没配置常浩的 open_id 或私聊号（twin_identity.py setup / setup-chat）"
+    no_chat = "没配置常浩私聊的 chat_id（先 twin_identity.py setup-chat），或格式不对"
 
     def lark(self, args, what):
         return lark(args, what)                  # 运行时取本模块的 lark（测试替换 F.lark 照样生效）
@@ -114,6 +115,14 @@ class Bot:
         import twin_state as T
         try:
             return T.owner_open_id(), T.owner_chat_id()
+        except T.StateError as e:
+            raise Fail(str(e))
+
+    def owner_chat(self):
+        """只要私聊号（发卡、提醒用）：只读私聊号的配置，不连带读 open_id（审查 P2-6：原链路发卡只看私聊号）。"""
+        import twin_state as T
+        try:
+            return T.owner_chat_id()
         except T.StateError as e:
             raise Fail(str(e))
 
@@ -274,9 +283,9 @@ def render(card, token):
 
 # ---------- 发送 ----------
 def owner_chat():
-    chat = BOT.owner()[1]
+    chat = BOT.owner_chat()
     if not (chat or "").startswith("oc_"):
-        raise Fail("没配置常浩私聊的 chat_id（先 twin_identity.py setup-chat），或格式不对")
+        raise Fail(BOT.no_chat)
     return chat
 
 
@@ -502,13 +511,17 @@ def run(ready=None):
     """常驻。ready：每轮先问一次能不能干活（门卫没绑定常浩时返回原因：这时不对账、不领卡，领了也发不出去，
     还会用掉中台的重试次数），返回 None 才干活。"""
     import autoloop_answer as A
+    paused = None
     while True:
-        why = ready() if ready else None
-        if why:
-            print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
-            time.sleep(30)
-            continue
         try:
+            why = ready() if ready else None
+            if why:
+                if why != paused:                      # 只在暂停原因变化时记一行
+                    print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
+                paused = why
+                time.sleep(30)
+                continue
+            paused = None
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
                 A.tell(A.identities()[1], text)

@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -129,6 +130,47 @@ class Config(Base):
             os.chmod(exe, 0o775)
             with self.assertRaisesRegex(F.Fail, "别人能改"):
                 G.lark_cli()
+            os.chmod(exe, 0o755)
+            with mock.patch.object(G, "allow_acl", lambda p: Path(p) == d.resolve()):   # 权限位没问题，但 ACL 放行了别人
+                with self.assertRaisesRegex(F.Fail, "别人能改"):
+                    G.lark_cli()
+
+    def test_secret_is_not_read_when_gate_code_can_be_replaced(self):
+        """审查 P1-1：门卫脚本目录（或它导入的模块、__pycache__）别人能改，就不读密钥。"""
+        f = Path(os.environ["DT_GATE_SECRET_FILE"])
+        f.parent.mkdir(parents=True)
+        f.write_text("s3cret\n")
+        os.chmod(f, 0o600)
+        self.assertEqual(G.read_secret(), "s3cret")                     # 仓库目录本身是本账号的，能过
+        code = Path(self.tmp.name) / "code"
+        (code / "__pycache__").mkdir(parents=True)
+        (code / "gatekeeper.py").write_text("")
+        with mock.patch.object(G, "HERE", code):
+            os.chmod(code, 0o777)
+            with self.assertRaisesRegex(F.Fail, "门卫脚本目录"):
+                G.read_secret()
+            os.chmod(code, 0o755)
+            os.chmod(code / "__pycache__", 0o777)
+            with self.assertRaisesRegex(F.Fail, "__pycache__"):
+                G.read_secret()
+            os.chmod(code / "__pycache__", 0o755)
+            mod = type(sys)("dt_fake_mod")
+            mod.__file__ = str(code / "evil.py")
+            (code / "evil.py").write_text("")
+            os.chmod(code / "evil.py", 0o666)
+            with mock.patch.dict(sys.modules, {"dt_fake_mod": mod}):
+                with self.assertRaisesRegex(F.Fail, "evil.py"):
+                    G.read_secret()
+
+    @unittest.skipUnless(sys.platform == "darwin", "ACL 只在 macOS 上核")
+    def test_acl_allow_entry_is_detected(self):
+        f = Path(self.tmp.name) / "acl-file"
+        f.write_text("x")
+        self.assertFalse(G.allow_acl(f))
+        import subprocess
+        subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(f)], check=True)
+        self.assertTrue(G.allow_acl(f))
+        self.assertTrue(G.allow_acl(Path(self.tmp.name) / "missing"))  # 读不出来也不认
 
 
 class RealCommand(unittest.TestCase):
@@ -161,7 +203,7 @@ class RealCommand(unittest.TestCase):
             self.assertEqual(seen["env"]["LARKSUITE_CLI_APP_ID"], APP)
             self.assertEqual(seen["env"]["LARKSUITE_CLI_APP_SECRET"], "topsecret")
             self.assertEqual(seen["env"]["LARKSUITE_CLI_CONFIG_DIR"], str(t / "gate/lark-cli"))
-            self.assertEqual(seen["env"]["HTTPS_PROXY"], "http://127.0.0.1:9")            # G-19：服务的代理照传
+            self.assertNotIn("HTTPS_PROXY", seen["env"])                  # 不经代理（审查 P2-10：代理解 TLS 能看到密钥）
             self.assertNotIn("DT_SHOULD_NOT_LEAK", seen["env"])
             self.assertFalse([k for k in seen["env"] if k.startswith(("DT_", "HERMES_", "LARK_"))])
 
@@ -225,6 +267,15 @@ class Bind(Base):
         self.assertEqual(G.binding()["open_id"], OTHER)
         with G.db() as con:
             self.assertEqual([r["note"] for r in con.execute("SELECT note FROM binding_log ORDER BY id")], ["首次绑定", "换绑"])
+
+    def test_rebind_to_another_chat_tells_the_old_chat(self):
+        self.bind()
+        G.bind_start(open_id=OTHER, replace=True)
+        nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
+        G.handle_event(event({"gate_bind": nonce}, eid="e_r", operator=OTHER, chat="oc_other_chat_01",
+                             mid=f"om_gate_msg_{self.lark.n:04d}"))
+        old = [a for a in self.lark.calls if a[:2] == ["im", "+messages-send"] and CHAT in a]
+        self.assertIn("改绑", json.loads(old[-1][old[-1].index("--content") + 1])["text"])
 
     def test_failed_send_leaves_no_pending_card(self):
         self.lark.fail.add("发绑定卡")
@@ -301,6 +352,24 @@ class Clicks(Base):
             self.assertTrue(rec.get("quiet"), rec)
         self.assertEqual(self.hub_calls, [])
 
+    def test_click_before_message_id_is_registered_asks_to_retry(self):
+        """审查 P2-7：卡已发出、消息号还没写进登记时点了：不说「不是那张卡」，请他稍后再点；不交中台。"""
+        with F.db(write=True) as con:
+            con.execute("UPDATE feishu_cards SET message_id = NULL WHERE card_id = 7")
+        self.click(eid="m1")
+        self.assertIn("还在登记", self.lark.texts()[-1])
+        self.assertEqual(self.hub_calls, [])
+
+    def test_unexpected_error_after_owner_checks_tells_owner_to_retry(self):
+        """审查 P2-8：event_id 记下后处理出错：核对过是常浩才回一句让他再点；别人点的不回。"""
+        with mock.patch.object(G, "_handle", side_effect=RuntimeError("锁超时")):
+            rec = self.click(eid="x1")
+            self.assertIn("RuntimeError", rec["why"])
+            self.assertIn("再点一次", self.lark.texts()[-1])
+            n = len(self.lark.texts())
+            self.click(eid="x2", operator=OTHER)
+            self.assertEqual(len(self.lark.texts()), n)
+
     def test_unbound_gate_refuses_clicks_and_pauses_card_loop(self):
         with G.db(write=True) as con:
             con.execute("DELETE FROM binding")
@@ -310,6 +379,51 @@ class Clicks(Base):
         self.assertIn("还没绑定", G.not_ready())
         with mock.patch.object(G, "binding", lambda: {"open_id": OWNER}):
             self.assertIsNone(G.not_ready())
+
+
+class SharedLoop(unittest.TestCase):
+    """和猛鬼兽链路共用的部分：默认机器人发卡只读私聊号；常驻循环暂停与出错；门卫领卡线程死了整个退出。"""
+    def test_hermes_bot_owner_chat_reads_only_the_chat_config(self):
+        """审查 P2-6：open_id 配置读不了时，猛鬼兽照旧能发卡（原来发卡只看私聊号）。"""
+        import twin_state as T
+        old = F.BOT
+        F.use(F.Bot())
+        self.addCleanup(F.use, old)
+        with mock.patch.dict(os.environ, {"DT_OWNER_CHAT_ID": "oc_hermes_home_01"}), \
+                mock.patch.object(T, "owner_open_id", side_effect=T.StateError("权限不对")):
+            self.assertEqual(F.owner_chat(), "oc_hermes_home_01")
+
+    def test_run_survives_ready_errors_and_logs_pause_once(self):
+        calls, sleeps = [], []
+
+        def ready():
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("库读不了")
+            if len(calls) <= 4:
+                return "没绑定"
+            raise KeyboardInterrupt                                      # 结束测试
+        out = []
+        with mock.patch.object(F.time, "sleep", sleeps.append), \
+                mock.patch("builtins.print", lambda line, **kw: out.append(line)):
+            with self.assertRaises(KeyboardInterrupt):
+                F.run(ready)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(sum('"paused"' in o for o in out), 1)          # 暂停原因不变只记一行
+        self.assertTrue(any("OSError" in o for o in out))               # ready 出错不弄死线程
+
+    def test_gate_exits_when_card_thread_dies(self):
+        def consume():
+            for t in threading.enumerate():
+                if t.name == "gate-cards":
+                    t.join(5)
+            return 0
+        with mock.patch.object(F, "run", lambda ready=None: None), mock.patch.object(G, "consume_once", consume), \
+                mock.patch.object(G.time, "sleep", lambda s: None), mock.patch("builtins.print"):
+            with self.assertRaises(SystemExit) as cm:
+                G.run()
+        self.assertEqual(cm.exception.code, 3)
+        F.use(F.Bot())
 
 
 class Consume(Base):
