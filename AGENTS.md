@@ -163,7 +163,7 @@ single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见
 - 改 Hermes 设置用 `hermes config set`（会自动备份），不直接改 YAML。
 - 信息边界以 PRD 第 8 节为准：受限内容只给常浩本人；只有常浩本人说的话算指令。
 - **测试一律用 `/usr/bin/python3`**（系统自带 3.9，和 Hermes 定时任务、CI、名册里的测试命令同版本）：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`、`… -s orca/tests`。本机 `python3` 是 3.14，3.10 以后的写法在 3.9 上会失败（M5 #5：`fromisoformat` 不认结尾的 Z）。交接写实际跑出的 `Ran N tests`，不抄旧数。
-- **全量测试并行跑（2026-11-20 起，G-03 的全量用它）**：`/usr/bin/python3 -B scripts/test_all.py`，两套（`hermes/scripts/tests`、`orca/tests`）按测试类分片（大类每片最多 8 条）、多进程同时跑，每片独立进程、各自的测试隔离；任何一片失败或实跑条数和列出的对不上就整体失败，失败片日志原样打印；`-j N` 定并行数，`--chunk N` 定每片最多几条（默认 8），`--log-dir <目录>` 留每片日志和耗时。CI 也用它。本机 Python 没装 PyYAML 时 test_secretary_gate 整个模块、test_secretary_patrol 一条明确跳过（CI 和 /usr/bin/python3 有）。
+- **全量测试并行跑（2026-11-20 起，G-03 的全量用它）**：`/usr/bin/python3 -B scripts/test_all.py`，两套（`hermes/scripts/tests`、`orca/tests`）按测试类分片（大类每片最多 8 条）、多进程同时跑，每片独立进程、各自的测试隔离；任何一片失败或实跑条数和列出的对不上就整体失败，失败片日志原样打印；`-j N` 定并行数，`--chunk N` 定每片最多几条（默认 8），`--log-dir <目录>` 留每片日志和耗时。CI 也用它。
 - 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。多方（Claude、Hermes、Codex）往同一目录写时，文件名带写入方前缀和序号，如 `claude-25-全量测试.log`、`hermes-26-裁决.md`，避免撞号（M5 #23）。
 - 不在仓库里写密钥和 Token。
 - 被 Hermes 派来干活时：只在当前分支干活，不切主分支、不合并、不 push。
