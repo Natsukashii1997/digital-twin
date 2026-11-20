@@ -17,6 +17,7 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号, "v": 按钮所在�
             请求可能已进中台、晚些才被处理；只有回读看到「已决定 / 已结束」才能自动结算，卡还开着就交常浩决定（release）
   （释放）  只在能证明中台没受理时自动删掉这一行（claim_log 留底），常浩可以再点：请求根本没发出去，或中台明确拒绝
             （400/401/403/404/409）。409 是中台说「卡片已不是你点的那一版」（见下面「版本」）：释放后请常浩在新版卡片上重点
+            （中台的版本反而更旧时不说会有新版，请人工核查，见 stale_note）
 所有改状态的写入都带「尝试号 + 预期状态」做条件更新，改到 0 行就说明状态已变，放弃这次改动，不覆盖新的尝试。
 发送只有一个入口 submit()：本人点击、桥接送达后的 flush、对账，都走它，所以一次尝试最多发一次。
 对账（reconcile）：queued 的卡已有消息号但本地没记「中台确认送达」→ 按登记原样重报送达（中台幂等），再领发送资格；
@@ -237,6 +238,20 @@ def secretary_note(c):
     return f"秘书替你选了「{label}」，不同意可以推翻（入口在秘书代批汇报卡上）。"
 
 
+def stale_note(seen, cur, err):
+    """中台按版本拒了这次回答（409）时给常浩的话。seen：点的那一版；cur：只读窗口现在读到的中台版本（读不到是 None）。"""
+    if type(cur) is not int:
+        return (f"中台说这张卡已经不是你点的第 {seen} 版（现在是第几版没读到），你的选择没有算数；"
+                "卡片更新后请在新版卡片上重新点一次。")
+    if cur > seen:
+        return (f"这张卡在你点之后改版了（你点的是第 {seen} 版，中台已经是第 {cur} 版），你的选择没有算数；"
+                "新版卡片送到后请在新版上重新点一次。")
+    if cur < seen:                                   # 中台比飞书上的还旧：中台库可能被恢复成旧快照，不会有新版送来
+        return (f"中台里这张卡是第 {cur} 版，比你点的第 {seen} 版还旧（中台库可能被恢复过），你的选择没有算数；"
+                "先别重复点，这张卡要人工核查。")
+    return f"这次没交上：{err}。中台没有受理，你可以再点一次。"     # 版本一样却被拒：不是版本的事，照一般的没受理说
+
+
 def submit(card_id):
     """唯一的发送入口。原子领取这次尝试的发送资格（queued → inflight，且卡已有消息号、中台已确认送达），
     领到的才发请求；请求带上点的那一版，中台对不上就拒绝（409）。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，
@@ -264,13 +279,10 @@ def submit(card_id):
     try:
         out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": owner, "ref": ref, "version": version})
     except F.HubError as e:
-        if e.sent and e.status == 409:               # 带了版本：中台说卡片已不是点的那一版，这次不算数（#278）
-            now_at = (read_card(card_id) or {}).get("version")
-            seen = f"你点的是第 {version} 版" + (f"，中台已经是第 {now_at} 版" if type(now_at) is int and now_at != version else "")
-            release(card_id, attempt, "inflight", f"{e}：{seen}")
-            return 1, f"这张卡在你点之后改版了（{seen}），你的选择没有算数；新版卡片送到后请在新版上重新点一次。"
         if not e.sent or e.status in DEFINITE:
-            release(card_id, attempt, "inflight", str(e))
+            release(card_id, attempt, "inflight", str(e))        # 先释放，再去读版本拼话（读中台慢，中途进程没了也不留在途）
+            if e.sent and e.status == 409:           # 带了版本：中台说卡片已不是点的那一版，这次不算数（#278）
+                return 1, stale_note(version, (read_card(card_id) or {}).get("version"), e)
             return 1, f"这次没交上：{e}。中台没有受理，你可以再点一次。"
         move(card_id, attempt, "inflight", "unknown", str(e))
         return 2, f"这次回答结果不明（{e}），我不会重答，会对账后告诉你。"

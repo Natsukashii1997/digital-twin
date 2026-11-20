@@ -631,8 +631,8 @@ class AskTests(Base):
         self.hub_side = lambda m, p, b: self.hub("UPDATE cards SET version = version + 1") if p.endswith("/answer") else None
         out = self.submit()
         self.assertEqual(out["result"], "failed", out["msg"])
-        self.assertIn("改版了", out["msg"])
-        self.assertIn("第 1 版", out["msg"])
+        self.assertIn("已经不是秘书获准时的第 1 版", out["msg"])
+        self.assertIn("没有算数", out["msg"])
         self.assertNotIn("HTTP", out["msg"])
         self.assertEqual(self.answers()[0][2]["version"], 1)
         self.assertEqual(self.hub("SELECT state, choice, version FROM cards WHERE id = 7"), [("open", None, 2)])
@@ -640,7 +640,7 @@ class AskTests(Base):
         self.assertIsNone(self.claim())
         d = self.get(out["decision"])
         self.assertEqual(d["status"], "failed")
-        self.assertIn("改版了", d["outcome"]["error"])
+        self.assertIn("已经不是秘书获准时的第 1 版", d["outcome"]["error"])
 
     def test_owner_answered_first(self):
         self.hub_side = lambda m, p, b: self.hub("UPDATE cards SET state = 'decided', choice = 1, \"by\" = ?", (OWNER,)) \
@@ -1682,7 +1682,7 @@ class SecretaryEndToEnd(HubFixture):
         with mock.patch.object(F, "hub", hub):
             out = SG.submit(self.prop())
         self.assertEqual(out["result"], "failed", out["msg"])
-        self.assertIn("改版了", out["msg"])
+        self.assertIn(f"已经不是秘书获准时的第 {want} 版", out["msg"])
         self.assertEqual([b["version"] for b in sent], [want])                  # 脚本自己带的是决定里记的那一版
         c = self.hub_card()
         self.assertEqual((c["state"], c["version"]), ("open", want))

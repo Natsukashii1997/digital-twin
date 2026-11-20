@@ -67,8 +67,8 @@
   关着时 ① 不看提议内容、不等 30 分钟，只核卡片开着且版本一致、准入、派单绑定、诱导词，就交常浩（4c-2 秘书侧此时不调模型，只交卡片号和版本）；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
   关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
-  错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放（409 = 卡片在获准之后
-  改版了，原因照这个写）；其余 → finish(unknown)、
+  错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放（409 = 卡片已不是获准时的
+  那一版，原因照这个写）；其余 → finish(unknown)、
   claims 记 unknown、不重答。回读（中台库只读）看到 decided、by = 秘书、choice 一致 → finish(done)，outcome 记 ref 和
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
@@ -1061,7 +1061,7 @@ def deliver_ask(st, d, ctx, now):
         if not e.sent or e.status in DEFINITE:
             why = str(e)
             if e.sent and e.status == 409:                   # 带了版本：中台说卡片已不是获准时的那一版
-                why = f"卡片在秘书获准之后改版了（秘书答的是第 {version} 版），这次回答没有算数"
+                why = f"中台里这张卡已经不是秘书获准时的第 {version} 版，这次回答没有算数"
             SL.finish(st, d["id"], "failed", {"error": why}, now=now)
             set_claim(card_id, d["id"], None, why)
             return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"中台没有受理：{why}"}

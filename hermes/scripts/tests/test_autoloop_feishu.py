@@ -499,21 +499,58 @@ class Answer(Base):
 
     def test_hub_409_means_card_changed_version(self):
         """#278：回答带着点的那一版；中台说版本对不上（409）→ 这次不算数、释放、请常浩在新版卡片上重点，不让他在旧卡上再点。"""
-        for seen, want in (({"id": 7, "state": "open", "version": 2}, "你点的是第 1 版，中台已经是第 2 版"),
-                           (None, "你点的是第 1 版"),                              # 只读窗口读不到：不编版本号
-                           ({"id": 7, "state": "open"}, "你点的是第 1 版")):
-            self.hub_reply, self.hub_card = F.HubError("中台回 HTTP 409", status=409), seen
-            code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
-            self.assertEqual(code, 1, said)
-            self.assertIsNone(self.claim())                                      # 中台明确没受理：释放
-            self.assertEqual(self.log()[-1], "released")
-            self.assertIn("改版了", said)
-            self.assertIn(want, said)
-            self.assertIn("新版卡片", said)
-            self.assertNotIn("可以再点一次", said)                               # 旧卡上再点只会再被拒
-            self.assertNotIn("HTTP", said)
-            self.assertEqual(self.answers()[-1][1]["version"], 1)
-        self.assertNotIn("中台已经是", said)                                     # 读不到中台版本的那两次没编数字
+        for seen, want, known in (({"id": 7, "state": "open", "version": 2}, "你点的是第 1 版，中台已经是第 2 版", True),
+                                  (None, "已经不是你点的第 1 版", False),             # 只读窗口读不到：不编版本号
+                                  ({"id": 7, "state": "open"}, "已经不是你点的第 1 版", False)):
+            with self.subTest(seen=seen):
+                self.hub_reply, self.hub_card = F.HubError("中台回 HTTP 409", status=409), seen
+                code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
+                self.assertEqual(code, 1, said)
+                self.assertIsNone(self.claim())                                  # 中台明确没受理：释放
+                self.assertEqual(self.log()[-1], "released")
+                self.assertIn(want, said)
+                self.assertIn("没有算数", said)
+                self.assertIn("新版", said)
+                self.assertNotIn("可以再点一次", said)                           # 旧卡上再点只会再被拒
+                self.assertNotIn("HTTP", said)
+                self.assertEqual("中台已经是" in said, known)                    # 读不到中台版本时不编数字
+                self.assertEqual("没读到" in said, not known)
+                self.assertEqual(self.answers()[-1][1]["version"], 1)
+
+    def test_hub_409_released_before_reading_hub(self):
+        """审查建议 4：先释放再读中台拼话；读中台时进程没了，也不留下一行在途（否则对账会记成结果不明、要常浩手动放开）。"""
+        seen = []
+
+        def read(cid):
+            seen.append(self.claim())
+            return {"id": 7, "state": "open", "version": 2}
+        self.hub_reply = F.HubError("中台回 HTTP 409", status=409)
+        with mock.patch.object(A, "read_card", read):
+            self.assertEqual(A.answer(self.tok, 1, CHAT, OWNER, self.ver())[0], 1)
+        self.assertEqual(seen, [None])
+
+    def test_hub_409_with_same_version_is_plain_refusal(self):
+        """中台回 409、回读版本却和点的一样（按引擎现在的规矩不会发生）：不说改版，照一般的没受理说。"""
+        self.hub_reply, self.hub_card = F.HubError("中台回 HTTP 409", status=409), {"id": 7, "state": "open", "version": 1}
+        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, self.ver())
+        self.assertEqual(code, 1)
+        self.assertIn("可以再点一次", said)
+        self.assertNotIn("改版", said)
+        self.assertIsNone(self.claim())
+
+    def test_hub_409_with_older_hub_version_asks_for_a_check(self):
+        """审查建议 3：中台的版本比点的还旧（中台库被恢复成旧快照）：不会有新版送来，不说「新版卡片送到后重点」，请人工核查。"""
+        F.deliver({**CARD, "ref": "om_fixture_1", "version": 2})                  # 飞书上、登记里都是第 2 版
+        self.confirm()
+        self.hub_reply, self.hub_card = F.HubError("中台回 HTTP 409", status=409), {"id": 7, "state": "open", "version": 1}
+        code, said, _ = A.answer(self.tok, 1, CHAT, OWNER, 2)
+        self.assertEqual(code, 1, said)
+        self.assertEqual(self.answers()[-1][1]["version"], 2)
+        self.assertIn("中台里这张卡是第 1 版，比你点的第 2 版还旧", said)
+        self.assertIn("人工核查", said)
+        self.assertNotIn("新版", said)
+        self.assertNotIn("可以再点一次", said)
+        self.assertIsNone(self.claim())
 
     def test_unknown_with_open_card_is_never_released_automatically(self):
         self.unknown_claim()
@@ -879,7 +916,8 @@ class BridgeLock(Base):
         with mock.patch.object(F, "given_up_cards", lambda: cards):
             self.assertEqual(F.check_given_up(), [7])
             self.assertEqual(F.check_given_up(), [])
-            cards.append({"card_id": 8, "title": None, "tries": 9, "error": None, "first_try_at": None, "state": None})
+            cards.append({"card_id": 8, "title": None, "tries": 9, "error": None, "first_try_at": "2026-11-20T11:00:00.000Z",
+                          "state": None})                                        # 卡片行查不到：按还开着说
             self.assertEqual(F.check_given_up(), [8])
             self.assertEqual(F.check_given_up(), [])
         self.assertEqual(len(self.alerts), 2)
@@ -929,15 +967,46 @@ class BridgeLock(Base):
             self.assertEqual(F.check_given_up(), [7])
         self.assertNotIn("又放弃", self.alerts[0])                               # 上次没发成，不算说过
 
-    def test_given_up_card_already_settled_says_so(self):
-        """卡片已经处理完（只是飞书里那条消息没更新成最后结果）：告诉常浩可以不管，命令照给。"""
-        cards = [{"card_id": 7, "title": "选一个", "tries": 9, "error": "x", "first_try_at": "2026-11-20T10:00:00.000Z",
-                  "state": "decided"}]
+    def test_given_up_words_follow_whether_redeliver_would_send(self):
+        """审查必须改 1：话照中台 worthSending 分四种——开着 / 已处理完且送到过 / 没看到的仅告知通知 / 重新送也不会再发。"""
+        import datetime as dt
+        now = dt.datetime(2026, 11, 20, 12, 0, tzinfo=dt.timezone.utc)
+        base = {"card_id": 7, "title": "t", "tries": 9, "error": "x", "first_try_at": "2026-11-20T10:00:00.000Z"}
+        cmd = "agent-autoloop redeliver 7"
+        cases = (
+            ({"state": "open", "ref": None, "fyi": 0, "created_at": "2026-11-20T09:00:00.000Z"}, ("不会再自动送到你这里", cmd), ()),
+            ({"state": "open", "ref": "om_1", "fyi": 0, "created_at": "2026-11-20T09:00:00.000Z"}, ("不会再自动送到你这里", cmd), ()),
+            ({"state": "decided", "ref": "om_1", "fyi": 0, "created_at": "2026-11-20T09:00:00.000Z"},
+             ("已经处理完", "可以不管", cmd), ("不会补发",)),
+            ({"state": "closed", "ref": "om_1", "fyi": 1, "created_at": "2026-11-01T09:00:00.000Z"}, ("已经处理完", cmd), ()),
+            ({"state": "closed", "ref": None, "fyi": 1, "created_at": "2026-11-20T09:00:00.000Z"},     # 通知一建就是 closed
+             ("只告知你的通知", "还没送到你这里", cmd), ("已经处理完", "可以不管", "消息没更新")),
+            ({"state": "closed", "ref": None, "fyi": 1, "created_at": "2026-11-19T11:00:00.000Z"},     # 过了 24 小时
+             ("重新送也不会再发",), (cmd, "可以不管", "消息没更新")),
+            ({"state": "decided", "ref": None, "fyi": 0, "created_at": "2026-11-20T09:00:00.000Z"},    # 没送到就在别处答了
+             ("没送到你这里就已经结束", "重新送也不会再发"), (cmd, "消息没更新")),
+            ({"state": "closed", "ref": None, "fyi": 1, "created_at": None},                            # 建卡时间读不到：不承诺会发
+             ("重新送也不会再发",), (cmd,)),
+        )
+        for extra, has, lacks in cases:
+            with self.subTest(**extra):
+                said = F.given_up_todo({**base, **extra}, now=now)
+                for w in has:
+                    self.assertIn(w, said)
+                for w in lacks:
+                    self.assertNotIn(w, said)
+
+    def test_given_up_alert_carries_the_right_words(self):
+        """提醒正文用的就是上面那句（没看到的通知不说「可以不管」）。"""
+        import datetime as dt
+        made = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat()
+        cards = [{"card_id": 7, "title": "跑完了", "tries": 9, "error": "x", "first_try_at": "2026-11-20T10:00:00.000Z",
+                  "state": "closed", "ref": None, "fyi": 1, "created_at": made}]
         with mock.patch.object(F, "given_up_cards", lambda: cards):
             self.assertEqual(F.check_given_up(), [7])
-        self.assertIn("已经处理完", self.alerts[0])
-        self.assertIn("可以不管", self.alerts[0])
+        self.assertIn("还没送到你这里", self.alerts[0])
         self.assertIn("agent-autoloop redeliver 7", self.alerts[0])
+        self.assertNotIn("可以不管", self.alerts[0])
 
     def test_direct_deliver_never_patches_back(self):
         """专项续审 P2-03：绕过 once 直接送旧版本，改飞书之前就拒：消息和登记都不回退。"""
@@ -1128,11 +1197,15 @@ class FeishuEndToEnd(HubFixture):
                         (json.dumps({"card_id": 99, "channel": "feishu", "version": 0, "ref": None, "tries": 9,
                                      "first_try_at": "2026-11-20T10:00:00.000Z", "not_before": None, "error": "坏了",
                                      "given_up": 1}),))
+            con.execute("INSERT INTO projections (collection, key, data) VALUES ('deliveries', '97:feishu', ?)",   # 审查建议 2
+                        (json.dumps({"card_id": 97, "channel": "feishu", "version": 1, "ref": "om_97", "tries": 0,
+                                     "first_try_at": None, "not_before": None, "error": None, "given_up": 1}),))
             con.execute("INSERT INTO projections (collection, key, data) VALUES ('deliveries', '98:secretary', ?)",
                         (json.dumps({"card_id": 98, "channel": "secretary", "tries": 9, "error": "x", "given_up": 1}),))
         with mock.patch("autoloop_publish.hub_db", lambda: copy):
             self.assertEqual(F.given_up_cards(), [{"card_id": 99, "title": None, "tries": 9, "error": "坏了",
-                                                   "first_try_at": "2026-11-20T10:00:00.000Z", "state": None}])
+                                                   "first_try_at": "2026-11-20T10:00:00.000Z", "ref": None, "state": None,
+                                                   "fyi": None, "created_at": None}])
         with mock.patch("autoloop_publish.hub_db", lambda: Path(self.home) / "none.db"):
             self.assertFalse(F.hub_readable())
             self.assertIsNone(F.given_up_cards())
@@ -1167,8 +1240,8 @@ class FeishuEndToEnd(HubFixture):
             con.execute("UPDATE feishu_cards SET version = ? WHERE card_id = ?", (ver + 1, got["card"]))
         code, said, rec = A.answer(tok, 1, CHAT, OWNER, ver + 1)
         self.assertEqual(code, 1, said)
-        self.assertIn("改版了", said)
-        self.assertIn(f"你点的是第 {ver + 1} 版，中台已经是第 {ver} 版", said)
+        self.assertIn(f"中台里这张卡是第 {ver} 版，比你点的第 {ver + 1} 版还旧", said)
+        self.assertIn("人工核查", said)
         self.assertEqual(next(c for c in C.state()["cards"] if c["id"] == got["card"])["state"], "open")
         with F.db(write=True) as con:
             self.assertIsNone(con.execute("SELECT 1 FROM claims WHERE card_id = ?", (got["card"],)).fetchone())   # 释放了
