@@ -357,10 +357,45 @@ def metrics(facts, card):
     return [
         ("有推进的项目", "未知" if progress is None else f"**{len(progress)}** / {n}",
          "分析降级，没判断" if progress is None else f"其余 {n - len(progress)} 个无实质推进"),
-        ("合并 PR", num(merged), "统计日 04:00→04:00" if merged is not None else "GitHub 取不到"),
+        ("合并 PR", num(merged), ("统计日 04:00→04:00" if merged is not None else "GitHub 取不到") + auto_merge_note(facts)),
         ("需要你拍板", dec_v, dec_n),
         ("风险与阻塞", f"{len(risks)} 类", risk_n),
     ]
+
+
+def auto_merged(facts):
+    """统计日内猛鬼兽按策略合并的 PR（#257；事实快照的 auto_merges.merged）。没有、算不出来都是空列表。"""
+    return [m for m in ((facts.get("auto_merges") or {}).get("merged") or []) if isinstance(m, dict)]
+
+
+def auto_merge_note(facts):
+    n = len(auto_merged(facts))
+    return f"；**其中猛鬼兽替你合并 {n} 个**" if n else ""
+
+
+def auto_merge_panel(facts):
+    """速览表下面的折叠面板「替你合并了什么」（甲版，常浩 2026-11-20 看了三张真卡片预览后选定，#259）：
+    一条一行：仓库#号、标题、档、合并官怎么判的、撤回口令；结果不明的排在后面标出。没有按策略合并的日子返回 None，卡片和原来一样。"""
+    merged = auto_merged(facts)
+    if not merged:
+        return None
+    def ref_of(m):
+        return f"{str(m.get('repo') or '?').split('/')[-1]}#{m.get('pr')}"
+
+    lines = []
+    for i, m in enumerate(merged, 1):
+        ref = ref_of(m)
+        judge = s(m.get("suggestion")) or "未知"
+        if judge == "退回":
+            judge += f"：{s(m.get('reasons')) or '未写原因'}（按你定的不拦）"
+        tail = f"｜已开撤回 PR #{m['revert'].get('revert_pr')}" if isinstance(m.get("revert"), dict) else f"｜撤回口令「撤回 {ref}」"
+        lines.append(f"{i}. **{ref}** {clip(m.get('title'), 60)}｜{s(m.get('tier')) or '?'}｜合并官：{judge}{tail}")
+    unsure = [m for m in ((facts.get("auto_merges") or {}).get("unsettled") or []) if isinstance(m, dict)]
+    for m in unsure:
+        lines.append(f"- ⚠️ 结果不明：**{ref_of(m)}** {clip(m.get('title'), 60)}，"
+                     "合并命令发了、还没核对清楚，合并官下一轮只读核对")
+    lines.append("<font color='grey'>不同意哪条，回「撤回 仓库#号」，猛鬼兽开撤回 PR 并合并；装过机的另外问你要不要重装。</font>")
+    return panel(f"替你合并了什么 · {len(merged)} 个 · 展开", lines)
 
 
 def header_numbers(card):
@@ -847,6 +882,8 @@ def decision_buttons(token, ns):
 def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None, token=None):
     """乙版卡片 JSON 2.0（常浩 2026-11-19 在私聊三版预览里选定，#226）；默认宽度。四板块：
     核心数据速览 → 昨日关键成果 → 风险与阻塞（按原因一类一行，带去向；项目明细在折叠面板里）→ 需要你拍板（表格）。
+    有按策略合并的日子（#257），速览表「合并 PR」一行的说明带一句「其中猛鬼兽替你合并 N 个」，表下多一个默认收起的折叠面板
+    「替你合并了什么」（常浩 2026-11-20 选甲，#259）；四板块不变。
     selfcheck：工程自检结果（#159）。None 不显示（预览）；"" 表示正常，只在底部灰字写一句；有内容就并进风险表
     最后一行「猛鬼兽自检有问题」，原文放进折叠面板。
     token：卡片令牌（#235）。给了就在拍板表下加一排「按推荐」按钮；预览不给，不放按钮。"""
@@ -860,6 +897,9 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None,
     els = [md("**📈 核心数据速览**"),
            table((("k", "指标", "25%"), ("v", "昨日", "15%"), ("n", "说明", "60%")),
                  [{"k": k, "v": v, "n": n} for k, v, n in metrics(facts, card)])]
+    merged_panel = auto_merge_panel(facts)                # 甲版（#259）：不加板块，收在速览表下面
+    if merged_panel:
+        els.append(merged_panel)
     ach = dicts(card, "achievements")
     unknown = delta_unknown(facts)
     empty = f"未知：{len(unknown)} 个项目 GitHub 取不到，没法判断昨天有没有成果" if unknown else "昨天没有新成果"

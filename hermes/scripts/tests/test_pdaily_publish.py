@@ -396,6 +396,51 @@ class CardTests(unittest.TestCase):
         self.assertEqual(btn["behaviors"][0]["default_url"], "https://x.feishu.cn/docx/abc")
         self.assertNotIn("今日推进", self.text(c))
         self.assertNotIn("callback", self.text(c))          # 没给令牌（预览）：没有按钮
+        self.assertNotIn("替你合并", self.text(c))          # 没有按策略合并的日子：卡片和原来一样（#259）
+        self.assertEqual([e["tag"] for e in c["body"]["elements"][:3]], ["markdown", "table", "hr"])
+
+    def auto(self, **kw):
+        m = {"repo": "o/my-skills", "pr": "119", "title": "automation-checkup：自动附睡眠记录", "tier": "L2",
+             "suggestion": "建议合并", "reasons": "", "revert_cmd": "撤回 my-skills#119", "revert": None}
+        m.update(kw)
+        return m
+
+    def test_auto_merges_fold_under_overview_table(self):
+        """甲版（常浩 2026-11-20 看了三张真卡片预览后选定，#259）：四板块不变；速览表「合并 PR」一行带一句，
+        表下一个默认收起的折叠面板，一条一行：仓库#号、标题、档、合并官怎么判的、撤回口令。"""
+        f = facts()
+        f["auto_merges"] = {"merged": [self.auto(),
+                                       self.auto(repo="o/github-center", pr="93", title="LESSONS 写明状态词", tier="L1",
+                                                 suggestion="退回", reasons="正文没有 Closes #号"),
+                                       self.auto(pr="121", revert={"revert_pr": "130", "revert_url": "u"})],
+                            "unsettled": [self.auto(pr="125", title="结果没核对清的")], "bypass": []}
+        c = self.card(f=f)
+        els = c["body"]["elements"]
+        heads = [e["content"] for e in els if e.get("tag") == "markdown" and e["content"].startswith("**")]
+        self.assertEqual(heads, ["**📈 核心数据速览**", "**✅ 昨日关键成果**", "**⚠️ 风险与阻塞 · 1 类**", "**🎯 需要你拍板 · 1 件**"])
+        row = [r for r in els[1]["rows"] if r["k"] == "合并 PR"][0]
+        self.assertEqual(row["n"], "统计日 04:00→04:00；**其中猛鬼兽替你合并 3 个**")
+        p = els[2]
+        self.assertEqual((p["tag"], p["expanded"], p["header"]["title"]["content"]),
+                         ("collapsible_panel", False, "替你合并了什么 · 3 个 · 展开"))
+        lines = [e["content"] for e in p["elements"]]
+        self.assertEqual(lines[0], "1. **my-skills#119** automation-checkup：自动附睡眠记录｜L2｜合并官：建议合并｜撤回口令「撤回 my-skills#119」")
+        self.assertEqual(lines[1], "2. **github-center#93** LESSONS 写明状态词｜L1｜合并官：退回：正文没有 Closes #号（按你定的不拦）"
+                                   "｜撤回口令「撤回 github-center#93」")
+        self.assertTrue(lines[2].endswith("｜已开撤回 PR #130"))
+        self.assertIn("⚠️ 结果不明：**my-skills#125**", lines[3])
+        self.assertIn("回「撤回 仓库#号」", lines[4])
+        self.assertEqual(els[3]["tag"], "hr")
+
+    def test_auto_merges_missing_or_odd_data_does_not_break_card(self):
+        for value in (None, {}, {"merged": None}, {"merged": ["不是对象", {"pr": 7}]}, "坏的"):
+            f = facts()
+            f["auto_merges"] = value if isinstance(value, (dict, type(None))) else None
+            c = self.card(f=f)
+            self.assertEqual(c["schema"], "2.0")
+        f = facts()
+        f["auto_merges"] = {"merged": [{"pr": 7}]}
+        self.assertIn("**?#7**", self.text(self.card(f=f)))
 
     def test_no_doc_drops_button_and_says_why(self):
         c = self.card(doc_error="云文档接口超时")
