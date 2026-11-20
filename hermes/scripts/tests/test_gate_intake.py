@@ -210,6 +210,13 @@ class ListenerCheck(unittest.TestCase):
                 with self.subTest(url=url), self.assertRaises(HL.NotOurListener):
                     HL.check(url, want="503")
 
+    def test_no_lsof_means_not_ours(self):
+        """查不了（没有 lsof、出错）一律当不是：不发钥匙。"""
+        with mock.patch.object(HL, "LSOF", "/nonexistent/lsof"):
+            with self.assertRaises(HL.NotOurListener):
+                HL.check("http://127.0.0.1:3350", want="503")
+
+    @unittest.skipUnless(os.path.exists(HL.LSOF), "只在 Mac 上有 /usr/sbin/lsof（CI 是 Linux）")
     def test_real_lsof_sees_our_own_listener(self):
         import socket
         with socket.socket() as srv:
