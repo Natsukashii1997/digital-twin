@@ -166,19 +166,19 @@ def snapshot(home):
     names = [r.get("name") for r in _read_json(rules).get("rules", []) if isinstance(r, dict)] if rules.exists() else []
     cfg = _read_json(home / "config.json")
     env = home / "secrets.env"
-    names = []
+    env_names = []
     if env.exists():
         for line in env.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
-                names.append(line.split("=", 1)[0].replace("export ", "").strip())
+                env_names.append(line.split("=", 1)[0].replace("export ", "").strip())
     return {
         "runs": runs, "cards": cards, "pauses": pauses, "keys": keys, "max_event": events,
         "live_runs": sum(runs.get(s, 0) for s in LIVE_RUNS),
         "live_cards": sum(cards.get(s, 0) for s in LIVE_CARDS),
         "rules_sha256": hashlib.sha256(rules.read_bytes()).hexdigest() if rules.exists() else None,
         "dispatch_rules": sorted(n for n in names if isinstance(n, str) and n.startswith("dispatch-")),
-        "url": cfg.get("url"), "listen": (cfg.get("hub") or {}).get("listen"), "secrets_env": names,
+        "url": cfg.get("url"), "listen": (cfg.get("hub") or {}).get("listen"), "secrets_env": env_names,
     }
 
 

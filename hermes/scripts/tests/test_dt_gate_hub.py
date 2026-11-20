@@ -315,6 +315,19 @@ class ChecksTest(unittest.TestCase):
         r = self.run_checks(self.snap(secrets_env=["GITHUB_WEBHOOK_SECRET"]))
         self.assertEqual([m for m, ok in r.items() if not ok], [m for m in r if "secrets.env" in m])
 
+    def test_finished_but_unarchived_progress_counts_as_done(self):
+        """state.json 写完、进度没归档就被杀：认作已搬完，不引导回滚（复核 P2-b）。"""
+        root = Path(os.environ["DT_GATE_ROOT"])
+        (root / "state.json").write_text("{}")
+        (root / "migrating.json").write_text(json.dumps({"stamp": "S"}))
+        H.settle_progress()
+        self.assertFalse((root / "migrating.json").exists())
+        self.assertTrue((root / "migrating.done-S.json").exists())
+
+    def test_hub_must_be_on_127_0_0_1(self):
+        r = self.run_checks(self.snap(url="http://localhost:3350", listen="localhost:3350"))
+        self.assertEqual(len([m for m, ok in r.items() if not ok]), 1)
+
     def test_half_done_migration_blocks(self):
         (Path(os.environ["DT_GATE_ROOT"]) / "migrating.json").write_text("{}")
         r = self.run_checks(self.snap())
@@ -348,11 +361,13 @@ class ChecksTest(unittest.TestCase):
             seen.append(current["engine"]["commit"][0])
             if current["engine"]["commit"].startswith("e"):
                 raise H.Stop("新的起不来")
+        backups = []
         with mock.patch.object(H, "installed", return_value=True), mock.patch.object(H, "_install_all", install), \
-                mock.patch("sys.stdout", io.StringIO()):
+                mock.patch.object(H, "run_cli", lambda *a, **k: backups.append(a[4])), mock.patch("sys.stdout", io.StringIO()):
             with self.assertRaisesRegex(H.Stop, "已退回上一份"):
                 H.cmd_update(self.host, self.a())
         self.assertEqual(seen, ["e", "o"])
+        self.assertEqual(backups[0][0], "backup")                                 # 换之前先备份中台库（复核 P2-d）
         self.assertEqual(json.loads((root / "current.json").read_text())["engine"]["commit"], "o" * 40)
 
     def test_all_good(self):
@@ -485,6 +500,9 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.cli(self.ohub, "init", "--no-service", "--port", str(self.ports["hub"]), "--command", "echo {prompt}")
         self.cli(self.ohub, "key", "new", "worker", "dt-worker")
         self.cli(self.ohub, "key", "new", "source", "hermes")
+        rules = json.loads((self.ohub / "rules.json").read_text())                # 加一条派单样子的规则（复核 P1-A）
+        rules["rules"].append({**rules["rules"][0], "name": "dispatch-e2e", "when": {"source": "local", "types": ["dispatch.*"]}})
+        (self.ohub / "rules.json").write_text(json.dumps(rules, ensure_ascii=False, indent=2))
         (nat / "Library/LaunchAgents").mkdir(parents=True)
         self.oplist = nat / "Library/LaunchAgents/agent-autoloop.plist"
         self.oplist.write_bytes(plistlib.dumps({
@@ -496,6 +514,9 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.url = f"http://127.0.0.1:{self.ports['hub']}"
         self.wait_healthy()
         self.cli(self.ohub, "pause", "试一下", "--reason", "搬家测试")
+        snap = U.snapshot(self.ohub)
+        self.assertEqual(snap["dispatch_rules"], ["dispatch-e2e"])
+        self.assertNotIn("dispatch-e2e", snap["pauses"])
         self.assertIn("暂停", self.cli(self.ohub, "emit", "try.migrate"))
         self.old_master = (self.ohub / "master.key").read_text()
         self.old_owner = json.loads((self.ohub / "config.json").read_text())["owner"]
@@ -523,10 +544,12 @@ class MigrateEndToEndTest(unittest.TestCase):
             db.close()
 
     def stage(self):
-        engine_commit = subprocess.run(["git", "-C", str(ENGINE), "rev-parse", "HEAD"], capture_output=True,
-                                       text=True, check=True).stdout.strip()
-        code = self.main("stage", "--engine-repo", str(ENGINE), "--engine-commit", "HEAD", "--repo", str(self.repo),
-                         "--repo-commit", "HEAD", "--node", os.path.realpath(NODE))
+        engine_commit = git(ENGINE, "rev-parse", "HEAD").decode().strip()
+        repo_commit = git(self.repo, "rev-parse", "HEAD").decode().strip()
+        self.assertEqual(self.main("stage", "--engine-repo", str(ENGINE), "--engine-commit", "HEAD", "--repo", str(self.repo),
+                                   "--repo-commit", repo_commit, "--node", os.path.realpath(NODE)), 1)   # 只认 40 位提交号
+        code = self.main("stage", "--engine-repo", str(ENGINE), "--engine-commit", engine_commit, "--repo", str(self.repo),
+                         "--repo-commit", repo_commit, "--node", os.path.realpath(NODE))
         self.assertEqual(code, 0, self.out.getvalue())
         return engine_commit
 
@@ -534,6 +557,9 @@ class MigrateEndToEndTest(unittest.TestCase):
         commit = self.stage()
         current = H.load_current()
         self.assertEqual(current["engine"]["commit"], commit)
+        self.assertEqual(self.main("preflight"), 1)                                 # 派单规则没暂停：不过
+        self.assertIn("没暂停的：['dispatch-e2e']", self.out.getvalue())
+        self.cli(self.ohub, "pause", "dispatch-e2e", "--reason", "搬家测试")
         self.assertEqual(self.main("preflight"), 0, self.out.getvalue())
         gate = self.users["dt-gate"]
 
@@ -579,7 +605,7 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.assertEqual(sorted(state["keys_removed"]), ["channel:desktop", "owner:owner", "source:hermes",
                                                          "source:local", f"worker:{json.loads((Path(state['owner_moved']) / 'config.json').read_text())['worker']['name']}"])
         facts = U.snapshot(ghub)
-        self.assertEqual(facts["pauses"], ["试一下"])
+        self.assertEqual(facts["pauses"], ["dispatch-e2e", "试一下"])
         self.assertGreaterEqual(facts["max_event"], 1)
         self.assertTrue(self.ohub.is_file())                             # 原位置是说明文件，主账号命令行不会新建空中台
         self.assertTrue(self.ohub.read_text().startswith(H.MARK))
@@ -628,7 +654,16 @@ class MigrateEndToEndTest(unittest.TestCase):
         wcfg.parent.mkdir(mode=0o700)
         wcfg.write_text(json.dumps({"url": self.url, "worker": {"name": "dt-worker", "key": "old"}}))
         old_hash = self.keys(ghub)["worker:dt-worker"]
-        self.assertEqual(self.main("rotate-worker", "--confirm"), 0, self.out.getvalue())
+        pf = self.d / "pf"
+        pf.mkdir()
+        (pf / "pf-dt-worker.status").write_text("at=x state=ok enabled=yes\n")
+        (pf / "pf-dt-worker.rules").write_text("pass out quick inet proto tcp from any to 127.0.0.1 port { 3350 } user dt-worker\n")
+        with mock.patch.dict(os.environ, {"DT_PF_DIR": str(pf)}):
+            self.assertEqual(self.main("rotate-worker", "--confirm"), 1)            # 门卫还没按监听账号保护 3350：不换
+            self.assertIn("监听账号", self.out.getvalue())
+            self.assertEqual(self.keys(ghub)["worker:dt-worker"], old_hash)
+            (pf / "pf-dt-worker.rules").write_text("block return in quick proto tcp from any to 127.0.0.1 port 3350 user != dt-gate\n")
+            self.assertEqual(self.main("rotate-worker", "--confirm"), 0, self.out.getvalue())
         newkey = json.loads(wcfg.read_text())["worker"]["key"]
         self.assertEqual(self.keys(ghub)["worker:dt-worker"], hashlib.sha256(newkey.encode()).hexdigest())
         self.assertNotEqual(self.keys(ghub)["worker:dt-worker"], old_hash)
@@ -636,6 +671,9 @@ class MigrateEndToEndTest(unittest.TestCase):
 
         # 以 dt-gate 身份跑控制面工具
         self.assertEqual(self.main("run", "agent-autoloop", "key", "list"), 0)
+        self.assertEqual(self.main("run", "agent-autoloop", "status"), 0)
+        with mock.patch.object(self.host, "listeners", return_value=[os.getuid() + 1]):     # 端口被别人占：不带本人密钥去
+            self.assertEqual(self.main("run", "agent-autoloop", "status"), 1)
         self.assertEqual(self.main("status"), 0)
         self.assertIn("在跑", self.out.getvalue())
 

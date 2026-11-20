@@ -279,6 +279,14 @@ def load_state():
     return read_json(f) if f.exists() else None
 
 
+def settle_progress():
+    """state.json 写完、还没来得及归档进度就被杀：两个都在时认作已搬完，把进度记录归档（复核 P2-b）。"""
+    half = gate_root() / "migrating.json"
+    if (gate_root() / "state.json").exists() and half.exists():
+        stamp = read_json(half).get("stamp", now_stamp())
+        os.replace(half, gate_root() / f"migrating.done-{stamp}.json")
+
+
 def gate_home(host):
     return Path(host.account(gate_account())["home"])
 
@@ -290,12 +298,10 @@ def gate_paths(host):
 
 # ---------- stage：root 所有的运行副本 ----------
 def resolve_commit(host, owner, repo, commit):
-    code, out, err = host.as_user(owner, [*GIT, "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{commit}}"],
-                                  env=GIT_ENV)
-    sha = out.decode().strip()
-    if code != 0 or not SHA.match(sha):
-        raise Stop(f"{repo} 里找不到提交 {commit}：{err.strip()[:200]}")
-    return sha
+    """只认完整的 40 位提交号（分支名、origin/main 这类引用主账号本地能改）；对象本身在 extract_archive 里由 root 核。"""
+    if not SHA.match(commit or ""):
+        raise Stop(f"提交要写完整的 40 位提交号（和 GitHub 上的合并提交对照），不认 {commit!r}")
+    return commit
 
 
 def _safe_name(name):
@@ -305,36 +311,25 @@ def _safe_name(name):
     return n
 
 
-def tree_blobs(host, owner, repo, sha):
-    """git ls-tree 列出的全部条目：路径 → (模式, 对象号)。"""
-    code, out, err = host.as_user(owner, [*GIT, "-C", str(repo), "ls-tree", "-r", "-z", "--full-tree", sha], env=GIT_ENV)
-    if code != 0:
-        raise Stop(f"git ls-tree 失败：{err.strip()[:200]}")
-    blobs = {}
-    for rec in out.split(b"\0"):
-        if not rec:
-            continue
-        meta, path = rec.split(b"\t", 1)
-        mode, _, obj = meta.decode().split(" ")
-        blobs[path.decode("utf-8")] = (mode, obj)
-    return blobs
+def obj_sha(kind, data):
+    return hashlib.sha1(b"%s %d\0" % (kind.encode(), len(data)) + data).hexdigest()
 
 
 def blob_sha(data):
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    return obj_sha("blob", data)
 
 
-def parse_batch(out, objs):
-    """git cat-file --batch 的输出：按顺序拆出每个对象的原始内容，root 自己重算哈希，和对象号对不上就停。"""
+def parse_batch(out, objs, kind="blob"):
+    """git cat-file --batch 的输出：按顺序拆出每个对象的原始内容，root 自己按类型重算哈希，和对象号对不上就停。"""
     got, i = {}, 0
     for obj in objs:
         nl = out.index(b"\n", i)
         head = out[i:nl].decode().split(" ")
-        if len(head) != 3 or head[0] != obj or head[1] != "blob":
+        if len(head) != 3 or head[0] != obj or head[1] != kind:
             raise Stop(f"取对象 {obj[:12]} 时回的不对：{head}")
         size = int(head[2])
         data = out[nl + 1:nl + 1 + size]
-        if len(data) != size or out[nl + 1 + size:nl + 2 + size] != b"\n" or blob_sha(data) != obj:
+        if len(data) != size or out[nl + 1 + size:nl + 2 + size] != b"\n" or obj_sha(kind, data) != obj:
             raise Stop(f"对象 {obj[:12]} 的内容和对象号对不上")
         got[obj] = data
         i = nl + 2 + size
@@ -343,9 +338,57 @@ def parse_batch(out, objs):
     return got
 
 
+def cat_objects(host, owner, repo, objs, kind):
+    """以主账号身份 git cat-file --batch 取原始对象（不经任何过滤），root 逐个重算哈希。"""
+    objs = list(dict.fromkeys(objs))
+    if not objs:
+        return {}
+    code, out, err = host.as_user(owner, [*GIT, "-C", str(repo), "cat-file", "--batch"],
+                                  stdin=("\n".join(objs) + "\n").encode(), env=GIT_ENV, timeout=300)
+    if code != 0:
+        raise Stop(f"git cat-file 失败：{err.strip()[:200]}")
+    return parse_batch(out, objs, kind)
+
+
+def parse_tree(data):
+    """原始树对象：[(模式, 名字, 对象号)]。"""
+    out, i = [], 0
+    while i < len(data):
+        sp = data.index(b" ", i)
+        nul = data.index(b"\0", sp)
+        mode, name = data[i:sp].decode(), data[sp + 1:nul].decode("utf-8")
+        if not name or "/" in name or name in (".", ".."):
+            raise Stop(f"树里有不安全的名字：{name!r}")
+        out.append((mode, name, data[nul + 1:nul + 21].hex()))
+        i = nul + 21
+    return out
+
+
+def tree_blobs(host, owner, repo, sha):
+    """提交里的全部文件：路径 → (模式, 对象号)。提交、每一层树都由 root 取原始对象、重算哈希、自己解析，
+    不信主账号 git 的 ls-tree 输出（独立审查复核 P2-a：改了松散对象，同一个提交号能指到另一棵树）。"""
+    commit = cat_objects(host, owner, repo, [sha], "commit")[sha]
+    first = commit.split(b"\n", 1)[0].decode()
+    if not re.match(r"^tree [0-9a-f]{40}$", first):
+        raise Stop(f"提交 {sha[:12]} 的格式不对")
+    blobs, level = {}, [("", first[5:])]
+    while level:
+        trees = cat_objects(host, owner, repo, [t for _, t in level], "tree")
+        nxt = []
+        for prefix, t in level:
+            for mode, name, obj in parse_tree(trees[t]):
+                path = f"{prefix}{name}"
+                if mode == "40000":
+                    nxt.append((path + "/", obj))
+                else:
+                    blobs[path] = (mode, obj)
+        level = nxt
+    return blobs
+
+
 def extract_archive(host, owner, repo, sha, dest, keep):
-    """把提交里要的文件取成新的 root 目录：按 git ls-tree 列出的对象号，用 git cat-file --batch 取原始内容（不经
-    git archive 的行尾转换、export-subst 等过滤），root 自己重算每个对象的哈希核对；只收普通文件，链接、子模块一律停下。"""
+    """把提交里要的文件取成新的 root 目录：路径和对象号来自 root 自己核过的提交、树（tree_blobs），内容用 git cat-file
+    --batch 取原始对象（不经行尾转换、export-subst 等过滤），root 重算哈希；只收普通文件，链接、子模块一律停下。"""
     if dest.exists():
         return dest                       # 按提交号命名、写完才改名：在的就是完整的
     items = sorted((_safe_name(p), mode, obj) for p, (mode, obj) in tree_blobs(host, owner, repo, sha).items() if keep(p))
@@ -354,12 +397,7 @@ def extract_archive(host, owner, repo, sha, dest, keep):
     bad = [p for p, mode, _ in items if mode not in ("100644", "100755")]
     if bad:
         raise Stop(f"提交里有链接或子模块：{bad[:5]}")
-    objs = list(dict.fromkeys(obj for _, _, obj in items))
-    code, out, err = host.as_user(owner, [*GIT, "-C", str(repo), "cat-file", "--batch"],
-                                  stdin=("\n".join(objs) + "\n").encode(), env=GIT_ENV, timeout=300)
-    if code != 0:
-        raise Stop(f"git cat-file 失败：{err.strip()[:200]}")
-    blobs = parse_batch(out, objs)
+    blobs = cat_objects(host, owner, repo, [obj for _, _, obj in items], "blob")
     tmp = dest.parent / f".{dest.name}.tmp-{secrets.token_hex(6)}"
     make_dir(tmp, 0o755)
     try:
@@ -528,6 +566,7 @@ def checks(host, a, migrating=True):
     check(host.guard("sticky_dir", str(shared().parent)) == 0, f"{shared().parent} 属 root、带粘滞位")
     if not migrating or current is None:
         return out
+    settle_progress()
     check(not (gate_root() / "migrating.json").exists(), "没有搬到一半的记录（有的话先跑 rollback --confirm 收拾）")
     check(load_state() is None, "还没搬过（gate/state.json 不存在）")
     check(not exists_as(host, gate, gate_paths(host)["hub"]), f"{gate} 里还没有中台目录")
@@ -542,7 +581,9 @@ def checks(host, a, migrating=True):
         check(not unpaused, f"派单规则全部暂停（没暂停的：{unpaused or '无'}）")
         check(not s["secrets_env"], f"secrets.env 里没有验签密钥（主账号见过的搬过去照样有效，先换掉；"
                                     f"现在有：{s['secrets_env'] or '无'}）")
-        check(s.get("url") and s.get("listen"), f"主账号中台地址 {s.get('url')}（监听 {s.get('listen')}）")
+        check(urllib.parse.urlsplit(s.get("url") or "").hostname == "127.0.0.1"
+              and str(s.get("listen") or "").startswith("127.0.0.1:"),
+              f"中台地址是 127.0.0.1（现在 {s.get('url')}，监听 {s.get('listen')}；监听核对只认这一个地址）")
         check(True, f"中台里现在的钥匙：{', '.join(s['keys'])}（搬过去以后只留新本人密钥和 {worker_account()}）")
     except (Stop, KeyError) as e:
         check(False, f"读主账号中台：{e}")
@@ -852,8 +893,10 @@ def cmd_migrate(host, a):
         write_json(root / "state.json", state)
     except BaseException as e:
         say(f"出错了，退回主账号中台：{e}")
-        undo(host, current, a.owner_account, stamp, prog.done)
-        prog.close("undone")
+        if undo(host, current, a.owner_account, stamp, prog.done):
+            prog.close("undone")
+        else:
+            say(f"退回没做完整（见上），进度记录留在 {prog.f}：看清原因后跑 rollback --confirm")
         raise
     prog.close("done")
     say(f"搬好了：中台以 {gate} 身份运行（{LABEL['hub']}），{url}")
@@ -888,6 +931,18 @@ def undo(host, current, owner_account, stamp, done):
             os.replace(state, gate_root() / f"state.undone-{stamp}.json")
     if done.get("stopped"):
         start_owner_agent(host, owner_account)
+    # 核结果（复核 P2-c）：主账号中台目录回来了、dt-gate 的中台目录已挪开、服务卸了
+    ok = True
+    if not exists_as(host, owner_account, ohub / "config.json"):
+        say(f"  主账号的 {ohub} 没有放回来")
+        ok = False
+    if done.get("gate_hub") and exists_as(host, gate_account(), gp["hub"]):
+        say(f"  dt-gate 的 {gp['hub']} 没有挪开")
+        ok = False
+    if done.get("daemon") and installed("hub"):
+        say(f"  {LABEL['hub']} 没有卸掉")
+        ok = False
+    return ok
 
 
 def start_owner_agent(host, owner_account):
@@ -931,10 +986,28 @@ def cmd_windows(host, a):
     return 0
 
 
+def pf_listener_rule():
+    """换工人钥匙的前提：门卫规则已按监听账号放行 3350（只有 dt-gate 在听的才收），否则中台重启的空档里新钥匙照样
+    能被抢绑端口的冒充者拿走（复核：pf 规则要和换钥匙、恢复派单定好先后）。规则由 0E-1 的 dt_worker_pf.sh 生成。"""
+    d = Path(os.environ.get("DT_PF_DIR") or "/Library/Application Support/DigitalTwin")
+    try:
+        status = (d / "pf-dt-worker.status").read_text(encoding="utf-8")
+        rules = (d / "pf-dt-worker.rules").read_text(encoding="utf-8")
+    except OSError:
+        raise Stop("读不到门卫规则（pf-dt-worker.status / .rules）")
+    if "state=ok" not in status.split():
+        raise Stop("门卫规则不在生效（状态不是 state=ok）")
+    pat = re.compile(rf"^\s*(pass|block)\b.*\bin\b.*\b3350\b.*\buser\b.*{re.escape(gate_account())}", re.M)
+    if not pat.search(rules):
+        raise Stop("门卫规则还没按监听账号保护 3350（要 0E-1 的 dt_worker_pf.sh 加上「3350 只收 dt-gate 在听的」）；"
+                   "装上之前换工人钥匙没用，先不换")
+
+
 def cmd_rotate_worker(host, a):
     if not a.confirm:
         raise Stop("换钥匙后 dt-worker 的接单程序要重启才接得上：确认后加 --confirm")
     s, current = need_state(), load_current()
+    pf_listener_rule()
     gp = gate_paths(host)
     w = host.account(worker_account())
     cfg = Path(w["home"]) / ".agent-autoloop/config.json"
@@ -965,6 +1038,11 @@ def cmd_update(host, a):
         raise Stop("会重启 dt-gate 的服务：确认后加 --confirm")
     s, current = need_state(), load_current()
     which_list = [w for w in ("hub", "readonly", "intake") if installed(w)]
+    if "hub" in which_list:                     # 新引擎可能改写库：换之前先备份（在 dt-gate 自己家里，复核 P2-d）
+        gp = gate_paths(host)
+        target = gp["home"] / f".agent-autoloop-update-{now_stamp()}"
+        run_cli(host, load_current(), gate_account(), gp["hub"], ["backup", str(target)])
+        say(f"换之前的中台备份：{target}（dt-gate 家里）")
     try:
         _install_all(host, current, s, which_list)
     except Stop as e:
@@ -988,6 +1066,10 @@ def cmd_run(host, a):
     if a.tool == "agent-autoloop":
         if not a.args or (a.args[0] not in CLI_ALLOWED and a.args[:2] != ["key", "list"]):
             raise Stop(f"中台命令行只放行：{'、'.join(CLI_ALLOWED)}、key list（签钥匙、备份、恢复不经这里）")
+        if a.args[:2] != ["key", "list"]:        # 其余子命令由引擎带本人密钥连中台：先核端口上是 dt-gate 在听（复核 P1-B）
+            hub_port = urllib.parse.urlsplit(s["hub_url"]).port
+            if not listened_by(host, hub_port, host.account(gate_account())["uid"]):
+                raise Stop(f"{hub_port} 端口上在听的不是 dt-gate（中台没起来或被别人占了），不带本人密钥去；先看 status")
         argv = [current["cli"], *a.args]
     else:
         argv = [PY, *PY_FLAGS, str(Path(current["repo"]["dir"]) / "hermes/scripts" / f"{a.tool}.py"), *a.args]
@@ -1006,6 +1088,8 @@ def cmd_status(host, a):
     except Stop as e:
         say(f"副本：{e}")
     s = load_state()
+    if host.is_root():
+        settle_progress()
     say(f"搬家：{'于 ' + s['migrated_at'] + '，主账号原目录 ' + s['owner_moved'] if s else '还没搬'}")
     if (gate_root() / "migrating.json").exists():
         say("  有搬到一半的记录（migrating.json）：跑 rollback --confirm 收拾")
@@ -1030,11 +1114,13 @@ def cmd_rollback(host, a):
     if not a.confirm:
         raise Stop("回滚会停掉 dt-gate 的中台、把主账号的中台放回去：确认后加 --confirm")
     current = load_current()
+    settle_progress()
     half = gate_root() / "migrating.json"
     if load_state() is None and half.exists():
         m = read_json(half)
         say(f"收拾搬到一半的那次（{m['stamp']}，做过：{[k for k, v in m['done'].items() if v]}）")
-        undo(host, current, m["owner_account"], m["stamp"], m["done"])
+        if not undo(host, current, m["owner_account"], m["stamp"], m["done"]):
+            raise Stop("没收拾完整（见上），进度记录留着；看清原因后再跑一次 rollback --confirm")
         os.replace(half, gate_root() / f"migrating.undone-{m['stamp']}.json")
         say("收拾好了：主账号中台已放回并重新启用")
         return 0

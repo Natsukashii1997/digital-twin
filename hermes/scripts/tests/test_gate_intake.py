@@ -203,9 +203,12 @@ class ListenerCheck(unittest.TestCase):
                     HL.check("http://127.0.0.1:3350", want="503")
         self.assertTrue(issubclass(HL.NotOurListener, OSError))           # 调用方都按「连不上」处理
 
-    def test_remote_url_not_checked(self):
-        with mock.patch.object(HL, "listener_uids", side_effect=AssertionError("不该查")):
-            HL.check("https://hub.example.invalid", want="503")
+    def test_only_127_0_0_1_when_checking(self):
+        """设了核对时别的地址一律不发钥匙：localhost 可能先连 ::1，127.0.0.2 / 外部地址这边核不了（复核 P2-e）。"""
+        with mock.patch.object(HL, "listener_uids", return_value=[503]):
+            for url in ("http://localhost:3350", "http://[::1]:3350", "http://127.0.0.2:3350", "https://hub.example.invalid"):
+                with self.subTest(url=url), self.assertRaises(HL.NotOurListener):
+                    HL.check(url, want="503")
 
     def test_real_lsof_sees_our_own_listener(self):
         import socket
