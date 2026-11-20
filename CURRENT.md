@@ -12,6 +12,14 @@
 - 选样式：甲 对话式 / 乙 决策单 / 丙 推荐优先 × 三种状态共 9 张真卡片以猛鬼兽机器人发到常浩私聊并回读核对；常浩 11-20 回「都选丙」，已登记 `docs/DECIDED.md`，模块只留丙版。证据 `evidence/195-batch1-cards/`。
 - Claude 子 agent 独立审：无 P1，4 条 P2 改了 3 条半（只读通知摊开、引用回答有歧义就不认、默认提示不教引用回答、Agent 总结不进大字；markdown 转义没做：正文本来就是 Agent 写的 markdown，同一信任级别）。
 - 下一步：送 L3；桥接改用本模块等 line-a-0e3 的共用模块落地后接。
+## #253 DT-ORC 6.4「送达未确认」对齐驿窗 postpane#466：没送成的不算（2026-11-20，Claude；PR 待常浩定合并）
+
+- 来由：驿窗 postpane#466（PR Natsukashii1997/postpane#468，已合并）把「没送成」从「送达未确认」里分了出来。常浩 2026-11-20 对驿窗改动确认「送达未确认两处」回「都改」，确认里写明四处规则文字同步改；本仓库是其中一处。
+- 改了什么：`docs/DT-ORC/ARCHITECTURE.md` 第 6.4 节驿窗回信对应表第 1 行补一句：插件明确回报没点过发送、或发出时插件没连上（话没出驿窗）的不算送达未确认，按没送成处理：自动往返不停，同一段话直接重送，不出审核结论。点了发送没见开始、说不清点没点的仍是第 1 行原来的处理。只是表格里一句措辞对齐，架构版本号没动（和 #185 对齐 MA-02 时的做法一样）。
+- 姊妹 PR：multi-agent#15（MA-02 第 4 节）、my-skills#121（thinking-review 1.1.3）。
+- 测试：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`：`Ran 1608 tests in 6784.431s`，`OK`；`… -s orca/tests`：`Ran 48 tests in 39.343s`，`OK`（基于 `1ba4f84` 加本改动；hermes 那套跑了近两小时，本机同时有多组同样的全量在跑）。
+- 证据：`evidence/2026-11-20-253-not-sent/`（`hermes-full.txt`、`orca-full.txt`、`exit.txt`）。
+
 ## #251 工程自检报的 7 项安装副本不一致已收口（2026-11-20，Claude；PR #252 已合并 `cb9443b`，已安装）
 
 - 来由：11-20 代验 11-14 那期日报，工程自检报安装副本不一致 7 项；常浩看逐项方案回「按推荐办」，对 7b 回「7b不改」，对旧版副本选「甲：钉住旧版」，PR 回「合并」。
@@ -19,6 +27,7 @@
 - **收回仓库**：groupdigest-act 第 6 节「常浩质疑报告内容」和 `references/report-content-audit.md`；workshop 三处（登记上游仓库前先查三件事、车间栏照 `D new` 实际值填、换车间先 `D clean` 再重开）。**7b 丢弃**：workshop 第 3 条「前一条回复说过派给谁、他同意就算点名」那句，用仓库版覆盖后已不在安装副本里。
 - **登记先不装**：twin_state.py、custody.py 写进 `hermes/install_hold.txt` 并钉住当前安装的旧版（`@<blob 号>`）；**自检行为变化**：写了 @ 的行，安装副本是钉住那版或 main 版都不报，第三种照报（新测试覆盖）。顺手补登记 #225 漏的 secretary_patrol.py。
 - **验证**：本分支全量 hermes 1609 + orca 48 通过、CI 通过。干净环境自检用 origin/main 克隆当替身跑：原 7 项和 secretary_patrol 全部不报（替身通过，`evidence/251-drift/selfcheck-after-standin.txt`）。
+- **技能放开（PR #254 已合并 `a30fc99`，已安装）**：常浩 11-20「全部放开，hermes自己改了就算」——猛鬼兽、亚古兽可以自己改技能，以安装副本为准；工程自检不再比对技能（脚本、提示词照比）；Claude / Codex 改技能前先收回安装副本的自改；DECIDED 已登记。亚古兽 14:16 自改的两份已原样收回仓库。装了 `ops/self_check.py`、thinking-mainline / evidence-check 两份 SKILL.md（装前核对亚古兽没再改），16:32 重启亚古兽网关，16:33:41 飞书重连。全量 hermes 1610 + orca 48 通过、CI 通过。替身自检（origin/main 克隆）**无输出**（`evidence/skills-selfedit/selfcheck-after-standin.txt`）；下面第 ② 处随之不再是问题。
 - **没达到「自检无输出」，两处**：① 主目录 main 拉不齐——主目录有别的会话没提交的 `projects.json`（新增「Hermes 本体（本地补丁）」名册条目），与 main 新提交冲突，`pull --ff-only` 失败，按约定没 stash；自检读主目录本地 main（还在 `d350369`），真实默认跑出 25 项（`selfcheck-after-real.txt`），要那处改动提交或另行处理后才对得上。② 亚古兽 11-20 14:16 自改了 thinking-mainline/SKILL.md 和 evidence-check/references/product-readiness.md（AGENTS 写明两份不许亚古兽自己改），收不收待常浩定。
 
 ## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR #250 已合并 3c6d7a9，已安装）
