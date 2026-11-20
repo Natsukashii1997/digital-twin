@@ -22,6 +22,29 @@
 
 ---
 
+## 2026-11-20 · agent-autoloop 转为自有项目，不再跟上游
+
+- **在哪定的**：Claude 会话「复盘挂起｜agent-autoloop 与 carvomoto 补防护」。常浩原话：「乙能不能fork下来，我不看上游，这个agent-autoloop项目就是我自己的项目了，就像驿窗一样。我自己深度开发自己使用」；看过改动确认（原决定、理由、代价）后回「改，转自有」。
+- **取代**：2026-11-15 digital-twin#190（批 0A）定的引擎零补丁、锁 v1.8.5、每周检查上游、通用改进经公开 fork 提 PR 回上游（`docs/agent-autoloop-底座-方案.md` 第 3.2 节，已加作废说明）。
+- **定了什么**
+  1. `Natsukashii1997/agent-autoloop` 是常浩自己的项目，引擎可以直接改，不再同步上游，做法参照驿窗（`NOTICE` 写明出处和「不再与上游同步」）。
+  2. 本机仓库去掉 `upstream` 远端（2026-11-20 已做）。
+  3. 常浩 11-20 在问题卡里逐项选定并已执行：删上游镜像分支 main（常浩本人在终端删）；dt 改名为 main 并作默认分支；删已合并的旧远端分支 `claude/ci-save-minutes`、`claude/h01-channel-scope`，未合并的 `codex/audit-fix-1118` 保留；main 开分支保护，必需检查 `check (ubuntu-latest)`（CI 的 job 带系统矩阵，实际检查名带括号），管理员可绕过。
+- **还没定、逐项问的**：`projects.json` 里 `write_allowed` 要不要放开；`update`、一键安装和文档链接指向谁；插件仓库 `dt-autoloop-plugins` 的分工要不要改；ADR-015 第 39 行「私有镜像引擎」由起草它的会话改。
+
+## 2026-11-20 · 每周提案卡片恢复为独立定时任务
+
+- **在哪定的**：Claude 会话「跨项目复盘｜返工根因与规则沉淀」的改动确认，常浩 11-20 回「恢复独立任务」；本会话（跨项目复盘收尾）常浩回「注册」后注册。
+- **定稿**：Hermes 定时任务 `4fece1545136`，配置备份 `~/Library/Application Support/DigitalTwin/evidence/2026-11-20-proposal-digest-restore/jobs.after.json`。
+
+**定了什么**
+
+1. 每周提案卡片（待决提案，含 P1「再犯与待提升」一组，每期最多 7 条）是 Hermes **独立**定时任务，不并进日报或别的任务。
+2. 时间：每周一 10:00（`0 10 * * 1`）。
+3. 做法照 11-11 删除前的 `81464e7ea4e3`：带模型，script `proposal_digest_draft.py` 出草稿，按 proposal-digest 技能写推荐再 `send --recommend` 发私聊卡片；正常结果投递 local，失败投递常浩私聊。
+
+---
+
 ## 2026-11-19 · 工作台分身页
 
 - **在哪定的**：Claude 会话（【交接】数字分身工作台｜分身页三版与其余三页），常浩 11-19 先对页面逻辑回「按这个逻辑出」，看完三版（控制台 / 授权表 / 闸门路径）回「选丙」；issue #246。

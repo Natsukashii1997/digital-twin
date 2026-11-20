@@ -6,6 +6,15 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## #251 工程自检报的 7 项安装副本不一致已收口（2026-11-20，Claude；PR #252 已合并 `cb9443b`，已安装）
+
+- 来由：11-20 代验 11-14 那期日报，工程自检报安装副本不一致 7 项；常浩看逐项方案回「按推荐办」，对 7b 回「7b不改」，对旧版副本选「甲：钉住旧版」，PR 回「合并」。
+- **装了**：prompts/README.md、ai_access.py、dispatch.py（审计高危修复）从 origin/main `1ba4f84` 装好（装前 main 全量 hermes 1608 + orca 48 通过）；合并后 `ops/self_check.py`、groupdigest-act、workshop 两个技能（含 references）从 `cb9443b` 装好，逐个 `cmp` 一致，14:26 重启猛鬼兽网关、飞书重连。旧副本备份 `evidence/251-drift/install-before/`。
+- **收回仓库**：groupdigest-act 第 6 节「常浩质疑报告内容」和 `references/report-content-audit.md`；workshop 三处（登记上游仓库前先查三件事、车间栏照 `D new` 实际值填、换车间先 `D clean` 再重开）。**7b 丢弃**：workshop 第 3 条「前一条回复说过派给谁、他同意就算点名」那句，用仓库版覆盖后已不在安装副本里。
+- **登记先不装**：twin_state.py、custody.py 写进 `hermes/install_hold.txt` 并钉住当前安装的旧版（`@<blob 号>`）；**自检行为变化**：写了 @ 的行，安装副本是钉住那版或 main 版都不报，第三种照报（新测试覆盖）。顺手补登记 #225 漏的 secretary_patrol.py。
+- **验证**：本分支全量 hermes 1609 + orca 48 通过、CI 通过。干净环境自检用 origin/main 克隆当替身跑：原 7 项和 secretary_patrol 全部不报（替身通过，`evidence/251-drift/selfcheck-after-standin.txt`）。
+- **没达到「自检无输出」，两处**：① 主目录 main 拉不齐——主目录有别的会话没提交的 `projects.json`（新增「Hermes 本体（本地补丁）」名册条目），与 main 新提交冲突，`pull --ff-only` 失败，按约定没 stash；自检读主目录本地 main（还在 `d350369`），真实默认跑出 25 项（`selfcheck-after-real.txt`），要那处改动提交或另行处理后才对得上。② 亚古兽 11-20 14:16 自改了 thinking-mainline/SKILL.md 和 evidence-check/references/product-readiness.md（AGENTS 写明两份不许亚古兽自己改），收不收待常浩定。
+
 ## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR #250 已合并 3c6d7a9，已安装）
 
 - 来由：项目坑 L-03（唤醒后代理没通，一周 4 次，每次只修一个脚本）；常浩 2026-11-20 批复盘提案 P9「按改过的」：体检只读 plist 键名，不读进程环境（G-42）。
@@ -186,7 +195,7 @@
 
 - 变基到 `6120638` 后临时 HOME 全量：hermes 1390 项 1 项报错、orca 48 项全过；报错的是 `test_autoloop_feishu` 的 `test_delivered_but_crashed_before_recording_recovers_once`（清临时目录时 hub worker 还在写 `runs/2-1`，Directory not empty）。只跑这个模块不加载本 PR 的文件，PR 分支 3 次错 1 次、main 5 次全过，判为偶发、与本 PR 无关。CI `test` 通过。证据 `evidence/2026-11-19-pr217-rebase2/`。
 - 已装：`proposal_digest.py` → `~/.hermes/scripts/`，`SKILL.md` → `~/.hermes/skills/autonomous-ai-agents/proposal-digest/`，`cmp` 一致；旧版备份在 `evidence/2026-11-19-pr217-install/`。`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway` 重启，13:00:27 飞书重新连上（pid 36084）。
-- 定时任务 `81464e7ea4e3` 没改。待：11-23（周一）10:00 第一期带「再犯与待提升」，看卡片和 `DigitalTwin/shadow/guards-decisions.md` 第一次建出来。
+- 定时任务：~~`81464e7ea4e3` 没改~~ 更正（11-20）：`81464e7ea4e3` 已于 11-11 按猛鬼兽清单删除（见下文「已删除」一行），照原写法 11-23 不会发。11-20 常浩对改动确认回「恢复独立任务」，按旧任务参数重新注册为 `4fece1545136`（`0 10 * * 1`，script `proposal_digest_draft.py`、技能 proposal-digest，结果投递 local、失败投递私聊；`hermes cron list` 读回一致；任务表前后与本地预览在 `evidence/2026-11-20-proposal-digest-restore/`）。待：11-23（周一）10:00 第一期带「再犯与待提升」（本地 `send --dry-run` 预览已含，替身通过）；`DigitalTwin/shadow/guards-decisions.md` 要等常浩回复卡片、写回结论时才建出。
 
 ## 2026-11-19 · 亚古兽接手销售 AI 侧边栏固定汇报（PR #219 已合并 `6a29c36`，已安装、已建定时任务）
 
@@ -350,6 +359,7 @@
 
 ## 2026-11-14 · 个人项目日报连续三期降级查因；#176 核对与取数修复已合并并安装（PR #177 `801bd60`）
 
+- **11-20 续**：11-20 代验时工程自检报的 7 项安装副本不一致已按常浩方案收口，见最上面「#251」一节。
 - **来由**：常浩问 11-13 的日报为什么降级。查实 11-12、11-13、11-14 三期（统计日 11-11 / 11-12 / 11-13）都发的是「脚本事实版」。
 - **主因：Hermes 调不动 Claude，回退 deepseek-flash**：Hermes 最后一次成功调 Claude 在 11-11 10:32；11-12 写稿报 `ClaudeAPIError`（`HERMES_MODEL_ADMISSION_CONSUMED`，重试 3 次），11-13、11-14 报 `ClaudeCodeLoggedOut`（OAuth 过期刷新失败）。`ai_access.py status` 显示 Claude Code「未登录」、近 7 天回退 23 次（飞书对话同样在回退）。deepseek 写的稿核对不过，整份降级。**未修**：要常浩本人 `claude auth login`。
 - **副因（11-12、11-13）**：09:15 电脑在睡眠，09:38 / 09:36 醒来才跑（`pmset -g log`）；刚醒代理没通，16 个项目里 15 个 GitHub 取不到（connection reset / EOF / TLS 握手超时）；核对又把 null 当「没合并」，模型写对的推进被判错。
