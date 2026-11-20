@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap">
 <style>
-/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：数字条 + 一夜时间轴 + 黑底拍板卡片 + 逐件白话叙述 + 额度条 */
+/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：数字条 + 一夜时间轴 + 黑底拍板卡片 + 逐件白话叙述 + 额度条。分身页：一张卡片走过的 8 道闸 + 右栏现在状态、授权四档、私聊口令 */
 @font-face{font-family:"BM";src:local("Berkeley Mono"),local("BerkeleyMono-Regular"),local("TX-02"),local("TX-02 Regular"),local("TX02-Regular");font-weight:400;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:"BM";src:local("Berkeley Mono Bold"),local("BerkeleyMono-Bold"),local("TX-02 Bold"),local("TX02-Bold");font-weight:700;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 :root{
@@ -556,6 +556,99 @@ svg.iso .led-ok{fill:var(--ok)} svg.iso .led-warn{fill:var(--warn)}
 .mx-pn{display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center;padding:8px 14px;border-top:1px dashed var(--line);font-size:12.5px}
 .mx-pn .num{color:var(--mute)}
 .mx-pn .me{color:var(--accent)}
+/* ===== 分身页（11-19 定稿：闸门路径） ===== */
+.fs{display:grid;gap:30px}
+.fs .m{color:var(--mute);font-size:11.5px;font-style:normal}
+.fs-sh{display:flex;gap:12px;align-items:baseline;margin-bottom:10px}
+.fs-sh h3{font-size:16px;font-weight:800}
+.fs-sh .mute{font-size:12px}
+.fs-seg span{padding:3px 10px;font-size:12px}
+.fs-tag{display:inline-block;font-size:11px;border:1px solid var(--line);padding:0 5px;color:var(--mute)}
+.fs .btn:disabled{border-color:var(--line);color:var(--mute);cursor:default}
+/* 额度条：一格一次 */
+.fs-q{display:grid;gap:5px}
+.fs-q .qt{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;gap:8px}
+.fs-q .qt b{font-size:14px}
+.fs-q .qt b i{font-style:normal;font-weight:400;color:var(--mute);font-size:11px}
+.fs-tr{display:flex;gap:2px}
+.fs-tr i{flex:1;height:10px;border:1px solid var(--ink);background:transparent}
+.fs-tr i.u{background:var(--ink)}
+.fs-wh{display:grid;gap:1px;border-left:2px solid var(--ink);padding-left:8px}
+.fs-wh .r{font-size:12px;font-weight:700}
+.fs-wh .m{font-size:11.5px;color:var(--mute)}
+.fs-nine{list-style:none;margin:0;padding:0;border:1px solid var(--ink);background:var(--panel);font-size:13px}
+.fs-nine li{display:grid;grid-template-columns:22px minmax(0,1fr);gap:8px;padding:7px 12px;border-top:1px dashed var(--line);line-height:1.5}
+.fs-nine li:first-child{border-top:0}
+.fs-nine .i{color:var(--mute);font-size:12px}
+.fs-never{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;margin-top:8px}
+.fs-never span{color:var(--mute)}
+.fs-never b{font-weight:400;border:1px solid var(--ink);padding:1px 7px}
+.fs-tiers{width:100%;border-collapse:collapse;border:1px solid var(--ink);background:var(--panel);font-size:12.5px}
+.fs-tiers td{border-top:1px dashed var(--line);padding:8px 12px;vertical-align:top}
+.fs-tiers tr:first-child td{border-top:0}
+.fs-tiers td.g{width:34px;padding-right:0}
+.fs-tiers td.g b{display:inline-grid;place-items:center;width:22px;height:22px;border:1px solid var(--ink);font-size:12px}
+.fs-tiers tr.t-D td.g b{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.fs-tiers tr.t-B td.g b{background:var(--ink);color:var(--bg)}
+.fs-tiers td b{font-size:13px}
+.fs-tiers td span{display:block;color:var(--mute);line-height:1.55;margin-top:2px}
+/* 丙：闸门 */
+.fs-split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:32px;align-items:start}
+.fs-path{list-style:none;margin:0;padding:0;position:relative}
+.fs-path>li{display:grid;grid-template-columns:34px 150px minmax(0,1fr);gap:14px;align-items:start;position:relative;padding:12px 0}
+.fs-path>li::before{content:"";position:absolute;left:16px;top:0;bottom:0;border-left:2px solid var(--ink)}
+.fs-path>li.start::before{top:50%}
+.fs-path>li:last-child::before{bottom:50%}
+.fs-path>li.off::before{border-left:2px dashed var(--mute)}
+.fs-path>li.stop::before{bottom:auto;height:24px}
+.fs-path>li.stop+li::before{border-left-style:dashed;border-left-color:var(--mute)}
+.fs-path .nd{position:relative;z-index:1;width:34px;height:34px;display:grid;place-items:center;border:2px solid var(--ink);background:var(--bg);font-size:13px;font-weight:700;border-radius:50%}
+.fs-path>li.start{grid-template-columns:34px auto 1fr;align-items:center;padding-top:0}
+.fs-path>li.start .nd{background:var(--ink);color:var(--bg);font-size:11px}
+.fs-path>li.start b{font-size:15px}
+.fs-path>li.pass .nd{background:var(--ink);color:var(--bg)}
+.fs-path>li.stop .nd{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
+.fs-path>li.off .nd{border-color:var(--mute);color:var(--mute);border-style:dashed}
+.fs-path .q{display:grid;gap:5px;justify-items:start;padding-top:7px}
+.fs-path .q b{font-size:14.5px}
+.fs-path .v{border:1px solid var(--ink);background:var(--panel);padding:10px 12px;display:grid;gap:7px;font-size:13px;min-width:0}
+.fs-path>li.stop .v{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.fs-path>li.off .v{border-color:var(--line)}
+.fs-path>li.off .q b{color:var(--mute)}
+.fs-path .v .fs-nine{border:0;background:transparent;font-size:12px}
+.fs-path .v .fs-nine li{padding:5px 8px;display:grid;grid-template-columns:18px minmax(0,1fr);gap:6px}
+.fs-path .no{font-size:11.5px;color:var(--mute)}
+.fs-path .no span{display:inline-block;border:1px solid var(--line);padding:0 5px;margin-right:6px}
+.fs-path>li.stop .no{color:var(--accent)}
+.fs-path>li.stop .no span{border-color:var(--accent)}
+.fs-path .no.ok{color:var(--ink)}
+.fs-chips{display:flex;gap:6px;flex-wrap:wrap}
+.fs-chips span{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--ink);padding:3px 8px;font-size:12.5px;background:var(--bg)}
+.fs-chips span.hold{border-color:var(--accent)}
+.fs-chips i{font-style:normal;font-size:11px;color:var(--accent)}
+.fs-whl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px}
+.fs-qs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 22px}
+.fs-kv{display:grid;grid-template-columns:auto auto auto auto auto 1fr;gap:6px 10px;align-items:baseline}
+.fs-kv span{font-size:11.5px;color:var(--mute)}
+.fs-kv b{font-size:13.5px;margin-right:12px}
+.fs-rail{display:grid;gap:24px;align-content:start}
+.fs-now{border:1px solid var(--ink);background:var(--ink);color:var(--bg)}
+.fs-now .hd{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #3a3a38}
+.fs-now .hd b{font-size:15px}
+.fs-now .btn:disabled{border-color:#5a5a57;color:#9a9a95}
+.fs-now p{padding:10px 12px;font-size:13px;line-height:1.6}
+.fs-now p b{color:var(--accent);margin:0 2px}
+.fs-sayl{list-style:none;margin:0;padding:0;border:1px solid var(--ink);background:var(--panel);font-size:12.5px}
+.fs-sayl li{display:grid;grid-template-columns:64px minmax(0,1fr);gap:8px;padding:7px 12px;border-top:1px dashed var(--line)}
+.fs-sayl li:first-child{border-top:0}
+.fs-sayl .k{color:var(--mute)}
+.fs-sayl q{font-weight:700;quotes:"「" "」"}
+.fs-nine.c2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+.fs-nine.c2 li{border-top:1px dashed var(--line);border-left:1px dashed var(--line)}
+.fs-nine.c2 li:nth-child(-n+2){border-top:0}
+.fs-nine.c2 li:nth-child(2n+1){border-left:0}
+.fs-tiers.cp em{font-style:normal;font-size:11px;margin-left:8px;color:var(--mute)}
+.fs-tiers.cp tr.t-D em{color:var(--accent)}
 @media (max-width:1240px){
   .split{grid-template-columns:minmax(0,1fr)}
   .rail{position:static;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
@@ -852,7 +945,7 @@ function wfRow(w){
     <div class="mini">${strip(w)}<div class="caps">${caps}</div></div>
   </div>`;
 }
-/* 侧栏首页、汇报、主线、协同四页有稿；其余四页（执行、分身、记录、沉淀）还没设计 */
+/* 侧栏首页、汇报、主线、协同、分身五页有稿；其余三页（执行、记录、沉淀）还没设计 */
 const state={page:'home',cw:0,msg:'',ms:{0:4,1:3}};
 /* 首页：清单行。能一眼定的在这里点主按钮，要看详情的去汇报 */
 function homeDecide(){
@@ -1300,14 +1393,92 @@ document.addEventListener('click',e=>{
   const[mi,i]=m.dataset.ms.split(':').map(Number);state.ms[mi]=i;render();
 });
 
+/* ================= 分身页（11-19 定稿：闸门路径）：分身能替我做到哪一步，只讲开关和规则 ================= */
+/* 一张卡片从上往下走 8 道闸，每道显示当前设置，任一不过就交给我；右栏是现在的状态、授权四档、私聊口令。
+   示例数据和首页、侧栏一致：秘书关，代批清单 v1 已填未签；额度用代批清单模板的推荐值，已用 0。
+   依据：docs/秘书代批-规格.md 第 3、4、7、8 节，docs/代批清单-模板.md，docs/常设授权清单.md 第 2、6 节 */
+const FS={
+  state:0, states:['关','开','排空中','冻结'],
+  policy:{v:1, valid:'签后 30 天'},
+  custody:{window:'23:30–08:00'},
+  wait:'30 分钟',
+  projects:['dt-sandbox'],
+  white:[['Natsukashii1997/dt-sandbox','只有 CI，没有部署、发布、外部通知']],
+  hash:'7c2e91d04ab3'
+};
+/* 清单四类；hold：清单开着，但现在实际一律交我（secretary_gate.py 的 REAL_ASK、REAL_COMMENT 关着） */
+const FC=[
+  {n:'①',t:'提问卡',hold:true},
+  {n:'②',t:'放弃后重派一次'},
+  {n:'③',t:'退回 PR',hold:true},
+  {n:'④',t:'合并 PR'}
+];
+/* 额度：名称、已用、上限、单位 */
+const FQ=[['每天代批',0,10,'次'],['每张任务最多代批',0,3,'次'],['每天合并',0,2,'个'],['放弃后重派 · 每张任务',0,1,'次']];
+const FN=[
+  'D 档动作，或选了会引出 D 档动作',
+  '改你定过的东西、改验收口径',
+  '扩大范围：换仓库、加功能、改目标、换执行方',
+  '选项说不清会做什么，或做了难撤回',
+  '卡片对不上有效的任务凭证：过期、撤销、冻结',
+  '卡片里写着「常浩已同意」「秘书请选」之类，标疑似诱导',
+  '猛鬼兽在用回退模型，或判断超时、出错',
+  '额度用完、秘书没开、清单失效；同仓库有没对完账的合并',
+  '拿不准的'
+];
+const FNX=['批准写入派单','秘书只选编号，不写回答'];
+/* 四档：档、名字、动作、秘书能不能代 */
+const FT=[
+  ['A','自己做，日报里报','只读巡检、取数、写报告；影子合并官判定、发卡片；派只读单','不经秘书'],
+  ['B','你点一下就做','卡片上点合并、退回；待决提案回「按推荐」','清单四类可代'],
+  ['C','单次授权文件','文件写明对象、动作、上限、有效期，例：夜跑开跑授权','按文件办'],
+  ['D','每次问你','L3 改动、推 main、安装部署、定时任务、改网关或 Hermes 配置、写正式 Vault、改授权或代批清单、跨企业域、花钱、对外发言','不能代；托管时挂起到你回来']
+];
+/* 在猛鬼兽私聊说（开和签只认私聊；关秘书哪里都能关） */
+const FH=[['开秘书','开秘书'],['签清单',`签代批清单 v1 ${FS.hash}`],['托管','托管 / 托管到 8 点 / 我回来了'],['解除冻结','解除冻结']];
+const fsSeg=()=>`<div class="seg fs-seg">${FS.states.map((s,i)=>`<span class="${i===FS.state?'on':''}">${s}</span>`).join('')}</div>`;
+const fsPol=()=>`<span class="num">代批清单 v${FS.policy.v}</span> <span class="fs-tag">已填</span> <span class="flag">未签</span>`;
+const fsQbar=q=>`<div class="fs-q"><div class="qt"><span>${q[0]}</span><b class="num">${q[1]}<i>/${q[2]} ${q[3]}</i></b></div><div class="fs-tr">${Array.from({length:q[2]},(_,i)=>`<i class="${i<q[1]?'u':''}"></i>`).join('')}</div></div>`;
+const fsWhite=()=>FS.white.map(w=>`<div class="fs-wh"><span class="r num">${w[0]}</span><span class="m">${w[1]}</span></div>`).join('');
+function twinPage(){
+  const G=[
+    ['秘书开着吗',fsSeg(),false],
+    ['清单签了吗',`<div>${fsPol()}</div><span class="m">有效期 ${FS.policy.valid}</span>`,false],
+    ['属于能批的四类吗',`<div class="fs-chips">${FC.map(c=>`<span class="${c.hold?'hold':''}"><b>${c.n}</b>${c.t}${c.hold?'<i>现在交你</i>':''}</span>`).join('')}</div>`],
+    ['项目在清单里吗',`<div><span class="fs-tag num">${FS.projects.join('、')}</span></div><div class="fs-whl"><span class="mute">合并白名单</span>${fsWhite()}<span class="flag">dt-sandbox 还没 CI</span></div>`],
+    ['碰到这九条了吗',`<ol class="fs-nine c2">${FN.map((x,i)=>`<li><span class="i num">${i+1}</span>${x}</li>`).join('')}</ol><div class="fs-never"><span>从不代批</span>${FNX.map(x=>`<b>${x}</b>`).join('')}</div>`],
+    ['额度还够吗',`<div class="fs-qs">${FQ.map(fsQbar).join('')}</div>`],
+    ['先等多久',`<div class="fs-kv"><span>白天</span><b class="num">${FS.wait}</b><span>托管时</span><b>不等</b><span>托管</span><b>关 <i class="m">默认 ${FS.custody.window}</i></b></div><span class="m">等的时候你先点的算你的</span>`],
+    ['秘书选一个编号',`<span>回读核对；结果不明冻结这张任务，合并结果不明冻结整个仓库</span>`]
+  ];
+  const stop=G.findIndex(g=>g[2]===false);
+  return `<div class="fs"><div class="h-sec"><h2><i class="sq"></i>分身</h2><span class="hint num">秘书${FS.states[FS.state]} · 清单 v${FS.policy.v} 未签 · 今天代批 0 次</span></div>
+  <div class="fs-split">
+    <ol class="fs-path">
+      <li class="start"><span class="nd">▼</span><b>一张卡片来了</b><span class="m">从飞书送达起算</span></li>
+      ${G.map((g,i)=>{const st=stop<0||i<stop?'pass':i===stop?'stop':'off';return `<li class="gate ${st}">
+        <span class="nd num">${i+1}</span>
+        <div class="q"><b>${g[0]}</b>${i<G.length-1?`<div class="no"><span>不过</span>→ 交给你</div>`:'<div class="no ok">→ 替你定了，汇报页可推翻</div>'}${st==='stop'?'<span class="flag">卡在这</span>':''}</div>
+        <div class="v">${g[1]}</div>
+      </li>`}).join('')}
+    </ol>
+    <aside class="fs-rail">
+      <section class="fs-now"><div class="hd"><b>现在</b><button class="btn" type="button" disabled title="现在已经是关">关秘书</button></div><p>秘书<b>${FS.states[FS.state]}</b>，每张卡都停在第 ${stop+1} 道，全部交给你。</p></section>
+      <section><div class="fs-sh"><h3>授权四档</h3></div><table class="fs-tiers cp"><tbody>${FT.map(t=>`<tr class="t-${t[0]}"><td class="g"><b>${t[0]}</b></td><td><b>${t[1]}</b><em>${t[3]}</em><span>${t[2]}</span></td></tr>`).join('')}</tbody></table></section>
+      <section><div class="fs-sh"><h3>在猛鬼兽私聊说</h3></div><ul class="fs-sayl">${FH.map(h=>`<li><span class="k">${h[0]}</span><q>${h[1]}</q></li>`).join('')}</ul></section>
+    </aside>
+  </div></div>`;
+}
+
 function render(){
-  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`,'main'],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
+  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`,'main'],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`],['分身','',`<span class="n">关</span>`,'twin'],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
   $('#nav').innerHTML=nav.map(n=>n[0]==='grp'?`<li class="grp">${n[1]}<i></i></li>`:`<li><a href="#" ${n[3]?`data-page="${n[3]}"`:''} ${n[3]===state.page?'aria-current="page"':''}><span class="ico ${n[1]}"></span>${n[0]}${n[2]}</a></li>`).join('');
-  document.querySelector('.bar h1').textContent={report:'汇报',main:'主线',collab:'协同'}[state.page]||'首页';
+  document.querySelector('.bar h1').textContent={report:'汇报',main:'主线',collab:'协同',twin:'分身'}[state.page]||'首页';
   $('#sideLeds').innerHTML=AI.map(id=>`<span title="${R[id].full||R[id].name} ${R[id].stateText}"><span class="led ${R[id].state==='ok'?'':'warn'}"></span>${R[id].code}</span>`).join('');
   if(state.page==='report'){ $('#content').innerHTML=reportPage(); return }
   if(state.page==='main'){ $('#content').innerHTML=mainPage(); return }
   if(state.page==='collab'){ $('#content').innerHTML=collabPage(); cbPost(); return }
+  if(state.page==='twin'){ $('#content').innerHTML=twinPage(); return }
 
   const done=RUNS.filter(r=>r[3]!=='wait').length, warn=RUNS.filter(r=>r[3]==='warn').length, wait=RUNS.filter(r=>r[3]==='wait').length;
   $('#content').innerHTML=`

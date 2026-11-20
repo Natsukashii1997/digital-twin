@@ -100,7 +100,52 @@ class TestFeedbackCheck(unittest.TestCase):
     def test_dropping_old_planned_asks_owner(self):
         d = copy.deepcopy(self.cur)
         d["items"] = [i for i in d["items"] if not i.get("title", "").startswith("侧边栏支持编辑学员信息")]
-        self.assertIn("先问他，不要自己定", self.errs(d))
+        self.assertIn("确认上线就改列已上线", self.errs(d))
+
+    def launch(self, title_prefix):
+        """把一条上期待上线原样改列已上线，放到已修复之后、待解决之前。"""
+        d = copy.deepcopy(self.cur)
+        it = next(i for i in d["items"] if i.get("title", "").startswith(title_prefix))
+        d["items"].remove(it)
+        it = {**it, "type": "launched"}
+        at = max(n for n, i in enumerate(d["items"]) if i["type"] == "fixed") + 1
+        d["items"].insert(at, it)
+        return d, it
+
+    def test_old_planned_moved_to_launched_passes(self):
+        d, _ = self.launch("侧边栏支持编辑学员信息")
+        self.assertEqual(sr.fb_check(d, self.prev), [])
+
+    def test_launched_must_keep_old_quotes(self):
+        d, it = self.launch("侧边栏支持编辑学员信息")
+        it["quotes"] = it["quotes"][:1]
+        self.assertIn("原话要照旧", self.errs(d))
+
+    def test_launched_needs_title_and_order(self):
+        q = [{"text": "x", "name": "a", "open_id": "ou_1"}]
+        e = "\n".join(sr.fb_check({"date": "2026-11-19", "cutoff": "x", "items": [
+            {"type": "pending", "title": "p", "quotes": q}, {"type": "launched", "quotes": q}]}))
+        self.assertIn("要写 title", e)
+        self.assertIn("已修复 → 已上线 → 待解决 → 待上线", e)
+
+    def test_launched_renders_as_own_sagittarius_group(self):
+        """常浩 2026-11-19 定：已上线写「♐ 已上线：<功能>」，单独一组（前后各空一行）。"""
+        d, _ = self.launch("侧边栏支持编辑学员信息")
+        rows = sr.fb_render(d)["zh_cn"]["content"]
+        heads = [r for r in rows if len(r) == 2 and r[1].get("style") == ["bold"]]
+        launched = [r for r in heads if r[0]["text"] == "♐ "]
+        self.assertEqual([r[1]["text"] for r in launched], ["已上线：侧边栏支持编辑学员信息（AI 从会话提取，人工辅助修改）"])
+        n = rows.index(launched[0])
+        blank = [{"tag": "text", "text": ""}]
+        self.assertEqual(rows[n - 1], blank)
+        self.assertEqual(rows[n + 2], blank)
+        self.assertNotIn("⬆️ ", [r[0]["text"] for r in heads if r[1]["text"].startswith("已上线")])
+
+    def test_launched_not_carried_to_next_period(self):
+        d, _ = self.launch("侧边栏支持编辑学员信息")
+        # 已上线算完成：下一期不再要求带上
+        nxt = {"date": "2026-11-20", "cutoff": "x", "items": [i for i in d["items"] if i["type"] in ("pending", "planned")]}
+        self.assertEqual(sr.fb_check(nxt, d), [])
 
     def test_carried_quotes_must_not_change(self):
         d = copy.deepcopy(self.cur)

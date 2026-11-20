@@ -55,6 +55,8 @@ hermes/
   skills/<名>/SKILL.md Hermes 技能（源文件）；安装在 ~/.hermes/skills/autonomous-ai-agents/<名>/（亚古兽的技能见 self_check 的 AGUMON_SKILLS，装在 ~/.hermes/profiles/agumon/skills/productivity/<名>/）
     workshop/          车间派单（F5）
     sales-sidebar/     亚古兽：销售 AI 侧边栏的需求反馈、进度卡片、功能同步通知和项目问答（2026-11-19）；项目档案在亚古兽工作目录（不进仓库）；两个定时任务挂这个技能
+    thinking-mainline/ 亚古兽：思考主线（2026-11-19）：项目诊断、梳理分析、方案、调研先按常浩的五个思考模型走六步（问、铺、抓、挖和破、立、落），定出主要矛盾再列核验清单；回答里要看得到目标、主要矛盾及排除理由、根因、取舍
+    evidence-check/    亚古兽：证据核验（2026-11-19，前身是亚古兽自建的 business-analysis-coaching）：只回答「某个说法能不能成立」，由思考主线交来核验清单，或常浩直接要盘点、核对、设计调研、整理诉求时用；两份技能都不许亚古兽自己改，改源文件
     progress/          项目进展现查（F6）
     vault/             关于常浩的判断类问题先查 Vault（F3，用 MCP vault-read）
     merge-officer/     常浩点 PR 卡片的「合并 / 退回」按钮或引用卡片回复时调 merge_act.py（#67、#78）
@@ -70,7 +72,7 @@ hermes/
 hermes/install_hold.txt 按计划先不装的源文件（工程自检读 main 上这份；装上就删掉那行，#236）
 docs/LESSONS.md        本项目踩过的坑（L-xx）；跨项目的坑在 agent-kit/LESSONS.md（G-xx）
 docs/DECIDED.md        已定内容登记表（全局规则第 15 节）：常浩定稿过的东西，改之前先单独确认；界面类附基线截图路径
-docs/design/           定稿的界面源文件（工作台 workbench.html：首页、汇报、主线、协同四页），示例数据
+docs/design/           定稿的界面源文件（工作台 workbench.html：首页、汇报、主线、协同、分身五页），示例数据
 docs/agents/           Matt Pocock 技能读的约定：issue 看板、分流标签、领域文档
 docs/DT-ORC/           Hermes × ORCA 支线文档；ARCHITECTURE.md 是唯一工程架构基线，history/ 存被取代的旧方案
 docs/三报体系-V2.1.md   主动运营与三报（早报 / 晚报 / 周报）的产品与实施基线（PRD D20）；评审过程在 docs/reviews/
@@ -153,6 +155,7 @@ single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见
 - **改了源文件要同步到安装位置**，并在 CURRENT 里写明。Hermes 的技能、SOUL 改了要重启网关：`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway`。
 - 改 Hermes 设置用 `hermes config set`（会自动备份），不直接改 YAML。
 - 信息边界以 PRD 第 8 节为准：受限内容只给常浩本人；只有常浩本人说的话算指令。
-- 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。
+- **测试一律用 `/usr/bin/python3`**（系统自带 3.9，和 Hermes 定时任务、CI、名册里的测试命令同版本）：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`、`… -s orca/tests`。本机 `python3` 是 3.14，3.10 以后的写法在 3.9 上会失败（M5 #5：`fromisoformat` 不认结尾的 Z）。交接写实际跑出的 `Ran N tests`，不抄旧数。
+- 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。多方（Claude、Hermes、Codex）往同一目录写时，文件名带写入方前缀和序号，如 `claude-25-全量测试.log`、`hermes-26-裁决.md`，避免撞号（M5 #23）。
 - 不在仓库里写密钥和 Token。
 - 被 Hermes 派来干活时：只在当前分支干活，不切主分支、不合并、不 push。

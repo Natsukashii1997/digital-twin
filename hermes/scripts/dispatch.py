@@ -85,7 +85,10 @@ def gh_err(r):
 
 def secret_hits(cwd, rng):
     """要推的提交里新增的行有没有像密钥的；只报文件和开头几个字符，不把密钥本身转出去。"""
-    log = git(cwd, "log", "-p", "--no-color", "--format=commit %h", rng).stdout
+    r = git(cwd, "log", "-p", "--no-color", "--format=commit %h", rng)
+    if r.returncode != 0:
+        done(False, f"凭据扫描读取 git log 失败（退出码 {r.returncode}），没有推送；请排查后重试")
+    log = r.stdout
     hits, file = [], None
     for line in log.splitlines():
         if line.startswith("+++ b/"):
@@ -471,6 +474,9 @@ def merge_github(a, o, p):
         (ROOT / a.no / "merge-test.log").write_text(t.stdout + t.stderr)
         if t.returncode != 0:
             done(False, f"{a.no} 合并前测试没过（{p['test']}），没有合并。日志：{ROOT / a.no / 'merge-test.log'}")
+    # 续跑、变基后 HEAD 可能已变，不能沿用开 PR 时的扫描结果。
+    if hits := secret_hits(wt, f"{remote}..HEAD"):
+        done(False, f"{a.no} 的提交里像有密钥或 Token，没有推送：{'；'.join(hits)}", secret_hits=hits)
     r = git(wt, "push", "--force-with-lease", "origin", f"HEAD:refs/heads/{o['branch']}")
     if r.returncode != 0:
         done(False, f"{a.no} 变基后推分支失败，没有合并：{(r.stderr or r.stdout).strip()[:300]}")
