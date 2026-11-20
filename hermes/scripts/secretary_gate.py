@@ -59,12 +59,16 @@
   规则没变；凭证仍有效、代次没变；secretary 准入；任务没被结果不明冻结；① 还要秘书通道已领到、本人没占着（autoloop_feishu.owner_holds）：
   本人占着 → 作废这个决定（释放额度），claim_log 记一笔「你已经在点了，秘书让出」；否则写 claims（who = secretary，
   state = approved，attempt = 决定号）再 secretary_ledger.begin（issued → executing）。
-送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）。**① 的送达开关 REAL_ASK 关着**
-  （PR #218 第 2 轮 P1-01）：中台 answer 只核卡片开着和 ref、不核版本，获准到送达之间卡片改版时旧答案会落到新版本上；
-  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 不看提议内容、不等 30 分钟，只核卡片开着且版本一致、准入、派单绑定、诱导词，就交常浩（4c-2 秘书侧此时不调模型，只交卡片号和版本；常浩 11-19 选甲）；② autoloop_grants.resume_dispatch
+送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref, version: 决定里记的卡片版本}（secretary 通道钥匙）。
+  版本（#278，引擎批 C）：中台（agent-autoloop `30f5a8e` 起）按版本核对，获准到送达之间卡片改了版 → 409、不产生决定、
+  卡片照旧开着，旧答案不会落到新版本上（规格第 9 节验收 12 的秘书这一半；更老的中台不认识 version，会照答，中台不能比这一版旧）。
+  **① 的送达开关 REAL_ASK 照旧关着**（PR #218 第 2 轮 P1-01，常浩 11-19 选甲）：当初关它是因为中台不核版本；现在中台能核、
+  请求也带了，但打开要等「开着的卡会不会改版」专项复核属实、再由常浩单独点头（docs/DECIDED.md 11-20 第 3 条），不随本批打开；
+  关着时 ① 不看提议内容、不等 30 分钟，只核卡片开着且版本一致、准入、派单绑定、诱导词，就交常浩（4c-2 秘书侧此时不调模型，只交卡片号和版本）；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
   关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
-  错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
+  错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放（409 = 卡片在获准之后
+  改版了，原因照这个写）；其余 → finish(unknown)、
   claims 记 unknown、不重答。回读（中台库只读）看到 decided、by = 秘书、choice 一致 → finish(done)，outcome 记 ref 和
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
@@ -140,7 +144,8 @@ RUN_FRESH = dt.timedelta(minutes=30)        # 判断结束到交提议的最长�
 # 判断时不许带上的上下文（PR #225 第 1 轮 P1-02）：Hermes 不加 --ignore-rules 会把项目上下文文件（AGENTS.md 等）、记忆、
 # 用户档案和 SOUL 注入系统提示；这几个是 Hermes v0.22 写进系统提示的块标题，SOUL 另按 $HERMES_HOME/SOUL.md 第一行查
 CONTEXT_MARKERS = ("# Project Context", "MEMORY (your personal notes)", "USER PROFILE (who the user is)")
-REAL_ASK = False        # ① 真送达：中台 answer 能按版本核对（CAS）之前整体关闭（PR #218 第 2 轮 P1-01，常浩 11-19 选甲，规格第 9 节验收 12）
+REAL_ASK = False        # ① 真送达：整体关闭（PR #218 第 2 轮 P1-01，常浩 11-19 选甲）。中台已能按版本核对、请求已带版本（#278），
+#                         但打开要专项复核属实后常浩单独点头（docs/DECIDED.md 11-20 第 3 条），不随别的改动打开
 TEST_ASK = False        # 测试在进程内打开 ① 的送达；不经环境变量
 REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
 TEST_GH = None          # 测试在进程内换成假 gh 的路径；不经环境变量
@@ -344,10 +349,10 @@ def gh_cmd():
 
 
 def ask_switch():
-    """① 的送达开关：中台回答还不能按版本核对，获准到送达之间卡片改版时旧答案会落到新版本上（PR #218 第 2 轮 P1-01）。
-    中台有了版本核对（规格第 9 节验收 12）再打开，并让 deliver_ask 带上获准时的版本。"""
+    """① 的送达开关。当初关它是因为中台回答不核版本（PR #218 第 2 轮 P1-01）；#278 起中台能核、deliver_ask 也带上了
+    获准时的版本，但打开要常浩单独点头（docs/DECIDED.md 11-20 第 3 条），所以照旧关着、一律交常浩。"""
     if not (REAL_ASK or TEST_ASK):
-        raise SwitchOff("中台收回答还不能按卡片版本核对，秘书替你选选项暂时整体关闭，这张交给你")
+        raise SwitchOff("秘书替你选选项的开关还没打开（要你单独点头才开），暂时整体关闭，这张交给你")
 
 
 def pr_now(github, pr):
@@ -1041,7 +1046,8 @@ def readback_ok(c, choice):
 
 
 def deliver_ask(st, d, ctx, now):
-    card_id, choice, ref = ctx["card"]["id"], ctx["hub_choice"], ctx["ref"]
+    """① 送达：回答带上决定里记的卡片版本，中台对不上就拒绝（409），旧答案不会落到改版后的卡片上（#278）。"""
+    card_id, choice, ref, version = ctx["card"]["id"], ctx["hub_choice"], ctx["ref"], d["card_version"]
     try:                                                     # 开关在获准后被关：确定没发
         ask_switch()
     except SwitchOff as e:
@@ -1049,12 +1055,16 @@ def deliver_ask(st, d, ctx, now):
         set_claim(card_id, d["id"], None, str(e))
         return {"ok": False, "result": "failed", "decision": d["id"], "msg": str(e)}
     try:
-        out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": SECRETARY, "ref": ref}, channel=CHANNEL)
+        out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": SECRETARY, "ref": ref, "version": version},
+                    channel=CHANNEL)
     except F.HubError as e:
         if not e.sent or e.status in DEFINITE:
-            SL.finish(st, d["id"], "failed", {"error": str(e)}, now=now)
-            set_claim(card_id, d["id"], None, str(e))
-            return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"中台没有受理：{e}"}
+            why = str(e)
+            if e.sent and e.status == 409:                   # 带了版本：中台说卡片已不是获准时的那一版
+                why = f"卡片在秘书获准之后改版了（秘书答的是第 {version} 版），这次回答没有算数"
+            SL.finish(st, d["id"], "failed", {"error": why}, now=now)
+            set_claim(card_id, d["id"], None, why)
+            return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"中台没有受理：{why}"}
         SL.finish(st, d["id"], "unknown", {"error": str(e)}, now=now)
         set_claim(card_id, d["id"], "unknown", str(e))
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": f"结果不明（{e}），不重答，等对账"}
