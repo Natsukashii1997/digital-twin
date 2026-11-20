@@ -403,6 +403,12 @@ class Policy(unittest.TestCase):
         self.said.start()
         self.addCleanup(self.said.stop)
 
+    def sent_at(self):
+        """30 秒前发的消息，写成 lark-cli 那样的本机时区时间（CI 在 UTC：写死北京时间的字符串会被当成未来的消息）。"""
+        import datetime as dt
+        now = dt.datetime.fromisoformat(os.environ["DT_NOW"]).astimezone()
+        return (now - dt.timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+
     def test_repo_rules_have_auto_section(self):
         self.assertEqual(self.rules["auto"]["tiers"], ["L0", "L1", "L2"])
         self.assertNotIn("L3", self.rules["auto"]["tiers"])
@@ -445,7 +451,7 @@ class Policy(unittest.TestCase):
         with unittest.mock.patch.object(MP, "owner_config", lambda: ("ou_owner", "oc_home")), \
                 unittest.mock.patch.object(MP, "fetch_message", lambda mid: {
                     "message_id": mid, "sender_type": "user", "sender_open_id": "ou_someone_else", "chat_id": "oc_home",
-                    "chat_type": "p2p", "create_time": "2026-11-20 14:59:30", "text": self.text}):
+                    "chat_type": "p2p", "create_time": self.sent_at(), "text": self.text}):
             with self.assertRaisesRegex(MP.Rejected, "发送者不是常浩本人"):
                 MP.do_sign("om_abc123", self.rules)
         self.said.start()
@@ -456,7 +462,7 @@ class Policy(unittest.TestCase):
         with unittest.mock.patch.object(MP, "owner_config", lambda: ("ou_owner", "oc_home")), \
                 unittest.mock.patch.object(MP, "fetch_message", lambda mid: {
                     "message_id": mid, "sender_type": "user", "sender_open_id": "ou_owner", "chat_id": "oc_home",
-                    "chat_type": "p2p", "create_time": "2026-11-20 14:59:30", "text": self.text + "。"}):
+                    "chat_type": "p2p", "create_time": self.sent_at(), "text": self.text + "。"}):
             MP.do_sign("om_abc123", self.rules)
         self.said.start()
         self.assertTrue(MP.active(self.rules)[0])
