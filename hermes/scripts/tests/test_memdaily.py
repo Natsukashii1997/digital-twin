@@ -159,7 +159,7 @@ class Collect(unittest.TestCase):
             try:
                 if want_calls == 2:
                     self.assertEqual(md.lark("docs", "+fetch", sleep=waits.append), {})
-                    self.assertEqual(waits, [10])
+                    self.assertEqual(waits, [md.netwait.INTERVAL])
                 else:
                     with self.assertRaises(md.Fail):
                         md.lark("docs", "+fetch", sleep=waits.append)
@@ -171,7 +171,7 @@ class Collect(unittest.TestCase):
         # 11-14 07:45 真实输出：唤醒后网络没通，lark-cli 刷新令牌失败，stdout 空、stderr 不是 JSON
         wake = ('[lark-cli] [WARN] uat-client: refresh attempt 1/2 failed for ou_x: token refresh request failed: '
                 'Post "https://open.feishu.cn/open-apis/authen/v2/oauth/token": dial tcp: lookup open.feishu.cn: no such host')
-        for raw, fails, want in ((wake, 2, {"x": 1}), (wake, 9, None), ("panic: something else", 1, None)):
+        for raw, fails, want in ((wake, 2, {"x": 1}), (wake, 30, None), ("panic: something else", 1, None)):
             calls, waits = [], []
 
             def fake(cmd, **kw):
@@ -184,13 +184,13 @@ class Collect(unittest.TestCase):
             try:
                 if want is not None:
                     self.assertEqual(md.lark("docs", "+fetch", sleep=waits.append), want)
-                    self.assertEqual(waits, [10, 30])
+                    self.assertEqual(waits, [md.netwait.INTERVAL] * 2)
                 else:
                     with self.assertRaises(md.Fail) as cm:
                         md.lark("docs", "+fetch", sleep=waits.append)
                     self.assertIn("输出不是 JSON", str(cm.exception))
-                    self.assertEqual(len(calls), len(md.DELAYS) + 1 if fails > 1 else 1)
-                    self.assertEqual(sum(waits), sum(md.DELAYS) if fails > 1 else 0)
+                    self.assertEqual(len(calls), 21 if fails > 1 else 1)             # 300 秒预算，每 15 秒一次（netwait）
+                    self.assertEqual(sum(waits), 300 if fails > 1 else 0)
             finally:
                 md.subprocess.run = orig
 

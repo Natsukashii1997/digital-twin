@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import netwait  # noqa: E402  唤醒后等网络、网络错误判断的共用实现（P9）
 from report_data import clean, wd  # noqa: E402  消息清洗、星期写法和工作日报共用
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
@@ -40,38 +41,32 @@ class Fail(Exception):
     pass
 
 
-NETWORK = re.compile(r"timed out|timeout|connection reset|connection refused|EOF|no such host|network is unreachable|TLS handshake"
-                     r"|dial tcp|token refresh request failed|retry the export|could not export", re.I)
-# 秒；11-12 首跑两次失败：睡眠醒来读文档超时、飞书「could not export … Retry the export」，各自过一会儿都好了。
-# 11-14 07:45 唤醒后网络没通，lark-cli 刷新令牌失败（dial tcp），输出不是 JSON；等够约 5 分钟，同 pdaily 的唤醒等待（#176）
-DELAYS = (10, 30, 60, 120, 120)
-
-
-def lark(*args, identity="user", cwd=None, tries=len(DELAYS) + 1, sleep=time.sleep):
+def lark(*args, identity="user", cwd=None, tries=None, sleep=time.sleep, clock=time.monotonic):
     """以亚古兽应用调 lark-cli（默认常浩的用户身份；推送用 identity="bot"），返回 data。
 
-    飞书报「可重试」或网络错误（超时、连接断开、连不上、刷新令牌失败；输出不是 JSON 时看原文）时重试，
-    间隔按 DELAYS，合计约 5 分钟；写文档的调用传 tries=1，不重试，免得写两遍。"""
+    飞书报「可重试」或网络错误（netwait.is_net_error：超时、连接断开、连不上、刷新令牌失败、导出要重试；输出不是 JSON
+    时看原文）时，按 netwait.Budget 每 15 秒重试，这一次调用合计最多等 DT_NET_WAIT_SECONDS 秒（默认 300，P9 起和
+    pdaily 的唤醒等待同一套，#176）。11-12 首跑：睡眠醒来读文档超时、飞书「could not export … Retry the export」；
+    11-14 07:45 唤醒后网络没通，刷新令牌失败（dial tcp）。写文档的调用传 tries=1，不重试，免得写两遍。"""
     # lark-cli 看到 Hermes 的环境变量会改读另一套配置，这里去掉（同 report_data.lark）
     env = {k: v for k, v in os.environ.items() if not k.lstrip("_").startswith(AGENT_ENV)}
-    for i in range(tries):
+    budget = netwait.Budget(0 if tries == 1 else None, sleep=sleep, clock=clock)
+    while True:
         r = subprocess.run([LARK, "--profile", PROFILE, *args, "--as", identity], capture_output=True, text=True,
                            timeout=300, env=env, cwd=cwd)
         try:
             d = json.loads(r.stdout or r.stderr)
         except ValueError:
             raw = r.stderr or r.stdout
-            if not NETWORK.search(raw) or i == tries - 1:
+            if not netwait.is_net_error(raw) or not budget.retry():
                 raise Fail(f"{args[0]} {args[1]} 输出不是 JSON（{raw[:200]}）")
-            sleep(DELAYS[min(i, len(DELAYS) - 1)])
             continue
         if d.get("ok", True):
             return d.get("data")
         err = d.get("error") or {}
         msg = str(err.get("message", "未知错误"))
-        if not (err.get("retryable") or NETWORK.search(msg)) or i == tries - 1:
+        if not (err.get("retryable") or netwait.is_net_error(msg)) or not budget.retry():
             raise Fail(f"{args[0]} {args[1]}：{msg[:200]}")
-        sleep(DELAYS[min(i, len(DELAYS) - 1)])
 
 
 def legacy():

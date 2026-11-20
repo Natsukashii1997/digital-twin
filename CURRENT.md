@@ -6,6 +6,14 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR 待开、待常浩合并）
+
+- 来由：项目坑 L-03（唤醒后代理没通，一周 4 次，每次只修一个脚本）；常浩 2026-11-20 批复盘提案 P9「按改过的」：体检只读 plist 键名，不读进程环境（G-42）。
+- 改了什么：新增 `hermes/scripts/netwait.py`（开跑闸门 gate / guard、重试预算 Budget、网络错误判断 is_net_error）；`report_data`、`pdaily_data`、`memdaily_data` 原来各自的等待重试删掉、改调它；8 个在跑的无模型定时任务入口和暂停中的合并官、夜跑主控开跑前先过闸门，等不到明确失败写原因（写稿类记进产物、由发送那次报）；`DT_MODEL_WAIT_SECONDS`、`DT_GH_WAIT_SECONDS` 合成 `DT_NET_WAIT_SECONDS`。`ops/health_check.py` 加网关 plist 代理变量名检查（G-19）和定时任务晚点 / 失败附 pmset 睡眠记录（G-20）；`ops/self_check.py` 把 netwait.py、report_data.py 的亚古兽副本也纳入比对。
+- 姊妹 PR：agent-kit#102（G-19、G-20 升〔体检〕）、my-skills#119（automation-checkup 两项）。
+- 未做：装进 `~/.hermes`（猛鬼兽 scripts 和亚古兽 profile scripts 各一份 netwait.py、report_data.py）、`~/Library/Application Support/DigitalTwin/bin/health_check.py`，等常浩回「合」后做；脚本改动不用重启网关。
+- 证据：`evidence/p9-env-ready/`（全量测试日志）。
+
 ## 安全审计 PR #171 再次续跑核验（2026-11-18，Codex，常浩授权继续原简报；计费阻断）
 
 - 时间：核验记录 `2026-11-18 10:38`。

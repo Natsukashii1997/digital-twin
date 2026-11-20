@@ -51,13 +51,13 @@
 - 现象：日报 / 周报唤醒后主模型通道没通就开跑、回退到备用模型（#140 → PR #141）；记忆日报首跑读文档网络超时（PR #170）、唤醒后刷新令牌失败（PR #178）；个人项目日报唤醒后 GitHub 取不到，误判「没合并」（#176 → PR #177）。同一类问题一周内出现 4 次。
 - 根因：Mac 睡眠时定时任务晚点，醒来那一刻代理和网络还没就绪；每次修复只给出事的那个入口加等待重试，于是 `report_data.py`（`wait_model_route`，`DT_MODEL_WAIT_SECONDS`）、`pdaily_data.py`（`gh_wait`，`DT_GH_WAIT_SECONDS`）、`memdaily_data.py`（`lark()` 的网络重试）三处各写一份，判断「网络类错误」的规则也各不相同。PR #141 正文自己写明「主对话和其他定时任务遇到代理未就绪仍会直接回退」。
 - 正确做法：
-  - 新加或修改 Hermes 无模型定时任务入口时，开跑前先等网络和代理连通（有上限，到点照常放行并记录），复用已有的等待实现，不再另写一份。
+  - 新加或修改 Hermes 无模型定时任务入口时，开跑前先调 `hermes/scripts/netwait.py` 的 `guard` / `gate`（P9 起的共用实现）：等要用到的地址（feishu / github / model / aihot）都连得上，最多 `DT_NET_WAIT_SECONDS` 秒（默认 300）；等不到就明确失败、写原因，不悄悄跳过，也不照常放行。调用里的网络重试用 `netwait.Budget`，判断网络错误用 `netwait.is_net_error`，不再另写一份。
   - 修这类问题时先搜所有定时任务入口有没有同样的缺口，一次补齐，或在 PR 里写明为什么不补。
   - 失败时段先按 G-20 查 `pmset -g log` 有没有睡眠，再查代码。
 - 证据：PR #141 `b5b3f71`、PR #170 `a6c1912`、PR #177 `801bd60`、PR #178 `c7e00a2`；三处实现见 `hermes/scripts/report_data.py`、`pdaily_data.py`、`memdaily_data.py`。
 - 再犯：G-20
-- 升级：〔提醒〕未升级。最硬能升到〔结构〕：三处等待收成一个共用模块，所有无模型定时任务入口先调它（复盘提案 P9）；未做。
-- 触发：`hermes cron create`、`DT_GH_WAIT_SECONDS`、`DT_MODEL_WAIT_SECONDS`
+- 升级：〔结构〕〔体检〕已升级（2026-11-20，复盘提案 P9，常浩当天批「按改过的」）：三处等待收成 `hermes/scripts/netwait.py`，在跑的 8 个无模型定时任务入口和暂停中的合并官、夜跑主控、工作日报取数开跑前都先过它（高频的两个等不到只在 6 小时内报一次）；`DT_MODEL_WAIT_SECONDS`、`DT_GH_WAIT_SECONDS` 合并成 `DT_NET_WAIT_SECONDS`。每日巡检 `ops/health_check.py` 查网关 plist 的代理变量名（G-19），定时任务晚点或失败时自动附 `pmset -g log` 睡眠记录（G-20）。剩余：`merge_act.py` 按钮合并的 3 秒、5 秒快速重试是另一用途，判断网络错误的正则仍自带一份，没并进来。
+- 触发：`hermes cron create`、`DT_NET_WAIT_SECONDS`、`netwait`
 
 ## L-04 结论还没定、关键前提还没实测，就写进 PRD 或架构基线，当天撤回或改版（2026-11-02、11-09）
 

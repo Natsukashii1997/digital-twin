@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -225,7 +226,7 @@ class DailySendTest(unittest.TestCase):
         self.patch(hc, "LOG_DIR", self.logs)
         self.gateway = self.patch(hc, "check_gateway", return_value=[])
         for name in ("check_fallback", "check_aux_errors", "check_cron", "check_unclean_exits", "check_skill_sync",
-                     "check_egress", "check_pf"):
+                     "check_egress", "check_pf", "check_gateway_proxy", "check_job_timing"):
             self.patch(hc, name, return_value=[])
         self.sent = []
         # 保留真实 run()/send()，在最底层拦住所有子进程；意外命令立即让测试失败。
@@ -281,6 +282,134 @@ class DailySendTest(unittest.TestCase):
         self.assertEqual(output.strip(), "2000-01-01 09:45 巡检正常")
         self.assertFalse(hasattr(hc, "check_sandbox") or hasattr(hc, "check_repos"))
 
+
+
+TOKEN = "sk-ant-oat01-FAKE-TOKEN-DO-NOT-PRINT"   # 夹具里的假令牌：体检输出里一个字都不许出现
+PMSET = """2026-11-20 09:07:03 +0800 Sleep               \tEntering Sleep state due to 'Clamshell Sleep':TCPKeepAlive=active Using Batt (Charge:72%) 595 secs
+2026-11-20 09:07:04 +0800 Wake Requests       \t[process=mDNSResponder request=Maintenance deltaSecs=7199 wakeAt=2026-11-20 11:07:03]
+2026-11-20 09:16:58 +0800 DarkWake            \tDarkWake from Deep Idle [CDNP] : due to rtc/Maintenance Using BATT (Charge:72%) 10 secs
+2026-11-20 09:17:08 +0800 Sleep               \tEntering Sleep state due to 'Maintenance Sleep':TCPKeepAlive=active Using Batt (Charge:72%) 47 secs
+2026-11-20 09:40:00 +0800 Wake                \tWake from Deep Idle [CDNPB] : due to UserActivity Using AC (Charge:72%) 
+2026-11-20 12:00:00 +0800 Sleep               \tEntering Sleep state due to 'Idle Sleep' Using AC 10 secs
+"""
+
+
+class WakeChecksTest(unittest.TestCase):
+    """P9：网关 plist 代理变量只核对键名（G-19、G-42）；定时任务晚点或失败附 pmset 睡眠记录（G-20）。验证环境：替身（临时 plist、jobs.json、pmset 输出）。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.agents = self.root / "LaunchAgents"
+        self.agents.mkdir()
+        self.home = self.root / "hermes"
+        (self.home / "cron").mkdir(parents=True)
+        hc._pmset_cache.clear()
+        self.addCleanup(hc._pmset_cache.clear)
+
+    def plist(self, keys, label="ai.hermes.gateway"):
+        env = {k: f"http://user:{TOKEN}@127.0.0.1:8086" for k in keys}
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = TOKEN
+        with open(self.agents / f"{label}.plist", "wb") as f:
+            plistlib.dump({"Label": label, "EnvironmentVariables": env}, f)
+
+    def proxy(self, label="ai.hermes.gateway"):
+        return hc.check_gateway_proxy(label, self.home, self.agents)
+
+    def test_all_proxy_keys_present_is_quiet(self):
+        self.plist(hc.PROXY_KEYS)
+        self.assertEqual(self.proxy(), [])
+
+    def test_missing_proxy_keys_reported_by_name_only(self):
+        self.plist(("HTTP_PROXY", "NO_PROXY", "http_proxy", "no_proxy"))
+        out, = self.proxy()
+        self.assertIn("缺代理变量 HTTPS_PROXY, https_proxy", out)
+        self.assertIn(".env 里也没有", out)
+        self.assertNotIn(TOKEN, out)
+        self.assertNotIn("8086", out)                                      # 值一个字都不出
+        (self.home / ".env").write_text(f"export HTTPS_PROXY=http://{TOKEN}@x\nhttps_proxy=y\n", encoding="utf-8")
+        out, = self.proxy()
+        self.assertIn("暂时不影响", out)
+        self.assertNotIn(TOKEN, out)
+
+    def test_plist_without_env_section_or_missing_or_broken(self):
+        with open(self.agents / "ai.hermes.gateway.plist", "wb") as f:
+            plistlib.dump({"Label": "x"}, f)
+        self.assertIn("缺代理变量 HTTPS_PROXY, HTTP_PROXY, NO_PROXY, https_proxy, http_proxy, no_proxy", self.proxy()[0])
+        self.assertEqual(self.proxy("没有这个"), [])                      # 没装由 check_gateway 报
+        (self.agents / "坏的.plist").write_text("不是 plist", encoding="utf-8")
+        self.assertEqual(self.proxy("坏的"), ["读不了网关配置 坏的.plist（InvalidFileException），代理变量没法核对"])
+
+    def jobs(self, *jobs):
+        (self.home / "cron/jobs.json").write_text(json.dumps({"jobs": list(jobs)}), encoding="utf-8")
+
+    @staticmethod
+    def job(name, sched, sent, late, status="ok", ran=None, enabled=True):
+        return {"id": name, "name": name + "（说明）", "enabled": enabled, "last_status": status, "last_run_at": ran or sent,
+                "last_dispatch": {"scheduled_at": sched, "dispatched_at": sent, "lateness_seconds": late}}
+
+    def timing(self, now="2026-11-20T13:00:00+08:00"):
+        with patch.object(hc, "run", return_value=subprocess.CompletedProcess([], 0, PMSET, "")) as run:
+            out = hc.check_job_timing(self.home, dt.datetime.fromisoformat(now))
+        return out, run
+
+    def test_late_job_gets_sleep_records(self):
+        self.jobs(self.job("个人项目日报·写稿", "2026-11-20T09:15:00+08:00", "2026-11-20T09:47:00+08:00", 1920),
+                  self.job("准点的", "2026-11-20T10:00:00+08:00", "2026-11-20T10:00:18+08:00", 18),
+                  self.job("停用的", "2026-11-20T09:15:00+08:00", "2026-11-20T09:47:00+08:00", 1920, enabled=False),
+                  self.job("前天的", "2026-11-18T09:15:00+08:00", "2026-11-18T09:47:00+08:00", 1920))
+        out, run = self.timing()
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("「个人项目日报·写稿」11-20 09:15 的那次晚了 32 分钟才派发", out[0])
+        self.assertIn("机器在睡（pmset：Sleep 1 次、DarkWake 1 次、Wake 1 次", out[0])
+        self.assertIn("09:17 Sleep Maintenance Sleep 电池 72%", out[0])
+        self.assertIn("09:40 Wake 插电", out[0])
+        self.assertNotIn("Requests", out[0])
+        run.assert_called_once_with(["pmset", "-g", "log"], timeout=300)
+
+    def test_failed_job_and_awake_machine(self):
+        self.jobs(self.job("AI HOT", "2026-11-20T12:30:00+08:00", "2026-11-20T12:30:05+08:00", 5, status="error",
+                           ran="2026-11-20T12:36:00+08:00"))
+        out, _ = self.timing()
+        self.assertEqual(out, ["定时任务「AI HOT」11-20 12:36 那次没跑成；那段时间 pmset 里没有睡眠 / 唤醒记录，机器应该醒着，原因要另查"])
+
+    def test_nothing_wrong_does_not_read_pmset(self):
+        self.jobs(self.job("准点的", "2026-11-20T10:00:00+08:00", "2026-11-20T10:00:18+08:00", 18))
+        out, run = self.timing()
+        self.assertEqual(out, [])
+        run.assert_not_called()
+        (self.home / "cron/jobs.json").write_text("坏的", encoding="utf-8")
+        self.assertEqual(self.timing()[0], [])
+
+    def test_pmset_unreadable(self):
+        start = dt.datetime.fromisoformat("2026-11-20T09:00:00+08:00")
+        with patch.object(hc, "run", return_value=subprocess.CompletedProcess([], 1, "", "boom")):
+            self.assertIn("读不了 pmset", hc.sleep_summary(start, start))
+
+    def test_end_to_end_dry_run_reports_missing_proxy_without_token(self):
+        """验收：临时 plist 去掉代理变量，体检（--dry-run，只打印）报出来；整份输出里搜不到令牌原文。"""
+        self.plist(("NO_PROXY", "no_proxy"), label="ai.hermes.gateway-agumon")
+        self.plist(hc.PROXY_KEYS)
+        stubs = {n: patch.object(hc, n, return_value=[]) for n in (
+            "check_gateway", "check_unclean_exits", "check_fallback", "check_aux_errors", "check_skill_sync",
+            "check_cron", "check_egress", "check_pf", "check_job_timing")}
+        for p in stubs.values():
+            p.start()
+            self.addCleanup(p.stop)
+        for name, value in (("LAUNCH_AGENTS", self.agents), ("HERMES", self.home), ("LOG_DIR", self.root / "health")):
+            p = patch.object(hc, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        output = io.StringIO()
+        with patch.object(sys, "argv", [str(SCRIPT), "--dry-run"]), redirect_stdout(output):
+            hc.main()
+        text = output.getvalue()
+        self.assertIn("亚古兽：网关 plist（ai.hermes.gateway-agumon.plist）的 EnvironmentVariables 缺代理变量 "
+                      "HTTPS_PROXY, HTTP_PROXY, https_proxy, http_proxy", text)
+        self.assertNotIn("猛鬼兽：网关 plist", text)
+        self.assertNotIn(TOKEN, text)
+        self.assertNotIn(TOKEN, "".join(p.read_text() for p in (self.root / "health").iterdir()))   # 巡检日志里也没有
 
 
 class WorkerIsolation(unittest.TestCase):

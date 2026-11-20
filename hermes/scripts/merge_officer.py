@@ -33,6 +33,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import netwait  # noqa: E402  唤醒后先等网络（P9）
+
 HERE = Path(__file__).resolve().parent
 ROSTER = Path(os.environ.get("DT_ROSTER", "~/Documents/ChatGPT/个人/work/digital-twin/projects.json")).expanduser()
 RULES = Path(os.environ.get("DT_MERGE_RULES") or HERE / "merge_rules.json")
@@ -424,7 +427,8 @@ def main(argv=None):
     p.add_argument("--rules", required=True)
     a = a.parse_args(argv)
     try:
-        if a.cmd in (None, "scan"):
+        if a.cmd in (None, "scan"):   # 定时任务每 30 分钟一跑：先等网络（P9），等不到第一次说原因，6 小时内不重复报
+            netwait.guard("merge-officer", ("github", "feishu"), "影子合并官这一轮", quiet_hours=6)
             return cmd_scan(a.verbose)
         if a.cmd == "backfill":
             return cmd_backfill()

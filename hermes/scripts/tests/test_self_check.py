@@ -77,6 +77,12 @@ class ScriptTest(unittest.TestCase):
         sh(self.repo, "add", "-A")
         sh(self.repo, "commit", "-q", "-m", "起步")
         self.write(self.home / "hermes/scripts/check_repos.py", "源 ops/check_repos.py\n")   # check_repos.py 装两处
+        for f in ("netwait.py", "report_data.py"):                                          # 两只机器人各一份（P9）
+            self.write(self.repo / "hermes/scripts" / f, f"源 {f}\n")
+            for d in ("hermes/scripts", "hermes/profiles/agumon/scripts"):
+                self.write(self.home / d / f, f"源 {f}\n")
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-q", "-m", "共用脚本")
         self.write(self.home / "hermes/scripts/安装处多出的.py", "不管\n")
         self.write(self.home / "tidings/bin/health.js", "")   # 健康：什么都不打印
 
@@ -247,6 +253,15 @@ class ScriptTest(unittest.TestCase):
         out = self.run_script()
         self.assertIn("- ~/hermes/profiles/agumon/scripts/memdaily_job.py 和 hermes/scripts/memdaily_job.py 内容不同", out)
         self.assertNotIn("~/hermes/scripts/memdaily", out)
+
+    def test_shared_scripts_checked_in_both_profiles(self):
+        """netwait.py、report_data.py 猛鬼兽和亚古兽各装一份，两处都比对（P9）。"""
+        self.write(self.home / "hermes/profiles/agumon/scripts/netwait.py", "旧的\n")
+        (self.home / "hermes/scripts/report_data.py").unlink()
+        out = self.run_script()
+        self.assertIn("- ~/hermes/profiles/agumon/scripts/netwait.py 和 hermes/scripts/netwait.py 内容不同", out)
+        self.assertIn("- ~/hermes/scripts/report_data.py 缺失（源：hermes/scripts/report_data.py）", out)
+        self.assertNotIn("~/hermes/scripts/netwait.py", out)
 
     def test_check_repos_checked_in_both_install_places(self):
         (self.home / "hermes/scripts/check_repos.py").unlink()

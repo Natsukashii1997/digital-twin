@@ -87,6 +87,7 @@ def isolated_env():
         "HTTP_PROXY": DEAD, "HTTPS_PROXY": DEAD, "ALL_PROXY": DEAD, "http_proxy": DEAD, "https_proxy": DEAD,
         "all_proxy": DEAD, "NO_PROXY": "127.0.0.1,localhost,::1", "no_proxy": "127.0.0.1,localhost,::1",
         "DT_TEST_ISOLATION": str(ROOT),
+        "DT_NET_WAIT_SECONDS": "0",   # 定时任务入口的网络闸门（netwait，P9）默认不等不探；测等待的用例自己打开
     }
 
 

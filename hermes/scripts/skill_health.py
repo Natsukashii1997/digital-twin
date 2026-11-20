@@ -14,6 +14,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+import netwait  # noqa: E402  唤醒后先等网络（P9）
+
 HOME = Path.home()
 REPO = Path(os.environ.get("MY_SKILLS_REPO", "~/Documents/ChatGPT/个人/work/my-skills")).expanduser()
 NODE = os.environ.get("SKILL_HEALTH_NODE", str(HOME / ".nvm/versions/node/v24.16.0/bin/node"))   # PATH 里没有 nvm
@@ -60,6 +63,7 @@ def days_arg(argv):
 
 def main(argv=None):
     days = days_arg(sys.argv[1:] if argv is None else argv)
+    netwait.guard("skill-health", ("feishu",), "skill 月度体检")   # 结果要经飞书发出，先等网络（P9）
     try:
         r = subprocess.run([NODE, SCRIPT, "--days", days], cwd=REPO, capture_output=True, text=True, timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
