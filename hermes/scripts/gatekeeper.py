@@ -12,23 +12,32 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
   lark-cli 经环境变量 LARKSUITE_CLI_APP_ID / LARKSUITE_CLI_APP_SECRET 拿凭据（本机 1.0.96 实测认这两个变量、
   不碰钥匙串），配置目录单独放 DigitalTwin/gate/lark-cli/。lark-cli 本体必须是绝对路径、从 / 起每一级只有 root 或
   dt-gate 能改（DT_GATE_LARK_CLI，默认 /Library/Application Support/DigitalTwin/bin/lark-cli）：别人能换掉它就能偷密钥。
+代码信任（L3 第 1 轮 P1-04）：真正的保证在部署：门卫脚本装在 root 所有、只有 root 能改的目录，由 root 的 LaunchDaemon 以
+  dt-gate 身份用 /usr/bin/python3 -I -S -B 启动（run 不满足这两条就拒绝启动，0E-3c 安装）。代码里的检查是加固：作为主程序
+  启动时，导入任何同目录脚本之前先核解释器、本目录每个条目和 sys.path；读密钥前再核一次，连同已加载的全部模块（每个进程
+  核过一次即可：能改这些属性的只有 root 和本账号）。
+状态文件（P1-02）：门卫目录、gate.db、app.json 每次用前核路径信任（含 ACL）、不认链接；run、doctor 另核卡片库 cards.db。
 
 收点击：lark-cli event consume card.action.trigger（飞书长连接，门卫主动连出去，本机不开端口；dt-gate 是控制面，
-门卫规则不限制它）。每条回调核对：
+门卫规则不限制它）。长连接进程在 stderr 打出就绪标记之后才领中台卡片，断开、重连期间暂停领卡，领到卡、发出去之前再看一次
+（P1-03：发出去的卡点了得有人收）。每条回调核对：
   - event_id 第一次见（gate.db 的 events 表，先记再办：同一条回调最多办一次）；host = im_message；只认按钮，不认表单；
   - 按钮值只有两种：{"autoloop": 令牌, "o": 选项号, "v": 版本号}（中台卡片）、{"gate_bind": 绑定码}（绑定卡），多一个字段都不认；
   - 中台卡片：回调必须带消息号，交给 autoloop_answer.answer 核点击人 = 绑定的 open_id、聊天 = 绑定的私聊、消息号 = 登记的
     卡片消息、令牌、选项、版本，之后照 0B-4a 的状态机走（排队、在途、结果不明、对账、本人优先）。
 身份绑定（ADR-015 §3.2：门卫的 open_id 由 dt-gate 自己从常浩的一次点击取得并登记，不从猛鬼兽配置复制、不接受秘书声明）：
-  bind start --email <常浩的飞书邮箱> | --open-id <ou_…>  只有 dt-gate 账号里能发起；发一张绑定卡（按钮带一次性绑定码，
-  10 分钟有效），常浩点了，门卫从这条回调取点击人 open_id 和私聊号登记。邮箱 / open_id 只用来把卡送到，登记的值只取回调。
-  已绑定时要 --replace 才能换绑；绑定前不领中台卡片（领了发不出去，还会用掉中台的重试次数）、不认任何点击。
+  分两步（L3 第 1 轮 P1-01：不能谁点了绑定卡就算常浩，要点卡的人和操作 dt-gate 终端的人是同一个人）：
+  ① bind start --email <常浩的飞书邮箱> | --open-id <ou_…>：只有 dt-gate 账号里能发起；发一张绑定卡（按钮带一次性绑定码，
+    10 分钟有效）。常浩点了，门卫只把这条回调的点击人和私聊号记成「待确认」，在点的那张卡上现给一个 6 位确认码（点击时才
+    生成，只有点卡的人看得到）；已有别人点过这张卡就不认（常浩重新 bind start）；
+  ② bind confirm <确认码>：常浩回到 dt-gate 终端输入，对上了才正式登记（点击后 10 分钟内，输错 3 次这次绑定作废）。
+  邮箱 / open_id 只用来把卡送到，登记的值只取回调。已绑定时要 --replace 才能换绑（同样两步，换到别的私聊会告诉旧私聊）；
+  绑定前不领中台卡片（领了发不出去，还会用掉中台的重试次数）、不认任何点击。
 
   gatekeeper.py setup --app-id cli_…       写应用编号
   gatekeeper.py doctor [--online]           自检：编号、密钥文件权限、lark-cli 路径、绑定；--online 再问飞书机器人信息
-  gatekeeper.py bind start|show
+  gatekeeper.py bind start|confirm <确认码>|show
   gatekeeper.py run                         常驻：收点击 + 领中台卡片（装成 dt-gate 的系统服务是 D 档，常浩说「装」才装）
-  gatekeeper.py once                        只领一次中台卡片（手动补发）
   gatekeeper.py show                        只读：绑定、卡片、答卷进度
 环境变量：DT_GATE_HOME、DT_GATE_SECRET_FILE、DT_GATE_LARK_CLI；卡片库、中台、通道钥匙同 autoloop_feishu。
 不调用 AI。猛鬼兽那条链路（merge-buttons 插件 → autoloop_answer）先保留；切换（停猛鬼兽桥接、中台 feishu 通道的
@@ -37,6 +46,8 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -50,6 +61,92 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+ROOT_UID = 0                             # 门卫代码要属 root（测试换成本账号）
+
+
+# ---------- 代码路径信任（导入同目录脚本之前就要用，只靠标准库）----------
+class Untrusted(Exception):
+    """路径别人能改。trusted() 把它换成 F.Fail。"""
+
+
+def allow_acl(path):
+    """macOS 的 ACL 能在权限位之外单独给别的账号放行（读、写、加文件）：有放行条目、或读不出 ACL 都返回 True（不认）。
+    和 ops/dt_root_guard.sh 的 no_allow_acl 同一判法（拒绝类条目只会收紧，不管）。不是 macOS 返回 False。"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(["/bin/ls", "-led", str(path)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if r.returncode != 0:
+        return True
+    return any(" allow " in line for line in r.stdout.splitlines()[1:])
+
+
+def check_path(path, what, checked=None):
+    """从 / 起每一级（含 path 本身）只有 root 或本账号能改：属主是 root 或本账号，组和其他人不能写（带粘滞位的上级目录
+    除外：别人删不掉、换不掉里面不属于他的条目），没有放行别人的 ACL。不过就抛 Untrusted。返回解析掉链接后的真实路径。
+    checked：同一轮里已经核过的目录（集合），共同的上级只核一次。"""
+    real = Path(path).resolve()
+    for q in (real, *real.parents):
+        if checked is not None and q in checked:
+            break
+        try:
+            st = os.stat(q)
+        except OSError:
+            raise Untrusted(f"{what}：找不到 {q}")
+        sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real
+        if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky) or allow_acl(q):
+            raise Untrusted(f"{what}：路径上的 {q} 别人能改（属主、权限位或 ACL），不用（换掉它就能拿到门卫密钥）")
+        if checked is not None and stat.S_ISDIR(st.st_mode):
+            checked.add(q)
+    return real
+
+
+def search_path():
+    return list(sys.path)
+
+
+def loaded_files():
+    return [m.__file__ for m in list(sys.modules.values()) if isinstance(getattr(m, "__file__", None), str)]
+
+
+def nearest(p):
+    """还不存在的路径看最近的已有上级：别人能在那里建目录、文件，就能塞进模块。"""
+    p = Path(p).absolute()
+    while not os.path.lexists(p) and p != p.parent:
+        p = p.parent
+    return p
+
+
+def code_paths():
+    """门卫会跑到的代码：解释器、本目录每个条目和 __pycache__ 里每个文件、sys.path 每一项、已加载的每个模块文件。"""
+    yield sys.executable, "Python 解释器"
+    yield HERE, "门卫脚本目录"
+    for f in sorted(HERE.iterdir()):
+        yield f, f"门卫脚本目录里的 {f.name}"
+        if f.name == "__pycache__" and f.is_dir():
+            for g in sorted(f.iterdir()):
+                yield g, f"门卫的 __pycache__/{g.name}"
+    for e in search_path():
+        yield nearest(e or "."), f"模块搜索路径 {e or '.'}"
+    for f in loaded_files():
+        yield nearest(f), f"已加载的模块 {Path(f).name}"
+
+
+def check_code():
+    done = set()
+    for p, what in code_paths():
+        check_path(p, what, done)
+
+
+if __name__ == "__main__":                       # 作为主程序：导入同目录脚本之前先核（L3 第 1 轮 P1-04；被测试导入时不跑）
+    try:
+        check_code()
+    except Untrusted as e:
+        print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+
 sys.path.insert(0, str(HERE))
 import autoloop_answer as A  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
@@ -62,14 +159,17 @@ CHAT_RE = re.compile(r"^oc_[0-9A-Za-z_-]{8,64}$")
 MSG_RE = re.compile(r"^om_[0-9A-Za-z_-]{8,80}$")
 NONCE_RE = re.compile(r"^[0-9a-f]{16}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-BIND_TTL = 600                           # 秒：绑定卡有效期
+BIND_TTL = 600                           # 秒：绑定卡有效期；点了以后确认码也是这么久
+BIND_TRIES = 3                           # bind confirm 输错几次这次绑定作废
+READY_MARK = f"[event] ready event_key={EVENT_KEY}"   # lark-cli event consume 就绪后在 stderr 打的固定一行
 EVENT_KEEP = 30 * 86400                  # 秒：回调去重记录留这么久（飞书重投远短于这个）
 DEFAULT_LARK = "/Library/Application Support/DigitalTwin/bin/lark-cli"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY CHECK (id = 1), open_id TEXT NOT NULL, chat_id TEXT NOT NULL,
   bound_at TEXT NOT NULL, event_id TEXT NOT NULL, message_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bind_pending (nonce TEXT PRIMARY KEY, message_id TEXT, sent_at TEXT NOT NULL,
-  replace_ok INTEGER NOT NULL);
+  replace_ok INTEGER NOT NULL, cand_open_id TEXT, cand_chat_id TEXT, cand_event_id TEXT, code_hash TEXT, clicked_at TEXT,
+  tries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS binding_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, open_id TEXT, chat_id TEXT,
   event_id TEXT, note TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, at TEXT NOT NULL, outcome TEXT);
@@ -89,15 +189,57 @@ def secret_file():
     return Path(os.environ.get("DT_GATE_SECRET_FILE") or "~/.dt/gate-app.secret").expanduser()
 
 
+def trusted(path, what, checked=None):
+    """check_path，不过就抛 F.Fail。"""
+    try:
+        return check_path(path, what, checked)
+    except Untrusted as e:
+        raise F.Fail(str(e))
+
+
+_DIRS_OK = set()
+
+
 def private_dir(d):
-    d.mkdir(parents=True, exist_ok=True)
-    os.chmod(d, 0o700)
+    """门卫自己的状态目录：从 / 起每一级只有 root 或本账号能改（含 ACL，L3 第 1 轮 P1-02），本账号的改成 700。
+    每个进程每个目录核一次（能改这些属性的只有 root 和本账号）。"""
+    d = Path(d)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    real = d.resolve()
+    if real not in _DIRS_OK:
+        trusted(real, "门卫状态目录")
+        _DIRS_OK.add(real)
+    if os.stat(real).st_uid == os.geteuid():
+        os.chmod(real, 0o700)
     return d
 
 
-def app_id():
+def state_file(f, what):
+    """门卫的状态文件（app.json、gate.db、cards.db）：存在就必须是本账号的普通文件（不认链接）、不给别人任何权限、
+    没有放行别人的 ACL（P1-02）。所在目录已核过只有 root 和本账号能改，核完到打开之间别人换不掉它。不存在返回 False。"""
     try:
-        v = json.loads((gate_home() / "app.json").read_text(encoding="utf-8")).get("app_id")
+        st = os.lstat(f)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077 or allow_acl(f):
+        raise F.Fail(f"{what} {f} 必须是本账号的普通文件、不给别人任何权限、没有放行别人的 ACL（不认链接）")
+    return True
+
+
+def cards_trusted():
+    """卡片库 cards.db（发卡登记的私聊、消息号、令牌都在里面，由 autoloop_feishu 管）：所在目录和文件同门卫状态。"""
+    f = F.db_file()
+    if f.parent.exists():
+        trusted(f.parent, "卡片库目录")
+    state_file(f, "卡片库")
+
+
+def app_id():
+    f = private_dir(gate_home()) / "app.json"
+    try:
+        if not state_file(f, "门卫应用编号文件"):
+            raise OSError
+        v = json.loads(f.read_text(encoding="utf-8")).get("app_id")
     except (OSError, ValueError, AttributeError):
         raise F.Fail("没有门卫的应用编号：先 gatekeeper.py setup --app-id cli_…")
     if not APP_RE.match(v or ""):
@@ -115,20 +257,6 @@ def setup(app):
         fh.write(json.dumps({"app_id": app}) + "\n")
     os.replace(tmp, f)
     return {"ok": True, "app_id": app, "file": str(f)}
-
-
-def allow_acl(path):
-    """macOS 的 ACL 能在权限位之外单独给别的账号放行（读、写、加文件）：有放行条目、或读不出 ACL 都返回 True（不认）。
-    和 ops/dt_root_guard.sh 的 no_allow_acl 同一判法（拒绝类条目只会收紧，不管）。不是 macOS 返回 False。"""
-    if sys.platform != "darwin":
-        return False
-    try:
-        r = subprocess.run(["/bin/ls", "-led", str(path)], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return True
-    if r.returncode != 0:
-        return True
-    return any(" allow " in line for line in r.stdout.splitlines()[1:])
 
 
 def read_secret():
@@ -152,46 +280,35 @@ def read_secret():
     return v
 
 
-def trusted(path, what, checked=None):
-    """从 / 起每一级（含 path 本身）只有 root 或本账号能改：属主是 root 或本账号，组和其他人不能写（带粘滞位的上级目录
-    除外：别人删不掉、换不掉里面不属于他的条目），没有放行别人的 ACL。不过就抛 Fail。返回解析掉链接后的真实路径。
-    checked：同一轮里已经核过的目录（集合），共同的上级只核一次。"""
-    real = Path(path).resolve()
-    for q in (real, *real.parents):
-        if checked is not None and q != real and q in checked:
-            break
-        try:
-            st = os.stat(q)
-        except OSError:
-            raise F.Fail(f"{what}：找不到 {q}")
-        sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real
-        if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky) or allow_acl(q):
-            raise F.Fail(f"{what}：路径上的 {q} 别人能改（属主、权限位或 ACL），不用（换掉它就能拿到门卫密钥）")
-        if checked is not None and q != real:
-            checked.add(q)
-    return real
+_CODE_OK = []
 
 
 def code_trusted():
-    """门卫自己跑的代码别人换不掉（审查 P1-1）：Python 解释器、本脚本所在目录、从这个目录导入的每个模块和它们的
-    __pycache__ 都要过 trusted。读密钥前查（所以 doctor、发卡、收点击之前都会查）；放在别人能改的目录里就不读密钥。"""
-    done = set()
-    trusted(sys.executable, "Python 解释器", done)
-    trusted(HERE, "门卫脚本目录", done)
-    done.add(HERE.resolve())
-    for m in list(sys.modules.values()):
-        f = getattr(m, "__file__", None)
-        if not f:
-            continue
-        f = Path(f).resolve()
-        if HERE.resolve() in f.parents:
-            trusted(f, f"门卫导入的 {f.name}", done)
-    cache = HERE / "__pycache__"
-    if cache.exists():
-        trusted(cache, "门卫的 __pycache__", done)
-        done.add(cache.resolve())
-        for f in cache.iterdir():
-            trusted(f, f"门卫的 __pycache__/{f.name}", done)
+    """读密钥前再核一次门卫会跑到的代码（P1-04 纵深防御；此时已加载的模块也都在里面，含标准库）。真正挡住「导入时就偷
+    密钥」的是部署（见 launch_ok）。每个进程核过一次即可：能改这些属性的只有 root 和本账号。"""
+    if _CODE_OK:
+        return
+    try:
+        check_code()
+    except Untrusted as e:
+        raise F.Fail(str(e))
+    _CODE_OK.append(True)
+
+
+def root_code():
+    """门卫代码目录和里面每个条目（含 __pycache__ 里的）都属 root：dt-gate 自己也改不了门卫代码（P1-04，0E-3c 安装）。"""
+    for p in (HERE, *HERE.iterdir(), *((HERE / "__pycache__").iterdir() if (HERE / "__pycache__").is_dir() else ())):
+        if os.lstat(p).st_uid != ROOT_UID:
+            raise F.Fail(f"门卫代码 {p} 不属 root：要装在只有 root 能改的目录（0E-3c 安装）")
+
+
+def launch_ok():
+    """常驻服务的启动要求（P1-04）：/usr/bin/python3 -I -S -B 启动（不读 PYTHON* 环境变量、不加载任何 site-packages、
+    不写字节码），代码属 root（root_code）。不满足抛 Fail。"""
+    f = sys.flags
+    if not (f.isolated and f.no_site and f.dont_write_bytecode):
+        raise F.Fail("门卫常驻要用 /usr/bin/python3 -I -S -B 启动")
+    root_code()
 
 
 def lark_cli():
@@ -256,8 +373,8 @@ GATE = GateBot()
 @contextlib.contextmanager
 def db(write=False):
     f = private_dir(gate_home()) / "gate.db"
-    if not f.exists():
-        os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    if not state_file(f, "门卫库"):
+        os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
     con = sqlite3.connect(f, timeout=10, isolation_level=None)
     con.row_factory = sqlite3.Row
     try:
@@ -281,10 +398,11 @@ def binding():
     return dict(r) if r else None
 
 
-def bind_card(nonce, done=None):
-    """绑定卡：开着时一个按钮（只带绑定码），绑好后去掉按钮写结果。核对码是绑定码末 4 位，终端里同时打印，对上再点。"""
-    text = ("在终端里刚发起门卫绑定，才点下面的按钮：点了以后，门卫只认你在这个私聊里点的卡片。"
-            f"没发起过就别点。核对码：**{nonce[-4:]}**（和终端里显示的一致再点）")
+def bind_card(nonce, done=None, final=True):
+    """绑定卡：开着时一个按钮（只带绑定码）；点了以后去掉按钮写确认码（final=False，仍是橙色），绑好后写结果（绿色）。
+    核对码是绑定码末 4 位，终端里同时打印，对上再点（只防点错卡，不当身份证明；身份靠确认码回到终端，P1-01）。"""
+    text = ("在终端里刚发起门卫绑定，才点下面的按钮：点了以后卡上会出确认码，回到终端输入才算绑定，之后门卫只认你在这个"
+            f"私聊里点的卡片。没发起过就别点。核对码：**{nonce[-4:]}**（和终端里显示的一致再点）")
     elements = [{"tag": "markdown", "content": text}]
     if done:
         elements.append({"tag": "markdown", "content": f"**{done}**"})
@@ -292,7 +410,7 @@ def bind_card(nonce, done=None):
         elements.append({"tag": "button", "text": {"tag": "plain_text", "content": "绑定"}, "type": "primary",
                          "width": "fill", "behaviors": [{"type": "callback", "value": {"gate_bind": nonce}}]})
     return {"schema": "2.0", "config": {"update_multi": True, "enable_forward": False},
-            "header": {"title": {"tag": "plain_text", "content": "门卫绑定"}, "template": "green" if done else "orange"},
+            "header": {"title": {"tag": "plain_text", "content": "门卫绑定"}, "template": "green" if done and final else "orange"},
             "body": {"elements": elements}}
 
 
@@ -333,14 +451,20 @@ def bind_start(email=None, open_id=None, replace=False):
         con.execute("UPDATE bind_pending SET message_id = ? WHERE nonce = ?", (mid, nonce))
     return {"ok": True, "check_code": nonce[-4:], "expires_in": BIND_TTL,
             "next": f"在飞书门卫私聊里核对码 {nonce[-4:]} 一致再点「绑定」（{BIND_TTL // 60} 分钟内，门卫要在 run）；"
-                    "点完用 gatekeeper.py bind show 核对"}
+                    "卡上会出 6 位确认码，再在这里运行 gatekeeper.py bind confirm <确认码>"}
+
+
+def code_hash(nonce, code):
+    return hashlib.sha256(f"{nonce}:{code}".encode()).hexdigest()
 
 
 def handle_bind(ev, nonce):
-    """常浩点了绑定卡：绑定码有效、没过期、点的是这张绑定卡，才登记回调里的点击人和私聊号。"""
+    """第一步：常浩点了绑定卡。绑定码有效、没过期、点的是这张绑定卡，才把回调里的点击人和私聊号记成待确认，在这张卡上
+    现给 6 位确认码（L3 第 1 轮 P1-01）；正式登记要 bind confirm。同一个人再点给新码、旧码作废；别人点过就不认。"""
     operator, chat, mid = ev.get("operator_id"), ev.get("chat_id"), ev.get("message_id")
     if not (OPEN_ID_RE.match(operator or "") and CHAT_RE.match(chat or "") and MSG_RE.match(mid or "")):
         raise Quiet("绑定回调缺点击人、聊天号或消息号")
+    code = f"{secrets.randbelow(10 ** 6):06d}"
     with db(write=True) as con:
         p = con.execute("SELECT * FROM bind_pending WHERE nonce = ?", (nonce,)).fetchone()
         if not p:
@@ -349,28 +473,73 @@ def handle_bind(ev, nonce):
             raise Quiet("绑定卡已过期")
         if p["message_id"] != mid:
             raise Quiet("点的不是这次发出的绑定卡")
-        old = con.execute("SELECT open_id, chat_id FROM binding WHERE id = 1").fetchone()
-        if old and not p["replace_ok"]:
+        if p["cand_open_id"] and (p["cand_open_id"], p["cand_chat_id"]) != (operator, chat):
+            raise Quiet("这张绑定卡已经有别人点过")
+        if con.execute("SELECT 1 FROM binding WHERE id = 1").fetchone() and not p["replace_ok"]:
             raise Quiet("已经绑定过，这次绑定没带 --replace")
-        con.execute("DELETE FROM bind_pending WHERE nonce = ?", (nonce,))
-        con.execute("INSERT OR REPLACE INTO binding (id, open_id, chat_id, bound_at, event_id, message_id) "
-                    "VALUES (1, ?, ?, ?, ?, ?)", (operator, chat, F.now(), ev["event_id"], mid))
-        con.execute("INSERT INTO binding_log (at, open_id, chat_id, event_id, note) VALUES (?, ?, ?, ?, ?)",
-                    (F.now(), operator, chat, ev["event_id"], "换绑" if old else "首次绑定"))
-    done = f"已绑定（open_id 尾号 {operator[-6:]}）。以后门卫只认你在这个私聊里点的卡片。"
+        con.execute("UPDATE bind_pending SET cand_open_id = ?, cand_chat_id = ?, cand_event_id = ?, code_hash = ?, "
+                    "clicked_at = ?, tries = 0 WHERE nonce = ?", (operator, chat, ev["event_id"], code_hash(nonce, code),
+                                                                  F.now(), nonce))
+    text = (f"确认码：**{code}**。回到 dt-gate 终端运行 gatekeeper.py bind confirm {code}（{BIND_TTL // 60} 分钟内）"
+            "才算绑定完成。不是你在终端发起的绑定就别输入，也别把确认码告诉别人。")
     try:
         GATE.lark(["im", "messages", "patch", "--message-id", mid,
-                   "--data", json.dumps({"content": json.dumps(bind_card(nonce, done), ensure_ascii=False)},
+                   "--data", json.dumps({"content": json.dumps(bind_card(nonce, text, final=False), ensure_ascii=False)},
                                         ensure_ascii=False)], "改绑定卡")
     except F.SendError:
-        GATE.send_text(chat, done, f"gate-bound-{nonce}")
+        GATE.send_text(chat, text.replace("**", ""), f"gate-code-{secrets.token_hex(8)}")
+    return {"ok": True, "pending_confirm": operator[-6:]}
+
+
+def bind_confirm(code):
+    """第二步：常浩在 dt-gate 终端输入卡上的确认码，对上了才正式登记（只有 dt-gate 账号能写门卫库，所以能跑这一步的
+    就是能操作 dt-gate 终端的人）。输错 BIND_TRIES 次这次绑定作废；点击后 BIND_TTL 秒内有效。"""
+    if not re.fullmatch(r"[0-9]{6}", code or ""):
+        raise F.Fail("确认码是 6 位数字")
+    err = None
+    with db(write=True) as con:                  # 输错也要把次数记上，所以出错原因放到事务提交后再抛
+        p = con.execute("SELECT * FROM bind_pending WHERE cand_open_id IS NOT NULL").fetchone()
+        old = con.execute("SELECT open_id, chat_id FROM binding WHERE id = 1").fetchone()
+        if not p:
+            err = "没有等确认的绑定：先 bind start，在飞书门卫私聊点「绑定」"
+        elif A._age(p["clicked_at"]) > BIND_TTL:
+            con.execute("DELETE FROM bind_pending")
+            err = "确认码已过期，这次绑定作废；重新 bind start"
+        elif not hmac.compare_digest(p["code_hash"] or "", code_hash(p["nonce"], code)):
+            tries = p["tries"] + 1
+            if tries >= BIND_TRIES:
+                con.execute("DELETE FROM bind_pending")
+                err = f"确认码连错 {BIND_TRIES} 次，这次绑定作废；重新 bind start"
+            else:
+                con.execute("UPDATE bind_pending SET tries = ? WHERE nonce = ?", (tries, p["nonce"]))
+                err = f"确认码不对（还能再试 {BIND_TRIES - tries} 次）"
+        elif old and not p["replace_ok"]:
+            con.execute("DELETE FROM bind_pending")
+            err = "已经绑定过，这次绑定没带 --replace"
+        else:
+            operator, chat, nonce = p["cand_open_id"], p["cand_chat_id"], p["nonce"]
+            con.execute("DELETE FROM bind_pending")
+            con.execute("INSERT OR REPLACE INTO binding (id, open_id, chat_id, bound_at, event_id, message_id) "
+                        "VALUES (1, ?, ?, ?, ?, ?)", (operator, chat, F.now(), p["cand_event_id"], p["message_id"]))
+            con.execute("INSERT INTO binding_log (at, open_id, chat_id, event_id, note) VALUES (?, ?, ?, ?, ?)",
+                        (F.now(), operator, chat, p["cand_event_id"], "换绑" if old else "首次绑定"))
+    if err:
+        raise F.Fail(err)
+    done = f"已绑定（open_id 尾号 {operator[-6:]}）。以后门卫只认你在这个私聊里点的卡片。"
+    notify = []
+    try:
+        GATE.lark(["im", "messages", "patch", "--message-id", p["message_id"],
+                   "--data", json.dumps({"content": json.dumps(bind_card(nonce, done), ensure_ascii=False)},
+                                        ensure_ascii=False)], "改绑定卡")
+    except F.SendError as e:
+        notify.append(str(e)[:120])
     if old and old["chat_id"] != chat:           # 换绑到别的私聊：告诉旧的那个（审查 P2-4，不是常浩发起的换绑他能马上看到）
         try:
             GATE.send_text(old["chat_id"], f"门卫已改绑到另一个人（open_id 尾号 {operator[-6:]}），以后不再认你在这里点的卡片。"
                            "不是你在 dt-gate 里发起的换绑，请马上停门卫并核查。", f"gate-rebound-{nonce}")
-        except F.SendError:
-            pass
-    return {"ok": True, "bound": operator[-6:]}
+        except F.SendError as e:
+            notify.append(str(e)[:120])
+    return {"ok": True, "open_id": operator, "chat_id": chat, **({"notify_error": notify} if notify else {})}
 
 
 # ---------- 收点击 ----------
@@ -430,8 +599,8 @@ def _handle(ev):
             return {"ok": False, "quiet": True, "why": "绑定码格式不对"}
         try:
             return handle_bind(ev, value["gate_bind"])
-        except F.SendError as e:                 # 已登记，只是改卡 / 回话没发出去
-            return {"ok": True, "bound": True, "notify_error": str(e)[:120]}
+        except F.SendError as e:                 # 已记成待确认，只是确认码没送到：同一个人再点一次会给新码
+            return {"ok": False, "pending_confirm": True, "notify_error": str(e)[:120]}
         except F.Fail as e:
             return {"ok": False, "quiet": True, "why": str(e)}
     if set(value) != {"autoloop", "o", "v"} or type(value["o"]) is not int or type(value["v"]) is not int \
@@ -447,14 +616,25 @@ def _handle(ev):
     return {**rec, "said": bool(said)}
 
 
+LISTENING = threading.Event()                    # 长连接进程打出了就绪标记、还没退出：这时发出去的卡点了才有人收
+_LISTEN_LOCK = threading.Lock()
+
+
 def consume_once(on_event=handle_event, log=print):
-    """起一次长连接消费进程，逐行处理，进程退出时返回退出码。stdin 一直开着（lark-cli 遇到 stdin 关闭就退出）。"""
+    """起一次长连接消费进程，逐行处理，进程退出时返回退出码。stdin 一直开着（lark-cli 遇到 stdin 关闭就退出）。
+    stderr 出现就绪标记才置 LISTENING，进程退出（含出错）立刻撤掉（L3 第 1 轮 P1-03）。"""
+    LISTENING.clear()
     cmd, env = GATE.command(["event", "consume", EVENT_KEY, "--as", "bot"])
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                             text=True, bufsize=1)
+    alive = [True]
 
     def errors():                                # lark-cli 的就绪标记、断线、错误信封都在 stderr
         for line in proc.stderr:
+            if line.strip() == READY_MARK:
+                with _LISTEN_LOCK:               # 退出后才读到的就绪行不算
+                    if alive[0]:
+                        LISTENING.set()
             log(json.dumps({"at": F.now(), "lark_cli": line.rstrip()[:300]}, ensure_ascii=False))
     t = threading.Thread(target=errors, daemon=True)
     t.start()
@@ -471,6 +651,9 @@ def consume_once(on_event=handle_event, log=print):
                 rec = {"ok": False, "why": f"{type(e).__name__}: {str(e)[:200]}"}
             log(json.dumps({"at": F.now(), **rec}, ensure_ascii=False))
     finally:
+        with _LISTEN_LOCK:
+            alive[0] = False
+            LISTENING.clear()
         if proc.poll() is None:
             proc.terminate()                     # SIGTERM：让 lark-cli 正常退订（不 kill -9）
             try:
@@ -485,12 +668,20 @@ def consume_once(on_event=handle_event, log=print):
 
 
 def not_ready():
-    return None if binding() else GATE.unbound
+    """领中台卡片前问：没绑定、或收点击的长连接没就绪（断了在重连）都先不领（P1-03）。"""
+    if not binding():
+        return GATE.unbound
+    if not LISTENING.is_set():
+        return "门卫收点击的长连接还没就绪（或断了在重连），先不领中台卡片：发出去点了没人收"
+    return None
 
 
 def run():
     """常驻：后台线程领中台卡片（没绑定时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟）。
-    领卡线程死了就整个退出（退出码 3），交给系统服务重启，不留一个只收点击、不发卡的半死进程（审查 P2-3）。"""
+    领卡线程死了就整个退出（退出码 3），交给系统服务重启，不留一个只收点击、不发卡的半死进程（审查 P2-3）。
+    启动前核启动方式、代码属 root、卡片库（P1-04、P1-02），不过就不起。"""
+    launch_ok()
+    cards_trusted()
     F.use(GATE)
     cards = threading.Thread(target=F.run, kwargs={"ready": not_ready}, daemon=True, name="gate-cards")
     cards.start()
@@ -512,7 +703,9 @@ def run():
 
 def doctor(online=False):
     out = {}
-    for name, fn in (("app_id", app_id), ("secret", lambda: read_secret() and "ok"), ("lark_cli", lark_cli)):
+    checks = (("app_id", app_id), ("secret", lambda: read_secret() and "ok"), ("lark_cli", lark_cli),
+              ("code_owner", lambda: root_code() or "root"), ("cards_db", lambda: cards_trusted() or "ok"))
+    for name, fn in checks:
         try:
             out[name] = fn()
         except F.Fail as e:
@@ -528,7 +721,7 @@ def doctor(online=False):
                 out["bot"]["error"] = "没读到机器人名字（返回结构和预期不同，或凭据不对）"
         except F.SendError as e:
             out["bot"] = {"error": str(e)}
-    out["ok"] = all(not isinstance(out.get(k), dict) for k in ("app_id", "secret", "lark_cli")) and b is not None \
+    out["ok"] = all(not isinstance(out.get(k), dict) for k, _ in checks) and b is not None \
         and not (online and "error" in out["bot"])
     return out
 
@@ -548,11 +741,12 @@ def main(argv=None):
     sub.add_parser("setup").add_argument("--app-id", required=True)
     sub.add_parser("doctor").add_argument("--online", action="store_true")
     b = sub.add_parser("bind")
-    b.add_argument("action", choices=("start", "show"))
+    b.add_argument("action", choices=("start", "confirm", "show"))
+    b.add_argument("code", nargs="?")
     b.add_argument("--email")
     b.add_argument("--open-id")
     b.add_argument("--replace", action="store_true")
-    for name in ("run", "once", "show"):
+    for name in ("run", "show"):
         sub.add_parser(name)
     a = ap.parse_args(argv)
     F.use(GATE)
@@ -565,12 +759,11 @@ def main(argv=None):
             out = doctor(a.online)
         elif a.cmd == "bind" and a.action == "start":
             out = bind_start(a.email, a.open_id, a.replace)
+        elif a.cmd == "bind" and a.action == "confirm":
+            out = bind_confirm(a.code)
         elif a.cmd == "bind":
             bd = binding()
             out = {"binding": bd and {k: bd[k] for k in ("open_id", "chat_id", "bound_at")}}
-        elif a.cmd == "once":
-            why = not_ready()
-            out = {"ok": False, "paused": why} if why else F.once()
         else:
             out = show()
     except (F.Fail, F.SendError) as e:

@@ -435,9 +435,11 @@ def check_given_up():
     return told
 
 
-def once(wait=50):
+def once(wait=50, ready=None):
     """领一张、处理一张；没有卡片返回 None。领卡前先确认中台库能读（读不到这轮不领，返回 paused）；处理在桥接锁里做，
-    锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。"""
+    锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。
+    ready（门卫用，同 run）：长轮询要等一阵，领到卡后发卡前再问一次；这时不能干活（收点击的长连接断了）就不发，
+    向中台报 failed 写明原因（中台退避重递）。猛鬼兽不传，行为不变。"""
     if not hub_readable():                       # 第 5 轮 P1-01：领一次就用掉中台一次尝试，读不到就先别领
         why = "读不到中台库，暂停领卡"
         alert("hub-unreadable", f"飞书桥接：{why}，中台卡片暂时送不到你这里（不会用掉中台的重试次数）；中台库恢复后自动继续。")
@@ -445,6 +447,10 @@ def once(wait=50):
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
+    why = ready() if ready else None
+    if why:
+        hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
+        return {"card": card["id"], "ok": False, "paused": why}
     with bridge_lock():
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
@@ -527,7 +533,7 @@ def run(ready=None):
                 A.tell(A.identities()[1], text)
             for cid in check_given_up():               # 中台已放弃送达的卡：每张私聊说一次
                 print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
-            out = once()
+            out = once(ready=ready)
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
             if out and out.get("paused"):              # 中台库读不到：歇 30 秒再看，别空转
