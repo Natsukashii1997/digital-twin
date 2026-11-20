@@ -1,5 +1,6 @@
 """每周提案收口（#61）自测：回复解析、四类来源汇总、卡片发送（假 lark-cli）和写回；全部用临时目录，不碰真实提案和飞书。
-再犯与待提升（#216）用假 node 回放 agent-kit 每周汇总 --json 的输出，不跑真的 agent-kit。"""
+再犯与待提升（#216）用假 node 回放 agent-kit 每周汇总 --json 的输出，不跑真的 agent-kit。
+已修未合并（复盘 N3）用假 gh（DT_GH）回放 pr list / pr diff；判定和每条失败路径的细测在 test_unmerged_fixes.py。"""
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
@@ -37,6 +38,24 @@ with open(root / "node-calls.jsonl", "a", encoding="utf-8") as f:
 if (root / "weekly-fail").exists():
     sys.stderr.write("每周汇总中断：ENOENT: no such file\n"); sys.exit(1)
 sys.stdout.write((root / "weekly.json").read_text(encoding="utf-8"))
+'''
+
+# 假 gh：pr list 回放 FAKE_DIR/gh-<仓库短名>.json（没有就是没开着的 PR），pr diff 回放 gh-<短名>-<编号>.diff；
+# 有 gh-fail 就像没登录那样退出
+FAKE_GH = r'''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ["FAKE_DIR"])
+args = sys.argv[1:]
+with open(root / "gh-calls.jsonl", "a", encoding="utf-8") as f:
+    f.write(json.dumps(args, ensure_ascii=False) + "\n")
+if (root / "gh-fail").exists():
+    sys.stderr.write("To get started with GitHub CLI, please run:  gh auth login\n"); sys.exit(4)
+repo = args[args.index("-R") + 1].split("/")[-1]
+if args[:2] == ["pr", "list"]:
+    f = root / f"gh-{repo}.json"
+    sys.stdout.write(f.read_text(encoding="utf-8") if f.exists() else "[]"); sys.exit(0)
+sys.stdout.write((root / f"gh-{repo}-{args[2]}.diff").read_text(encoding="utf-8"))
 '''
 
 EMPTY_WEEKLY = {"schema": 1, "day": "2026-11-09", "scanned": {"projects": 0, "files": 0}, "recurrences": [], "promotions": [],
@@ -218,6 +237,8 @@ class Digest(unittest.TestCase):
         (t / "fake/lark-cli").chmod(0o755)
         (t / "fake/node").write_text(FAKE_NODE, encoding="utf-8")
         (t / "fake/node").chmod(0o755)
+        (t / "fake/gh").write_text(FAKE_GH, encoding="utf-8")
+        (t / "fake/gh").chmod(0o755)
         self.weekly(EMPTY_WEEKLY)
         (t / "agent-kit/tools").mkdir(parents=True)
         (t / "agent-kit/tools/weekly-review.mjs").write_text("// 替身，由假 node 回放\n", encoding="utf-8")
@@ -237,6 +258,7 @@ class Digest(unittest.TestCase):
                "DT_PROPOSAL_DIR": str(t / "prop"), "DT_SHADOW_DIR": str(self.shadow), "DT_LARK_CLI": str(t / "fake/lark-cli"),
                "FAKE_DIR": str(t / "fake"), "DT_NOW": now, "FEISHU_HOME_CHANNEL": chat,
                "DT_HERMES_ENV": str(t / "hermes.env"), "DT_WEEKLY_REVIEW": str(t / "agent-kit/tools/weekly-review.mjs"),
+               "DT_GH": str(t / "fake/gh"),
                "PATH": str(t / "fake") + os.pathsep + os.environ.get("PATH", "")}
         if lessons is not None:
             env["DT_LESSONS_MIN_PROJECTS"] = lessons
@@ -555,6 +577,70 @@ class Digest(unittest.TestCase):
         text = card["body"]["elements"][0]["content"]
         self.assertTrue(text.startswith("本期没有待决提案。\n\n⚠️ 再犯与待提升本期没取到：每周汇总出错"))
         self.assertNotIn("回复写法", text)
+
+    # ---------- 已修未合并（复盘 N3） ----------
+
+    def with_github(self, stale=True):
+        """名册里的 app 写上 github；有一个开了 7 天的审计修复 PR（stale=False 时是刚开的新功能 PR）。"""
+        roster = json.loads((self.tmp / "projects.json").read_text())
+        roster["projects"][0]["github"] = "o/app"
+        (self.tmp / "projects.json").write_text(json.dumps(roster), encoding="utf-8")
+        prs = [{"number": 7, "title": "收藏存储：并发收藏不再互相覆盖（审计高危）" if stale else "新功能",
+                "createdAt": "2026-11-02T01:00:00Z" if stale else "2026-11-08T23:00:00Z"}]
+        (self.tmp / "fake/gh-app.json").write_text(json.dumps(prs, ensure_ascii=False), encoding="utf-8")
+
+    def test_unmerged_section_at_card_end(self):
+        self.with_github()
+        r = self.run_cli("send", "--dry-run", lessons=None)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        text = self.card_text(r.stdout)
+        tail = text.split("请长按这张卡片选「回复」", 1)[1]
+        self.assertIn("**已修未合并**（只提醒，不用回复）\n开着超过 3 天的修复类 PR：\n- app#7 收藏存储：并发收藏不再互相覆盖（审计高危）（开了 7 天）\n"
+                      "多个开着的 PR 里重复的同一处改动：没有（查了 1 个仓库）", tail)      # 在卡片最后，回复写法之后
+        self.assertEqual(self.numbered(text)[:2], ["A1", "B1"])                       # 不占编号
+        d = json.loads(self.run_cli("draft", lessons=None).stdout)
+        self.assertIn("- app#7 收藏存储：并发收藏不再互相覆盖（审计高危）（开了 7 天）", d["unmerged"])
+        self.assertNotIn("app#7", json.dumps(d["items"], ensure_ascii=False))
+        self.assertEqual(self.calls(), [])
+
+    def test_unmerged_only_still_sends_and_list_prints(self):
+        for dd in ("retro", "niuma"):
+            subprocess.run(["rm", "-rf", str(self.tmp / dd)], check=True)
+        self.with_github()
+        d = json.loads(self.run_cli("draft", lessons=None).stdout)                   # 草稿不为空，Hermes 不会回「无」
+        self.assertEqual((d["items"], d["notes"]), ([], []))
+        r = self.run_cli("send", lessons=None)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        (call,) = self.calls()
+        text = json.loads(call[call.index("--content") + 1])["body"]["elements"][0]["content"]
+        self.assertTrue(text.startswith("本期没有待决提案。\n\n**已修未合并**"))
+        self.assertNotIn("回复写法", text)
+        out = self.run_cli("list", lessons=None).stdout
+        self.assertIn("- app#7 收藏存储：并发收藏不再互相覆盖（审计高危）（开了 7 天）", out)
+
+    def test_unmerged_failure_alone_still_sends(self):
+        for dd in ("retro", "niuma"):
+            subprocess.run(["rm", "-rf", str(self.tmp / dd)], check=True)
+        self.with_github()
+        (self.tmp / "fake/gh-fail").write_text("1")
+        r = self.run_cli("send", lessons=None)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        (call,) = self.calls()
+        text = json.loads(call[call.index("--content") + 1])["body"]["elements"][0]["content"]
+        self.assertIn("⚠️ 没查到（不是 0 条）：全部 1 个仓库——gh 没登录或登录失效（", text)
+
+    def test_unmerged_nothing_found_does_not_send_alone(self):
+        for dd in ("retro", "niuma"):
+            subprocess.run(["rm", "-rf", str(self.tmp / dd)], check=True)
+        self.with_github(stale=False)
+        self.assertEqual(self.run_cli("draft", lessons=None).stdout, "")
+        r = self.run_cli("send", lessons=None)
+        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertEqual(self.calls(), [])
+        (self.tmp / "retro/x").mkdir(parents=True)                                   # 有别的提案时，这一栏写「没有」
+        (self.tmp / "retro/x/提案.md").write_text("## A 规则提案\n\n### A1 一条 · 单次\n", encoding="utf-8")
+        text = self.card_text(self.run_cli("send", "--dry-run", lessons=None).stdout)
+        self.assertIn("**已修未合并**（只提醒，不用回复）\n名册 1 个仓库都查了：没有开着超过 3 天的修复类 PR，也没有重复的同一处改动。", text)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@
              每期最多 7 条，超出的在卡片上写「另有 N 条」，全部记在期号状态里、`list` 打印。取不到（没有 node、
              脚本不在、出错、超时、格式不对）时卡片照常发其他来源，并写一句这一类本期没取到及原因；只有这句也照发。
              结论记在影子目录 guards-decisions.md（同上格式），不替常浩落地、不改各项目的坑记录
+卡片末尾另有一栏「已修未合并」（复盘 N3，常浩 2026-11-20 批，unmerged_fixes.py）：名册里写了 github 的仓库，开着超过 3 天的
+修复类 PR，和多个开着的 PR 里重复的同一处改动。只提醒、不编号、不用回复，Hermes 不写推荐；每次汇总都调 gh（只读）。
+没查到的仓库写明原因，不当成 0 条；只有这一栏有内容（查到条目或有没查到的）也照发，全查了且没有时不单独发。
 「延期」记成「待定」，下周一还会再列；没提到的编号保持待决。采纳只记结论，不替常浩落地那条规则。
 
 用法：
@@ -32,7 +35,7 @@ DT_PROPOSAL_DIR（期号状态）、DT_SHADOW_DIR（lessons-decisions.md）、FE
 DT_HERMES_ENV，默认 ~/.hermes/.env，读这一项）、
 DT_LARK_CLI（换 lark-cli，自测用）、DT_NOW（ISO 时间），DT_LESSONS_MIN_PROJECTS（默认 0 = 不列 LESSONS 候选）、
 DT_WEEKLY_REVIEW（agent-kit 每周汇总脚本；node 先找 PATH，再找 /opt/homebrew/bin、/usr/local/bin、~/.nvm，
-Hermes 定时任务的 PATH 里没有 nvm）。
+Hermes 定时任务的 PATH 里没有 nvm）、DT_GH（已修未合并用的 gh，自测用；默认先找 PATH，再找 /opt/homebrew/bin、/usr/local/bin）。
 """
 import argparse
 import datetime as dt
@@ -46,6 +49,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import unmerged_fixes
 from feishu_home import home_chat
 from tidings_weekly import SendError, send
 
@@ -349,6 +353,11 @@ def collect(now):
     return collect_retro() + collect_niuma() + collect_lessons(now) + guards, more, notes
 
 
+def collect_unmerged(now):
+    """已修未合并（复盘 N3）：返回 (卡片末尾这一栏的行, 有没有要看的)。"""
+    return unmerged_fixes.render(unmerged_fixes.collect(ROSTER, now))
+
+
 # ---------- 卡片 ----------
 
 def number(items):
@@ -362,8 +371,10 @@ def overdue(item, now):
         return False
 
 
-def build_card(issue_no, items, now, notes=()):
-    lines = ["本期没有待决提案。", "", *notes] if not items else card_lines(items, now, notes)   # 只有提示也照发，不悄悄少一类
+def build_card(issue_no, items, now, notes=(), unmerged=()):
+    lines = ["本期没有待决提案。", *(["", *notes] if notes else [])] if not items else card_lines(items, now, notes)   # 只有提示也照发
+    if unmerged:
+        lines += ["", *unmerged]                         # 已修未合并放最后：只提醒，不和要回复的编号混在一起
     return {"schema": "2.0",
             "header": {"title": {"tag": "plain_text", "content": f"📮 待决提案 · 第 {issue_no} 期（{now:%m/%d}）"},
                        "template": "blue"},
@@ -548,16 +559,17 @@ def write_item(item, verdict, day, note):
 # ---------- 命令 ----------
 
 def cmd_draft():
-    """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）和卡片提示的 JSON；两样都没有时不输出。"""
+    """给 Hermes 写推荐用：打印本期待决提案（含原文摘录）、卡片提示和已修未合并一栏的 JSON；三样都没有要看的时不输出。"""
     now = today()
     items, more, notes = collect(now)
+    unmerged, has_unmerged = collect_unmerged(now)
     items = number(items)
-    if not items and not notes:
+    if not items and not notes and not has_unmerged:
         return 0
     print(json.dumps({"date": now.date().isoformat(), "items": [
         {"n": i["n"], "key": i["key"], "group": i["group"], "id": i["id"], "title": i["title"],
          "overdue": overdue(i, now), "body": "\n".join(i.get("body") or [])[:1500]} for i in items],
-        "more": len(more), "notes": notes},
+        "more": len(more), "notes": notes, "unmerged": unmerged},
         ensure_ascii=False, indent=2))
     return 0
 
@@ -570,8 +582,9 @@ def cmd_send(dry_run=False, force=False, recommend=None):
     if issues and issues[-1]["date"] == day and issues[-1].get("message_id") and not (force or dry_run):
         return 0
     items, more, notes = collect(now)
+    unmerged, has_unmerged = collect_unmerged(now)
     items = number(items)
-    if not items and not notes:
+    if not items and not notes and not has_unmerged:
         if dry_run:
             print("没有待决提案，这周不发。")
         return 0
@@ -583,7 +596,7 @@ def cmd_send(dry_run=False, force=False, recommend=None):
             return 1
     items = [{k: v for k, v in i.items() if k != "body"} for i in items]
     no = issues[-1]["no"] if issues and issues[-1]["date"] == day else len(issues) + 1
-    card = build_card(no, items, now, notes)
+    card = build_card(no, items, now, notes, unmerged)
     if dry_run:
         print(json.dumps({"msg_type": "interactive", "content": card}, ensure_ascii=False, indent=2))
         return 0
@@ -598,7 +611,8 @@ def cmd_send(dry_run=False, force=False, recommend=None):
         print(f"待决提案没发出：{e}")
         return 1
     issue = {"no": no, "date": day, "message_id": mid, "items": items, "answers": [],
-             "more": [{"key": i["key"], "id": i["id"], "title": i["title"]} for i in more], "notes": notes}
+             "more": [{"key": i["key"], "id": i["id"], "title": i["title"]} for i in more], "notes": notes,
+             "unmerged": unmerged}
     if issues and issues[-1]["date"] == day:
         issues[-1] = {**issue, "answers": issues[-1].get("answers", [])}
     else:
@@ -631,6 +645,8 @@ def cmd_list():
         print(f"{GUARDS_GROUP}超出没列的 {len(issue['more'])} 条（不带编号，下期定了前面的再往上补）：")
         for i in issue["more"]:
             print(f"- {i['id']} {i['title']}")
+    for line in issue.get("unmerged") or []:
+        print(line)
     answers = issue.get("answers") or []
     print(f"已回复 {len(answers)} 次" + (f"，最近一次：{answers[-1]['reply']}" if answers else "") + "。")
     return 0
