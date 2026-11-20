@@ -109,7 +109,7 @@
       "id": "secretary",
       "name": "秘书代批（#195 批 0B：猛鬼兽按常浩签的清单代批中台卡片；控制面 secretary_gate.py、秘书侧巡视 secretary_patrol.py 已写，未装、不生效）",
       "executor": "hermes",
-      "reads": "巡视：中台只读窗口 autoloop_readonly.py 的卡片快照（不含本人密钥、卡片链接、回答原文）；控制面另从中台库、凭证库、cards.db、受信发布记录重取；④代合并另只读 GitHub（PR 状态、CI、main 上的工作流列表）",
+      "reads": "巡视：中台只读窗口 autoloop_readonly.py 的卡片快照（不含本人密钥、卡片链接、回答原文）；控制面另从中台库、凭证库、cards.db、受信发布记录重取；④代合并另只读 GitHub（PR 状态、CI、main 上的 .github 目录）",
       "writes": "秘书侧：DigitalTwin/secretary/outbox/ 的提议、patrol.json；控制面：秘书账本（交常浩、代批记录），①送达开关打开后才有中台 secretary 通道的回答（by=秘书）；④合并执行器开关（REAL_MERGE，0E-4 接机器账号凭据前关着）打开后经合并执行器合并 PR",
       "note": "仅支持 Hermes（规格 docs/秘书代批-规格.md §6：判断用 hermes chat 单次（-Q --source tool -t todo --max-turns 1 --ignore-rules：不带 SOUL、记忆、项目上下文），模型不持通道钥匙）。控制面另按 YAML 语义核 Hermes 配置，查 .env / .op.env / 安装目录 .env 里有没有 HERMES_ 变量、有没有管理员级配置目录：有自定义系统提示、人格、预载消息、外部密钥源、HERMES_ 变量、管理员级配置，或核不清，①就交常浩（PR #225 第 3、4 轮）。①送达开关（secretary_gate.REAL_ASK）关着时巡视不调模型，①一律交常浩（常浩 11-19 选甲）；④代合并（0B-4d）不调模型，全是确定性检查；没装常驻、没签钥匙，不生效。"
     },
