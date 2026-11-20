@@ -40,9 +40,10 @@ import secretary_gate as SG  # noqa: E402
 import secretary_ledger as SL  # noqa: E402
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
-# 本机 Python 没装 PyYAML 时整个模块明确跳过、不报一堆失败（常浩 2026-11-20 定提速 B）：secretary_gate 按 YAML 语义核
-# Hermes 配置（PR #225），缺库一律交常浩，走到代批的用例都测不了。正式环境 /usr/bin/python3 和 CI 都装了 6.0.1，照常跑。
-NO_YAML = ("本机 Python 没有 yaml 库（PyYAML）：secretary_gate 核 Hermes 配置要它，缺库一律交常浩，这些用例测不了；"
+# 本机 Python 没装 PyYAML 时，走到①代批、要核 Hermes 配置的测试类明确跳过、不报一堆失败（常浩 2026-11-20 定提速 B）：
+# secretary_gate 按 YAML 语义核配置（PR #225），缺库一律交常浩，这些类测不了；②③、对账以外的类照常跑。
+# 正式环境 /usr/bin/python3 和 CI 都装了 6.0.1，照常跑。新加的类缺库时也失败的，同样套上 @needs_yaml。
+NO_YAML = ("本机 Python 没有 yaml 库（PyYAML）：这一类要走到①代批、核 Hermes 配置，secretary_gate 缺库一律交常浩，测不了；"
            "正式环境 /usr/bin/python3 和 CI 都装了 PyYAML 6.0.1，在那里照常跑")
 needs_yaml = unittest.skipIf(SG.yaml is None, NO_YAML)
 
@@ -361,6 +362,7 @@ DEL = object()
 REAL_ISSUE = SL.issue          # 打桩 SL.issue 的测试里，造别的决定要用原函数
 
 
+@needs_yaml
 class AskTests(Base):
     def test_ask_done_and_read_back(self):
         out = self.submit()
@@ -636,6 +638,7 @@ class AskTests(Base):
         self.assertEqual(out["result"], "unknown")
 
 
+@needs_yaml
 class ReconcileTests(Base):
     def test_unknown_reconciled_by_evidence_never_resent(self):
         self.hub_error = F.HubError("超时")
@@ -890,6 +893,7 @@ class RejectTests(Base):
         self.assertEqual(SG.reconcile(now=T), [(out["decision"], "unreconciled")])
 
 
+@needs_yaml
 class RunEvidenceTests(Base):
     """审查 P1-01：模型名、是否回退、判断结果不收提议自报，按 Hermes 自己的运行记录核。"""
     def base(self):
@@ -1122,6 +1126,7 @@ class RunEvidenceTests(Base):
         self.assertIn("只有选选项", self.handoff(self.submit(p), "model")["basis"])
 
 
+@needs_yaml
 class VersionTests(Base):
     """审查 P1-02：送达证据按版本——改版后要这一版送到飞书、秘书通道确认的是这一版，并从这一版送达起重新等 30 分钟。"""
     def bump(self):
@@ -1203,6 +1208,7 @@ class VersionTests(Base):
         self.assertEqual((r["version"], r["hub_delivered_at"]), (3, None))
 
 
+@needs_yaml
 class TaskLockTests(Base):
     """审查 P1-03：②③ 从前闸到续接事件发出全程持着这张任务的发布锁；发布持锁时秘书不续接。"""
     def setUp(self):
@@ -1265,6 +1271,7 @@ class TaskLockTests(Base):
             self.assertEqual(self.submit()["result"], "done")
 
 
+@needs_yaml
 class KillRecoveryTests(Base):
     """#218 第 3 轮 P1-04 / P1-05（常浩 11-19 选甲）：① 卡在 executing 超过 2 分钟、核不出结论的，一律对账不清：
     额度不退、冻结这张任务、交常浩；不再拿 cards.db 有没有获准记录推断「肯定没发」。"""
@@ -1381,6 +1388,7 @@ class OrphanTests(Base):
         self.assertEqual(self.posted, [])
 
 
+@needs_yaml
 class AskSwitchTests(Base):
     """#218 第 2 轮 P1-01（常浩 11-19 选甲）：中台还不能按版本核对回答，① 的送达开关正式关着：前闸全过也交常浩。"""
     def test_switch_off_hands_off_and_sends_nothing(self):
@@ -1517,6 +1525,7 @@ class CliTests(Base):
 
 # ---------- 端到端：真中台 ----------
 @unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
+@needs_yaml
 class SecretaryEndToEnd(HubFixture):
     COMMAND = f"{sys.executable} {HERE / 'fixtures' / 'ask_receipt.py'} {{prompt}}"
 
@@ -1681,12 +1690,6 @@ class SecretaryEndToEnd(HubFixture):
         self.assertEqual(len(answers), 1)
         c = self.hub_card()
         self.assertEqual((c["state"], c["by"]), ("decided", "秘书"))
-
-
-# 本模块里的测试类一律套上 needs_yaml（Base 除外：test_secretary_patrol 继承它，那边只给真走到代批的用例单独套）
-for _cls in list(globals().values()):
-    if isinstance(_cls, type) and issubclass(_cls, unittest.TestCase) and _cls.__module__ == __name__ and _cls is not Base:
-        needs_yaml(_cls)
 
 
 if __name__ == "__main__":
