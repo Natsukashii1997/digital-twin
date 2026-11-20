@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -307,6 +308,12 @@ class WakeChecksTest(unittest.TestCase):
         (self.home / "cron").mkdir(parents=True)
         hc._pmset_cache.clear()
         self.addCleanup(hc._pmset_cache.clear)
+        # pmset 记的是本机时间，夹具按北京时间写；CI 机器是 UTC，固定时区才对得上
+        tz = patch.dict(os.environ, {"TZ": "Asia/Shanghai"})
+        tz.start()
+        self.addCleanup(time.tzset)
+        self.addCleanup(tz.stop)
+        time.tzset()
 
     def plist(self, keys, label="ai.hermes.gateway"):
         env = {k: f"http://user:{TOKEN}@127.0.0.1:8086" for k in keys}
