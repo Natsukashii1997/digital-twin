@@ -9,6 +9,7 @@ hermes/scripts/autoloop_grants.py  # 秘书代批 / 执行底座（#195），各
 hermes/scripts/autoloop_publish.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/autoloop_readonly.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/button_probe.py  # 按钮实测探针（#195 0B-3），只在实测时手动跑
+hermes/scripts/gatekeeper.py  # 门卫机器人（ADR-015 0E-3a），装在 dt-gate、不进 ~/.hermes/scripts；绑定、切换在 0E-3c
 hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_ledger.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_report.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装

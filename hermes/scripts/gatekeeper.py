@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""门卫机器人（ADR-015 修订 1 批 0E-3a，#195）：不带 AI 的授权组件，跑在控制面账号 dt-gate。
+
+用飞书「门卫」应用的身份把中台 feishu 通道的卡片发到常浩私聊，自己经飞书长连接直接收卡片点击（不经 Hermes 网关、
+不经秘书），核对点击人是绑定的常浩、聊天是绑定的私聊、点的是登记的那条卡片消息、令牌和版本都对，再用 feishu 通道钥匙
+把回答交给中台。发卡、改卡、报送达、本人点击状态机、对账、卡片库全部复用 autoloop_feishu / autoloop_answer（换成
+GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击。
+
+凭据（常浩 11-19 定：真凭据存成账号家目录里只有它能读的文件，不用钥匙串）：
+  应用编号  DigitalTwin/gate/app.json（setup --app-id 写）
+  应用密钥  ~/.dt/gate-app.secret（常浩亲手贴进 dt-gate，600、属 dt-gate、不能是链接；不经任何 AI）
+  lark-cli 经环境变量 LARKSUITE_CLI_APP_ID / LARKSUITE_CLI_APP_SECRET 拿凭据（本机 1.0.96 实测认这两个变量、
+  不碰钥匙串），配置目录单独放 DigitalTwin/gate/lark-cli/。lark-cli 本体必须是绝对路径、从 / 起每一级只有 root 或
+  dt-gate 能改（DT_GATE_LARK_CLI，默认 /Library/Application Support/DigitalTwin/bin/lark-cli）：别人能换掉它就能偷密钥。
+
+收点击：lark-cli event consume card.action.trigger（飞书长连接，门卫主动连出去，本机不开端口；dt-gate 是控制面，
+门卫规则不限制它）。每条回调核对：
+  - event_id 第一次见（gate.db 的 events 表，先记再办：同一条回调最多办一次）；host = im_message；只认按钮，不认表单；
+  - 按钮值只有两种：{"autoloop": 令牌, "o": 选项号, "v": 版本号}（中台卡片）、{"gate_bind": 绑定码}（绑定卡），多一个字段都不认；
+  - 中台卡片：回调必须带消息号，交给 autoloop_answer.answer 核点击人 = 绑定的 open_id、聊天 = 绑定的私聊、消息号 = 登记的
+    卡片消息、令牌、选项、版本，之后照 0B-4a 的状态机走（排队、在途、结果不明、对账、本人优先）。
+身份绑定（ADR-015 §3.2：门卫的 open_id 由 dt-gate 自己从常浩的一次点击取得并登记，不从猛鬼兽配置复制、不接受秘书声明）：
+  bind start --email <常浩的飞书邮箱> | --open-id <ou_…>  只有 dt-gate 账号里能发起；发一张绑定卡（按钮带一次性绑定码，
+  10 分钟有效），常浩点了，门卫从这条回调取点击人 open_id 和私聊号登记。邮箱 / open_id 只用来把卡送到，登记的值只取回调。
+  已绑定时要 --replace 才能换绑；绑定前不领中台卡片（领了发不出去，还会用掉中台的重试次数）、不认任何点击。
+
+  gatekeeper.py setup --app-id cli_…       写应用编号
+  gatekeeper.py doctor [--online]           自检：编号、密钥文件权限、lark-cli 路径、绑定；--online 再问飞书机器人信息
+  gatekeeper.py bind start|show
+  gatekeeper.py run                         常驻：收点击 + 领中台卡片（装成 dt-gate 的系统服务是 D 档，常浩说「装」才装）
+  gatekeeper.py once                        只领一次中台卡片（手动补发）
+  gatekeeper.py show                        只读：绑定、卡片、答卷进度
+环境变量：DT_GATE_HOME、DT_GATE_SECRET_FILE、DT_GATE_LARK_CLI；卡片库、中台、通道钥匙同 autoloop_feishu。
+不调用 AI。猛鬼兽那条链路（merge-buttons 插件 → autoloop_answer）先保留；切换（停猛鬼兽桥接、中台 feishu 通道的
+回答人换成门卫 open_id）是 0E-3c，另做。
+"""
+import argparse
+import contextlib
+import datetime as dt
+import json
+import os
+import re
+import secrets
+import sqlite3
+import stat
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import autoloop_answer as A  # noqa: E402
+import autoloop_feishu as F  # noqa: E402
+import tidings_weekly as TW  # noqa: E402
+
+EVENT_KEY = "card.action.trigger"
+APP_RE = re.compile(r"^cli_[0-9a-f]{16}$")
+OPEN_ID_RE = re.compile(r"^ou_[0-9A-Za-z_-]{8,64}$")
+CHAT_RE = re.compile(r"^oc_[0-9A-Za-z_-]{8,64}$")
+MSG_RE = re.compile(r"^om_[0-9A-Za-z_-]{8,80}$")
+NONCE_RE = re.compile(r"^[0-9a-f]{16}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+BIND_TTL = 600                           # 秒：绑定卡有效期
+EVENT_KEEP = 30 * 86400                  # 秒：回调去重记录留这么久（飞书重投远短于这个）
+DEFAULT_LARK = "/Library/Application Support/DigitalTwin/bin/lark-cli"
+PASS_ENV = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "all_proxy", "no_proxy")
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY CHECK (id = 1), open_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+  bound_at TEXT NOT NULL, event_id TEXT NOT NULL, message_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bind_pending (nonce TEXT PRIMARY KEY, message_id TEXT, sent_at TEXT NOT NULL,
+  replace_ok INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS binding_log (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, open_id TEXT, chat_id TEXT,
+  event_id TEXT, note TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, at TEXT NOT NULL, outcome TEXT);
+"""
+
+
+class Quiet(F.Fail):
+    """来源不对（不是绑定的人、不是那张卡、不认的回调）：不回话，只记日志。"""
+
+
+# ---------- 文件与配置 ----------
+def gate_home():
+    return Path(os.environ.get("DT_GATE_HOME") or F.C.G.SUPPORT / "gate").expanduser()
+
+
+def secret_file():
+    return Path(os.environ.get("DT_GATE_SECRET_FILE") or "~/.dt/gate-app.secret").expanduser()
+
+
+def private_dir(d):
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    return d
+
+
+def app_id():
+    try:
+        v = json.loads((gate_home() / "app.json").read_text(encoding="utf-8")).get("app_id")
+    except (OSError, ValueError, AttributeError):
+        raise F.Fail("没有门卫的应用编号：先 gatekeeper.py setup --app-id cli_…")
+    if not APP_RE.match(v or ""):
+        raise F.Fail("app.json 里的应用编号格式不对")
+    return v
+
+
+def setup(app):
+    if not APP_RE.match(app or ""):
+        raise F.Fail("应用编号格式不对（应是 cli_ 加 16 位十六进制）")
+    f = private_dir(gate_home()) / "app.json"
+    tmp = f.with_name(f".app.json.{secrets.token_hex(4)}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"app_id": app}) + "\n")
+    os.replace(tmp, f)
+    return {"ok": True, "app_id": app, "file": str(f)}
+
+
+def read_secret():
+    """门卫应用密钥：属本账号、600、普通文件（不认链接）、一行。内容只交给 lark-cli 子进程的环境，不打印、不写日志。"""
+    f = secret_file()
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise F.Fail(f"读不到门卫应用密钥 {f}（不存在、是链接或没权限）：请常浩亲手放进 dt-gate")
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+            raise F.Fail(f"门卫应用密钥 {f} 必须是本账号的普通文件、权限 600")
+        v = fh.read().strip()
+    if not v or len(v) > 128 or any(c.isspace() for c in v):
+        raise F.Fail(f"门卫应用密钥 {f} 内容格式不对")
+    return v
+
+
+def lark_cli():
+    """lark-cli 的路径：绝对路径，从 / 起每一级只有 root 或本账号能改（组、其他人不能写，带粘滞位的目录除外）。"""
+    p = Path(os.environ.get("DT_GATE_LARK_CLI") or DEFAULT_LARK)
+    if not p.is_absolute():
+        raise F.Fail("DT_GATE_LARK_CLI 必须是绝对路径")
+    real = p.resolve()
+    try:
+        st = os.stat(real)
+    except OSError:
+        raise F.Fail(f"找不到 lark-cli：{real}")
+    if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
+        raise F.Fail(f"{real} 不是能执行的文件")
+    for q in (real, *real.parents):
+        st = os.stat(q)
+        sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real
+        if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky):
+            raise F.Fail(f"lark-cli 路径上的 {q} 别人能改，不用（换掉它就能拿到门卫密钥）")
+    return str(real)
+
+
+# ---------- 门卫机器人 ----------
+class GateBot(F.Bot):
+    name = "门卫"
+    unbound = "门卫还没绑定常浩（gatekeeper.py bind start），绑定前一律不认点击"
+
+    def env(self):
+        """lark-cli 子进程的环境：只给凭据、单独的配置目录和代理变量（G-19：服务的代理写进 plist），不继承别的。"""
+        home = private_dir(gate_home())
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8",
+               "LARKSUITE_CLI_APP_ID": app_id(), "LARKSUITE_CLI_APP_SECRET": read_secret(),
+               "LARKSUITE_CLI_BRAND": "feishu", "LARKSUITE_CLI_CONFIG_DIR": str(private_dir(home / "lark-cli")),
+               "LARKSUITE_CLI_LOG_DIR": str(private_dir(home / "lark-cli-log")),
+               "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1", "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1"}
+        env.update({k: os.environ[k] for k in PASS_ENV if os.environ.get(k)})
+        return env
+
+    def command(self, args):
+        """(命令, 环境)。凭据或路径不对抛 SendError：调用方都按「发不出去」处理（不会误报成中台的事）。"""
+        try:
+            return [lark_cli(), *args], self.env()
+        except F.Fail as e:
+            raise F.SendError(str(e))
+
+    def lark(self, args, what):
+        cmd, env = self.command([*args, "--as", "bot", "--format", "json"])
+        return TW.run_lark(cmd, what, env)
+
+    def send_text(self, chat, text, key):
+        self.lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "text",
+                   "--content", json.dumps({"text": text}, ensure_ascii=False), "--idempotency-key", key], "发消息")
+
+    def owner(self):
+        b = binding()
+        return (b["open_id"], b["chat_id"]) if b else (None, None)
+
+
+GATE = GateBot()
+
+
+# ---------- 门卫库 ----------
+@contextlib.contextmanager
+def db(write=False):
+    f = private_dir(gate_home()) / "gate.db"
+    if not f.exists():
+        os.close(os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    con = sqlite3.connect(f, timeout=10, isolation_level=None)
+    con.row_factory = sqlite3.Row
+    try:
+        con.executescript(SCHEMA)
+        if write:
+            con.execute("BEGIN IMMEDIATE")
+        yield con
+        if write:
+            con.execute("COMMIT")
+    except BaseException:
+        if con.in_transaction:
+            con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
+
+
+def binding():
+    with db() as con:
+        r = con.execute("SELECT * FROM binding WHERE id = 1").fetchone()
+    return dict(r) if r else None
+
+
+def _age(at):
+    try:
+        return (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(at)).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def bind_card(nonce, done=None):
+    """绑定卡：开着时一个按钮（只带绑定码），绑好后去掉按钮写结果。核对码是绑定码末 4 位，终端里同时打印，对上再点。"""
+    text = ("在终端里刚发起门卫绑定，才点下面的按钮：点了以后，门卫只认你在这个私聊里点的卡片。"
+            f"没发起过就别点。核对码：**{nonce[-4:]}**（和终端里显示的一致再点）")
+    elements = [{"tag": "markdown", "content": text}]
+    if done:
+        elements.append({"tag": "markdown", "content": f"**{done}**"})
+    else:
+        elements.append({"tag": "button", "text": {"tag": "plain_text", "content": "绑定"}, "type": "primary",
+                         "width": "fill", "behaviors": [{"type": "callback", "value": {"gate_bind": nonce}}]})
+    return {"schema": "2.0", "config": {"update_multi": True, "enable_forward": False},
+            "header": {"title": {"tag": "plain_text", "content": "门卫绑定"}, "template": "green" if done else "orange"},
+            "body": {"elements": elements}}
+
+
+def bind_start(email=None, open_id=None, replace=False):
+    """发绑定卡。邮箱 / open_id 只用来把卡送到；登记的 open_id、私聊号只取常浩点击的那条回调。"""
+    if bool(email) == bool(open_id):
+        raise F.Fail("--email 和 --open-id 二选一")
+    if email and not EMAIL_RE.match(email):
+        raise F.Fail("邮箱格式不对")
+    if open_id and not OPEN_ID_RE.match(open_id):
+        raise F.Fail("open_id 格式不对（门卫应用下的 ou_…）")
+    if binding() and not replace:
+        raise F.Fail("门卫已经绑定过；要换绑加 --replace（换绑后旧的 open_id 不再认）")
+    nonce = secrets.token_hex(8)
+    with db(write=True) as con:                  # 同一时间只有一张有效的绑定卡
+        con.execute("DELETE FROM bind_pending")
+        con.execute("INSERT INTO bind_pending (nonce, message_id, sent_at, replace_ok) VALUES (?, NULL, ?, ?)",
+                    (nonce, F.now(), int(replace)))
+    content = json.dumps(bind_card(nonce), ensure_ascii=False)
+    try:
+        if open_id:
+            out = GATE.lark(["im", "+messages-send", "--user-id", open_id, "--msg-type", "interactive",
+                             "--content", content, "--idempotency-key", f"gate-bind-{nonce}"], "发绑定卡")
+        else:                                    # +messages-send 只收 chat_id / open_id；按邮箱走原始接口
+            out = GATE.lark(["api", "POST", "/open-apis/im/v1/messages", "--params", json.dumps({"receive_id_type": "email"}),
+                             "--data", json.dumps({"receive_id": email, "msg_type": "interactive", "content": content,
+                                                   "uuid": f"gate-bind-{nonce}"}, ensure_ascii=False)], "发绑定卡")
+    except F.SendError:
+        with db(write=True) as con:
+            con.execute("DELETE FROM bind_pending WHERE nonce = ?", (nonce,))
+        raise
+    mid = out.get("message_id")
+    if not MSG_RE.match(mid or ""):
+        with db(write=True) as con:
+            con.execute("DELETE FROM bind_pending WHERE nonce = ?", (nonce,))
+        raise F.Fail("发绑定卡没拿到消息号")
+    with db(write=True) as con:
+        con.execute("UPDATE bind_pending SET message_id = ? WHERE nonce = ?", (mid, nonce))
+    return {"ok": True, "check_code": nonce[-4:], "expires_in": BIND_TTL,
+            "next": f"在飞书门卫私聊里核对码 {nonce[-4:]} 一致再点「绑定」（{BIND_TTL // 60} 分钟内，门卫要在 run）；"
+                    "点完用 gatekeeper.py bind show 核对"}
+
+
+def handle_bind(ev, nonce):
+    """常浩点了绑定卡：绑定码有效、没过期、点的是这张绑定卡，才登记回调里的点击人和私聊号。"""
+    operator, chat, mid = ev.get("operator_id"), ev.get("chat_id"), ev.get("message_id")
+    if not (OPEN_ID_RE.match(operator or "") and CHAT_RE.match(chat or "") and MSG_RE.match(mid or "")):
+        raise Quiet("绑定回调缺点击人、聊天号或消息号")
+    with db(write=True) as con:
+        p = con.execute("SELECT * FROM bind_pending WHERE nonce = ?", (nonce,)).fetchone()
+        if not p:
+            raise Quiet("没有这次绑定（绑定码不对、已用过或已被新的绑定取代）")
+        if _age(p["sent_at"]) > BIND_TTL:
+            raise Quiet("绑定卡已过期")
+        if p["message_id"] != mid:
+            raise Quiet("点的不是这次发出的绑定卡")
+        old = con.execute("SELECT open_id FROM binding WHERE id = 1").fetchone()
+        if old and not p["replace_ok"]:
+            raise Quiet("已经绑定过，这次绑定没带 --replace")
+        con.execute("DELETE FROM bind_pending WHERE nonce = ?", (nonce,))
+        con.execute("INSERT OR REPLACE INTO binding (id, open_id, chat_id, bound_at, event_id, message_id) "
+                    "VALUES (1, ?, ?, ?, ?, ?)", (operator, chat, F.now(), ev["event_id"], mid))
+        con.execute("INSERT INTO binding_log (at, open_id, chat_id, event_id, note) VALUES (?, ?, ?, ?, ?)",
+                    (F.now(), operator, chat, ev["event_id"], "换绑" if old else "首次绑定"))
+    done = f"已绑定（open_id 尾号 {operator[-6:]}）。以后门卫只认你在这个私聊里点的卡片。"
+    try:
+        GATE.lark(["im", "messages", "patch", "--message-id", mid,
+                   "--data", json.dumps({"content": json.dumps(bind_card(nonce, done), ensure_ascii=False)},
+                                        ensure_ascii=False)], "改绑定卡")
+    except F.SendError:
+        GATE.send_text(chat, done, f"gate-bound-{nonce}")
+    return {"ok": True, "bound": operator[-6:]}
+
+
+# ---------- 收点击 ----------
+def parse_value(raw):
+    """回调里的按钮值（lark-cli 给的是 JSON 字符串）→ 字典；不认的返回 None。"""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    return raw if isinstance(raw, dict) else None
+
+
+def seen(event_id):
+    """记下这条回调；已经记过（飞书重投、重放）返回 True。顺手清掉 30 天前的记录。"""
+    with db(write=True) as con:
+        cutoff = (dt.datetime.now().astimezone() - dt.timedelta(seconds=EVENT_KEEP)).isoformat(timespec="seconds")
+        con.execute("DELETE FROM events WHERE at < ?", (cutoff,))
+        cur = con.execute("INSERT OR IGNORE INTO events (event_id, at) VALUES (?, ?)", (event_id, F.now()))
+        return cur.rowcount != 1
+
+
+def note_outcome(event_id, rec):
+    with db(write=True) as con:
+        con.execute("UPDATE events SET outcome = ? WHERE event_id = ?",
+                    (json.dumps(rec, ensure_ascii=False)[:500], event_id))
+
+
+def handle_event(ev):
+    """处理一条 card.action.trigger 回调，返回记录（写日志用，不含令牌）。只有核对过的常浩点击才回话。"""
+    if not isinstance(ev, dict) or ev.get("type") != EVENT_KEY:
+        return {"ok": False, "quiet": True, "why": "不是卡片回调"}
+    eid = ev.get("event_id")
+    if not isinstance(eid, str) or not eid or len(eid) > 128:
+        return {"ok": False, "quiet": True, "why": "回调没有 event_id"}
+    if seen(eid):
+        return {"ok": False, "quiet": True, "event": eid, "why": "这条回调已经处理过（重投或重放）"}
+    rec = _handle(ev)
+    note_outcome(eid, rec)
+    return {"event": eid, **rec}
+
+
+def _handle(ev):
+    if ev.get("host") != "im_message" or ev.get("action_tag") != "button" or ev.get("form_value"):
+        return {"ok": False, "quiet": True, "why": "只认私聊消息卡片上的按钮"}
+    value = parse_value(ev.get("action_value"))
+    if value is None:
+        return {"ok": False, "quiet": True, "why": "按钮值认不出"}
+    if set(value) == {"gate_bind"}:
+        if not NONCE_RE.match(str(value["gate_bind"])):
+            return {"ok": False, "quiet": True, "why": "绑定码格式不对"}
+        try:
+            return handle_bind(ev, value["gate_bind"])
+        except F.SendError as e:                 # 已登记，只是改卡 / 回话没发出去
+            return {"ok": True, "bound": True, "notify_error": str(e)[:120]}
+        except F.Fail as e:
+            return {"ok": False, "quiet": True, "why": str(e)}
+    if set(value) != {"autoloop", "o", "v"} or type(value["o"]) is not int or type(value["v"]) is not int \
+            or not F.TOKEN_RE.match(str(value["autoloop"])):
+        return {"ok": False, "quiet": True, "why": "不是门卫认的按钮"}
+    mid = ev.get("message_id")
+    if not MSG_RE.match(mid or ""):              # 门卫的回调带消息号；没带就核不了点的是哪条，不认
+        return {"ok": False, "quiet": True, "why": "回调没带消息号"}
+    code, said, rec = A.answer(value["autoloop"], value["o"], ev.get("chat_id") or "", ev.get("operator_id") or "",
+                               value["v"], message_id=mid)
+    if said:
+        A.tell(A.identities()[1], said)          # 只回绑定的私聊
+    return {**rec, "said": bool(said)}
+
+
+def consume_once(on_event=handle_event, log=print):
+    """起一次长连接消费进程，逐行处理，进程退出时返回退出码。stdin 一直开着（lark-cli 遇到 stdin 关闭就退出）。"""
+    cmd, env = GATE.command(["event", "consume", EVENT_KEY, "--as", "bot"])
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                            text=True, bufsize=1)
+
+    def errors():                                # lark-cli 的就绪标记、断线、错误信封都在 stderr
+        for line in proc.stderr:
+            log(json.dumps({"at": F.now(), "lark_cli": line.rstrip()[:300]}, ensure_ascii=False))
+    t = threading.Thread(target=errors, daemon=True)
+    t.start()
+    try:
+        for line in proc.stdout:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                log(json.dumps({"at": F.now(), "ok": False, "why": "回调行不是 JSON"}, ensure_ascii=False))
+                continue
+            try:
+                rec = on_event(ev)
+            except Exception as e:               # 一条出错不断开长连接
+                rec = {"ok": False, "why": f"{type(e).__name__}: {str(e)[:200]}"}
+            log(json.dumps({"at": F.now(), **rec}, ensure_ascii=False))
+    finally:
+        if proc.poll() is None:
+            proc.terminate()                     # SIGTERM：让 lark-cli 正常退订（不 kill -9）
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        t.join(timeout=5)
+        for fh in (proc.stdin, proc.stdout, proc.stderr):
+            fh.close()
+    return proc.returncode
+
+
+def not_ready():
+    return None if binding() else GATE.unbound
+
+
+def run():
+    """常驻：后台线程领中台卡片（没绑定时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟）。"""
+    F.use(GATE)
+    threading.Thread(target=F.run, kwargs={"ready": not_ready}, daemon=True).start()
+    wait = 10
+    while True:
+        started = time.monotonic()
+        try:
+            code = consume_once()
+            why = f"长连接进程退出（退出码 {code}）"
+        except F.Fail as e:
+            why = str(e)
+        print(json.dumps({"at": F.now(), "ok": False, "why": why, "retry_in": wait}, ensure_ascii=False), flush=True)
+        time.sleep(wait)
+        wait = 10 if time.monotonic() - started > 600 else min(wait * 2, 300)
+
+
+def doctor(online=False):
+    out = {}
+    for name, fn in (("app_id", app_id), ("secret", lambda: read_secret() and "ok"), ("lark_cli", lark_cli)):
+        try:
+            out[name] = fn()
+        except F.Fail as e:
+            out[name] = {"error": str(e)}
+    b = binding()
+    out["binding"] = {"open_id_tail": b["open_id"][-6:], "chat_id": b["chat_id"], "bound_at": b["bound_at"]} if b else None
+    if online:
+        try:
+            info = GATE.lark(["api", "GET", "/open-apis/bot/v3/info"], "查机器人")
+            bot = info.get("bot") or info
+            out["bot"] = {"app_name": bot.get("app_name"), "activate_status": bot.get("activate_status")}
+        except F.SendError as e:
+            out["bot"] = {"error": str(e)}
+    out["ok"] = all(not isinstance(out.get(k), dict) for k in ("app_id", "secret", "lark_cli")) and b is not None \
+        and not (online and "error" in out["bot"])
+    return out
+
+
+def show():
+    with db() as con:
+        log = [dict(r) for r in con.execute("SELECT at, note, open_id, chat_id FROM binding_log ORDER BY id DESC LIMIT 10")]
+        events = [dict(r) for r in con.execute("SELECT event_id, at, outcome FROM events ORDER BY at DESC LIMIT 20")]
+    b = binding()
+    return {"binding": b and {k: b[k] for k in ("open_id", "chat_id", "bound_at")}, "binding_log": log,
+            "recent_events": events, **F.show()}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("setup").add_argument("--app-id", required=True)
+    sub.add_parser("doctor").add_argument("--online", action="store_true")
+    b = sub.add_parser("bind")
+    b.add_argument("action", choices=("start", "show"))
+    b.add_argument("--email")
+    b.add_argument("--open-id")
+    b.add_argument("--replace", action="store_true")
+    for name in ("run", "once", "show"):
+        sub.add_parser(name)
+    a = ap.parse_args(argv)
+    F.use(GATE)
+    try:
+        if a.cmd == "run":
+            run()
+        elif a.cmd == "setup":
+            out = setup(a.app_id)
+        elif a.cmd == "doctor":
+            out = doctor(a.online)
+        elif a.cmd == "bind" and a.action == "start":
+            out = bind_start(a.email, a.open_id, a.replace)
+        elif a.cmd == "bind":
+            bd = binding()
+            out = {"binding": bd and {k: bd[k] for k in ("open_id", "chat_id", "bound_at")}}
+        elif a.cmd == "once":
+            why = not_ready()
+            out = {"ok": False, "paused": why} if why else F.once()
+        else:
+            out = show()
+    except (F.Fail, F.SendError) as e:
+        print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))
+        return 1
+    print(json.dumps(out, ensure_ascii=False, indent=1 if a.cmd in ("show", "doctor") else None))
+    return 0 if not isinstance(out, dict) or out.get("ok", True) is not False else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
