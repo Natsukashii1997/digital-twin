@@ -1,7 +1,7 @@
 {
   "version": "2",
   "date": "2026-11-20",
-  "note": "合并官的判定规则（#61；v2 #257）。思路取自 orca/merge_gate.py（在 claude/37-* 分支）和 docs/DT-ORC/ARCHITECTURE.md 4.2、5.5：完整 HEAD/base 绑定、敏感路径交给人、有硬性问题一律退回、路径只能上调风险。v2（ADR-016）：改定方向文档（direction_docs）也问常浩；影子门槛 threshold 废止、删除；新增 auto（按策略合并）。每次被常浩推翻，改这里、版本号加一，并用 merge_officer.py replay 回放历史。",
+  "note": "合并官的判定规则（#61；v2 #257）。思路取自 orca/merge_gate.py（在 claude/37-* 分支）和 docs/DT-ORC/ARCHITECTURE.md 4.2、5.5：完整 HEAD/base 绑定、敏感路径交给人、有硬性问题一律退回、路径只能上调风险。v2（ADR-016）：改定方向文档（direction_docs）也问常浩；数字分身的敏感路径从整个 hermes/ 收窄到授权、合并、派单、凭据、身份、对外发言、安装相关的脚本和技能，以及合并后不用装机就生效的文件（名册、ai_access.json、保护基线、先不装清单），其余 hermes/ 脚本按 L1 / L2（常浩 2026-11-20「都按推荐」；合并不等于装机，装机仍问常浩）；影子门槛 threshold 废止、删除；新增 auto（按策略合并）。每次被常浩推翻，改这里、版本号加一，并用 merge_officer.py replay 回放历史。",
   "sensitive": [
     "^\\.github/",
     "^ops/",
@@ -14,7 +14,10 @@
     "password"
   ],
   "repo_sensitive": {
-    "digital-twin": ["^hermes/", "^orca/executor-settings\\.json$", "^orca/merge_gate\\.py$", "^projects\\.json$"]
+    "digital-twin": ["^hermes/scripts/(merge_|custody|secretary|autoloop_|twin_|run_worker|dispatch|ai_access|multica_night|pdaily_act|button_probe|sidebar_reports)",
+                     "^hermes/scripts/tests/_isolation/", "^hermes/(plugins|workspace|baselines)/",
+                     "^hermes/skills/(merge-officer|workshop|pdaily-act|groupdigest-act)/", "^hermes/install_hold\\.txt$",
+                     "^ai_access\\.json$", "^orca/executor-settings\\.json$", "^orca/merge_gate\\.py$", "^projects\\.json$"]
   },
   "l0_paths": ["\\.md$"],
   "rule_docs": ["(^|/)AGENTS\\.md$", "(^|/)CLAUDE\\.md$", "(^|/)PRD\\.md$", "(^|/)LESSONS\\.md$", "(^|/)SKILL\\.md$"],

@@ -75,8 +75,28 @@ class Evaluate(unittest.TestCase):
         self.assertIn("ops/health_check.py", why[0])
 
     def test_repo_specific_sensitive(self):
-        self.assertEqual(mo.evaluate(facts(["hermes/scripts/x.py"], repo="o/digital-twin"), RULES)[:2], ("L3", mo.ASK))
-        self.assertEqual(mo.evaluate(facts(["hermes/scripts/x.py"], repo="o/other"), RULES)[:2], ("L1", mo.MERGE))
+        self.assertEqual(mo.evaluate(facts(["hermes/scripts/merge_act.py"], repo="o/digital-twin"), RULES)[:2], ("L3", mo.ASK))
+        self.assertEqual(mo.evaluate(facts(["hermes/scripts/merge_act.py"], repo="o/other"), RULES)[:2], ("L1", mo.MERGE))
+
+    def test_digital_twin_sensitive_is_narrowed_not_whole_hermes(self):
+        """#257（常浩 11-20「都按推荐」）：数字分身不再整个 hermes/ 算 L3。留下的是授权、合并、派单、凭据、身份、对外发言、
+        安装相关的，以及合并后不用装机就生效的文件；日报、取数、推送这类脚本按 L1 / L2。"""
+        def tier(path):
+            return mo.tier_of("o/digital-twin", [path], RULES)
+        for path in ("hermes/scripts/merge_officer.py", "hermes/scripts/merge_policy.py", "hermes/scripts/merge_rules.json",
+                     "hermes/scripts/custody_ledger.py", "hermes/scripts/secretary_gate.py", "hermes/scripts/autoloop_grants.py",
+                     "hermes/scripts/twin_identity.py", "hermes/scripts/twin_state.py", "hermes/scripts/run_worker.py",
+                     "hermes/scripts/dispatch.py", "hermes/scripts/ai_access.py", "hermes/scripts/multica_night_tick.py",
+                     "hermes/scripts/pdaily_act.py", "hermes/scripts/sidebar_reports.py", "hermes/scripts/tests/_isolation/__init__.py",
+                     "hermes/plugins/merge-buttons/__init__.py", "hermes/workspace/HERMES.md", "hermes/baselines/dt-sandbox-github.json",
+                     "hermes/skills/merge-officer/SKILL.md", "hermes/skills/workshop/SKILL.md", "hermes/install_hold.txt",
+                     "ai_access.json", "projects.json", "ops/self_check.py", ".github/workflows/ci.yml"):
+            self.assertEqual(tier(path), "L3", path)
+        for path in ("hermes/scripts/pdaily_publish.py", "hermes/scripts/pdaily_facts.py", "hermes/scripts/actions.py",
+                     "hermes/scripts/aihot_hot.py", "hermes/scripts/memdaily_data.py", "hermes/scripts/netwait.py",
+                     "hermes/scripts/tests/test_merge_act.py", "hermes/prompts/pdaily_report.md", "hermes/skills/progress/SKILL.md",
+                     "hermes/samples/x.json"):
+            self.assertNotEqual(tier(path), "L3", path)
 
     def test_hard_problem_beats_ask(self):
         tier, sug, why = mo.evaluate(facts(["ops/x.sh"], draft=True), RULES)
