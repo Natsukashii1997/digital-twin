@@ -2,8 +2,12 @@
 
 中台、只读窗口、秘书窄窗口都是回环 TCP；中台一停（重启、崩溃后 KeepAlive 的 30 秒），端口就空着，主账号里的进程抢绑
 127.0.0.1:3350 就能冒充中台，收下 dt-gate 发过去的本人密钥、来源钥匙、通道钥匙。dt-gate 里的客户端在带钥匙请求之前调
-check(url)：端口上必须有监听、而且监听的进程全都属于 DT_HUB_LISTENER_UID 这个 uid，否则当作连不上（抛 OSError）。
-非 root 的 lsof 看不到别的账号的进程：冒充者属主账号时，dt-gate 这边看到的是「没人在听」，同样不放行。
+check(url)：127.0.0.1 这个端口上必须有 DT_HUB_LISTENER_UID 这个账号的进程在 LISTEN，否则当作连不上（抛 OSError）。
+保证的边界（L3 第 2 轮 P2-02）：check 用 lsof -a -u <uid> 只看这个账号的进程，**不检查别的账号有没有也在听**；
+能当作「独占」靠的是中台（agent-autoloop 的 Node HTTP Server，没开 reusePort）、只读窗口和窄窗口（Python HTTPServer）
+都独占绑定 127.0.0.1:端口，别的账号先占了，dt-gate 的服务就起不来，查到的就是「没有」，不放行。
+非 root 的 lsof 能不能看到别的账号的进程取决于它的编译方式（lsof -h 里的安全模式），这里不依赖这一点。
+要看「端口上全部监听者」的是 root 侧（dt_gate_hub 的 Host.listeners，不带 uid 全量扫）。
 
 只在设了 DT_HUB_LISTENER_UID 时生效（dt_gate_hub.py 给 dt-gate 的服务设）；主账号和测试里不设，行为不变。
 生效时地址只认 127.0.0.1：别的回环地址、localhost（可能先连 ::1）、外部地址一律不发钥匙。
@@ -22,7 +26,7 @@ class NotOurListener(OSError):
 
 def listener_uids(port, lsof=None, uid=None, timeout=10):
     """本机 TCP 端口上处于 LISTEN 的进程的 uid 列表（看不到的进程不在里面）。lsof 不在、跑不起来抛 OSError。
-    给了 uid 就只扫这个账号的进程（-a -u）：非 root 本来就只看得到自己的，结果一样，机器忙时快得多；
+    给了 uid 就只扫这个账号的进程（-a -u，机器忙时快得多，全量扫描会超过 10 秒）：只回答「这个账号有没有在听」；
     root 要看全部账号（找冒充者）时不给 uid。"""
     only = ["-a", "-u", str(int(uid))] if uid is not None else []
     r = subprocess.run([lsof or LSOF, "-nP", *only, f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-Fu"], capture_output=True,
