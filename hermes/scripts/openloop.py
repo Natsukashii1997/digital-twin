@@ -454,6 +454,9 @@ def mainline_source(projects, fetch):
         except pdaily_data.Fail as e:
             cover["failed"][name] = str(e)
             continue
+        if ref is None and os.path.isdir(str(root)):   # 目录在、分支找不到（改过名、名册旧了）：这是没取到，不是「这个项目没有 CURRENT」
+            cover["failed"][name] = f"找不到主分支 {main}（本机和远端都没有，名册里写的可能旧了）"
+            continue
         if text is None:
             cover["none"].append(name)
             continue
@@ -630,6 +633,8 @@ def gaps(ledger):
     for name in cov["github"].get("capped") or []:
         out.append(f"GitHub·{name}：开着的 PR 超过 {PR_PAGE * PR_PAGES} 个，只取了前面的")
     for name, why in (cov["mainline"].get("fetch_failed") or {}).items():
+        if name in (cov["mainline"].get("failed") or {}):   # 整个没读到的上面已经说了，这里不再说「读的是本机已有的版本」
+            continue
         out.append(f"拉取·{name}：{why}（CURRENT 读的是本机已有的版本，可能旧）")
     for name, why in (cov.get("mismatch_unchecked") or {}).items():
         out.append(f"对不上·{name}：{why}（这个项目的「待合并」没核全，沿用上一份里它的）")
