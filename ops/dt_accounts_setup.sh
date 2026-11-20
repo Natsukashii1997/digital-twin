@@ -62,6 +62,17 @@ check_account() {
     echo "  [停下] 查不清 $u 是不是管理员（dseditgroup -o checkmember -m $u admin）"
     bad=1
   fi
+  # 主组不能是 wheel（0），也不能在 wheel 组里（审查第 4 轮 P3-2）
+  m=$(dscl . -read "/Users/$u" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+  case $m in
+    ''|*[!0-9]*) echo "  [停下] 读不出 $u 的主组（dscl . -read /Users/$u PrimaryGroupID）"; bad=1 ;;
+    0) echo "  [停下] $u 的主组是 wheel（0）：请改成 staff（20）"; bad=1 ;;
+  esac
+  is_member "$u" wheel && m=0 || m=$?
+  if [ "$m" != 1 ]; then
+    echo "  [停下] $u 在 wheel 组里或查不清（dseditgroup -o checkmember -m $u wheel）"
+    bad=1
+  fi
   if [ "$(dscl . -read "/Users/$u" IsHidden 2>/dev/null | awk '{print $2}')" = 1 ]; then
     echo "  登录界面：已隐藏"
   else
@@ -119,11 +130,14 @@ ard_access() {
 # 允许名单不存在 = 「所有用户」都能登录。
 # 名单里有没有它要分清「不是成员」和「查不清」，查不清当成能登录（L3 第 3 轮 P2-02）。
 remote_access() {
-  local u=$1 job=$2 group=$3 name=$4 m=2
-  if ! launchctl print "system/$job" >/dev/null 2>&1; then
-    echo "  ${name}：没开"
-    return 0
-  fi
+  local u=$1 job=$2 group=$3 name=$4 m=2 rc
+  # 只有「找不到这个服务」（返回 113）才算没开；别的出错是查不清（审查第 4 轮 P3-1）
+  launchctl print "system/$job" >/dev/null 2>&1 && rc=0 || rc=$?
+  case $rc in
+    0) ;;
+    113) echo "  ${name}：没开"; return 0 ;;
+    *) echo "  [停下] 查不清${name}开没开（launchctl print system/$job 返回 ${rc}）"; return 1 ;;
+  esac
   if dscl . -read "/Groups/$group" >/dev/null 2>&1; then
     is_member "$u" "$group" && m=0 || m=$?
   fi

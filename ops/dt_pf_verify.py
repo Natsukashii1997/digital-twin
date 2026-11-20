@@ -42,6 +42,8 @@ RULES = DIR + "/pf-dt-worker.rules"
 ANCHOR = "com.apple/dt-worker"
 REACHED = ("open", "answer", "200")
 HOLD = 2.0          # 压力模式里连上了先拿着连接这么久，让 root 抓现场
+ON_OPEN = None      # 压力模式里账号这边一连上就调它（往标准错误报一行），root 实时读到就抓现场（审查第 4 轮 P2-7）
+GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dt_root_guard.sh")
 ECHO = b"dt-verify"
 DNS_Q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x06feishu\x02cn\x00" + b"\x00\x01\x00\x01"
 
@@ -62,6 +64,8 @@ def try_tcp(host, port, timeout=3, hold=0.0):
     try:
         s.connect((host, port))
         lport = s.getsockname()[1]   # 带上本地端口：漏过时拿它去 pf 连接表里找
+        if ON_OPEN:
+            ON_OPEN("tcp", lport)
         if hold:
             time.sleep(hold)         # 先不断开：root 那边在抓现场
         return f"open:{lport}"
@@ -84,7 +88,11 @@ def try_udp(host, port, timeout=3, payload=ECHO, check=None):
         lport = s.getsockname()[1]
         s.send(payload)
         data = s.recv(512)
-        return f"answer:{lport}" if (check or (lambda d: d == payload))(data) else "garbage"
+        if not (check or (lambda d: d == payload))(data):
+            return "garbage"
+        if ON_OPEN:
+            ON_OPEN("udp", lport)
+        return f"answer:{lport}"
     except ConnectionRefusedError:
         return "refused"
     except socket.timeout:
@@ -297,15 +305,48 @@ def run_as(user, ts, mode="probe", n=None, popen=False):
     return parse_result(r.returncode, r.stdout, r.stderr, len(ts))
 
 
-def collect(procs, n, timeout):
-    """等各账号的进程跑完、收结果；没跑完的（出错、超时、结果不对）记下原因并结束它。"""
+def collect(procs, counts, timeout, on_open=None):
+    """等各账号的进程跑完、收结果；没跑完的（出错、超时、结果不对）记下原因并结束它。
+    标准错误边跑边读：账号报「OPEN <tcp|udp> <本地端口>」时当场调 on_open(账号, 协议, 端口)，其余留作出错说明。"""
+    errs = {u: [] for u in procs}
+
+    def drain(u, p):
+        for raw in p.stderr:
+            line = raw.decode(errors="replace").rstrip("\n")
+            parts = line.split()
+            if on_open and len(parts) == 3 and parts[0] == "OPEN" and parts[2].isdigit():
+                try:
+                    on_open(u, parts[1], int(parts[2]))
+                except Exception as e:      # 抓现场出错不影响收结果
+                    errs[u].append(f"抓现场出错：{e}")
+            else:
+                errs[u].append(line)
+    readers = [threading.Thread(target=drain, args=(u, p), daemon=True) for u, p in procs.items()]
+    for th in readers:
+        th.start()
+    timer = threading.Timer(timeout, lambda: [p.kill() for p in procs.values()])
+    timer.start()
     outs = {}
-    for u, p in procs.items():
+    try:
+        for u, p in procs.items():
+            try:
+                out = p.stdout.read()
+                p.wait()
+                outs[u] = (out, p.returncode)
+            except Exception as e:
+                p.kill()
+                outs[u] = e
+    finally:
+        timer.cancel()
+    for th in readers:
+        th.join(10)
+    for u in procs:
+        if isinstance(outs[u], Exception):
+            continue
+        out, code = outs[u]
         try:
-            out, err = p.communicate(timeout=timeout)
-            outs[u] = parse_result(p.returncode, out, err, n)
+            outs[u] = parse_result(code, out, "\n".join(errs[u][-20:]).encode(), counts[u])
         except Exception as e:
-            p.kill()
             outs[u] = e
     return outs
 
@@ -348,21 +389,61 @@ def pfctl(*args):
 
 
 def pf_snapshot(kind, lport):
-    """漏过的那个连接在 pf 连接表里的样子、它属于谁、门卫锚点每条规则的命中计数、主规则集。"""
+    """漏过的那个连接在 pf 连接表里的样子（详细版带「是哪条规则建的这条连接」：不是门卫规则，就说明 pf 当时
+    没认出这个连接属于谁，审查第 4 轮 P2-7）、它属于谁、门卫锚点每条规则的命中计数、主规则集。"""
     states = [l for l in pfctl("-ss").splitlines() if f":{lport} " in l + " " or f"[{lport}]" in l]
     owner = subprocess.run(["lsof", "-nP", f"-i{kind.upper()}:{lport}", "-F", "pcuLn"],
                            capture_output=True, text=True).stdout
-    return {"at": time.time(), "states": states[:50], "owner": owner[:2000],
+    return {"at": time.time(), "states": states[:50], "states_verbose": states_verbose(lport)[:50], "owner": owner[:2000],
             "anchor_rules": pfctl("-a", ANCHOR, "-vsr"), "main_rules": pfctl("-s", "rules")}
 
 
+def states_verbose(lport):
+    """pfctl -vv -ss 里和这个端口有关的连接（每条连同下面缩进的详细行，含 rule 编号）。"""
+    blocks, cur = [], []
+    for line in pfctl("-vv", "-ss").splitlines():
+        if line[:1] not in (" ", "\t") and cur:
+            blocks.append("\n".join(cur))
+            cur = []
+        cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur))
+    return [b for b in blocks if f":{lport} " in b.split("\n", 1)[0] + " " or f"[{lport}]" in b.split("\n", 1)[0]]
+
+
+def root_path_ok(path):
+    """从 / 起每一级只有 root 能改（和门卫脚本同一份核对，ops/dt_root_guard.sh）：不然 root 写记录可能被引到别处（审查第 4 轮 P3-4）。"""
+    return subprocess.run(["/bin/bash", "-c", '. "$1" && root_path "$2"', "_", GUARD, path]).returncode == 0
+
+
 def write_report(prefix, report):
+    if not root_path_ok(DIR):
+        raise SystemExit(f"{DIR} 不是只有 root 能改的目录，不写记录")
     os.makedirs(OUT_DIR, mode=0o755, exist_ok=True)
+    if not root_path_ok(OUT_DIR):
+        raise SystemExit(f"{OUT_DIR} 不是只有 root 能改的目录，不写记录")
     path = os.path.join(OUT_DIR, prefix + time.strftime("%Y%m%d-%H%M%S") + ".json")
     with open(path, "w") as f:
         json.dump(report, f, ensure_ascii=False, indent=1)
     os.chmod(path, 0o644)
     return path
+
+
+def control_problems(report, ts, ctrl):
+    """对照组 dt-gate（以账号身份跑、不受门卫管）必须连得上 root 自己连得上的本机靶子：连不上说明「以账号身份跑」
+    这一步本身有问题（比如 sudo -u 下网络都不通），受管账号的「连不上」就证明不了是门卫挡的（审查第 4 轮 P2-6）。返回 0 或 2。"""
+    gate = report["accounts"].get("dt-gate")
+    if not isinstance(gate, list):
+        print("== 对照不完整：dt-gate 账号不存在或没跑完，受管账号连不上不能算门卫挡的")
+        report["control"] = "dt-gate 没跑完"
+        return 2
+    bad = [f"{t['kind']} {t['host']}:{t['port']}" for t, row, c in zip(ts, gate, ctrl)
+           if t.get("own") and reached(c) and not reached(row["got"])]
+    report["control"] = bad or "ok"
+    if bad:
+        print(f"== 对照不完整：dt-gate 连不上 root 自己的靶子 {len(bad)} 个（{'、'.join(bad[:5])}）")
+        return 2
+    return 0
 
 
 def verify():
@@ -402,6 +483,7 @@ def verify():
                 elif v == "没法判断" and worst == 0:
                     worst = 2
             report["accounts"][u] = rows
+        worst = max(worst, control_problems(report, ts, ctrl)) if worst != 1 else 1
         report["hits_on_own_targets"] = own.hits
     finally:
         own.close()
@@ -476,39 +558,63 @@ def stress(seconds, interval=1.0):
         return 2
     own = Targets(own_addrs(), on_hit=pf_snapshot)
     report = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "seconds": seconds, "reload_interval": interval, "accounts": {}}
-    leaks, incomplete = [], []
+    leaks, incomplete, live = [], [], []
+    lock = threading.Lock()
+
+    def on_open(u, kind, lport):            # 受管账号连上了：当场抓现场（它还拿着连接）；对照组连上是应该的
+        if u in ALLOWED:
+            snap = {"user": u, "kind": kind, "lport": lport, **pf_snapshot(kind, lport)}
+            with lock:
+                live.append(snap)
     try:
         cands = stress_targets(own, users)
         ctrl = probe(cands)
         ts = [t for t, c in zip(cands, ctrl) if reached(c)]
         report["targets"] = ts
         report["skipped"] = [{**t, "root": c} for t, c in zip(cands, ctrl) if not reached(c)]
+        # 对照组只连「本机已有的监听、公网」（11-19 两次漏过时 root 和 dt-gate 也在连这些），不连 root 自己的靶子
+        # （那些靶子收到的连接都当漏过）
+        others = [t for t in ts if not t.get("own")]
         if [t for t in report["skipped"] if t.get("own")]:
             incomplete.append("root 自己的靶子 root 连不上")
+        elif not account_exists("dt-gate"):
+            incomplete.append("没有 dt-gate 账号，没有对照组")
         else:
             report["anchor_before"] = pfctl("-a", ANCHOR, "-vsr")
             print(f"靶子 {len(ts)} 个（root 连不上、不算数的 {len(report['skipped'])} 个），{'、'.join(users)} 同时连 {seconds} 秒，"
-                  f"每 {interval:g} 秒强制重新加载一次规则……")
+                  f"dt-gate 和 root 同时连其中 {len(others)} 个本机已有监听和公网作对照，每 {interval:g} 秒强制重新加载一次规则……")
             own.armed = True
             rel = Reloader(interval)
             rel.start()
             procs = {u: run_as(u, ts, "probe-stress", seconds, popen=True) for u in users}
-            outs = collect(procs, len(ts), seconds + 600)
+            procs["dt-gate"] = run_as("dt-gate", others, "probe-stress", seconds, popen=True)
+            root_rows = {}
+            root_th = threading.Thread(target=lambda: root_rows.setdefault("rows", probe_stress(others, seconds)), daemon=True)
+            root_th.start()
+            counts = {u: len(ts) for u in users}
+            counts["dt-gate"] = len(others)
+            outs = collect(procs, counts, seconds + 600, on_open)
+            root_th.join(seconds + 600)
             rel.stop.set()
             rel.join(10)
             own.armed = False
             report["reloads"] = {"count": len(rel.times), "errors": rel.errors}
             report["anchor_after"] = pfctl("-a", ANCHOR, "-vsr")
+            gate = outs.pop("dt-gate")
             leaks, incomplete, report["accounts"] = judge_stress(users, ts, outs, rel.times)
+            report["control"] = {"dt-gate": gate if isinstance(gate, list) else str(gate)[:500], "root": root_rows.get("rows")}
+            incomplete += control_incomplete(others, gate, root_rows.get("rows"))
             for h in own.hits:
                 h["ms_from_reload"] = nearest_reload(h["at"], rel.times)
+            for x in live:
+                x["ms_from_reload"] = nearest_reload(x["at"], rel.times)
             if rel.errors or not rel.times:
                 incomplete.append(f"强制重新加载 {len(rel.times)} 次，出错 {rel.errors} 次")
             if not rules_intact():
                 incomplete.append("测试后加载上的规则和规则文件不一致")
     finally:
         own.close()
-    report.update(leaks=leaks, hits_on_own_targets=own.hits, incomplete=incomplete)
+    report.update(leaks=leaks, hits_on_own_targets=own.hits, live_snapshots=live, incomplete=incomplete)
     path = write_report("stress-", report)
     for u, rows in report["accounts"].items():
         print(f"== {u}")
@@ -516,8 +622,9 @@ def stress(seconds, interval=1.0):
             k = sum(v for g, v in row["got"].items() if g in REACHED)
             print(f"  {row['what']} {row['host']}:{row['port']}：试了 {row['n']} 次，连上 {k} 次（{row['got']}）")
     print(f"重新加载 {report.get('reloads', {}).get('count', 0)} 次")
-    if leaks or own.hits:
-        print(f"有漏过：账号报告 {len(leaks)} 次，root 靶子收到 {len(own.hits)} 次（现场在记录里）；记录在 {path}")
+    if leaks or own.hits or live:
+        print(f"有漏过：账号报告 {len(leaks)} 次，root 靶子收到 {len(own.hits)} 次，当场抓到现场 {len(live)} 次（现场在记录里）；"
+              f"记录在 {path}")
         return 1
     if incomplete:
         print("测试不完整：" + "；".join(incomplete[:5]) + f"；记录在 {path}")
@@ -526,11 +633,26 @@ def stress(seconds, interval=1.0):
     return 0
 
 
+def control_incomplete(others, gate, root_rows):
+    """对照组（dt-gate、root）对每个靶子都要连上过：连不上，同一时刻受管账号的「连不上」就不能算门卫挡的（审查第 4 轮 P2-6）。"""
+    bad = []
+    for who, rows in (("dt-gate", gate), ("root", root_rows)):
+        if not isinstance(rows, list) or len(rows) != len(others):
+            bad.append(f"对照组 {who} 没跑完：{str(rows)[:200]}")
+            continue
+        for t, row in zip(others, rows):
+            if not any(row["got"].get(k) for k in REACHED):
+                bad.append(f"对照组 {who} 一次都没连上 {t['host']}:{t['port']}")
+    return bad
+
+
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "probe":   # 以账号身份跑的那一半
         print(json.dumps(probe(json.loads(sys.argv[2]))))
         return 0
     if len(sys.argv) >= 4 and sys.argv[1] == "probe-stress":
+        global ON_OPEN
+        ON_OPEN = lambda kind, lport: (sys.stderr.write(f"OPEN {kind} {lport}\n"), sys.stderr.flush())
         print(json.dumps(probe_stress(json.loads(sys.argv[2]), float(sys.argv[3]))))
         return 0
     if os.geteuid() != 0:

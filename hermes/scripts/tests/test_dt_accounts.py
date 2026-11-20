@@ -43,9 +43,11 @@ class PfRules(unittest.TestCase):
     def assert_whitelist(self, text, user):
         """白名单、默认拒绝（L3 P1-02）：先放行准连的本机端口，紧接着一条不分地址族、不分目标的 TCP / UDP 全拒。"""
         lines = [l for l in text.splitlines() if l.endswith(f"user {user}")]
-        self.assertEqual(len(lines), 2, lines)
+        self.assertEqual(len(lines), 3, lines)
         self.assertTrue(lines[0].startswith("pass out quick inet proto tcp from any to 127.0.0.1 port {"))
         self.assertEqual(lines[1], f"block return out quick proto {{ tcp, udp }} from any to any user {user}")
+        # 审查第 4 轮 P2-8：入站一律拒绝，账号不能占住别人准连的端口冒充服务
+        self.assertEqual(lines[2], f"block return in quick proto {{ tcp, udp }} from any to any user {user}")
 
     def test_worker_only(self):
         r = rules("dt-worker")
@@ -73,6 +75,8 @@ class PfRules(unittest.TestCase):
         for uid in (subprocess.check_output(["id", "-u", u], text=True).strip() for u in ("dt-worker", "dt-secretary")):
             self.assertIn(f"block return out quick proto tcp all user = {uid}", out)
             self.assertIn(f"block return out quick proto udp all user = {uid}", out)
+            self.assertIn(f"block return in quick proto tcp all user = {uid}", out)
+            self.assertIn(f"block return in quick proto udp all user = {uid}", out)
         self.assertNotIn("inet6", out)
 
     def test_gate_and_unknown_refused(self):
@@ -352,7 +356,7 @@ class AccountGuards(unittest.TestCase):
         return subprocess.run(["bash", "-c", f". {GUARD}\n{stubs}\n{body}"], capture_output=True, text=True)
 
     def remote(self, on, group, member):
-        stubs = (f'launchctl() {{ return {0 if on else 1}; }}\n'
+        stubs = (f'launchctl() {{ return {0 if on is True else 113 if on is False else on}; }}\n'
                  f'dscl() {{ return {0 if group else 1}; }}\n'
                  f'dseditgroup() {{ {self.MEMBER[member]}; }}\n')
         return self.bash(stubs, func(SETUP, "remote_access") +
@@ -366,6 +370,28 @@ class AccountGuards(unittest.TestCase):
         self.assertIn("[停下]", r.stdout)
         self.assertNotEqual(self.remote(True, True, True).returncode, 0)   # 开着，在名单里
         self.assertNotEqual(self.remote(True, True, None).returncode, 0)   # 开着，查不清
+        r = self.remote(5, True, False)                                    # 审查第 4 轮 P3-1：launchctl 别的出错不当成没开
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("查不清远程登录开没开", r.stdout)
+
+    def test_primary_group_and_wheel(self):
+        """审查第 4 轮 P3-2：主组是 wheel、在 wheel 组里、主组读不出，都停下。"""
+        base = ('id() { return 0; }\nuid_ok() { return 0; }\nfdesetup() { :; }\n'
+                'sudo() { echo "User $3 is not allowed to run sudo"; }\n'
+                'defaults() { return 1; }\nremote_access() { return 0; }\nard_access() { return 0; }\n')
+        def run(pg, wheel):
+            dscl = f'dscl() {{ case "$4" in PrimaryGroupID) {pg} ;; *) return 1 ;; esac; }}\n'
+            dse = ('dseditgroup() { if [ "$5" = wheel ]; then ' + self.MEMBER[wheel] + '; else '
+                   + self.MEMBER[False] + '; fi; }\n')
+            return self.bash(base + dscl + dse, func(SETUP, "check_account") + "\ncheck_account dt-gate")
+        self.assertEqual(run('echo "PrimaryGroupID: 20"', False).returncode, 0)
+        for pg, wheel, words in (('echo "PrimaryGroupID: 0"', False, "主组是 wheel"),
+                                 ('return 1', False, "读不出 dt-gate 的主组"),
+                                 ('echo "PrimaryGroupID: 20"', True, "wheel 组里"),
+                                 ('echo "PrimaryGroupID: 20"', None, "wheel 组里或查不清")):
+            r = run(pg, wheel)
+            self.assertNotEqual(r.returncode, 0, words)
+            self.assertIn(words, r.stdout)
 
     def test_is_member_three_states(self):
         for member, code in ((True, 0), (False, 1), (None, 2)):
@@ -538,14 +564,22 @@ case "$*" in
       early_pass) echo 'pass out quick all'; echo 'anchor "com.apple/*" all' ;;
       *) echo 'scrub-anchor "com.apple/*" all fragment reassemble'; echo 'anchor "com.apple/*" all' ;;
     esac ;;
+  "-s Interfaces -v") echo "lo0"; [ "$sc" = skip_iface ] && echo "lo0 (skip)"; echo "en0"; exit 0 ;;
+  "-s nat") echo 'nat-anchor "com.apple/*" all'; echo 'rdr-anchor "com.apple/*" all'
+            [ "$sc" = nat_pass ] && echo 'nat pass on en0 from 192.168.2.0/24 to any -> (en0)'
+            [ "$sc" = other_nat_anchor ] && echo 'nat-anchor "vpn/*" all'; exit 0 ;;
+  "-a com.apple/250.ApplicationFirewall -s nat") [ "$sc" = sibling_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
+  "-a "*" -s nat") exit 0 ;;
   "-a com.apple -s Anchors") [ "$sc" = anchors_fail ] && exit 1
                              echo "  com.apple/250.ApplicationFirewall"; echo "  com.apple/dt-worker"
                              [ "$sc" = odd_anchor ] && echo "  AirDrop"; exit 0 ;;
   "-a com.apple/250.ApplicationFirewall -s Anchors") [ "$sc" = nested_pass ] && echo "  com.apple/250.ApplicationFirewall/x"; exit 0 ;;
   "-a com.apple/250.ApplicationFirewall/x -s Anchors") exit 0 ;;
-  "-a com.apple/250.ApplicationFirewall/x -s rules") echo 'pass in quick on lo0 all' ;;
+  "-a com.apple/250.ApplicationFirewall/x -s rules") echo 'pass out quick on lo0 all' ;;
   "-a com.apple/250.ApplicationFirewall -s rules")
     [ "$sc" = sibling_pass ] && echo 'pass out quick proto tcp all flags S/SA keep state'
+    [ "$sc" = sibling_pass_both ] && echo 'pass quick on en0 all'
+    [ "$sc" = sibling_pass_in ] && echo 'pass in quick proto tcp to port 5000 keep state'
     [ "$sc" = sibling_fail ] && exit 1
     echo 'block drop in all'; exit 0 ;;
   "-q -f /etc/pf.conf") exit 0 ;;
@@ -568,6 +602,19 @@ esac
     GUARD_STUB = """root_dir() { return 0; }
 root_path() { [ "$SCENARIO" != dir_bad ]; }
 uid_ok() { [ "$SCENARIO" != uid_bad ]; }
+user_list() {
+  case $SCENARIO in
+    ds_fail) return 1 ;;
+    ds_flaky) [ -e "$FAKE_DIR/ds_once" ] || { : > "$FAKE_DIR/ds_once"; return 1; } ;;
+  esac
+  echo "root 0"; echo "dt-worker 502"
+  [ "$SCENARIO" = no_secretary ] || echo "dt-secretary 504"
+}
+"""
+
+    PKILL = """#!/bin/bash
+echo "$*" >> "$FAKE_DIR/kills"
+exit 1
 """
 
     def setup_dir(self):
@@ -579,6 +626,11 @@ uid_ok() { [ "$SCENARIO" != uid_bad ]; }
         script = PF.read_text().replace("/sbin/pfctl", str(fake))
         script = script.replace('DIR="/Library/Application Support/DigitalTwin"', f'DIR="{d}"')
         script = script.replace("chown root:wheel", ": chown root:wheel")   # 不是 root，改不了属主
+        pk = d / "pkill"
+        pk.write_text(self.PKILL)
+        pk.chmod(0o755)
+        script = script.replace("/usr/bin/pkill", str(pk))
+        script = script.replace("DS_TRIES=12", "DS_TRIES=3").replace("    sleep 5 ", "    sleep 0 ")
         script = re.sub(r'^\[ "\$\(id -u\)" = 0 \].*$', "", script, flags=re.M)
         (d / "pf.sh").write_text(script)
         (d / "dt_root_guard.sh").write_text(self.GUARD_STUB)
@@ -586,6 +638,7 @@ uid_ok() { [ "$SCENARIO" != uid_bad ]; }
 
     def apply(self, scenario, d=None):
         d = d or self.setup_dir()
+        self.last_dir = d
         env = dict(os.environ, FAKE_DIR=str(d), SCENARIO=scenario, STATUS_PATH=str(d / "pf-dt-worker.status"))
         r = subprocess.run(["bash", str(d / "pf.sh"), "apply"], capture_output=True, text=True, env=env)
         st = d / "pf-dt-worker.status"
@@ -593,6 +646,7 @@ uid_ok() { [ "$SCENARIO" != uid_bad ]; }
         fields = dict(kv.split("=", 1) for kv in status.split() if "=" in kv)
         at_load = (d / "status_at_load").read_text() if (d / "status_at_load").exists() else ""
         self.loads = len((d / "loads").read_text().split()) if (d / "loads").exists() else 0
+        self.kills = (d / "kills").read_text().splitlines() if (d / "kills").exists() else []
         return r, fields, at_load
 
     def test_ok(self):
@@ -600,19 +654,27 @@ uid_ok() { [ "$SCENARIO" != uid_bad ]; }
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(f["state"], "ok")
         self.assertEqual(f["users"], "dt-worker,dt-secretary")
-        self.assertEqual(f["rules"], "9")          # 工人 2 条放行 + 2 条拒绝，秘书 3 + 2
+        self.assertEqual(f["rules"], "13")         # 工人 2 条放行 + 2 条出站拒绝 + 2 条入站拒绝，秘书 3 + 2 + 2
         self.assertEqual(f["reloaded"], "yes")
+        self.assertRegex(f["boot"], r"^\d+$")      # 记本次开机时间（审查第 4 轮 P2-2）
         self.assertIn("state=applying", at_load)  # 加载前先写「进行中」
+        # 重新加载过：两个账号的进程全部结束（旧规则下的连接不过新规则，审查第 4 轮 P2-4）
+        self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
 
     def test_unchanged_not_reloaded(self):
         """L3 第 3 轮 P1-02：实际加载的和应有的一样，就不重新加载（两次偶发漏过都在重新加载附近）；被改了才重新加载。"""
         d = self.setup_dir()
         self.apply("ok", d)
         self.assertEqual(self.loads, 1)
+        (d / "kills").unlink()
+        st = d / "pf-dt-worker.status"
+        before = st.read_text()
         r, f, _ = self.apply("ok", d)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((f["state"], f["reloaded"]), ("ok", "no"))
         self.assertEqual(self.loads, 1)
+        self.assertEqual(self.kills, [])           # 没重新加载，不动账号的进程
+        self.assertNotIn("applying", before)       # 平时的核对不写「进行中」（审查第 4 轮 P2-1）
         (d / "loaded.rules").write_text("# 被人清空了\n")
         r, f, _ = self.apply("ok", d)
         self.assertEqual((f["state"], f["reloaded"]), ("ok", "yes"))
@@ -623,7 +685,13 @@ uid_ok() { [ "$SCENARIO" != uid_bad ]; }
                               ("tampered", "不一致"), ("no_anchor", "没挂"), ("disabled", "pf_没开"),
                               ("early_pass", "主规则集里锚点前面有：pass_out_quick_all"),
                               ("sibling_pass", "com.apple/250.ApplicationFirewall_里有：pass_out_quick"),
-                              ("nested_pass", "com.apple/250.ApplicationFirewall/x_里有：pass_in_quick"),
+                              ("nested_pass", "com.apple/250.ApplicationFirewall/x_里有：pass_out_quick"),
+                              ("sibling_pass_both", "com.apple/250.ApplicationFirewall_里有：pass_quick"),
+                              ("skip_iface", "有网卡被_pf_跳过：lo0_(skip)"),
+                              ("nat_pass", "主规则集的地址转换里有：nat_pass"),
+                              ("other_nat_anchor", "主规则集的地址转换里有：nat-anchor_\"vpn/*\""),
+                              ("sibling_nat_pass", "com.apple/250.ApplicationFirewall_的地址转换里有：rdr_pass"),
+                              ("ds_fail", "目录服务查不清"),
                               ("sibling_fail", "读不出_com.apple/250.ApplicationFirewall_的规则"),
                               ("anchors_fail", "读不出_com.apple_下的锚点"),
                               ("odd_anchor", "认不出_com.apple_下的锚点名"),
@@ -633,8 +701,33 @@ uid_ok() { [ "$SCENARIO" != uid_bad ]; }
             self.assertEqual(f["state"], "failed", scenario)
             self.assertIn(why, f["reason"], scenario)
             self.assertNotIn("users", f, scenario)    # 失败时不声称管上了谁
+            status = (Path(self.last_dir) / "pf-dt-worker.status").read_text()
+            self.assertEqual(len(status.splitlines()), 1, status)   # 状态只有一行：原因里没混进子 shell 里陷阱写的东西
+            self.assertNotIn("行出错", status, scenario)
             if scenario not in ("load_fail", "partial", "dup", "tampered", "disabled"):
                 self.assertEqual(self.loads, 0, scenario)   # 前面的核对不过，根本不加载
+            # 判定不在生效：两个账号正在跑的进程一律结束（审查第 4 轮 P2-5）
+            self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * (1 + (scenario in ("partial", "dup", "tampered", "disabled"))), scenario)
+
+    def test_directory_unclear_keeps_rules(self):
+        """审查第 4 轮 P1-1：目录服务一时查不清，不能当成「没有秘书」把秘书从规则里删掉；短暂查不清时重试后照常。"""
+        d = self.setup_dir()
+        self.apply("ok", d)
+        rules_before = (d / "pf-dt-worker.rules").read_text()
+        r, f, _ = self.apply("ds_fail", d)
+        self.assertEqual(f["state"], "failed")
+        self.assertEqual((d / "pf-dt-worker.rules").read_text(), rules_before)   # 规则文件、加载的规则都不动
+        self.assertEqual(self.loads, 1)
+        r, f, _ = self.apply("ds_flaky", d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((f["state"], f["users"]), ("ok", "dt-worker,dt-secretary"))
+        r, f, _ = self.apply("no_secretary", d)      # 目录服务说清了没有秘书：才不管它
+        self.assertEqual((f["state"], f["users"]), ("ok", "dt-worker"))
+
+    def test_inbound_only_quick_pass_allowed(self):
+        """审查第 4 轮 P3-5：别的锚点里只放行入站（隔空投送等）绕不过门卫的出站拒绝，不算挡路。"""
+        r, f, _ = self.apply("sibling_pass_in")
+        self.assertEqual(f["state"], "ok", r.stdout + r.stderr)
 
     def test_unsafe_dir_writes_nothing(self):
         """L3 第 3 轮 P2-05：状态目录不是只有 root 能改的，连状态文件都不写。"""
@@ -746,7 +839,11 @@ class Verify(unittest.TestCase):
         closed.bind(("127.0.0.1", 0))
         cport = closed.getsockname()[1]
         closed.close()
-        ts = [self.t("127.0.0.1", cport)]
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(64)
+        self.addCleanup(srv.close)
+        ts = [self.t("127.0.0.1", cport), self.t("127.0.0.1", srv.getsockname()[1])]
         real = subprocess.Popen
 
         def no_sudo(cmd, *a, **kw):
@@ -755,12 +852,56 @@ class Verify(unittest.TestCase):
         self.v.subprocess.Popen = no_sudo
         self.addCleanup(setattr, self.v.subprocess, "Popen", real)
         procs = {u: self.v.run_as(u, ts, "probe-stress", 1, popen=True) for u in ("dt-worker", "dt-secretary")}
-        outs = self.v.collect(procs, len(ts), 60)
+        seen = []
+        outs = self.v.collect(procs, {u: len(ts) for u in procs}, 60, lambda u, kind, lport: seen.append((u, kind, lport)))
+        # 审查第 4 轮 P2-7：账号一连上就报一行，root 边跑边读、当场抓现场（这里记下谁、什么协议、哪个本地端口）
         for u in procs:
             self.assertIsInstance(outs[u], list, outs[u])
+            opens = [o["lport"] for o in outs[u][1]["opens"]]
+            self.assertTrue(opens)
+            self.assertEqual(sorted(p for w, k, p in seen if w == u and k == "tcp"), sorted(opens))
             got = outs[u][0]["got"]   # 每秒上万次连关掉的端口，偶尔有一次 error:22，不影响这里要核的
             self.assertGreater(got.get("refused", 0), 0, got)
             self.assertEqual(outs[u][0]["opens"], [])
+
+    def test_collect_reports_failures(self):
+        """账号进程出错退出、结果条数不对、超时，都记成没跑完（不会当成「没连上」）。"""
+        py = "/usr/bin/python3"
+        procs = {"a": subprocess.Popen([py, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE),
+                 "b": subprocess.Popen([py, "-c", "print('[]')"], stdout=subprocess.PIPE, stderr=subprocess.PIPE),
+                 "c": subprocess.Popen([py, "-c", "import time; time.sleep(30)"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)}
+        outs = self.v.collect(procs, {"a": 1, "b": 1, "c": 1}, 2)
+        self.assertIn("退出码 3", str(outs["a"]))
+        self.assertIn("boom", str(outs["a"]))
+        self.assertIn("条数", str(outs["b"]))
+        self.assertIsInstance(outs["c"], Exception)
+
+    def test_control_required(self):
+        """审查第 4 轮 P2-6：对照组 dt-gate 连不上 root 自己连得上的靶子、没跑完，都是测试不完整（不报「全部符合」）。"""
+        own, other = {**self.t("127.0.0.1", 40000), "own": True}, self.t("127.0.0.1", 5000)
+        ts, ctrl = [own, other], ["open:1", "open:2"]
+        ok = {"accounts": {"dt-gate": [{"got": "open:3"}, {"got": "refused"}]}}
+        self.assertEqual(self.v.control_problems(ok, ts, ctrl), 0)
+        bad = {"accounts": {"dt-gate": [{"got": "timeout"}, {"got": "open:4"}]}}
+        self.assertEqual(self.v.control_problems(bad, ts, ctrl), 2)
+        self.assertEqual(self.v.control_problems({"accounts": {}}, ts, ctrl), 2)
+        hit = {"n": 3, "got": {"open": 1, "refused": 2}, "opens": []}
+        miss = {"n": 3, "got": {"refused": 3}, "opens": []}
+        self.assertEqual(self.v.control_incomplete([other], [hit], [hit]), [])
+        self.assertIn("dt-gate 一次都没连上", self.v.control_incomplete([other], [miss], [hit])[0])
+        self.assertIn("root 没跑完", self.v.control_incomplete([other], [hit], None)[0])
+        self.assertIn("dt-gate 没跑完", self.v.control_incomplete([other], RuntimeError("x"), [hit])[0])
+
+    def test_report_path_checked(self):
+        """审查第 4 轮 P3-4：写记录前核对目录从 / 起只有 root 能改，不过就不写。"""
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(d)])
+        self.assertFalse(self.v.root_path_ok(str(d)))   # 真用 dt_root_guard.sh 核：自己账号的临时目录不过
+        self.v.DIR, self.v.OUT_DIR = str(d), str(d / "verify")
+        with self.assertRaises(SystemExit):
+            self.v.write_report("", {})
+        self.assertFalse((d / "verify").exists())
 
     def test_judge_stress(self):
         """账号没跑完、某个靶子一次都没试到，都算不完整；连上的每一次都算漏过，并记离最近一次重新加载差几毫秒。"""
