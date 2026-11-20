@@ -328,6 +328,7 @@ class Mismatch(Base):
             "PR #77 已合并，PR #78 待合并": [78],
             "#5 做完（PR #6 未合并）；#7 另一件事": [6],
             "没有号（PR 待合并）": [],
+            "循环首次跑通（[PR #40](https://github.com/o/dt/pull/40) 送审中，[PR #39](https://github.com/o/dt/pull/39) PASS 待合并）": [39],
         }
         for text, want in cases.items():
             self.assertEqual(ol.pending_numbers(text), want, text)

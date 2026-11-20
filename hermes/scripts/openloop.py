@@ -76,6 +76,7 @@ NUM = re.compile(r"(?<![A-Za-z0-9_./-])#(\d+)")   # 本仓库的号；「postpan
 PENDING = re.compile(r"(?:待|等)[^，,。；;（）()\s]{0,6}合并|未合并")   # 待合并、待常浩合并、待常浩定合并、等常浩合并、未合并
 CLAUSE = re.compile(r"[，,；;。（）()]")
 SENTENCE = re.compile(r"[。；;]")
+LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")   # [PR #39](https://…)：只留方括号里的字，网址里的号和括号不参与断句
 MARK_STATE = {"▶": "在做", "⏳": "等外部", "❓": "等你"}
 PARKED = {"⏸": "先不做", "📌": "挂起"}
 DONE = "✅✖"
@@ -385,7 +386,7 @@ def pending_numbers(text):
     def numbers(part):
         merged = {n for c in CLAUSE.split(part) if "已合并" in c for n in NUM.findall(c)}
         return {int(n) for n in NUM.findall(part) if n not in merged}
-    sentences, found = SENTENCE.split(text), set()
+    sentences, found = SENTENCE.split(LINK.sub(r"\1", text)), set()
     for i, sentence in enumerate(sentences):
         if not PENDING.search(sentence):
             continue
