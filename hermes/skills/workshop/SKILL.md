@@ -27,6 +27,7 @@ metadata:
 ## 1. 整理成派单
 
 1. **项目**：先读名册 `~/Documents/ChatGPT/个人/work/digital-twin/projects.json`，按 `name` 和 `aliases` 匹配，取 `id`。匹配不上，告诉常浩“不在名册里”，问要不要加进去；匹配到多个，先问。不要自己去读名册外的项目来代替派单。
+   - **要登记的是第三方/上游仓库（如 Hermes 本体 `~/.hermes/hermes-agent`）时先查三件事再提方案**：`git status --short` 和 `git branch --show-current`（游离 HEAD 上未提交的本地补丁要先存成本地分支，名册 `main` 指向这个分支，否则 worktree 从 origin 拉、补丁不在底里）；`git remote -v`（origin 是别人的上游就**不填 `github`**——填了 `D new` 会往上游建 issue、`D pr` 往上游开 PR）；名册 `test` 只填相关测试子集，不跑上游全量。改 Hermes 本体、改名册、改网关都是常设授权清单 D 档，三项分别列出等常浩逐项点头，不合在一个“可以”里默认放行。
 2. **只读还是写入**：要改代码、改文档、提交的就是写入单；看、查、总结、出方案的是只读单。只读单把“不得修改项目文件、不得运行会写缓存或产物的测试/构建、不提交或丢弃”写进任务；派单元数据可写在项目外。主目录未提交改动必须在现有工作区读，不能用新 worktree 代替。具体核对方法见 [只读调查](references/read-only-investigation.md)。
 3. **交给谁**：常浩点名 Claude 或 Codex 就听他的，开单带 `--tool`；**没点名就不带 `--tool`**，由派单脚本按 AI 接入设置里车间的执行方选（`/usr/bin/python3 ~/.hermes/scripts/ai_access.py status` 能看当前默认和各家能不能用），不要自己按任务类型猜。常浩说「以后默认用 Claude / Codex」时，跑 `ai_access.py set default claude|codex`，把输出原样告诉他（下一张单生效）。
 4. **任务说明**写进一个临时文件，必须包含五要素：目标、交付物、验收标准（怎么算做完）、边界（哪些不做）、交给谁。车间看不到你和常浩的对话，要写清楚。
@@ -46,7 +47,9 @@ metadata:
    边界：…
    回复「可以」开跑，或者直接说要改哪里。
    ```
+   「车间」一栏照 `D new` 返回的 `msg`/`order.tool` 填实际值，不填你打算的；和规程分工（主开发 Claude）不一致时在确认里点明，让他回「可以，用 X」时一并定。
    只有常浩回复“可以 / 行 / 跑吧”等明确同意，才开跑。他要改，就改任务文件（`~/.hermes/dispatch/<单号>/task.md`）后再发一次确认；他说不要了，执行 `D clean <单号>`。
+   **换车间**：`dispatch.py` 不能改已开单的执行方。先 `D clean <旧单号>`（作废并清 worktree/分支、关 issue），再 `D new ... --tool <新车间> --task-file ~/.hermes/dispatch/<旧单号>/task.md` 用同一份任务说明重开；用 `cmp` 确认两张单 task.md 相同、旧 issue 已 CLOSED，回报里交代新旧单号和 issue。常浩的「可以，用 X」同时是对新单的开跑确认，不用再发一轮待确认。
 
 ## 3. 开跑
 
