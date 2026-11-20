@@ -3,7 +3,9 @@
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
 import os
+import subprocess
 import sys
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -47,7 +49,37 @@ class Auto(Fixture, unittest.TestCase):
         return [json.loads(l) for l in f.read_text(encoding="utf-8").splitlines()] if f.exists() else []
 
     def events(self):
-        return [r["event"] for r in self.book()]
+        """账本里的事件，不含 started（每次合并请求起来都有一行，另有用例专门核对）。"""
+        return [r["event"] for r in self.book() if r["event"] != "started"]
+
+    def requests(self):
+        """本机还活着的、对 app#5 这个版本的合并请求进程（看门进程和它起的 gh）。"""
+        import merge_act
+        return merge_act.live_requests("pulls/5/merge", "repos/o/app/pulls/5/merge", f"sha={self.head}")
+
+    def wait_for(self, cond, what, secs=240):             # 机器忙的时候起一个子进程都要好几秒
+        end = time.monotonic() + secs
+        while time.monotonic() < end:
+            if cond():
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"等了 {secs} 秒没等到：{what}")
+
+    def revert_requests(self):
+        import merge_act
+        return merge_act.live_requests("pr revert", "pr revert 5 --repo o/app ", str(self.fake))
+
+    def start_bg(self, *args, **env):
+        """后台起一个 merge_act.py（要在请求发出之后把它杀掉的用例用）。结束时把留下的进程清掉。"""
+        import merge_act
+        p = subprocess.Popen([sys.executable, "-B", str(ACT), *args], env=self.env(env),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.kill(), p.communicate(),
+                                 merge_act.kill_requests((self.requests() or []) + (self.revert_requests() or []))))
+        return p
+
+    def start_auto(self, **env):
+        return self.start_bg("auto", "app#5", **env)
 
     def handoffs(self):
         f = self.dir / "handoffs.json"
@@ -127,8 +159,10 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("撤回：merge_act.py revert app#5", r.stdout)
         (merge,) = self.merges_called()
         self.assertEqual(merge[3:], ["repos/o/app/pulls/5/merge", "-f", "merge_method=squash", "-f", f"sha={self.head}"])   # 绑定判定时的版本
-        intent, done = self.book()
+        intent, started, done = self.book()
         self.assertEqual((intent["event"], done["event"], intent["id"]), ("intent", "merged", done["id"]))
+        self.assertEqual((started["event"], started["id"], started["limit"]), ("started", intent["id"], 60.0))   # 请求的起止都有记录
+        self.assertEqual(done["ended"], {"how": "自己退出", "exit": 0})
         for key, want in (("repo", "o/app"), ("pr", "5"), ("title", "PR 5"), ("head", self.head), ("base", self.base),
                           ("tier", "L0"), ("rules_version", "2"), ("suggestion", mo.MERGE), ("checks", ["test"]),
                           ("identity", "owner-gh")):
@@ -184,18 +218,23 @@ class Auto(Fixture, unittest.TestCase):
         self.scan()                                                  # 和别的例外一样发卡片问常浩
         self.assertEqual(len(self.calls("lark.jsonl")), 1)
 
-    def test_unknown_file_total_stops(self):
+    def test_unknown_file_total_or_origin_is_exception_and_gets_card(self):
+        """#260-P2-09：GitHub 这次没给改动文件总数 / 来源仓库：核对不了，按例外交常浩（发卡片），不是不声不响地卡着。"""
         self.sign()
         self.update_pr(changedFiles=None)
         r = self.auto()
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("改动文件总数", r.stdout)
-        self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
-        self.update_pr(changedFiles=1, isCrossRepository=None)        # 来源仓库读不到：同样不合
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("属于例外", r.stdout)
+        self.assertIn("没给出改动文件总数", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+        self.update_pr(changedFiles=1, isCrossRepository=None)        # 来源仓库读不到：同样
         r = self.auto()
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn("来源仓库", r.stdout)
-        self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("没给出 PR 的来源仓库", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+        self.scan()
+        (card,) = self.calls("lark.jsonl")                           # 巡视发卡片问常浩
+        self.assertIn("来源仓库", json.dumps(card, ensure_ascii=False))
 
     def test_off_during_checks_stops_before_merge(self):
         """核对到一半常浩关了自动合并：合并命令发出前再读一次开关，不合、不记要合。"""
@@ -281,17 +320,53 @@ class Auto(Fixture, unittest.TestCase):
         self.scan()
         self.assertEqual((self.state(), self.book(), self.handoffs()), ("OPEN", [], []))
 
-    def test_handoff_kept_when_repo_listing_fails(self):
-        """这一轮没列出这个仓库的 PR（GitHub 报错）：交出登记不能当成作废。"""
+    def test_handoff_not_in_listing_is_checked_one_by_one(self):
+        """#260-P2-10：交出登记的 PR 不在这一轮的列表里（没列全、没取到），不等于它关了：逐个核实，
+        核实不了就留着；确认还开着、版本没变的照样合；确认关了或换了版本才作废。"""
         self.sign()
         self.running()
         self.auto()
-        import merge_act
-        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
-            self.assertEqual(merge_act.auto_scan(self.rules_now(), [], [], set()), [])
-            self.assertEqual(len(MP.handoffs()), 1)
-            merge_act.auto_scan(self.rules_now(), [], [], {"o/app"})
-            self.assertEqual(MP.handoffs(), [])
+        (self.fake / "hide_from_list").write_text("5")
+        self.fail(view={"n": 9, "msg": EOF_NET})                     # 列表里没有它，单独去读也读不到
+        self.scan()
+        self.assertEqual(len(self.handoffs()), 1)
+        self.fail(view={"n": 0, "msg": ""})
+        self.scan()                                                  # 读到了：还开着、版本没变、CI 在跑
+        self.assertEqual((len(self.handoffs()), self.book()), (1, []))
+        self.passed()
+        self.scan()                                                  # 不在列表里也照样合
+        self.assertEqual((self.state(), self.events(), self.handoffs()), ("MERGED", ["intent", "merged"], []))
+
+    def test_handoff_dropped_only_when_confirmed_closed_or_moved(self):
+        self.sign()
+        self.running()
+        (self.fake / "hide_from_list").write_text("5")
+        for change in ({"state": "CLOSED"}, {"headRefOid": "b" * 40}):
+            self.update_pr(state="OPEN", headRefOid=self.head)
+            self.assertEqual(self.auto().returncode, 2)
+            self.assertEqual(len(self.handoffs()), 1)
+            self.update_pr(**change)
+            self.scan()
+            self.assertEqual(self.handoffs(), [], change)
+        self.assertEqual(self.book(), [])
+
+    def test_more_than_100_open_prs_are_all_seen(self):
+        """#260-P2-10：一个仓库开着 106 个 PR，交出的那个排在第 106 个：照样判到、合到，交出登记不会被误删。"""
+        self.sign()
+        data = json.loads((self.fake / "prs.json").read_text())
+        five = data["o/app"].pop("5")
+        for n in range(200, 305):
+            data["o/app"][str(n)] = self.pr(n, f"{n:040x}", ["docs/x.md"])
+        data["o/app"]["5"] = five
+        self.set_prs(data)
+        self.running()
+        self.assertEqual(self.auto().returncode, 2)
+        self.passed()
+        self.scan()
+        self.assertEqual((self.state(), self.handoffs()), ("MERGED", []))
+        self.assertEqual(len({r["pr"] for r in self.ledger() if r["repo"] == "o/app"}), 106)
+        (listing,) = [c for c in self.calls() if c[:2] == ["pr", "list"] and "o/app" in c and "open" in c]
+        self.assertEqual(listing[listing.index("--limit") + 1], "1000")
 
     def test_exception_still_gets_card_when_policy_on(self):
         self.sign()
@@ -388,11 +463,14 @@ class Auto(Fixture, unittest.TestCase):
         self.sign()
         self.intent("2026-11-07T09:30:00+08:00")
         self.assertIn("还没核对清楚", self.auto().stdout)
-        out = self.scan().stdout
+        self.assertEqual(self.scan().stdout, "")                     # 查过进程表：那次请求的进程不在。先记一笔，不下结论
+        self.assertEqual(self.events(), ["intent", "quiet"])
+        self.assertIn("还没核对清楚", self.auto().stdout)
+        out = self.scan_at("2026-11-07T10:05:00+08:00")              # 记过之后又过了一阵，PR 仍开着：才算没合上
         self.assertIn("只读核对：app#5", out)
         self.assertIn("没合上", out)
         self.assertIn("重新交出", out)
-        self.assertEqual(self.events(), ["intent", "not_merged"])
+        self.assertEqual(self.events(), ["intent", "quiet", "not_merged"])
         self.assertEqual(self.auto().returncode, 0)                  # 核对过没合、会话重新交出，才再合
 
     def test_unsettled_is_never_resent_by_patrol(self):
@@ -404,11 +482,87 @@ class Auto(Fixture, unittest.TestCase):
         self.intent("2026-11-07T09:55:00+08:00")                     # 5 分钟前记了要合，然后进程没了
         self.assertEqual(self.scan().stdout, "")                     # 离发请求不到 10 分钟、PR 还开着：先不下结论
         self.assertEqual((self.events(), len(self.handoffs()), self.merges_called()), (["intent"], 1, []))
-        out = self.scan_at("2026-11-07T10:20:00+08:00")              # 等够了还开着：确认没合上，交出登记作废
+        self.assertEqual(self.scan_at("2026-11-07T10:20:00+08:00"), "")           # 等够了：先确认那次请求的进程已经不在
+        self.assertEqual((self.events(), len(self.handoffs()), self.merges_called()), (["intent", "quiet"], 1, []))
+        out = self.scan_at("2026-11-07T10:50:00+08:00")              # 再一轮仍开着：确认没合上，交出登记作废
         self.assertIn("没合上", out)
-        self.assertEqual((self.events(), self.handoffs(), self.merges_called(), self.state()), (["intent", "not_merged"], [], [], "OPEN"))
-        self.assertEqual(self.scan_at("2026-11-07T10:50:00+08:00"), "")
+        self.assertEqual((self.events(), self.handoffs(), self.merges_called(), self.state()),
+                         (["intent", "quiet", "not_merged"], [], [], "OPEN"))
+        self.assertEqual(self.scan_at("2026-11-07T11:20:00+08:00"), "")
         self.assertEqual((self.merges_called(), self.state()), ([], "OPEN"))      # 之后的巡视也不合：要会话重新交出
+
+    # ---------- 合并请求的硬期限、发起方死掉之后（#260-P1-01） ----------
+
+    def test_parent_killed_after_request_started_old_request_is_stopped_before_any_verdict(self):
+        """发起合并的进程在请求发出之后被杀：请求的进程（看门进程 + gh）还活着。巡视不能因为「10 分钟后 PR 还开着」
+        就记没合上、放开重新交出：先停掉旧请求，确认它不在了，再隔一轮才下结论。全程没有第二个合并请求。"""
+        self.sign()
+        (self.fake / "merge_hang").write_text("900")
+        p = self.start_auto(DT_MERGE_REQ_TIMEOUT="900")              # 期限放得很长：专门测「看门进程也指望不上」时巡视怎么办
+        self.wait_for(lambda: self.merges_called() and any(b["event"] == "started" for b in self.book()), "合并请求发出")
+        p.kill()
+        p.wait()
+        self.assertGreaterEqual(len(self.requests()), 2)             # 发起方死了，看门进程和 gh 都还在
+        self.assertEqual(self.scan_at("2026-11-07T10:05:00+08:00"), "")           # 不到 10 分钟：不下结论，也不动它
+        self.assertGreaterEqual(len(self.requests()), 2)
+        out = self.scan_at("2026-11-07T10:20:00+08:00")
+        self.assertIn("已经停掉", out)
+        self.wait_for(lambda: self.requests() == [], "旧请求被停掉")
+        self.assertEqual((self.events(), self.state(), len(self.handoffs())), (["intent", "killed"], "OPEN", 1))
+        self.assertEqual(self.scan_at("2026-11-07T10:50:00+08:00"), "")           # 进程不在了：记一笔，这一轮仍不下结论
+        self.assertEqual(self.events(), ["intent", "killed", "quiet"])
+        out = self.scan_at("2026-11-07T11:20:00+08:00")
+        self.assertIn("没合上", out)
+        self.assertEqual((self.events(), self.handoffs(), self.state()), (["intent", "killed", "quiet", "not_merged"], [], "OPEN"))
+        self.assertEqual(len(self.merges_called()), 1)
+
+    def test_request_dies_by_its_own_deadline_after_parent_is_killed(self):
+        """请求的期限不靠发起它的进程：发起方被杀之后，看门进程到点照样杀掉 gh、自己退出。"""
+        self.sign()
+        (self.fake / "merge_hang").write_text("900")
+        p = self.start_auto(DT_MERGE_REQ_TIMEOUT="30")
+        self.wait_for(lambda: self.merges_called() and any(b["event"] == "started" for b in self.book()), "合并请求发出")
+        p.kill()
+        p.wait()
+        self.assertEqual(self.events(), ["intent"])                  # 发起方死在请求结束之前：没有它来记结果、来杀子进程
+        self.wait_for(lambda: self.requests() == [], "到期后请求的进程自己没了", 240)
+        self.assertEqual((self.state(), len(self.merges_called())), ("OPEN", 1))
+
+    def test_request_timeout_is_unsure_and_leaves_no_process(self):
+        self.sign()
+        (self.fake / "merge_hang").write_text("900")
+        r = self.auto(env={"DT_MERGE_REQ_TIMEOUT": "1"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("结果不明", r.stdout)
+        self.assertIn("超过 1 秒没回应", r.stdout)
+        self.assertEqual(self.requests(), [])                        # 返回时请求的进程已经不在
+        intent, started, unsure = self.book()
+        self.assertEqual((started["event"], started["limit"], unsure["event"], unsure["ended"]),
+                         ("started", 1.0, "unsure", {"how": "到期杀掉", "exit": 124}))
+        self.assertEqual(self.scan().stdout, "")                     # 刚发出：不下结论
+        out = self.scan_at("2026-11-07T10:20:00+08:00")              # 结果行就是「请求已经结束」的记录：等够了一轮就能下结论
+        self.assertIn("没合上", out)
+        self.assertEqual(self.events(), ["intent", "unsure", "not_merged"])
+
+    def test_cannot_prove_request_dead_stays_unsettled(self):
+        """进程表查不了：证明不了旧请求已经终止，宁可一直结果不明，也不放开重新交出。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")
+        blind = {"DT_PGREP": str(self.tmp / "no-pgrep")}
+        r = self.cli(OFFICER, "scan", env={"DT_NOW": "2026-11-07T10:20:00+08:00", **blind})
+        self.assertIn("进程表查不了", r.stdout)
+        r = self.cli(OFFICER, "scan", env={"DT_NOW": "2026-11-07T10:50:00+08:00", **blind})
+        self.assertEqual(r.stdout, "")                               # 一天说一次
+        self.assertEqual(self.events(), ["intent"])
+        self.assertIn("还没核对清楚", self.auto().stdout)
+        self.update_pr(state="MERGED", mergeCommit={"oid": "a" * 40})             # 已合并不用证明进程：照样记来源不明
+        r = self.cli(OFFICER, "scan", env={"DT_NOW": "2026-11-07T11:20:00+08:00", **blind})
+        self.assertIn("来源不明", r.stdout)
+
+    def test_gh_not_runnable_means_nothing_was_sent(self):
+        import merge_act
+        res = merge_act._gh_finish(merge_act._gh_start([str(self.tmp / "no-such-gh"), "api"]))
+        self.assertEqual((res["launched"], res["ended"]), (False, {"how": "没起来", "exit": 127}))
 
     def test_network_cut_is_unsure_even_if_pr_still_open(self):
         """合并请求发出时断网：回读 PR 还开着也不能记「没合上」放开重试（请求可能还在路上）。"""
@@ -500,6 +654,57 @@ class Auto(Fixture, unittest.TestCase):
         self.scan()
         self.assertEqual(len(self.calls("lark.jsonl")), 2)           # 关了以后：补上
 
+    # ---------- 巡视时合并被拒绝（#260-P2-13） ----------
+
+    def test_patrol_says_permanent_rejection_once_and_stops_hammering(self):
+        """权限不够这类不会自己好的拒绝：说一次、交出登记留着、当天不再每轮撞；会话重新交出当场再试，第二天巡视再试一次。"""
+        self.sign()
+        self.running()
+        self.auto()
+        self.passed()
+        (self.fake / "merge_deny").write_text("x")
+        out = self.scan().stdout
+        self.assertIn("没合上", out)
+        self.assertIn("HTTP 403", out)
+        self.assertIn("今天不再重试", out)
+        self.assertEqual((len(self.handoffs()), len(self.merges_called())), (1, 1))
+        self.assertTrue(self.book()[-1]["permanent"])
+        self.assertEqual(self.scan().stdout, "")                     # 同一天：不再说，也不再发请求
+        self.assertEqual(len(self.merges_called()), 1)
+        out = self.scan_at("2026-11-08T10:00:00+08:00")              # 第二天：再试一次、再说一次
+        self.assertIn("HTTP 403", out)
+        self.assertEqual(len(self.merges_called()), 2)
+        (self.fake / "merge_deny").unlink()
+        self.assertEqual(self.auto(env={"DT_NOW": "2026-11-08T10:05:00+08:00"}).returncode, 0)   # 修好后会话重新交出：当场合
+
+    def test_patrol_says_transient_rejection_once_but_keeps_retrying(self):
+        self.sign()
+        self.running()
+        self.auto()
+        self.passed()
+        (self.fake / "merge_fail").write_text("x")
+        out = self.scan().stdout
+        self.assertIn("没合上", out)
+        self.assertIn("下一轮巡视会再试", out)
+        self.assertFalse(self.book()[-1]["permanent"])
+        self.assertEqual(self.scan().stdout, "")                     # 不重复提醒，但照样再试
+        self.assertEqual((len(self.merges_called()), len(self.handoffs())), (2, 1))
+        (self.fake / "merge_fail").unlink()
+        self.scan()
+        self.assertEqual(self.state(), "MERGED")
+
+    def test_cards_file_updates_do_not_lose_each_other(self):
+        """#260-P2-11：cards.json 有两个写入者（巡视发卡片、退回按钮）。四个进程同时各写 25 条，一条都不能丢。"""
+        code = ("import sys, merge_act as A\n"
+                "for i in range(25):\n"
+                "    A.update_cards(lambda d: d['cards'].append({'who': sys.argv[1], 'i': i}))\n")
+        procs = [subprocess.Popen([sys.executable, "-B", "-c", code, str(n)], cwd=str(HERE.parent), env=self.env())
+                 for n in range(4)]
+        self.assertEqual([p.wait(timeout=120) for p in procs], [0, 0, 0, 0])
+        cards = json.loads((self.shadow / "cards.json").read_text(encoding="utf-8"))["cards"]
+        self.assertEqual(len({(c["who"], c["i"]) for c in cards}), 100)
+        self.assertEqual([f.name for f in self.shadow.iterdir() if ".tmp" in f.name], [])
+
     # ---------- 绕过记录 ----------
 
     def test_merge_outside_executor_is_recorded_once(self):
@@ -545,24 +750,120 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("撤回 PR 没有自动合并，等常浩说合并", r.stdout)
         self.assertEqual(self.state(105), "OPEN")
 
-    def test_revert_pr_opened_but_merge_step_stops(self):
-        """撤回 PR 开出来了，接着自动合并那一步读不到状态：说清撤回 PR 已开、没合，不说成「没撤回」。"""
+    def reverted(self, **before):
+        """按策略合了 app#5，再开出撤回 PR app#105（before：开撤回 PR 之前先改 app#5 的状态，撤回 PR 会照抄）。"""
+        self.sign()
+        self.assertEqual(self.auto().returncode, 0)
+        if before:
+            self.update_pr(**before)
+        return self.cli(ACT, "revert", "app#5", "合错了")
+
+    RUNNING = {"statusCheckRollup": [{"name": "test", "status": "IN_PROGRESS", "conclusion": ""}], "mergeStateStatus": "UNSTABLE"}
+    PASSED = {"statusCheckRollup": [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}], "mergeStateStatus": "CLEAN"}
+
+    def reverts_called(self):
+        return [c for c in self.calls() if c[:2] == ["pr", "revert"]]
+
+    def merges_of(self, number):
+        return [c for c in self.merges_called() if c[3] == f"repos/o/app/pulls/{number}/merge"]
+
+    def test_revert_records_head_at_open_and_resumes_with_it(self):
+        """撤回 PR 开出时 CI 还在跑：记下开出时的版本、登记交出；之后再跑一次撤回命令（或等巡视）接着合的就是这个版本。"""
+        r = self.reverted(**self.RUNNING)
+        self.assertIn("已开撤回 PR：https://github.com/o/app/pull/105", r.stdout)
+        self.assertIn("现在还不能合", r.stdout)
+        opened = [b for b in self.book() if b["event"] == "revert_opened"][0]
+        self.assertEqual(opened["revert_head"], "e" * 40)
+        self.assertEqual([(h["pr"], h["head"]) for h in self.handoffs()], [("105", "e" * 40)])
+        self.update_pr(105, **self.PASSED)
+        again = self.cli(ACT, "revert", "app#5")                     # #260-P2-03：再跑一次接着合，不重复开
+        self.assertIn("已按策略合并 app#105", again.stdout)
+        self.assertEqual((self.state(105), len(self.reverts_called())), ("MERGED", 1))
+        (merge,) = self.merges_of(105)
+        self.assertIn("sha=" + "e" * 40, merge)
+
+    def test_revert_head_changed_while_waiting_for_ci_requires_new_authorization(self):
+        """#260-P1-07：撤回 PR 开出后等 CI 的时候被推了新提交。再跑撤回命令不把新版本当成授权过的：停下说明；
+        巡视也不合（开出时的交出登记作废）。新版本要合，得有人重新交出。"""
+        self.reverted(**self.RUNNING)
+        self.update_pr(105, headRefOid="d" * 40, **self.PASSED)
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("在开出之后又有新提交", r.stdout)
+        self.assertIn("eeeeeee", r.stdout)
+        self.assertIn("ddddddd", r.stdout)
+        self.assertIn("不自动合并", r.stdout)
+        self.assertIn("merge_act.py auto app#105", r.stdout)
+        self.assertEqual((self.state(105), self.merges_of(105)), ("OPEN", []))
+        self.scan()                                                  # 巡视发现新版本：交出登记作废，不合
+        self.assertEqual((self.state(105), self.merges_of(105), self.handoffs()), ("OPEN", [], []))
+        self.assertEqual(self.cli(ACT, "revert", "app#5").stdout.count("不自动合并"), 1)       # 再跑多少次都一样
+        self.assertEqual(self.auto("app#105").returncode, 0)         # 会话看过新版本、重新交出：这才是新的授权
+        (merge,) = self.merges_of(105)
+        self.assertIn("sha=" + "d" * 40, merge)
+
+    def test_revert_head_changed_after_network_cut_requires_new_authorization(self):
+        """#260-P1-07：撤回 PR 开出、版本记下之后断网，没走到合并；网络恢复前它被推了新提交。续接时同样停下。"""
         self.sign()
         self.auto()
-        self.fail(view={"n": 9, "msg": "GraphQL: Could not resolve to a PullRequest"})
+        self.fail(view_revert={"skip": 1, "n": 9, "msg": EOF_NET})   # 开出后第一次读到了（记下版本），接着就断网
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("已开撤回 PR", r.stdout)
+        self.assertIn("撤回 PR 还没合并", r.stdout)
+        self.assertNotIn("没撤回", r.stdout)
+        self.fail(view_revert={"n": 0, "msg": ""})
+        self.update_pr(105, headRefOid="d" * 40)
+        again = self.cli(ACT, "revert", "app#5")
+        self.assertIn("在开出之后又有新提交", again.stdout)
+        self.assertEqual((self.state(105), self.merges_of(105), len(self.reverts_called())), ("OPEN", [], 1))
+
+    def test_revert_head_changed_between_two_reads_requires_new_authorization(self):
+        """看撤回 PR 状态时还是开出的版本，真要合的那次读取已经变了：同样不合。"""
+        r = self.reverted(**self.RUNNING)
+        self.update_pr(105, **self.PASSED)
+        import merge_act
+        real = merge_act.gh_read
+        seen = []
+
+        def racing(args, what):                                      # 第一次读完之后有人推了新提交
+            out = real(args, what)
+            if args[:3] == ["pr", "view", "105"] and not seen:
+                seen.append(1)
+                self.update_pr(105, headRefOid="d" * 40)
+            return out
+
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, self.env()), unittest.mock.patch.object(merge_act.mo, "GH", str(self.fake / "gh")), \
+                unittest.mock.patch.object(merge_act.mo, "RULES", self.rules), unittest.mock.patch.object(merge_act.mo, "ROSTER", self.roster), \
+                unittest.mock.patch.object(merge_act, "gh_read", racing), contextlib.redirect_stdout(buf):
+            self.assertEqual(merge_act.cmd_revert("app#5", ""), 0)
+        self.assertIn("在开出之后又有新提交", buf.getvalue())
+        self.assertEqual((self.state(105), self.merges_of(105)), ("OPEN", []))
+
+    def test_revert_head_not_read_at_open_is_never_auto_merged(self):
+        """撤回 PR 开出来了，紧接着读它的版本没读到：不知道开出时是哪个版本，以后也不自动合并；说清撤回 PR 已开、怎么合。"""
+        self.sign()
+        self.auto()
+        self.fail(view_revert={"n": 9, "msg": "GraphQL: Could not resolve to a PullRequest"})
         r = self.cli(ACT, "revert", "app#5")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("已开撤回 PR：https://github.com/o/app/pull/105", r.stdout)
-        self.assertIn("撤回 PR 还没合并", r.stdout)
+        self.assertIn("撤回 PR 没有自动合并：没记下它开出时的版本", r.stdout)
         self.assertNotIn("没撤回", r.stdout)
         self.assertEqual(self.events(), ["intent", "merged", "revert_intent", "revert_opened"])
-        self.fail(view={"n": 0, "msg": ""})
-        again = self.cli(ACT, "revert", "app#5")                     # #260-P2-03：再跑一次接着合，不重复开
-        self.assertIn("已按策略合并 app#105", again.stdout)
-        self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
+        self.assertNotIn("revert_head", self.book()[-1])
+        self.fail(view_revert={"n": 0, "msg": ""})
+        again = self.cli(ACT, "revert", "app#5")
+        self.assertIn("撤回 PR 没有自动合并", again.stdout)
+        self.assertEqual((self.state(105), self.merges_of(105), len(self.reverts_called())), ("OPEN", [], 1))
+        self.assertEqual(self.auto("app#105").returncode, 0)         # 会话看过、交出，才合
 
-    def test_revert_lost_reply_is_found_not_reopened(self):
-        """开撤回 PR 的请求发出去、回应丢了：再跑一次先按记录号找到已开的那个，不重复开。"""
+    def test_revert_lost_reply_is_found_checked_and_adopted_without_auto_merge(self):
+        """开撤回 PR 的请求发出去、回应丢了：再跑一次从 PR 列表里按记录号找到它，核对身份和内容后认领，不重复开；
+        认领的没看到开出时的版本，不自动合并（#260-P2-03、P1-07）。"""
         self.sign()
         self.auto()
         self.fail(revert_lost={"n": 1, "msg": "x"})
@@ -571,9 +872,65 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("不确定撤回 PR 开出来没有", r.stdout)
         again = self.cli(ACT, "revert", "app#5")
         self.assertIn("上次开的撤回 PR 找到了：https://github.com/o/app/pull/105", again.stdout)
-        self.assertIn("已按策略合并 app#105", again.stdout)
-        self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
-        self.assertTrue([b for b in self.book() if b["event"] == "revert_opened"][0]["adopted"])
+        self.assertIn("撤回 PR 没有自动合并：没记下它开出时的版本（事后认领的", again.stdout)
+        self.assertEqual((len(self.reverts_called()), self.state(105), self.merges_of(105)), (1, "OPEN", []))
+        opened = [b for b in self.book() if b["event"] == "revert_opened"][0]
+        self.assertTrue(opened["adopted"])
+        self.assertNotIn("revert_head", opened)
+        self.assertEqual([c for c in self.calls() if "--search" in c], [])       # 不靠正文搜索（有索引延迟）
+
+    def test_revert_candidate_that_does_not_check_out_is_not_adopted(self):
+        """正文带着记录号、但身份或内容对不上的 PR，不认它是撤回 PR；对得上的不止一个也不认。都停下交人，不重复开。"""
+        cases = {"改动和原 PR 反过来对不上": {"files": [{"path": "docs/a.md"}, {"path": "src/extra.py"}]},
+                 "增删行数": {"files": [{"path": "docs/a.md", "additions": 9, "deletions": 0}]},
+                 "目标分支是 release": {"baseRefName": "release"},
+                 "来源分支不在本仓库": {"isCrossRepository": True, "headRepositoryOwner": {"login": "stranger"}}}
+        self.sign()
+        self.update_pr(files=[{"path": "docs/a.md", "additions": 3, "deletions": 1}])
+        self.auto()
+        self.fail(revert_lost={"n": 1, "msg": "x"})
+        self.cli(ACT, "revert", "app#5")
+        good = json.loads((self.fake / "prs.json").read_text())["o/app"]["105"]
+        self.assertEqual(good["files"], [{"path": "docs/a.md", "additions": 1, "deletions": 3}])
+        for word, change in cases.items():
+            self.update_pr(105, **{**good, **change})
+            r = self.cli(ACT, "revert", "app#5")
+            self.assertEqual(r.returncode, 1, word)
+            self.assertIn("核对不上，不认它是撤回 PR", r.stdout)
+            if word != "增删行数":
+                self.assertIn(word, r.stdout)
+        self.update_pr(105, **good)
+        data = json.loads((self.fake / "prs.json").read_text())
+        data["o/app"]["106"] = dict(good, number=106)                # 第二个正文带同一个记录号的 PR
+        self.set_prs(data)
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("认不出哪个是撤回 PR", r.stdout)
+        self.assertEqual((len(self.reverts_called()), [b for b in self.book() if b["event"] == "revert_opened"]), (1, []))
+
+    def test_revert_request_still_alive_is_not_reopened(self):
+        """开撤回 PR 的请求发出之后，发起它的进程被杀、请求还挂着：再跑一次不能重新开（会开出两个）。
+        先说还在跑；过了期限停掉它；确认不在、列表里也没有、过了 10 分钟，才重新开。"""
+        self.sign()
+        self.auto()
+        (self.fake / "revert_hang").write_text("900")
+        p = self.start_bg("revert", "app#5", DT_MERGE_REQ_TIMEOUT="900")
+        self.wait_for(self.reverts_called, "开撤回 PR 的请求发出")
+        p.kill()
+        p.wait()
+        self.assertGreaterEqual(len(self.revert_requests()), 2)
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("上一次开撤回 PR 的请求还在跑", r.stdout)
+        late = {"DT_NOW": "2026-11-07T10:20:00+08:00"}
+        r = self.cli(ACT, "revert", "app#5", env=late)
+        self.assertIn("过了期限还挂着，已经停掉", r.stdout)
+        self.wait_for(lambda: self.revert_requests() == [], "旧的撤回请求被停掉")
+        self.assertEqual(len(self.reverts_called()), 1)
+        (self.fake / "revert_hang").unlink()
+        r = self.cli(ACT, "revert", "app#5", env=late)               # 不在了、列表里也没有、过了 10 分钟：重新开
+        self.assertIn("已开撤回 PR：https://github.com/o/app/pull/105", r.stdout)
+        self.assertEqual(len(self.reverts_called()), 2)
 
     def test_revert_only_policy_merges(self):
         self.sign()
@@ -590,9 +947,13 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("没撤回", r.stdout)
         self.assertEqual(self.events(), ["intent", "merged", "revert_intent"])
-        again = self.cli(ACT, "revert", "app#5")                     # 刚失败、GitHub 上搜不到：先不重新开
-        self.assertIn("还搜不到", again.stdout)
-        self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
+        again = self.cli(ACT, "revert", "app#5")                     # 刚失败、GitHub 上找不到：先不重新开
+        self.assertIn("还找不到", again.stdout)
+        self.assertEqual(len(self.reverts_called()), 1)
+        (self.fake / "revert_fail").unlink()
+        later = self.cli(ACT, "revert", "app#5", env={"DT_NOW": "2026-11-07T10:20:00+08:00"})    # 过了 10 分钟仍没有：重新开
+        self.assertIn("已开撤回 PR", later.stdout)
+        self.assertEqual(len(self.reverts_called()), 2)
 
 
 class Policy(unittest.TestCase):
@@ -650,14 +1011,32 @@ class Policy(unittest.TestCase):
         f = mo.facts_of("o/app", {"number": 1, "changedFiles": 3, "files": [
             {"path": "b.md", "changeType": "RENAMED"}, {"path": "a.md", "changeType": "MODIFIED"}]})
         self.assertEqual((f["files_total"], f["renamed"], f["paths"], f["from_fork"]), (3, ["b.md"], ["a.md", "b.md"], None))
-        why = mo.exception_reasons(f, self.rules)
-        self.assertEqual(len(why), 2, why)
+        why = mo.exception_reasons(f, self.rules)                    # 文件没看全、有改名、来源仓库没给出（#260-P2-09）
+        self.assertEqual(len(why), 3, why)
+        self.assertTrue(any("没给出 PR 的来源仓库" in w for w in why))
         own = {"number": 1, "files": [], "isCrossRepository": False, "headRepository": {"name": "App"}, "headRepositoryOwner": {"login": "O"}}
         self.assertFalse(mo.facts_of("o/app", own)["from_fork"])
         for change in ({"isCrossRepository": True}, {"headRepository": {"name": "app2"}}, {"headRepositoryOwner": None}):
             self.assertTrue(mo.facts_of("o/app", {**own, **change})["from_fork"], change)
-        old = mo.facts_of("o/app", {"number": 1, "files": [{"path": "a.md"}]})        # 旧记录没有这两项：照原来判
-        self.assertEqual((old["files_total"], old["renamed"], mo.exception_reasons(old, self.rules)), (None, [], []))
+        fresh = mo.facts_of("o/app", {**own, "files": [{"path": "a.md"}]})            # 现读的状态里 GitHub 没给文件总数
+        self.assertEqual(mo.exception_reasons(fresh, self.rules), ["GitHub 没给出改动文件总数，核对不了改动文件有没有看全"])
+        old = {"repo": "o/app", "pr": 1, "paths": ["a.md"], "labels": []}             # 早先存的快照根本没有这两个键：照原来判
+        self.assertEqual(mo.exception_reasons(old, self.rules), [])
+
+    def test_cap_counts_by_settle_day_and_keeps_unsettled(self):
+        """#260-P2-12：上限按「合上那天」数，不按发请求那天；结果不明的没结清就一直占一个名额。"""
+        def at(now, **rec):
+            with unittest.mock.patch.dict(os.environ, {"DT_NOW": now}):
+                MP.append(rec)
+        for i in "abcd":
+            at("2026-11-19T23:59:50+08:00", event="intent", id=i, repo="o/r", pr=i, head="h")
+        at("2026-11-20T00:00:10+08:00", event="merged", id="a", merge_commit="c")          # 跨零点合上的
+        at("2026-11-20T00:00:20+08:00", event="failed", id="b", why="x")                    # 没合上的不占
+        at("2026-11-20T08:00:00+08:00", event="unsure", id="c", why="x")                    # 结果不明
+        self.assertEqual([MP.merged_count(d) for d in ("2026-11-19", "2026-11-20", "2026-11-21")], [2, 3, 2])
+        at("2026-11-21T09:00:00+08:00", event="merged_unknown", id="c")                     # 核对出来源不明：算核对那天
+        at("2026-11-21T09:00:00+08:00", event="not_merged", id="d", why="x")
+        self.assertEqual([MP.merged_count(d) for d in ("2026-11-19", "2026-11-20", "2026-11-21", "2026-11-22")], [0, 1, 1, 0])
 
     def test_incomplete_signature_is_not_authority(self):
         """#260-P2-04：签署记录缺字段或类型不对，哪怕范围哈希对得上也不算授权。"""

@@ -29,6 +29,8 @@ repo = args[args.index("--repo") + 1]
 if (root / "fail").exists() and repo in (root / "fail").read_text():
     sys.stderr.write("error connecting to api.github.com\n"); sys.exit(1)
 prs = json.loads((root / "prs.json").read_text(encoding="utf-8")).get(repo, [])
+prs = [{"changedFiles": len(p.get("files") or []), "isCrossRepository": False,      # 没写的按「本仓库分支开的 PR」补
+        "headRepository": {"name": repo.split("/")[1]}, "headRepositoryOwner": {"login": repo.split("/")[0]}, **p} for p in prs]
 if args[:2] == ["pr", "list"]:
     state = args[args.index("--state") + 1]
     print(json.dumps([p for p in prs if state == "all" or p["state"] == state.upper()], ensure_ascii=False))

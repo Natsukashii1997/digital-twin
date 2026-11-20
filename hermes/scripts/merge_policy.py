@@ -19,9 +19,15 @@
                         unsure   请求发出去了、没拿到确定结果（超时、断网、回读失败、没归类的报错）
                       只有 intent（进程中途没了）和 unsure 都算结果不明：不重发，合并官巡视时只读核对，核对后再记一行：
                         merged_unknown  PR 已合并，但证明不了是这次合的（别处也可能合了它）：不算按策略合并，不能用撤回口令
-                        not_merged      等够时间后 PR 仍没合并（或已关闭、换了版本）：交出登记作废，要合得重新交出
-                      另有 revert_intent（要开撤回 PR）、revert_opened（撤回 PR 已开）、bypass（PR 已合并但没经合并执行器）三种单行记录。
-  handoffs.json       交出登记：会话调 merge_act.py auto 时记下「仓库、PR、完整 HEAD、谁、什么时候」。绑定版本：之后 PR 有新提交，登记作废。
+                        not_merged      PR 仍没合并，而且能证明那次合并请求已经终止（或 PR 已关闭、换了版本）：交出登记作废，要合得重新交出
+                      合并请求的起止也记在同一个 id 下（#260-P1-01），都不算结果：
+                        started  合并请求的看门进程已经起来（进程号、期限秒数）；结果行里的 ended 是它怎么结束的
+                        killed   巡视时发现这次的合并请求进程过了期限还活着，已经停掉
+                        quiet    巡视时查过本机进程表，这次的合并请求进程已经不在（之后再隔一段时间 PR 仍开着，才记 not_merged）
+                      另有 revert_intent（要开撤回 PR）、revert_opened（撤回 PR 已开；revert_head 是开出当时核对过的版本，
+                      只有这个版本会被接着自动合并）、bypass（PR 已合并但没经合并执行器）三种单行记录。
+  handoffs.json       交出登记：会话调 merge_act.py auto 时记下「仓库、PR、完整 HEAD、谁、什么时候」。绑定版本：之后 PR 有新提交，登记作废
+                      （合并官确认 PR 关了、合了或换了版本才作废；只是没列出来的不算）。
   auto.lock           合并锁：按策略合并、合并官巡视一次只跑一个（上限判断和写账本在同一把锁里），一轮可能占几分钟。
   policy.lock         开关锁：只在读改写 policy.json 的那一下持有。开、关不等合并锁：巡视正跑着，「关自动合并」也立刻生效；
                       merge_act 在发合并命令之前再读一次开关。
@@ -279,13 +285,20 @@ def merges(path=None):
             by[r["id"]] = {**r, "status": "pending"}
         elif r["event"] in DONE and r.get("id") in by:
             by[r["id"]].update({k: v for k, v in r.items() if k not in ("at", "event")}, status=r["event"], done_at=r["at"])
+        elif r["event"] == "started" and r.get("id") in by:
+            by[r["id"]]["started"] = {k: r.get(k) for k in ("at", "pid", "limit")}
+        elif r["event"] == "quiet" and r.get("id") in by:
+            by[r["id"]]["quiet_at"] = r["at"]
+        elif r["event"] == "killed" and r.get("id") in by:      # 刚停掉过一个活着的请求：之前的「已经不在」不算数
+            by[r["id"]]["killed_at"] = r["at"]
+            by[r["id"]].pop("quiet_at", None)
         elif r["event"] == "revert_opened":
             revert[r.get("id")] = r
         elif r["event"] == "revert_intent" and r.get("id") in by:
             by[r["id"]]["revert_intent"] = {"at": r["at"], "reason": r.get("reason")}
     for i, r in revert.items():
         if i in by:
-            by[i]["revert"] = {k: r.get(k) for k in ("at", "revert_pr", "revert_url", "reason")}
+            by[i]["revert"] = {k: r.get(k) for k in ("at", "revert_pr", "revert_url", "reason", "revert_head", "head_unverified")}
     return sorted(by.values(), key=lambda r: r["at"])
 
 
@@ -296,8 +309,17 @@ def unsettled(repo=None, pr=None):
 
 
 def merged_count(day):
-    """这一天（北京时间日历日）已经合了几个；结果不明、来源不明的也算，免得顶着上限反复发合并请求。"""
-    return sum(1 for m in merges() if m["at"][:10] == day and m["status"] in ("merged", "pending", "unsure", "merged_unknown"))
+    """这一天（北京时间日历日）占了几个上限名额（#260-P2-12）：合上的、核对出「已合并、来源不明」的，按有了这个结果的
+    那一天算（不按发请求那天：跨零点的合并占的是合上那天的名额）；结果不明的不管哪天发的，没结清就一直占一个。"""
+    return sum(1 for m in merges() if m["status"] in ("pending", "unsure")
+               or (m["status"] in ("merged", "merged_unknown") and m["done_at"][:10] == day))
+
+
+def failed_today(repo, pr, head, day):
+    """这个版本最近一次按策略合并是不是今天被永久性地拒绝了（登录失效、权限不够、分支规则不让合：等多久都不会自己好）。
+    是的话合并官今天不再对它发请求（#260-P2-13）；第二天再试一次，或会话重新交出时当场试。"""
+    hits = [m for m in merges() if (m["repo"], str(m["pr"]), m.get("head")) == (repo, str(pr), head)]
+    return bool(hits) and hits[-1]["status"] == "failed" and bool(hits[-1].get("permanent")) and hits[-1]["done_at"][:10] == day
 
 
 def find_merged(repo, pr, statuses=("merged",)):
@@ -346,12 +368,14 @@ def drop_handoff(repo, pr):
 
 
 def note_once(key, day):
-    """同一件事一天只说一次（上限拦下）：第一次返回 True 并记下。调用方持合并锁。"""
+    """同一件事一天只说一次（上限拦下、某个 PR 被拒绝、进程表查不了）：第一次返回 True 并记下。调用方持合并锁。
+    前些天说过的顺手清掉，这份记录不会越攒越多。"""
     d = _handoff_doc()
-    said = d.setdefault("said", {})
+    said = {k: v for k, v in (d.get("said") or {}).items() if v == day}
     if said.get(key) == day:
         return False
     said[key] = day
+    d["said"] = said
     _save_handoffs(d)
     return True
 

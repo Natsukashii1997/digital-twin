@@ -66,6 +66,7 @@ PR_FIELDS = ("number,title,state,isDraft,mergeable,headRefOid,baseRefOid,labels,
              "isCrossRepository,headRepository,headRepositoryOwner,"
              "statusCheckRollup,body,closingIssuesReferences,mergedAt,closedAt")
 END_FIELDS = "number,state,headRefOid,mergedAt,closedAt"
+OPEN_LIMIT = 1000        # 每个仓库一次最多取多少个开着的 PR（gh 自己翻页）。原来是 100，超过就漏（#260-P2-10）
 SHA = re.compile(r"^[0-9a-f]{40}$")
 CLOSES = re.compile(r"\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+(\S+/\S+)?#\d+", re.I)
 FAILING = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
@@ -153,7 +154,9 @@ def exception_reasons(f, rules):
     L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签；
     改动文件没看全（超过 gh 一次给的 100 个）或有文件改名（看不到原路径）：判不了有没有碰敏感路径，按碰了处理；
     来自别的仓库（fork）的 PR：仓库是公开的，机制不核对审查结论，外来代码一律问常浩（常浩 2026-11-20 定，#260-P1-05）；
-    规则里收窄了 auto.tiers 时，风险档不在里面的也算。旧的状态快照没有 files_total / renamed，照原来判。"""
+    规则里收窄了 auto.tiers 时，风险档不在里面的也算。
+    改动文件总数、来源仓库这两项，现读的状态里有这个键、值却是 None，就是 GitHub 这次没给：核对不了，也按例外交常浩
+    （#260-P2-09，不再静默卡着）；旧的状态快照（facts.jsonl 里早先存的）根本没有这两个键，照原来判。"""
     paths = f.get("paths") or []
     ask = []
     tier = tier_of(f["repo"], paths, rules)
@@ -165,11 +168,15 @@ def exception_reasons(f, rules):
     if docs:
         ask.append("改动定方向文档：" + "、".join(docs[:5]))
     total = f.get("files_total")
-    if total is not None and total != len(paths):
+    if "files_total" in f and total is None:
+        ask.append("GitHub 没给出改动文件总数，核对不了改动文件有没有看全")
+    elif total is not None and total != len(paths):
         ask.append(f"改动文件 {total} 个，只读得到 {len(paths)} 个，看不全有没有敏感路径")
     if f.get("renamed"):
         ask.append("有文件改名，看不到原来的路径：" + "、".join(f["renamed"][:5]))
-    if f.get("from_fork"):
+    if "from_fork" in f and f["from_fork"] is None:
+        ask.append("GitHub 没给出 PR 的来源仓库，核对不了是不是外来的 PR")
+    elif f.get("from_fork"):
         ask.append("来自别的仓库（fork）的 PR，不是本仓库的分支")
     labels = sorted(set(f.get("labels") or []) & set(rules.get("ask_labels") or []))
     if labels:
@@ -330,15 +337,16 @@ def scan(verbose, act):
     rules = load_rules()
     rows = read_rows()
     seen = {(r["repo"], r["pr"], r["head_sha"]) for r in rows}
-    at, errors, added, facts, open_now, settled, listed = now(), [], [], [], [], [], set()
+    at, errors, added, facts, open_now, settled = now(), [], [], [], [], []
     for repo in active_repos():
         try:
-            prs = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json", PR_FIELDS],
+            prs = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(OPEN_LIMIT), "--json", PR_FIELDS],
                           f"{repo} 取 open PR")
         except GhError as e:
             errors.append(str(e))
             continue
-        listed.add(repo)
+        if len(prs) >= OPEN_LIMIT:               # 到了一次取的上限：后面可能还有没列出来的，说出来，不当成全列到了
+            errors.append(f"{repo} 开着的 PR 到了 {OPEN_LIMIT} 个的上限，可能没列全")
         for pr in prs:
             f = facts_of(repo, pr)
             open_now.append(f)
@@ -396,7 +404,7 @@ def scan(verbose, act):
         if cards:
             errors += merge_act.send_cards(cards, by_key)
         # 策略没生效也核对上次结果不明的合并（只读）：合并命令已经发过，不能因为关了开关就一直挂着
-        said = merge_act.auto_scan(rules, open_now, settled, listed) if on else merge_act.reconcile_unsettled()
+        said = merge_act.auto_scan(rules, open_now, settled) if on else merge_act.reconcile_unsettled()
     if verbose:
         for r in added:
             print(f"{r['repo']}#{r['pr']} {r['tier']} {r['suggestion']}  {r['title'][:40]}"

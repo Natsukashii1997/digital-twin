@@ -16,21 +16,32 @@ OFFICER = HERE.parent / "merge_officer.py"
 ACT = HERE.parent / "merge_act.py"
 
 # 假 gh：PR 状态在 FAKE_DIR/prs.json（{仓库: {号: PR}}），每次调用记进 calls.jsonl。
-# FAKE_DIR/fail.json 模拟网络或 GitHub 报错：{种类: {"n": 次数, "msg": 报错}}，每次调用用掉一次。
+# FAKE_DIR/fail.json 模拟网络或 GitHub 报错：{种类: {"n": 次数, "msg": 报错}}，每次调用用掉一次；带 "skip": k 的先放过前 k 次。
 #   view：任何 pr view；view_merged：合并之后的 pr view；merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
 #   comment：留言。
 # pr view / list 没写 changedFiles 的按 files 的个数补上；FAKE_DIR/off_on_view 存在时，pr view 顺手把策略记录关掉（#257）。
 # api -X PUT repos/<仓库>/pulls/<号>/merge（按策略合并的 REST 合并接口，#260）：合上就打印 {sha, merged}；版本不对 409、
 # 已不是 OPEN 405；fail.json 的 merge 在合之前断网、merge_lost 合上之后断网；FAKE_DIR/other_merges_first 存在时先被别处合掉。
-# FAKE_DIR/label_on_view2 存在时，第二次 pr view 起 PR 带 needs-info。pr list --search 按正文里的词找。
-# pr revert（#257）：在 prs.json 里新开一个撤回 PR（号 = 原号 + 100），打印它的网址；FAKE_DIR/revert_fail 存在就失败。
+# FAKE_DIR/label_on_view2 存在时，第二次 pr view 起 PR 带 needs-info。
+# pr list 和真 gh 一样只给 --limit 个（按 prs.json 里的顺序）；FAKE_DIR/hide_from_list 里写的 PR 号不出现在列表里（pr view 照常）。
+# FAKE_DIR/merge_deny 存在时合并接口报 403（权限不够）。
+# FAKE_DIR/merge_hang 里写秒数：合并接口先挂住这么久再处理（请求发出去、迟迟没回应）；revert_hang 同理，挂在开撤回 PR 上。
+# pr revert（#257）：在 prs.json 里新开一个撤回 PR（号 = 原号 + 100，文件同原 PR、增删行数对调），打印它的网址；
+# FAKE_DIR/revert_fail 存在就失败。fail.json 的 view_revert 只让「号大于 100 的 PR」的 pr view 失败。
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 from pathlib import Path
 root = Path(os.environ["FAKE_DIR"])
 args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
     f.write(json.dumps(args, ensure_ascii=False) + "\n")
+def hang(name):
+    if (root / name).exists():
+        time.sleep(float((root / name).read_text()))
+if args[:3] == ["api", "-X", "PUT"]:
+    hang("merge_hang")
+if args[:2] == ["pr", "revert"]:
+    hang("revert_hang")
 prs = json.loads((root / "prs.json").read_text(encoding="utf-8"))
 if args[:3] == ["api", "-X", "PUT"]:                 # REST 合并接口（按策略合并用，#260）：换成内部写法 pr apimerge <号> --repo <仓库> sha=…
     parts = args[3].split("/")
@@ -42,18 +53,20 @@ def full(p):      # 没写的字段按「本仓库分支开的 PR」补：改动
             "headRepository": {"name": repo.split("/")[1]}, "headRepositoryOwner": {"login": repo.split("/")[0]}, **p}
 if args[:2] == ["pr", "list"]:
     state = args[args.index("--state") + 1]
-    if "--search" in args:                           # 按正文里的记录号找（撤回 PR 的认领）
-        word = args[args.index("--search") + 1].split()[0]
-        print(json.dumps([{"number": p["number"], "url": "https://github.com/" + repo + "/pull/" + str(p["number"]),
-                           "state": p["state"]} for p in mine.values() if word in (p.get("body") or "")])); sys.exit(0)
+    limit = int(args[args.index("--limit") + 1]) if "--limit" in args else 30
+    hidden = (root / "hide_from_list").read_text().split() if (root / "hide_from_list").exists() else []
     print(json.dumps([full(p) for p in mine.values()
-                      if state == "all" or p["state"] == state.upper()])); sys.exit(0)
+                      if (state == "all" or p["state"] == state.upper()) and str(p["number"]) not in hidden][:limit])); sys.exit(0)
 pr = mine.get(args[2])
 if pr is None:
     sys.stderr.write("no pull requests found\n"); sys.exit(1)
 def fail(kind):
     f = root / "fail.json"
     plan = json.loads(f.read_text()) if f.exists() else {}
+    if plan.get(kind, {}).get("skip", 0) > 0:        # 先放过前 skip 次
+        plan[kind]["skip"] -= 1
+        f.write_text(json.dumps(plan))
+        return None
     if plan.get(kind, {}).get("n", 0) <= 0:
         return None
     plan[kind]["n"] -= 1
@@ -62,7 +75,7 @@ def fail(kind):
 def die(msg):
     sys.stderr.write(msg + "\n"); sys.exit(1)
 if args[:2] == ["pr", "view"]:
-    msg = fail("view") or (pr["state"] == "MERGED" and fail("view_merged"))
+    msg = fail("view") or (pr["state"] == "MERGED" and fail("view_merged")) or (pr["number"] > 100 and fail("view_revert"))
     if msg:
         die(msg)
 if args[:2] == ["pr", "merge"] and fail("merge"):
@@ -85,6 +98,8 @@ if args[:2] == ["pr", "apimerge"]:
         (root / "prs.json").write_text(json.dumps(prs))
     if pr["state"] != "OPEN":
         die("gh: Pull Request is not mergeable (HTTP 405)")
+    if (root / "merge_deny").exists():               # 权限不够：等多久都不会自己好
+        die("gh: Resource not accessible by personal access token (HTTP 403)")
     if (root / "merge_fail").exists() or [a for a in args if a.startswith("sha=")] != ["sha=" + pr["headRefOid"]]:
         die("gh: Head branch was modified. Review and try the merge again. (HTTP 409)")
     pr["state"], pr["mergeCommit"] = "MERGED", {"oid": "f" * 40}
@@ -112,7 +127,8 @@ if args[:2] == ["pr", "revert"]:
         die("GraphQL: Something went wrong (revertPullRequest)")
     n = str(int(args[2]) + 100)
     mine[n] = dict(pr, number=int(n), title="Revert " + pr["title"], state="OPEN", headRefOid="e" * 40, mergeCommit=None,
-                   body=args[args.index("--body") + 1])
+                   body=args[args.index("--body") + 1], url="https://github.com/" + repo + "/pull/" + n,
+                   files=[dict(f, additions=f.get("deletions", 0), deletions=f.get("additions", 0)) for f in pr.get("files") or []])
     (root / "prs.json").write_text(json.dumps(prs))
     if fail("revert_lost"):
         die('Post "https://api.github.com/graphql": EOF')
@@ -202,18 +218,20 @@ class Fixture:
     def set_prs(self, data):
         (self.fake / "prs.json").write_text(json.dumps(data), encoding="utf-8")
 
-    def update_pr(self, **kw):
+    def update_pr(self, _number=5, **kw):
         data = json.loads((self.fake / "prs.json").read_text())
-        data["o/app"]["5"].update(kw)
+        data["o/app"][str(_number)].update(kw)
         self.set_prs(data)
 
+    def env(self, extra=None):
+        return {**os.environ, "FAKE_DIR": str(self.fake), "DT_GH": str(self.fake / "gh"), "DT_LARK_CLI": str(self.fake / "lark-cli"),
+                "DT_ROSTER": str(self.roster), "DT_SHADOW_DIR": str(self.shadow), "DT_MERGE_RULES": str(self.rules),
+                "DT_MERGE_RUNS": str(self.tmp / "runs"), "DT_MERGE_DIR": str(self.tmp / "merge"),
+                "FEISHU_HOME_CHANNEL": "oc_test0001", "DT_NOW": "2026-11-07T10:00:00+08:00",
+                "DT_HERMES_ENV": str(self.tmp / "no.env"), "DT_GH_RETRY_WAITS": "0,0", **(extra or {})}
+
     def cli(self, script, *args, env=None):
-        e = {**os.environ, "FAKE_DIR": str(self.fake), "DT_GH": str(self.fake / "gh"), "DT_LARK_CLI": str(self.fake / "lark-cli"),
-             "DT_ROSTER": str(self.roster), "DT_SHADOW_DIR": str(self.shadow), "DT_MERGE_RULES": str(self.rules),
-             "DT_MERGE_RUNS": str(self.tmp / "runs"), "DT_MERGE_DIR": str(self.tmp / "merge"),
-             "FEISHU_HOME_CHANNEL": "oc_test0001", "DT_NOW": "2026-11-07T10:00:00+08:00",
-             "DT_HERMES_ENV": str(self.tmp / "no.env"), "DT_GH_RETRY_WAITS": "0,0", **(env or {})}
-        return subprocess.run([sys.executable, "-B", str(script), *args], capture_output=True, text=True, env=e, timeout=120)
+        return subprocess.run([sys.executable, "-B", str(script), *args], capture_output=True, text=True, env=self.env(env), timeout=120)
 
     def calls(self, name="calls.jsonl"):
         f = self.fake / name
