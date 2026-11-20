@@ -203,7 +203,8 @@ class Fixture:
         sh(self.main, "config", "user.name", "t")
         (self.main / "check.py").write_text("import pathlib, sys\nsys.exit(1 if pathlib.Path('fail').exists() else 0)\n")
         (self.main / "README.md").write_text("v1\n")
-        sh(self.main, "add", ".")
+        (self.main / "fixture-id").write_text(os.urandom(8).hex() + "\n")   # 每个夹具的提交号都不一样：全量并行跑时，
+        sh(self.main, "add", ".")                                           # 别的分片同一秒建的夹具不会撞上同一个版本号（查进程表靠它认请求）
         sh(self.main, "commit", "-qm", "init")
         sh(self.main, "push", "-q", "origin", "main")
         self.base = sh(self.main, "rev-parse", "HEAD")

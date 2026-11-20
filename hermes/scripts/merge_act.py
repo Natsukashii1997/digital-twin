@@ -1164,7 +1164,7 @@ def _adopt_revert(repo, pr, hit, path, main, orig, again):
     重新开要同时满足：本机没有上次那个请求的进程；列表里一个候选都没有；「上次的请求已经结束」有记录（请求返回时记的
     revert_unsure，或这里第一次看到进程不在时记的 revert_quiet），那条记录之后又过了 SETTLE_HOLD（留给已经到了
     GitHub、撤回 PR 还没出现在列表里的请求）。"""
-    alive = live_requests("pr revert", f"pr revert {pr} --repo {repo} ")
+    alive = live_requests("pr revert", f"pr revert {pr} --repo {repo} ", hit["id"])    # 命令行里的正文带着这条记录号
     if alive is None:
         raise Stop("本机进程表查不了，证明不了上一次开撤回 PR 的请求已经停了", "在电脑上交给 Claude 会话看")
     if alive:
