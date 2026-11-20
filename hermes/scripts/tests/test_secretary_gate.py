@@ -40,6 +40,14 @@ import secretary_gate as SG  # noqa: E402
 import secretary_ledger as SL  # noqa: E402
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
+# 控制面按 YAML 语义核 Hermes 配置（PR #225），读不到 yaml 库就一律交常浩，这里大部分用例会跟着失败。
+# 本机的 PyYAML 装在用户目录（~/Library/Python/3.9/...），Python 启动时 HOME 不是真家目录、设了 PYTHONNOUSERSITE
+# 或沙箱挡了读那个目录，就读不到（2026-11-20 查清：P9 合并前全量的 117 条失败就是这样来的）。
+# 读不到时只让 YamlPrecondition 一条失败、写明原因，其余用例跳过，免得一百多条失败看着像代码坏了。
+NO_YAML = ("这次运行的 Python 读不到 yaml 库：本机 PyYAML 装在用户目录 ~/Library/Python/3.9，"
+           "HOME 不是真家目录、PYTHONNOUSERSITE=1 或沙箱挡读时就读不到；在正常终端里用 /usr/bin/python3 跑全量，"
+           "或给系统 Python 装上 pyyaml==6.0.1（CI 就是这样装的）") if SG.yaml is None else ""
+
 TZ = CU.TZ
 T = dt.datetime(2026, 11, 18, 14, 0, tzinfo=TZ)        # 过去的时刻：对账判「在途过久」按真实时钟
 SID = "s-20261119-100000-0123456789ab"
@@ -152,8 +160,15 @@ def write_run(home, p, started, ended, sid=None, source="tool", end_reason="cli_
     return sid
 
 
+class YamlPrecondition(unittest.TestCase):
+    def test_yaml_importable(self):
+        self.assertFalse(NO_YAML, NO_YAML)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
+        if NO_YAML:
+            self.skipTest(NO_YAML)
         tmp = tempfile.TemporaryDirectory(prefix="dt-secretary-gate-")
         self.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -1515,6 +1530,8 @@ class SecretaryEndToEnd(HubFixture):
     COMMAND = f"{sys.executable} {HERE / 'fixtures' / 'ask_receipt.py'} {{prompt}}"
 
     def setUp(self):
+        if NO_YAML:
+            self.skipTest(NO_YAML)
         super().setUp()
         root = Path(self.key_file).parents[2]
         self.repo_full = "o/dt-sandbox"
