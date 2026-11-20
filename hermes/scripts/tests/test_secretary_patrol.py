@@ -81,6 +81,7 @@ class Patrol(TSG.Base):
         self.assertEqual(self.patrol_state()["7:1"]["result"], "handoff")
         self.assertEqual(self.model_calls, [])
 
+    @TSG.needs_yaml                      # 提议真经控制面核运行证据，要 yaml 库读 Hermes 配置
     def test_ask_switch_on_model_proposal_goes_through(self):
         reply = {"category": "ask", "card": 7, "card_version": 1, "choice": 1, "text": dict(TSG.TEXT), "abstain": None,
                  "error": None}

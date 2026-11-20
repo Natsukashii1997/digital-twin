@@ -40,6 +40,12 @@ import secretary_gate as SG  # noqa: E402
 import secretary_ledger as SL  # noqa: E402
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
+# 本机 Python 没装 PyYAML 时整个模块明确跳过、不报一堆失败（常浩 2026-11-20 定提速 B）：secretary_gate 按 YAML 语义核
+# Hermes 配置（PR #225），缺库一律交常浩，走到代批的用例都测不了。正式环境 /usr/bin/python3 和 CI 都装了 6.0.1，照常跑。
+NO_YAML = ("本机 Python 没有 yaml 库（PyYAML）：secretary_gate 核 Hermes 配置要它，缺库一律交常浩，这些用例测不了；"
+           "正式环境 /usr/bin/python3 和 CI 都装了 PyYAML 6.0.1，在那里照常跑")
+needs_yaml = unittest.skipIf(SG.yaml is None, NO_YAML)
+
 TZ = CU.TZ
 T = dt.datetime(2026, 11, 18, 14, 0, tzinfo=TZ)        # 过去的时刻：对账判「在途过久」按真实时钟
 SID = "s-20261119-100000-0123456789ab"
@@ -1675,6 +1681,12 @@ class SecretaryEndToEnd(HubFixture):
         self.assertEqual(len(answers), 1)
         c = self.hub_card()
         self.assertEqual((c["state"], c["by"]), ("decided", "秘书"))
+
+
+# 本模块里的测试类一律套上 needs_yaml（Base 除外：test_secretary_patrol 继承它，那边只给真走到代批的用例单独套）
+for _cls in list(globals().values()):
+    if isinstance(_cls, type) and issubclass(_cls, unittest.TestCase) and _cls.__module__ == __name__ and _cls is not Base:
+        needs_yaml(_cls)
 
 
 if __name__ == "__main__":
