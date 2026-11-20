@@ -244,6 +244,16 @@ class HandoffTests(Base):
         self.state = "frozen"
         self.issue("handoff", category="merge", reason="d_level")
 
+    def test_handoff_card_needs_version(self):
+        """PR #225 第 3 轮 P2-05：交常浩写 card 就要同时写 card_version（只给卡片会悄悄失去去重）；card 只给交常浩用。"""
+        self.rejects("BadInput", self.issue, "handoff", category="redispatch", reason="unsure", card=8)
+        self.rejects("BadInput", self.issue, "handoff", category="redispatch", reason="unsure", card=8, card_version=True)
+        self.rejects("BadInput", self.issue, "redispatch", card=8, card_version=1)
+        h = self.issue("handoff", category="redispatch", reason="unsure", card=8, card_version=1)
+        self.assertEqual((h["card_id"], h["card_version"]), (8, 1))
+        self.assertIn("已经交过", self.rejects("DuplicateHandoff", self.issue, "handoff", category="redispatch",
+                                               reason="unsure", card=8, card_version=1))
+
     def test_handoff_only_into_current_session(self):
         self.session = SID2
         self.assertIn("不是现在这次", self.rejects("WrongSession", self.issue, "handoff", category="ask", reason="unsure"))

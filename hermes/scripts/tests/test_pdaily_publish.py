@@ -763,6 +763,16 @@ class SendTests(unittest.TestCase):
         self.assertIn("没出成", (self.tmp / "sent.json").read_text())
         self.assertNotIn("docs +create", self.cmds())
 
+    def test_no_build_failure_card_carries_recorded_reason(self):
+        """P9：09:15 写稿前网络等不到，原因记进 build-error.json，10:00 的失败卡片写明。"""
+        for f in self.out.glob(f"{DAY}.*"):
+            if not f.name.endswith("facts.json"):
+                f.unlink()
+        pp.record_build_error(DAY, "写稿前网络 / 代理 300 秒没通（github：URLError: refused）", self.out)
+        self.assertIsNone(pp.send(DAY, self.out))
+        sent = (self.tmp / "sent.json").read_text()
+        self.assertIn("09:15 的写稿没跑成：写稿前网络 / 代理 300 秒没通", sent)
+
     def test_cli_send_quiet_on_success(self):
         from io import StringIO
         buf = StringIO()
@@ -977,6 +987,7 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         card = json.loads((self.tmp / "o" / f"{DAY}.card.json").read_text(encoding="utf-8"))
         self.assertIn("取数失败（RuntimeError：gh 挂了）", json.dumps(card, ensure_ascii=False))
+        self.assertIn("取数失败（RuntimeError：gh 挂了）", pp.build_error(DAY, self.tmp / "o"))   # 10:00 的失败卡片也用它
 
 
 class MaterialTests(unittest.TestCase):

@@ -8,7 +8,7 @@
 提议（不可信输入，JSON，最多 16 KB；以后 dt-secretary 经窄接口调 submit）：
   {"schema": 1, "category": "ask" | "redispatch" | "reject",
    "card": 卡片号, "card_version": 卡片版本,          ← ask、redispatch（② 的卡片是中台放弃时发的通知卡）
-   "choice": 第几项（从 1 数）,                       ← 只 ask；送中台时换成中台的下标 choice - 1
+   "choice": 第几项（从 1 数）,                       ← 只 ask；送中台时换成中台的下标 choice - 1；弃权、出错时可以是 null
    "task": 任务号, "pr": PR 号, "head": 40 位提交,     ← 只 reject
    "text": {"context", "question", "summary", "basis"}  写给常浩的白话（规则同 secretary_ledger：ask 按「回复」，②③ 按「合并」）
    "run": {"session": Hermes 会话号},                 ← 只 ask：这次模型判断的运行记录（见下）
@@ -19,7 +19,11 @@
   ① 的模型运行证据（审查 P1-01：模型名、是否回退不收提议自报）：按 run.session 只读打开 Hermes 自己的运行记录
   （$HERMES_HOME/state.db，主模型和回退模型从 $HERMES_HOME/config.yaml 读），这次会话必须：source = tool、没有父会话、
   **只有一条输入**、正常结束、没调工具、开始不早于这一版卡片的飞书送达、结束不超过 30 分钟；**全部模型调用**（主循环和辅助调用）
-  都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
+  都是 Hermes 配置的主模型，主循环有调用（有回退模型或别的模型 → 交常浩）；系统提示（sessions.system_prompt_hash → system_prompts）
+  记着、且没有项目上下文、记忆、用户档案和 SOUL（PR #225 第 1 轮 P1-02：秘书侧必须带 --ignore-rules）；$HERMES_HOME/config.yaml
+  按 YAML 语义（重复键、复杂键、解析不了都算核不清）没有自定义系统提示、人格、预载消息、外部密钥源，没有管理员级配置目录
+  （/etc/hermes、$HERMES_MANAGED_DIR），Hermes 会读的环境文件（.env、.op.env、安装目录 .env）里不出现 HERMES_（第 2、3、4 轮
+  P1-02：这几样 --ignore-rules 管不到，临时系统提示也不进运行记录）；输入第一行整行等于 run_marker(卡片号, 版本)；最后一条
   模型输出是一个 JSON 对象，只许有 category、card、card_version、choice、text、abstain、error，和提议逐项严格相同（类型也要一样；
   提议只是把这次输出原样转交）。②③ 不用模型（规格第 6 节），没有 run。source = tool 只是标签，不是调用者身份（ADR-015 账号隔离）。
 
@@ -57,7 +61,7 @@
   state = approved，attempt = 决定号）再 secretary_ledger.begin（issued → executing）。
 送达：① POST /v1/cards/<号>/answer {choice, by: "秘书", ref: 秘书自己的 ref}（secretary 通道钥匙）。**① 的送达开关 REAL_ASK 关着**
   （PR #218 第 2 轮 P1-01）：中台 answer 只核卡片开着和 ref、不核版本，获准到送达之间卡片改版时旧答案会落到新版本上；
-  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 前闸全过也交常浩；② autoloop_grants.resume_dispatch
+  要中台按版本核对（规格第 9 节验收 12，先向上游要扩展点）后才打开，并让请求带上获准时的版本；关着时 ① 不看提议内容、不等 30 分钟，只核卡片开着且版本一致、准入、派单绑定、诱导词，就交常浩（4c-2 秘书侧此时不调模型，只交卡片号和版本；常浩 11-19 选甲）；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
   关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放；其余 → finish(unknown)、
@@ -95,6 +99,11 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 
+try:                                         # 核 Hermes 配置用和 Hermes 一样的 yaml.safe_load 语义；没装就核不了、交常浩
+    import yaml
+except ImportError:                          # pragma: no cover
+    yaml = None
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import ai_access as AA  # noqa: E402
@@ -128,6 +137,9 @@ RUN_SESSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 RUN_SOURCE = "tool"                         # hermes chat --source tool 的单次调用
 RUN_END = ("cli_close", "agent_close")      # 正常结束
 RUN_FRESH = dt.timedelta(minutes=30)        # 判断结束到交提议的最长间隔
+# 判断时不许带上的上下文（PR #225 第 1 轮 P1-02）：Hermes 不加 --ignore-rules 会把项目上下文文件（AGENTS.md 等）、记忆、
+# 用户档案和 SOUL 注入系统提示；这几个是 Hermes v0.22 写进系统提示的块标题，SOUL 另按 $HERMES_HOME/SOUL.md 第一行查
+CONTEXT_MARKERS = ("# Project Context", "MEMORY (your personal notes)", "USER PROFILE (who the user is)")
 REAL_ASK = False        # ① 真送达：中台 answer 能按版本核对（CAS）之前整体关闭（PR #218 第 2 轮 P1-01，常浩 11-19 选甲，规格第 9 节验收 12）
 TEST_ASK = False        # 测试在进程内打开 ① 的送达；不经环境变量
 REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
@@ -388,11 +400,39 @@ def frozen_task(st, task_id, but=None):
     return [r[0] for r in rows if r[1] != "executing" or _age(r[2]) >= STALE]
 
 
+def void_orphans(st, task_id=None, now=None):
+    """记了账（issued）却超过 STALE 还没开始送的秘书决定：进程在记账和获准之间停了（PR #225 第 1 轮 P1-03）。
+    它们还没发过任何请求，作废、释放额度，让这件事按完整前闸重新走一遍（不续用旧的获准前提）。返回作废的决定号。"""
+    t = now or CU.now_tz()
+    rows = st.conn.execute("SELECT id, updated_at FROM secretary_decisions WHERE action != 'handoff' AND status = 'issued'"
+                           + (" AND task_id = ?" if task_id else ""), (task_id,) if task_id else ()).fetchall()
+    out = []
+    for did, at in rows:
+        try:
+            age = (t - CU.parse_iso(at)).total_seconds()
+        except (TypeError, ValueError):
+            age = float("inf")
+        if age < STALE:
+            continue                                         # 可能正有进程在获准
+        with contextlib.suppress(L.LedgerError):             # 刚好被别的进程推进或作废了
+            SL.void(st, did, "记了账但一直没开始送（进程中途停了），作废、释放额度", now=now)
+            out.append(did)
+    return out
+
+
 def record_handoff(st, ctx, reason, why, now):
     snap = ctx["received"]
-    d = SL.issue(st, session_id=ctx["session"], project=ctx["project"], action="handoff", category=ctx["category"],
-                 reason=reason, target=ctx["target"], revocability="irrevocable", received=snap,
-                 card_version=ctx.get("card_version"), now=now, **handoff_text(ctx["category"], snap, why))
+    try:
+        card = ctx.get("card")                               # 对象里没有卡片的（② 通知卡）也按卡片和版本去重（第 2 轮 P1-04）
+        d = SL.issue(st, session_id=ctx["session"], project=ctx["project"], action="handoff", category=ctx["category"],
+                     reason=reason, target=ctx["target"], revocability="irrevocable", received=snap,
+                     card=card["id"] if card else None, card_version=card["version"] if card else None, now=now,
+                     **handoff_text(ctx["category"], snap, why))
+    except L.LedgerError as e:                               # 同一次会话里这张卡这一版已经交过（PR #225 第 1 轮 P1-04）：不记第二笔
+        if e.code != "DuplicateHandoff":
+            raise
+        return {"ok": True, "result": "handoff", "decision": e.existing, "reason": reason,
+                "msg": f"这张卡这一版已经交给你了（{e.existing}），不重复记"}
     return {"ok": True, "result": "handoff", "decision": d["id"], "reason": reason,
             "msg": f"交常浩（{SL.HANDOFF_REASONS[reason]}）：{why}"}
 
@@ -410,15 +450,18 @@ def format_errors(p, cat):
         errs.append(f"多了不认识的字段：{'、'.join(sorted(set(p) - want))}")
     if type(p.get("schema")) is not int or p["schema"] != 1:     # 严格整数：True、1.0 都不算（第 3 轮 P2-02）
         errs.append("schema 要是 1")
+    ab = p.get("abstain")
+    giving_up = ab is not None or p.get("error") is not None
     for k in KEYS[cat]:
         v = p.get(k)
+        if k == "choice" and giving_up and v is None:       # 弃权、出错时可以不选（4c-2：秘书侧弃权写 null）
+            continue
         ok = (isinstance(v, str) and P.SHA.match(v)) if k == "head" else \
             (isinstance(v, str) and G.TASK_ID.match(v)) if k == "task" else _pos_int(v)
         if not ok:
             errs.append(f"{k} 格式不对")
     if p.get("error") is not None and not (isinstance(p["error"], str) and p["error"].strip()):
         errs.append("error 要么是 null，要么写明")
-    ab = p.get("abstain")
     if ab is not None and not (isinstance(ab, dict) and set(ab) <= {"reason", "note"} and ab.get("reason") in SL.HANDOFF_REASONS):
         errs.append("abstain 要写交常浩的原因代号")
     if "run" in p and cat != "ask":
@@ -462,15 +505,167 @@ def _json_object(text):
     return out if isinstance(out, dict) else None
 
 
+NEUTRAL_PERSONALITY = ("", "none", "default", "neutral")   # Hermes v0.22 hermes_cli/personality.py 的「不用人格」写法
+# Hermes 读的环境文件里出现这个前缀就交常浩（第 4 轮 P1-02a）：不自己解析 dotenv（export 后跟制表符、BOM、NUL 都绕过过
+# 手写解析），只按字面找。管住的不止临时系统提示 / 预载消息，还有 HERMES_HOME、HERMES_MANAGED_DIR、HERMES_IGNORE_RULES 这类
+# 改「读哪份配置、带不带规则」的变量；常浩本机这几个文件里一个 HERMES_ 都没有。
+ENV_FILE_MARKER = "HERMES_"
+MANAGED_DIRS = (Path("/etc/hermes"),)       # Hermes 管理员级配置目录（v0.22 hermes_cli/managed_scope.py，另有 $HERMES_MANAGED_DIR）
+
+
+class Uncheckable(Exception):
+    """Hermes 实际会用的配置核不清（解析不了、有重复键、写法不认识、文件读不了）。"""
+
+
+def _yaml_load(text):
+    """yaml.safe_load 语义（锚点、合并引用、引号、任意缩进都按 YAML 解开），另把重复键当成核不清（Hermes 会默默取后一个）。"""
+    if yaml is None:
+        raise Uncheckable("本机没有 yaml 库")
+
+    class Strict(yaml.SafeLoader):
+        pass
+
+    def mapping(loader, node, deep=False):
+        loader.flatten_mapping(node)                         # 先展开 <<: 合并引用，再查重复键
+        seen = set()
+        for k, _ in node.value:
+            key = loader.construct_object(k, deep=deep)
+            try:
+                dup = key in seen
+            except TypeError:                                # 复杂键（序列、映射当键）：Hermes 也读不成，核不清（第 4 轮 P2-06）
+                raise Uncheckable("配置里有不能当键的复杂键")
+            if dup:
+                raise Uncheckable(f"配置里有重复的键 {key!r}")
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+    Strict.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
+    try:
+        return yaml.load(text, Loader=Strict)                # noqa: S506  Strict 是 SafeLoader 子类
+    except Uncheckable:
+        raise
+    except Exception as e:                                   # noqa: BLE001  解析、构造阶段的任何异常都算核不清，不能让进程崩掉变成「交不上」
+        raise Uncheckable(f"配置解析不了（{type(e).__name__}）")
+
+
+def _blank(v):
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def hermes_config(home):
+    """按 YAML 语义读 $HERMES_HOME/config.yaml（和 Hermes read_raw_config 一样用 utf-8-sig，去掉开头的 BOM）；解析不了时 Hermes
+    会退回上一份好的配置，所以一律核不清。"""
+    try:
+        text = (home / "config.yaml").read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as e:
+        raise Uncheckable(f"配置读不了（{type(e).__name__}）")
+    cfg = _yaml_load(text)
+    if not isinstance(cfg, dict):
+        raise Uncheckable("配置顶层不是映射")
+    return cfg
+
+
+def managed_dirs():
+    """Hermes 管理员级配置目录的候选（v0.22 managed_scope.get_managed_dir：$HERMES_MANAGED_DIR 去两边空白后非空且是目录，否则
+    /etc/hermes）。两个都看：判断进程的环境由巡视清掉了 HERMES_MANAGED_DIR，但控制面自己的环境里有就照样算。Hermes 用
+    Path(override)，不展开 ~；不是绝对路径（含 ~ 开头）时它指向哪里取决于进程当时的目录，核不清（PR #225 第 5 轮 P2-07：
+    原来 expanduser 遇到不存在的用户会抛异常，控制面崩掉、巡视记成交不上反复重试）。"""
+    extra = os.environ.get("HERMES_MANAGED_DIR", "").strip()
+    if not extra:
+        return list(MANAGED_DIRS)
+    if not extra.startswith("/"):
+        raise Uncheckable(f"HERMES_MANAGED_DIR 不是绝对路径（{extra!r}），管理员级配置在哪核不清")
+    return [*MANAGED_DIRS, Path(extra)]
+
+
+def hermes_env_files(home):
+    """Hermes 启动时会读的环境文件（v0.22 hermes_cli/env_loader.py load_hermes_dotenv）：$HERMES_HOME/.env（覆盖已有环境）、
+    .op.env、安装目录的 .env（main.py 的 PROJECT_ROOT = hermes_cli 上一级的真实路径）。安装目录必须真是 Hermes 源码根目录
+    （有 hermes_cli/main.py），不然说明 Hermes 装在别处、读的 .env 不是这一份，核不清。管理员级 .env 不在这里：有管理员目录就整体交常浩。"""
+    root = (home / "hermes-agent").resolve()
+    if not (root / "hermes_cli" / "main.py").is_file():
+        raise Uncheckable("找不到 Hermes 安装目录（$HERMES_HOME/hermes-agent/hermes_cli/main.py），读的是哪份 .env 核不清")
+    return [home / ".env", home / ".op.env", root / ".env"]
+
+
+def _env_file_text(f):
+    """按 Hermes 的读法取环境文件的文字（v0.22 _sanitize_env_file_if_needed / _load_dotenv_with_fallback：UTF-8 去 BOM、
+    去掉 NUL；UTF-16 / UTF-32 带 BOM 的它会转码或另行处理）。不是 UTF-8 的一律核不清，不猜编码。不存在返回 None。"""
+    try:
+        raw = f.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise Uncheckable(f"{f.name} 读不了（{type(e).__name__}）")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
+        raise Uncheckable(f"{f.name} 不是 UTF-8 编码")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise Uncheckable(f"{f.name} 读不了（不是合法的 UTF-8）")
+    return text.replace("\x00", "")
+
+
+def hermes_overlays(home, cfg):
+    """会叠加进判断、--ignore-rules 又管不到的东西（PR #225 第 2、3 轮 P1-02），返回发现的项（空 = 干净）；核不清抛 Uncheckable。
+    配置（按 YAML 语义）：agent.system_prompt、非中性 display.personality、prefill_messages_file / agent.prefill_messages_file、
+    secrets（外部密钥源：会往环境里写什么核不了）；agent / display 不是映射也算核不清。管理员级配置目录存在就核不清（它的
+    config.yaml 深度合并在用户配置上面、.env 最后覆盖，第 4 轮 P1-02b；不自己实现合并规则）。环境文件：文字里出现 HERMES_ 就算
+    （第 4 轮 P1-02a）。临时系统提示只在调用时注入、不进运行记录，所以只能这样按来源核；同账号进程改文件、制造竞态是 #230 的事。
+    运行时的 HERMES_HOME 和这里核的是不是同一个：环境文件改不了它（出现 HERMES_ 就交常浩），判断进程用了别的家目录时运行记录不在
+    这里的 state.db，run_evidence 查不到会话就交常浩。"""
+    found = []
+    for d in managed_dirs():
+        try:
+            present = d.is_dir()
+        except OSError as e:
+            raise Uncheckable(f"管理员级配置目录 {d} 查不了（{type(e).__name__}）")
+        if present:
+            raise Uncheckable(f"有 Hermes 管理员级配置目录 {d}，它会叠加在你的配置上面，实际生效的配置核不清")
+    agent, display = cfg.get("agent"), cfg.get("display")
+    if not (agent is None or isinstance(agent, dict)) or not (display is None or isinstance(display, dict)):
+        raise Uncheckable("agent / display 不是映射")
+    agent, display = agent or {}, display or {}
+    if not _blank(agent.get("system_prompt")):
+        found.append("自定义系统提示")
+    pers = display.get("personality")
+    if not (pers is None or (isinstance(pers, str) and pers.strip().lower() in NEUTRAL_PERSONALITY)):
+        found.append("人格设定")
+    if not _blank(cfg.get("prefill_messages_file")) or not _blank(agent.get("prefill_messages_file")):
+        found.append("预载消息")
+    if cfg.get("secrets"):
+        found.append("外部密钥源")
+    for f in hermes_env_files(home):
+        text = _env_file_text(f)
+        if text is not None and ENV_FILE_MARKER in text.upper():
+            found.append(f"{f.name} 里的 HERMES_ 变量")
+    return sorted(set(found))
+
+
+def soul_marker(home):
+    """$HERMES_HOME/SOUL.md 第一行非空文字（没有就是空）：系统提示里出现它就是带上了 SOUL。"""
+    try:
+        lines = [ln.strip() for ln in (home / "SOUL.md").read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return ()
+    return (lines[0],) if lines else ()
+
+
 def run_evidence(session, card, since, t):
     """按 Hermes 自己的运行记录核这次判断（头注释「① 的模型运行证据」）。返回 (证据, 模型输出的 JSON 对象)；不过抛 Handoff(model)。"""
     def no(why):
         raise Handoff("model", f"这次判断的运行记录{why}，不代批")
     home = hermes_home()
-    cfg = AA.hermes_models(home)
+    try:
+        full = hermes_config(home)                           # 先按 YAML 语义读（读不了、非法编码在这里报清楚原因）
+        cfg = AA.hermes_models(home)
+    except (Uncheckable, UnicodeDecodeError, ValueError) as e:
+        no(f"核不了（Hermes 配置：{e}）")
     main = cfg.get("model") or {}
     if cfg.get("error") or not main.get("default") or not main.get("provider"):
         no("核不了（读不到 Hermes 主模型配置）")
+    ym = full.get("model")                                   # 两种读法读出的主模型要一致（第 3 轮 P1-02：别让简易读法和 YAML 语义各说各话）
+    if not isinstance(ym, dict) or (ym.get("default"), ym.get("provider")) != (main["default"], main["provider"]):
+        no("核不了（Hermes 主模型配置的写法两种读法对不上）")
     try:
         con = _ro(home / "state.db")
     except sqlite3.Error:
@@ -485,6 +680,8 @@ def run_evidence(session, card, since, t):
                             (session,)).fetchall()
         last = con.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'assistant' AND active = 1 "
                            "AND content IS NOT NULL AND content != '' ORDER BY id DESC LIMIT 1", (session,)).fetchone()
+        sp_hash = s["system_prompt_hash"] if "system_prompt_hash" in s.keys() else None
+        sp = con.execute("SELECT prompt FROM system_prompts WHERE hash = ?", (sp_hash,)).fetchone() if sp_hash else None
     except sqlite3.Error:
         no("读不全")
     finally:
@@ -495,6 +692,16 @@ def run_evidence(session, card, since, t):
         no("显示没有正常结束")
     if s["tool_call_count"]:
         no("显示判断时调用了工具")
+    if sp is None or not isinstance(sp["prompt"], str):
+        no("没记下系统提示，核不了判断时有没有带上你的个人设定和记忆")
+    try:
+        overlays = hermes_overlays(home, full)
+    except Uncheckable as e:
+        no(f"核不了（{e}）")
+    if overlays:
+        no(f"核出 Hermes 配置里有{'、'.join(overlays)}，判断时会一起带上")
+    if any(m in sp["prompt"] for m in CONTEXT_MARKERS + soul_marker(home)):
+        no("显示判断时带上了你的个人设定、记忆或项目上下文（没按 --ignore-rules 跑）")
     try:
         started = dt.datetime.fromtimestamp(float(s["started_at"]), tz=t.tzinfo)
         ended = dt.datetime.fromtimestamp(float(s["ended_at"]), tz=t.tzinfo)
@@ -689,6 +896,16 @@ def reject_gate(ctx, p):
 def front_gates(p, ctx, st_status, t, st):
     """前闸，按顺序；不过抛 Handoff / Refused / NotReady。"""
     cat = ctx["category"]
+    if cat == "ask" and not (REAL_ASK or TEST_ASK):           # ① 送达开关关着：不看秘书的判断、不等 30 分钟，但先查来路再交常浩
+        card = ctx["card"]                                    # （4c-2：秘书侧此时不调模型，只交卡片号和版本；PR #225 第 1 轮 P2-01，
+        if card["state"] != "open":                           # 常浩 11-19 选甲：卡片版本、准入、派单绑定、诱导词照查，原因写准）
+            raise Refused(f"卡片已经不开着了（{card['state']}），不用办")
+        if type(p.get("card_version")) is not int or card["version"] != p["card_version"]:
+            raise Refused(f"卡片已经变了（现在第 {card['version']} 版），提议作废，按新版本重交")
+        admission_gate(ctx, st_status)
+        bind_gate(ctx, t)
+        induce_gate(ctx)
+        ask_switch()
     errs = [] if ctx["claimed"] == cat else [f"类别写成了 {ctx['claimed']!r}，这件事是 {cat}"]
     errs += format_errors(p, cat)
     if errs:
@@ -935,6 +1152,7 @@ def submit(proposal, now=None):
             try:
                 if ctx["category"] in ("redispatch", "reject"):     # 从前闸到续接发出全程持锁（审查 P1-03）
                     held.enter_context(task_locked(ctx["task"]))
+                void_orphans(st, ctx["task"], now)
                 front_gates(proposal, ctx, st_status, t, st)
             except Handoff as h:
                 return record_handoff(st, ctx, h.reason, h.why, now)
@@ -983,6 +1201,7 @@ def reconcile(card=None, now=None):
     """对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定按回读证据结算；从不重发。返回 [(决定号, 结论)]。"""
     notes = []
     with SL.open_store(now) as st:
+        notes += [(did, "void") for did in void_orphans(st, now=now)]
         rows = st.conn.execute("SELECT id FROM secretary_decisions WHERE action != 'handoff' AND status IN "
                                "('executing','unknown','unreconciled')" + (" AND card_id = ?" if card else "")
                                + " ORDER BY created_at", (card,) if card else ()).fetchall()

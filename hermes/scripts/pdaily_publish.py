@@ -962,7 +962,7 @@ def load_facts(path, day):
         if done:
             return facts
     projects = json.loads(pdaily_facts.progress_data.ROSTER.read_text())["projects"]
-    facts = pdaily_facts.build(day, projects, pdaily_facts.pdaily_data.gh_wait())   # 唤醒后代理没通：最多等 300 秒（#176）
+    facts = pdaily_facts.build(day, projects, pdaily_data.netwait.wait_seconds())   # 唤醒后代理没通：gh 最多等 300 秒（#176、P9）
     pdaily_facts.write(facts)
     return facts
 
@@ -1113,6 +1113,20 @@ def create_doc(day, doc_text, out):
     return url
 
 
+def record_build_error(day, reason, out=None):
+    """写稿没成的原因写进 <统计日>.build-error.json，10:00 发送时写进失败卡片（定时任务入口的网络闸门、取数失败共用）。"""
+    out = Path(out or DAILY)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{day}.build-error.json").write_text(json.dumps({"error": reason}, ensure_ascii=False), encoding="utf-8")
+
+
+def build_error(day, out):
+    try:
+        return str(json.loads((Path(out) / f"{day}.build-error.json").read_text(encoding="utf-8"))["error"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def send(day, out, force=False):
     """把这一天的日报发到常浩私聊：建完整报告文档 → 按乙版出卡片 → 拦工作内容 → 发 → 回读 → 记 delivery.json。
     卡片只从本地事实快照和 build 产物现做，不接受外来卡片。成功返回 None，失败返回原因（一句话）。"""
@@ -1133,7 +1147,8 @@ def send(day, out, force=False):
     except (OSError, ValueError):
         meta, facts = None, None
     if meta is None or facts is None or not (out / f"{day}.card-fields.json").exists():
-        card, doc_text, fields = failure_card(day, "09:00 的写稿没跑成，没有可发的日报"), None, None
+        why = build_error(day, out)
+        card, doc_text, fields = failure_card(day, f"09:15 的写稿没跑成{'：' + why if why else ''}，没有可发的日报"), None, None
     else:
         fields = json.loads((out / f"{day}.card-fields.json").read_text(encoding="utf-8"))
         doc_text = (out / f"{day}.report.md").read_text(encoding="utf-8")
@@ -1226,7 +1241,7 @@ def main(argv=None):
         reason = f"取数失败（{type(e).__name__}：{clip(e, 120)}）"
         if a.cmd == "build":
             out = Path(a.out or DAILY)
-            out.mkdir(parents=True, exist_ok=True)
+            record_build_error(day.isoformat(), reason, out)   # 10:00 的失败卡片写明原因
             (out / f"{day}.card.json").write_text(json.dumps(failure_card(day.isoformat(), reason), ensure_ascii=False, indent=1),
                                                   encoding="utf-8")
         print(json.dumps({"ok": False, "stat_day": day.isoformat(), "error": reason}, ensure_ascii=False))
