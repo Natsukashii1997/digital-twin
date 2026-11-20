@@ -565,10 +565,16 @@ def hermes_config(home):
 
 
 def managed_dirs():
-    """Hermes 管理员级配置目录的候选（v0.22 managed_scope.get_managed_dir：$HERMES_MANAGED_DIR 非空且是目录，否则 /etc/hermes）。
-    两个都看：判断进程的环境由巡视清掉了 HERMES_MANAGED_DIR，但控制面自己的环境里有就照样算。"""
+    """Hermes 管理员级配置目录的候选（v0.22 managed_scope.get_managed_dir：$HERMES_MANAGED_DIR 去两边空白后非空且是目录，否则
+    /etc/hermes）。两个都看：判断进程的环境由巡视清掉了 HERMES_MANAGED_DIR，但控制面自己的环境里有就照样算。Hermes 用
+    Path(override)，不展开 ~；不是绝对路径（含 ~ 开头）时它指向哪里取决于进程当时的目录，核不清（PR #225 第 5 轮 P2-07：
+    原来 expanduser 遇到不存在的用户会抛异常，控制面崩掉、巡视记成交不上反复重试）。"""
     extra = os.environ.get("HERMES_MANAGED_DIR", "").strip()
-    return [*MANAGED_DIRS, *([Path(extra).expanduser()] if extra else [])]
+    if not extra:
+        return list(MANAGED_DIRS)
+    if not extra.startswith("/"):
+        raise Uncheckable(f"HERMES_MANAGED_DIR 不是绝对路径（{extra!r}），管理员级配置在哪核不清")
+    return [*MANAGED_DIRS, Path(extra)]
 
 
 def hermes_env_files(home):

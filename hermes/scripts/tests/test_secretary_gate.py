@@ -1074,9 +1074,17 @@ class RunEvidenceTests(Base):
         (self.root / "m").mkdir()
         with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": f"  {self.root / 'm'}  "}):   # Hermes 去掉两边空白再用
             self.assertIn("管理员级配置目录", self.handoff(self.submit(), "model")["basis"])
+        for odd in ("~dt-no-such-user-xyz/hermes", "~/hermes", "relative/hermes"):                # 第 5 轮 P2-07：不是绝对路径核不清
+            with self.subTest(odd):
+                self.setUp()
+                with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": odd}):
+                    self.assertIn("不是绝对路径", self.handoff(self.submit(), "model")["basis"])
         self.setUp()
         (self.root / "etc-hermes").write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": " "}):
+            self.assertEqual(self.submit()["result"], "done")
+        self.setUp()
+        with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": str(self.root / "missing")}):          # 绝对路径但不存在：照常
             self.assertEqual(self.submit()["result"], "done")
 
     def test_run_in_other_home_hands_off(self):
