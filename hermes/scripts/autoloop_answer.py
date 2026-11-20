@@ -339,18 +339,15 @@ def reconcile(card_id=None, queued=True):
 
 
 def _reconcile_queued(cid, attempt):
-    import autoloop_exits as E
-    import autoloop_recovery as R
-    try:                                         # 重报送达也是往中台写：恢复闸关着就先不动（审查 P1-04）
-        R.ensure_open()
-    except E.Refused:
-        return []
+    """排队的本人回答：先按登记补报送达，再交中台。两步都往中台写，都过恢复闸（审查 P1-04）：补报送达在
+    report_delivered 里入口看一眼、桥接锁里再核（闸关了抛 Deferred，先不动）；交中台在 submit 的领资格事务里核
+    （闸关了留在排队）。"""
     with F.db() as con:
         card = con.execute("SELECT message_id, hub_delivered_at FROM feishu_cards WHERE card_id = ?", (cid,)).fetchone()
     if card and card["message_id"] and not card["hub_delivered_at"]:
         try:
             F.report_delivered(cid)              # 送达报告可能已被中台收下、本地没记上：按登记原样重报
-        except F.Deferred:                       # 锁里再核时闸关了：先不动，开闸后再对
+        except F.Deferred:                       # 恢复闸关着：先不动，开闸后再对
             return []
         except F.HubError as e:
             if e.status in DEFINITE:             # 中台不收这份送达：看看卡还开不开
