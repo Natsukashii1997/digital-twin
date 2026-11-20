@@ -6,6 +6,14 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## #253 DT-ORC 6.4「送达未确认」对齐驿窗 postpane#466：没送成的不算（2026-11-20，Claude；PR 待常浩定合并）
+
+- 来由：驿窗 postpane#466（PR Natsukashii1997/postpane#468，已合并）把「没送成」从「送达未确认」里分了出来。常浩 2026-11-20 对驿窗改动确认「送达未确认两处」回「都改」，确认里写明四处规则文字同步改；本仓库是其中一处。
+- 改了什么：`docs/DT-ORC/ARCHITECTURE.md` 第 6.4 节驿窗回信对应表第 1 行补一句：插件明确回报没点过发送、或发出时插件没连上（话没出驿窗）的不算送达未确认，按没送成处理：自动往返不停，同一段话直接重送，不出审核结论。点了发送没见开始、说不清点没点的仍是第 1 行原来的处理。只是表格里一句措辞对齐，架构版本号没动（和 #185 对齐 MA-02 时的做法一样）。
+- 姊妹 PR：multi-agent#15（MA-02 第 4 节）、my-skills#121（thinking-review 1.1.3）。
+- 测试：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`：`Ran 1608 tests in 6784.431s`，`OK`；`… -s orca/tests`：`Ran 48 tests in 39.343s`，`OK`（基于 `1ba4f84` 加本改动；hermes 那套跑了近两小时，本机同时有多组同样的全量在跑）。
+- 证据：`evidence/2026-11-20-253-not-sent/`（`hermes-full.txt`、`orca-full.txt`、`exit.txt`）。
+
 ## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR #250 已合并 3c6d7a9，已安装）
 
 - 来由：项目坑 L-03（唤醒后代理没通，一周 4 次，每次只修一个脚本）；常浩 2026-11-20 批复盘提案 P9「按改过的」：体检只读 plist 键名，不读进程环境（G-42）。
