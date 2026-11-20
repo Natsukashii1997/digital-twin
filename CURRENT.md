@@ -6,6 +6,15 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## main 本机全量失败查清：117 条是测试进程读不到 yaml（2026-11-20，Claude；跨项目复盘挂起 9、挂起 7）
+
+- 来由：P9 合并前全量报 117 条失败、说是「main 上原本就有」，更早还记着 main 上 2 项不明失败，都没人核实；常浩 11-20「剩下10项直接开始做」。
+- **117 条**：全在秘书两组测试。本机 PyYAML 装在用户目录 `~/Library/Python/3.9/...`，Python 启动时 HOME 不是真家目录、`PYTHONNOUSERSITE=1` 或沙箱挡读就读不到，`secretary_gate` 一律交常浩、用例跟着失败；`PYTHONNOUSERSITE=1` 原样复现 139 条中 117 条失败，正常终端 139 条全过。CI 把 pyyaml 装在系统目录，所以 CI 一直通过。
+- **2 项**：没找到原始记录；证据目录里唯一对得上的是 11-19 0d-recovery 功能分支（Python 3.14）的 `errors=2`（test_autoloop_drill，不在 main 上，那个分支后来全量都过了），是推断。今天 main 全量没复现任何失败。
+- **改了**：`test_secretary_gate.py` 加 YamlPrecondition：读不到 yaml 时只这一条失败、写明原因和办法，其余跳过（读不到时 Ran 140、failures=1、skipped=95；正常 140 OK）。
+- **全量**：改后 hermes `Ran 1610` OK、orca `Ran 48` OK；main 基线那遍跑到约 35 分钟被外部信号掐断，没跑完（掐断前没有失败标记）。证据 `evidence/2026-11-20-main-failures/`（结论在 `claude-30-结论.md`）。
+- **Hermes 记忆**：`~/.hermes/memories/USER.md` 的 P-14 同步成全局第 15 节现行版（判断已定先查 `docs/DECIDED.md`，没登记不等于没定；定了当轮就登记）。它没有仓库源文件、没有安装脚本（由猛鬼兽记忆工具维护），直接在锁内改装好的文件；改前备份 `~/.hermes/memories/USER.md.bak-20261120`，证据目录另存改前改后；7 条共 1087 字（上限 1375），Hermes 注入扫描全过。网关没重启：按 Hermes 代码（agent_init、system_prompt 建会话时 load_from_disk），新会话就读到新版，进行中的会话要等它重建系统提示（推断，未实测）。
+
 ## #251 工程自检报的 7 项安装副本不一致已收口（2026-11-20，Claude；PR #252 已合并 `cb9443b`，已安装）
 
 - 来由：11-20 代验 11-14 那期日报，工程自检报安装副本不一致 7 项；常浩看逐项方案回「按推荐办」，对 7b 回「7b不改」，对旧版副本选「甲：钉住旧版」，PR 回「合并」。
