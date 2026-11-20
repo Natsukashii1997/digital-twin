@@ -174,6 +174,10 @@ class PrState(unittest.TestCase):
         self.assertEqual(r["check_at"], "2026-11-20T16:20:00+08:00")
         self.assertEqual(r["done_when"], "PR 合并或关闭")
 
+    def test_draft_with_a_red_check_is_stuck(self):
+        r = self.row(draft=True, checks=[run("test", "FAILURE")])
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "CI 失败：test"))
+
     def test_failed_check_wins_over_an_approval(self):
         r = self.row(checks=[run("test", "TIMED_OUT")], reviews=[review("APPROVED")])
         self.assertEqual(r["state"], "卡住")
@@ -271,7 +275,46 @@ class Mainline(Base):
         self.assertEqual([[i["text"] for i in s["items"]] for s in got], [["甲"], ["乙", "丙等常浩决定"]])
 
     def test_mentions_of_the_word_are_not_sections(self):
-        self.assertEqual(ol.mainlines("## 2026-11-19 · #239 工作台主线页\n- ▶ 甲\n**主线**：x｜✅2\n- ▶ 乙\n"), [])
+        self.assertEqual(ol.mainlines("## 2026-11-19 · #239 工作台主线页\n- ▶ 甲\n主线暂停于：0D\n- ▶ 乙\n"), [])
+
+    def test_more_header_styles(self):
+        for head in ("## 主线", "## 主线清单：底座", "**主线：底座**", "## 当前主线：底座", "### 主线: 底座"):
+            got = ol.mainlines(f"{head}\n\n1. ▶ 甲\n2、✅ 乙\n- ⏳ 丙\n")
+            self.assertEqual([[i["mark"] + i["text"] for i in s["items"]] for s in got], [["▶甲", "✅乙", "⏳丙"]], head)
+
+    def test_one_line_mainline_is_split_into_items(self):
+        text = "- 别的\n  - 主线：接力根治｜完成 2/4：✅ S1（#423）✅ 全链路梳理 ⏳ 第 0 批装机（等 #442 合并）；▶️ 第 1 批\n- 主线「设计规范」（完成 1/2）：✅ 提炼；❓ 机检做不做\n"
+        got = ol.mainlines(text)
+        self.assertEqual([(s["title"], s["line"]) for s in got], [("接力根治｜完成 2/4", 2), ("「设计规范」（完成 1/2）", 3)])
+        self.assertEqual([i["mark"] + i["text"] for i in got[0]["items"]], ["✅S1（#423）", "✅全链路梳理", "⏳第 0 批装机（等 #442 合并）", "▶第 1 批"])
+        self.assertEqual([i["mark"] + i["text"] for i in got[1]["items"]], ["✅提炼", "❓机检做不做"])
+        self.roster(self.project("pp", text))
+        led = self.build(Hub())
+        self.assertEqual(sorted((r["id"], r["state"]) for r in led["rows"]),
+                         [("mainline:pp/接力根治/第0批装机", "等外部"), ("mainline:pp/接力根治/第1批", "在做"), ("mainline:pp/设计规范/机检做不做", "等你")])
+
+    def test_what_cannot_be_parsed_is_reported_not_dropped(self):
+        text = ("**主线**：底座｜✅2 ▶1 ⏸1\n\n"                      # 答复里的计数行，不是清单
+                "## 11-12 · 主线推进｜完成 3/4（见下）\n\n"            # 像主线标题，认不出
+                "## 主线：底座｜完成 0/2\n| ▶ | 表格里的一项 |\n- ▶ 正常的一项\n")
+        self.roster(self.project("dt", text))
+        led = self.build(Hub())
+        self.assertEqual([r["id"] for r in led["rows"]], ["mainline:dt/底座/正常的一项"])
+        self.assertEqual([(u["line"], u["mainline"]) for u in led["unparsed"]], [(1, "底座｜"), (3, "像主线、没认出来"), (6, "底座｜完成 0/2")])
+
+    def test_only_the_top_section_of_a_repeated_mainline_counts(self):
+        text = ("### 主线：审计修复｜完成 2/2\n✅ 第 2 项\n✅ 验证\n\n## 更早的一节\n\n"
+                "### 主线：审计修复｜完成 0/2\n❓ 第 2 项：等常浩确认\n📌 验证\n")
+        self.roster(self.project("cc", text))
+        led = self.build(Hub())
+        self.assertEqual((led["rows"], led["parked"]), ([], []))        # 下面那节是这条主线以前的样子：不收
+        self.assertEqual(led["coverage"]["mainline"]["old"], [{"project": "cc", "title": "审计修复｜完成 0/2", "why": "同名主线的旧快照，只认最上面一节"}])
+
+    def test_ids_do_not_shift_when_an_earlier_twin_is_done(self):
+        for first in ("▶", "✅"):
+            self.roster(self.project(f"p{ord(first)}", f"## 主线：落地｜完成 0/2\n- {first} 第 1 页：甲\n- ▶ 第 1 页：乙\n"))
+            ids = [r["id"].split("/", 1)[1] for r in self.build(Hub())["rows"] if "乙" in r["next"]]
+            self.assertEqual(ids, ["落地/第1页~2"], first)
 
     def test_rows_states_ids_and_parked(self):
         p = self.project("dt", CURRENT)
@@ -292,7 +335,7 @@ class Mainline(Base):
         self.assertEqual(ask["check_at"], "2026-11-18T12:30:00+08:00")
         self.assertEqual([(x["mark"], x["what"]) for x in led["parked"]], [("⏸", "#136 托管合并"), ("📌", "批 6 驿窗只显示")])
         self.assertEqual([u["line"] for u in led["unparsed"]], [18])
-        self.assertEqual(led["coverage"]["mainline"]["old"], [{"project": "dt", "title": "托管上线（#126）｜完成 3/8"}])
+        self.assertEqual(led["coverage"]["mainline"]["old"], [{"project": "dt", "title": "托管上线（#126）｜完成 3/8", "why": "标题写着旧主线"}])
         self.assertEqual((led["counts"]["只计数"], led["counts"]["未解析"]), (2, 1))
 
     def test_inline_question_mark_means_waiting_for_owner(self):
@@ -301,13 +344,6 @@ class Mainline(Base):
         rows = self.build(Hub())["rows"]
         self.assertEqual([(r["id"], r["state"]) for r in rows], [("mainline:th/落地/第1页", "等你"), ("mainline:th/落地/第1页~2", "在做")])
         self.assertEqual(rows[0]["next"], "常浩定：等常浩合并")
-
-    def test_same_titles_in_two_sections_do_not_share_an_id(self):
-        text = "### 主线：审计修复（v3.0）｜完成 0/1\n📌 全量验证\n▶ 修\n\n### 主线：审计修复（v3.0）｜完成 0/1\n📌 全量验证\n▶ 修\n"
-        self.roster(self.project("cc", text))
-        led = self.build(Hub())
-        self.assertEqual([x["id"] for x in led["parked"]], ["mainline:cc/审计修复/全量验证", "mainline:cc/审计修复/全量验证~2"])
-        self.assertEqual(sorted(r["id"] for r in led["rows"]), ["mainline:cc/审计修复/修", "mainline:cc/审计修复/修~2"])
 
     def test_project_without_current_or_repo_is_reported_not_fatal(self):
         gone = {"id": "gone", "name": "gone", "path": str(self.root / "不存在"), "main": "main", "category": "活跃", "github": None}
@@ -369,6 +405,30 @@ class Mismatch(Base):
         self.assertEqual(led["counts"]["对不上"], 2)
         self.assertEqual(hub.calls.count(("o/dt", "lookup")), 1)   # 一个仓库只查一次
 
+    def test_two_headings_about_the_same_pr_get_their_own_ids(self):
+        text = "## 审计 PR #171 二次刷新（待合并）\n\n## 审计 PR #171 刷新（待合并）\n"
+        self.roster(self.project("dt", text))
+        hub = Hub(numbers={"o/dt": {171: {"__typename": "PullRequest", "state": "MERGED", "mergedAt": "2026-11-20T03:00:00Z"}}})
+        self.assertEqual([m["id"] for m in self.build(hub)["mismatches"]],
+                         ["mismatch:dt/CURRENT:#171@节标题", "mismatch:dt/CURRENT:#171@节标题~2"])
+
+    def test_too_many_numbers_is_said_out_loud(self):
+        self.roster(self.project("dt", "".join(f"## 第 {n} 件（PR #{n} 待合并）\n\n" for n in range(1, 6))))
+        with mock.patch.object(ol, "LOOKUP_MAX", 3):
+            led = self.build(Hub())
+        self.assertEqual(led["coverage"]["mismatch_unchecked"], {"dt": "「待合并」里提到 5 个号，只核了前 3 个"})
+
+    def test_parked_and_mismatches_survive_a_project_that_cannot_be_read(self):
+        self.roster(self.project("dt", CURRENT))
+        hub = Hub(numbers={"o/dt": {253: {"__typename": "PullRequest", "state": "MERGED", "mergedAt": "2026-11-20T03:00:00Z"}}})
+        first = self.build(hub)
+        with mock.patch.object(ol.pdaily_data, "show", side_effect=pdaily_data.Fail("CURRENT.md 不是 UTF-8 编码")):
+            led = self.build(hub, prev=first, now=NOW + dt.timedelta(hours=1))
+        self.assertEqual(led["coverage"]["mainline"]["failed"], {"dt": "CURRENT.md 不是 UTF-8 编码"})
+        for kind in ("rows", "parked", "mismatches"):
+            self.assertEqual([x["id"] for x in led[kind]], [x["id"] for x in first[kind]], kind)
+            self.assertTrue(all(x["carried"] and x["since"] == "2026-11-20T16:00:00+08:00" for x in led[kind]), kind)
+
     def test_lookup_failure_is_reported_not_silently_clean(self):
         self.roster(self.project("dt", CURRENT))
         led = self.build(Hub(down={"o/dt"}))
@@ -427,7 +487,10 @@ class Ledger(Base):
         self.assertIn("dt", led["coverage"]["github"]["failed"])
         text = ol.render(led, now=NOW + dt.timedelta(hours=1))
         self.assertIn("GitHub·dt：", text)
-        self.assertIn("（沿用上一份）", text)
+        self.assertIn("（沿用 11-20 16:00 那份）", text)
+        self.assertIn("沿用上一份 3 条｜没取到 ", text.splitlines()[0])
+        again = self.scan(Hub(prs={"o/dt": []}, down={"o/dt"}), now=NOW + dt.timedelta(hours=2))
+        self.assertEqual({r["carried_from"] for r in again["rows"] if r.get("carried")}, {"2026-11-20T16:00:00+08:00"})   # 连着两次没取到：还是记最初那次
 
     def test_pagination_collects_every_page_and_flags_the_cap(self):
         many = [pr(n, checks=[run("test")]) for n in range(1, 6)]
@@ -442,7 +505,7 @@ class Ledger(Base):
         text = ol.render(self.scan(hub), now=NOW)
         for part in ("未闭环账本｜11-20 16:00 扫描", "【卡住】1", "pr:dt#2｜红的", "卡在：CI 失败：test", "【待验证】1", "【在做】",
                      "【记录和事实对不上】1", "PR #253 已合并（11-20 11:00）", "【主线清单里没解析出来的】1", "【只计数，不催】⏸ 1｜📌 1",
-                     "【没收的旧主线】dt「托管上线（#126）｜完成 3/8」", "下次看：不催"):
+                     "【没收的旧主线】dt「托管上线（#126）｜完成 3/8」（标题写着旧主线）", "下次看：不催"):
             self.assertIn(part, text)
         self.assertNotIn("已超过 24 小时", text)
         self.assertIn("已超过 24 小时", ol.render(json.loads((self.out / "ledger.json").read_text()), now=NOW + dt.timedelta(hours=25)))
@@ -457,6 +520,32 @@ class Ledger(Base):
                 self.assertEqual(ol.main(["show"]), 1)
             self.assertIn("先跑 scan", buf.getvalue())
 
+    def test_scan_command_reports_failure_in_one_line(self):
+        env = {"DT_OPENLOOP_DIR": str(self.out)}
+        for boom, want in ((ol.Fail("读不了项目名册"), "账本没更新：读不了项目名册"), (KeyError("意外"), "账本没更新：出错（KeyError：'意外'）")):
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(ol, "scan", side_effect=boom), contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(["scan", "--no-fetch"]), 1)
+            self.assertEqual(buf.getvalue().strip(), want)
+        self.assertFalse(self.out.exists())
+
+    def test_scan_command_writes_or_dry_runs(self):
+        hub = Hub(prs={"o/dt": self.prs})
+        real = ol.scan
+        with mock.patch.dict(os.environ, {"DT_OPENLOOP_DIR": str(self.out), "DT_NOW": "2026-11-20T16:00:00+08:00"}), \
+                mock.patch.object(ol.merge_officer, "load_rules", return_value=RULES), \
+                mock.patch.object(ol, "scan", side_effect=lambda **kw: real(hub=hub, **{**kw, "fetch": False})):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(["scan", "--dry-run"]), 0)
+            self.assertEqual(json.loads(buf.getvalue())["counts"]["卡住"], 1)
+            self.assertFalse(self.out.exists())                      # 试跑不写文件
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(["scan"]), 0)
+            self.assertIn("未闭环账本｜11-20 16:00 扫描", buf.getvalue())
+            self.assertTrue((self.out / "ledger.json").exists())
+
     def test_bad_roster_fails_loudly_and_leaves_the_ledger_alone(self):
         self.scan(Hub(prs={"o/dt": self.prs}))
         before = (self.out / "ledger.json").read_text()
@@ -464,6 +553,49 @@ class Ledger(Base):
             with self.assertRaises(ol.Fail):
                 self.scan(Hub())
         self.assertEqual((self.out / "ledger.json").read_text(), before)
+
+
+class Fetch(Base):
+    """scan 默认先拉各项目的远端主分支：读到的是远端现在的 CURRENT，不是本机旧的。"""
+
+    def setUp(self):
+        super().setUp()
+        self.p = self.project("dt", "## 主线：底座｜完成 0/1\n- ▶ 旧的一项\n")
+        self.repo = Path(self.p["path"])
+        self.bare = self.root / "remote.git"
+        sh(self.root, "clone", "-q", "--bare", str(self.repo), str(self.bare))
+        sh(self.repo, "remote", "add", "origin", str(self.bare))
+        sh(self.repo, "fetch", "-q", "origin")
+        other = self.root / "other"                                   # 别的会话在远端推了新的 CURRENT，本机没拉
+        sh(self.root, "clone", "-q", str(self.bare), str(other))
+        commit_current(other, "## 主线：底座｜完成 0/1\n- ▶ 远端新写的一项\n", "2026-11-20 15:00:00 +0800")
+        sh(other, "push", "-q", "origin", "main")
+        self.roster(self.p)
+
+    def whats(self, fetch):
+        led = ol.build(NOW, ol.roster(), Hub(), RULES, fetch=fetch)
+        return [r["what"] for r in led["rows"]], led["coverage"]["mainline"]["fetch_failed"]
+
+    def test_fetch_reads_what_the_remote_has_now(self):
+        self.assertEqual(self.whats(False), (["旧的一项"], {}))
+        before = sh(self.repo, "rev-parse", "main"), sh(self.repo, "status", "--porcelain")
+        self.assertEqual(self.whats(True), (["远端新写的一项"], {}))
+        self.assertEqual((sh(self.repo, "rev-parse", "main"), sh(self.repo, "status", "--porcelain")), before)   # 本地分支和工作区没动
+
+    def test_fetch_failure_and_timeout_are_reported(self):
+        sh(self.repo, "remote", "set-url", "origin", str(self.root / "没有这个远端"))
+        rows, failed = self.whats(True)
+        self.assertEqual(rows, ["旧的一项"])
+        self.assertIn("dt", failed)
+        real = subprocess.run
+
+        def slow(cmd, **kw):
+            if "fetch" in cmd:
+                self.assertEqual((kw["timeout"], kw["env"]["GIT_TERMINAL_PROMPT"]), (ol.FETCH_TIMEOUT, "0"))
+                raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+            return real(cmd, **kw)
+        with mock.patch.object(ol.subprocess, "run", side_effect=slow):
+            self.assertEqual(self.whats(True)[1], {"dt": "60 秒没拉完"})
 
 
 class RealGhPath(Base):
@@ -509,14 +641,15 @@ def step(kind, at, **kw):
 
 
 def handoff(id_="h1", status="open", phase="working", steps=(), pr_=None, cwd=None, session="cli-1", risk="L3", head=HEAD,
-            halt=None, error=None, rounds=1, title="送审｜改点东西"):
+            halt=None, error=None, carried=0, rounds_from=0, title="送审｜改点东西"):
     """驿窗 handoffs.json 里的一条接力（字段名照 handoffs.rs 的 camelCase）。"""
-    steps = list(steps)
+    steps = [dict(x) for x in steps]   # 各条接力各拿一份，用例改其中一条不会动到共用的步骤
     last = steps[-1]["at"] if steps else ms("2026-11-20T14:00:00+08:00")
     h = {"id": id_, "title": title, "claudeSession": session, "cwd": cwd, "chatgptConversation": "c", "status": status,
-         "createdAt": steps[0]["at"] if steps else last, "updatedAt": last, "rounds": rounds, "phase": phase, "phaseAt": last,
+         "createdAt": steps[0]["at"] if steps else last, "updatedAt": last, "rounds": 2 * len(steps), "phase": phase, "phaseAt": last,
          "steps": steps, "attempt": 0, "auto": True}
-    for k, v in (("pr", pr_), ("risk", risk), ("head", head), ("halt", halt), ("error", error)):
+    for k, v in (("pr", pr_), ("risk", risk), ("head", head), ("halt", halt), ("error", error), ("carried", carried or None),
+                 ("roundsFrom", rounds_from or None)):   # rounds 是驿窗记的「话来回了几次」，不是第几轮：故意给个对不上的数
         if v is not None:
             h[k] = v
     return h
@@ -644,6 +777,39 @@ class Sessions(Sources):
         cov = led["coverage"]["sessions"]
         self.assertEqual((cov["not_personal"], cov["rows"], cov["skipped"]["没写状态行"], cov["dropped"]["已交给下游会话"]), (1, 1, 4, 0))
 
+    def test_estimates_in_the_sessions_own_words(self):
+        cases = {"全量测试在跑，约 40 分钟后出结果。": 40, "再等 2 小时。": 120, "大约半小时出结果。": 30, "预计 1.5 个小时。": 90,
+                 "已跑了约 30 分钟，还没完。": 120, "跑了大约 30 分钟。": 120, "后台会话在装。": 120}
+        rows = [session_row(chr(ord("a") + i), "后台进行中", f"会话{i}", status) for i, status in enumerate(cases)]
+        for x in rows:
+            self.meta_of(x)
+        self.inbox(FakeInbox(rows))
+        got, _ = self.rows()
+        for x, minutes in zip(rows, cases.values()):
+            due = ol.parse_ts("2026-11-20T14:00:00+08:00") + dt.timedelta(minutes=minutes)
+            self.assertEqual(got[f"session:{x['id']}"]["check_at"], ol.iso(due), x["status"])
+
+    def test_odd_sessions_are_counted_or_skipped_not_fatal(self):
+        a, b, c = session_row("a"), session_row("b"), session_row("c", "暂停中")
+        self.meta_of(a)
+        self.meta_of(b)
+        (self.meta / f"{b['id']}.json").write_text(json.dumps({"sessionId": b["id"], "cwd": self.p["path"], "prs": ["不是字典"], "originCwd": 5}))
+        self.meta_of(c)
+        self.inbox(FakeInbox([a, b, c]))
+        rows, led = self.rows()
+        self.assertEqual(sorted(rows), [f"session:{a['id']}"])
+        cov = led["coverage"]["sessions"]
+        self.assertEqual((cov["bad"], cov["other_words"]), (1, 1))
+
+    def test_a_crash_inside_the_inbox_script_only_loses_this_source(self):
+        fake = FakeInbox([])
+        fake.scan = mock.Mock(side_effect=KeyError("lastAssistantCliSessionId"))
+        self.inbox(fake)
+        rows, led = self.rows(Hub(prs={"o/dt": [pr(1, checks=[run("test")])]}))
+        self.assertEqual(list(rows), ["pr:dt#1"])
+        self.assertEqual(led["coverage"]["sessions"]["failed"], "出错（KeyError：'lastAssistantCliSessionId'）")
+        self.assertIn("上一份账本里也没有，这一类这次是空的", "\n".join(ol.gaps(led)))
+
     def test_missing_script_is_reported_and_previous_rows_are_kept(self):
         a = session_row("a")
         self.meta_of(a)
@@ -653,7 +819,7 @@ class Sessions(Sources):
             rows, led = self.rows(prev=first, now=NOW + dt.timedelta(minutes=5))
         self.assertTrue(rows[f"session:{a['id']}"]["carried"])
         self.assertEqual(led["coverage"]["sessions"]["failed"], "找不到拍板清单脚本")
-        self.assertIn("会话：找不到拍板清单脚本", "\n".join(ol.gaps(led)))
+        self.assertIn("会话：找不到拍板清单脚本（沿用上一份账本里的 1 条）", "\n".join(ol.gaps(led)))
 
 
 REAL_INBOX = _isolation.REAL_HOME / "Documents/ChatGPT/个人/work/my-skills/skills/decision-inbox/scripts/decision_inbox.py"
@@ -702,10 +868,41 @@ class Relays(Sources):
         return rows.get(f"relay:{items[0]['id']}"), rows, led
 
     def test_sent_and_waiting_is_external(self):
-        r, _, _ = self.relay_row(self.h(steps=[WORK, ASK], rounds=2))
+        r, _, _ = self.relay_row(self.h(steps=[WORK, ASK], carried=1))
         self.assertEqual((r["state"], r["owner"], r["next"], r["project"]), ("等外部", "ChatGPT", "等 L3 第 2 轮回信", "dt"))
         self.assertEqual(r["evidence"], "11-20 14:10 已送 ChatGPT 审查，对方在看")
         self.assertEqual(r["check_at"], "2026-11-20T16:10:00+08:00")
+
+    def test_round_number_follows_postpane_counting(self):
+        """第几轮照驿窗的算法：前面接力带过来的轮数加上这条里算数的回信；常浩发话后重新起算；只补结论的回信不算。"""
+        again = [step("work", "2026-11-20T15:00:00+08:00"), step("ask", "2026-11-20T15:00:00+08:00")]
+        fmt = [step("format", "2026-11-20T14:41:00+08:00"), step("reply", "2026-11-20T14:42:00+08:00", verdict="revise")]
+        cases = [(dict(steps=[WORK, ASK]), "等 L3 第 1 轮回信"),
+                 (dict(steps=[WORK, ASK], carried=3), "等 L3 第 4 轮回信"),
+                 (dict(steps=[WORK, ASK, REVISE, BACK] + again), "等 L3 第 2 轮回信"),
+                 (dict(steps=[WORK, ASK, REVISE] + fmt + [BACK] + again), "等 L3 第 2 轮回信"),
+                 (dict(steps=[WORK, ASK, REVISE, BACK] + again, carried=3, rounds_from=4), "等 L3 第 1 轮回信"),
+                 (dict(steps=[WORK, ASK], risk=None), "等 第 1 轮回信")]
+        for kw, want in cases:
+            self.assertEqual(self.relay_row(self.h(**kw))[0]["next"], want, kw)
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        _, rows, _ = self.relay_row(self.h(steps=[WORK, ASK, REVISE, BACK], carried=3, pr_="O/dt#1"), hub=hub)
+        self.assertEqual(rows["pr:dt#1"]["blocked"], "审查要求修改（驿窗 L3 第 4 轮）")
+
+    def test_asking_chatgpt_to_mend_its_last_lines_is_still_waiting(self):
+        noverdict = step("reply", "2026-11-20T14:40:00+08:00")
+        r, _, _ = self.relay_row(self.h(steps=[WORK, ASK, noverdict, step("format", "2026-11-20T14:41:00+08:00")], phase="working"))
+        self.assertEqual((r["state"], r["owner"], r["next"]), ("等外部", "ChatGPT", "等 L3 第 1 轮补上结论"))
+        self.assertEqual(r["check_at"], "2026-11-20T16:41:00+08:00")
+
+    def test_one_odd_handoff_is_skipped_not_fatal(self):
+        odd = [self.h("h2", steps=[WORK, ASK]), self.h("h3", steps=[WORK, ASK], carried="三"), self.h("h4", steps=[WORK, ASK])]
+        odd[0]["updatedAt"] = "2026-11-20"
+        odd[2]["steps"][1]["at"] = "刚才"
+        r, rows, led = self.relay_row(self.h(steps=[WORK, ASK]), *odd)
+        self.assertEqual((r["state"], sorted(rows)), ("等外部", ["relay:h1"]))   # 好的那条照收，三条坏的各自跳过
+        self.assertEqual(led["coverage"]["relays"]["bad"], 3)
+        self.assertIn("驿窗送审：有 3 条的数据不是预想的样子，跳过了", "\n".join(ol.gaps(led)))
 
     def test_reply_not_returned_is_stuck_after_thirty_minutes(self):
         expired = step("back", "2026-11-20T14:40:00+08:00", delivery="expired")
@@ -843,6 +1040,49 @@ class Merge(Sources):
         self.assertEqual(list(rows), [f"session:{a['id']}"])
         self.assertEqual([x["id"] for x in rows[f"session:{a['id']}"]["links"]], ["relay:h1"])
         self.assertEqual(rows[f"session:{a['id']}"]["state"], "等你")
+
+    def test_one_row_never_holds_two_prs(self):
+        """会话记着 #2，它发起的接力写的是 #1：对不上，分开列，互相记一笔。"""
+        a = session_row("a", "等你操作", "两头的会话")
+        self.meta_of(a, prs=[("o/dt", 2)], cli="cli-1")
+        self.inbox(FakeInbox([a]))
+        self.relays(handoff(steps=[WORK, ASK], pr_="O/dt#1", session="cli-1"))
+        rows, _ = self.rows(Hub(prs={"o/dt": [pr(1, checks=[run("test")]), pr(2, checks=[run("test")])]}))
+        self.assertEqual(sorted(rows), ["pr:dt#1", "pr:dt#2"])
+        self.assertEqual([(x["id"], x.get("related", False)) for x in rows["pr:dt#1"]["links"]], [("relay:h1", False), (f"session:{a['id']}", True)])
+        self.assertEqual([(x["id"], x.get("related", False)) for x in rows["pr:dt#2"]["links"]], [(f"session:{a['id']}", False), ("relay:h1", True)])
+        two = session_row("b", "等你操作", "记着两个 PR 的会话")
+        self.meta_of(two, prs=[("o/dt", 1), ("o/dt", 2)], cli="cli-2")
+        self.inbox(FakeInbox([two]))
+        self.relays(handoff(steps=[WORK, ASK], pr_="O/dt#1", session="cli-2"))
+        rows, _ = self.rows(Hub(prs={"o/dt": [pr(1, checks=[run("test")]), pr(2, checks=[run("test")])]}))
+        self.assertEqual(sorted(rows), ["pr:dt#1", "pr:dt#2"])                 # 接力和会话并到 #1 那一行，#2 只是相关
+        self.assertNotIn("pr:dt#1", [x["id"] for x in rows["pr:dt#1"]["links"]])   # 不会记一笔指向自己
+
+    def test_a_source_that_fails_keeps_its_part_of_merged_rows(self):
+        a = session_row("a", "等你操作", "0D", "PR #1 等你批准。", "回复「合并」。")
+        self.meta_of(a, prs=[("o/dt", 1)], cli="cli-1")
+        self.inbox(FakeInbox([a]))
+        self.relays(handoff(steps=[WORK, ASK, REVISE, BACK], pr_="O/dt#1", session="cli-1"))
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        rows, first = self.rows(hub)
+        self.assertEqual((list(rows), rows["pr:dt#1"]["state"]), (["pr:dt#1"], "卡住"))
+        later = NOW + dt.timedelta(minutes=5)
+        with mock.patch.object(ol, "inbox_module", side_effect=ol.Fail("找不到拍板清单脚本")):      # 会话这一类取不到
+            rows, led = self.rows(hub, prev=first, now=later)
+        r = rows["pr:dt#1"]
+        self.assertEqual(sorted(x["id"] for x in r["links"]), ["relay:h1", f"session:{a['id']}"])   # 会话那部分还在这一行里
+        self.assertEqual((r["carried"], r["carried_from"], led["coverage"]["sessions"]["carried"]), (True, "2026-11-20T16:00:00+08:00", 1))
+        self.handoffs.write_text("{坏的", encoding="utf-8")                                          # 驿窗记录读坏
+        rows, led = self.rows(hub, prev=first, now=later)
+        r = rows["pr:dt#1"]
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "审查要求修改（驿窗 L3 第 1 轮）"))        # 照上一份记下的送审记录判，不说成没人审
+        self.assertEqual(sorted(x["id"] for x in r["links"]), ["relay:h1", f"session:{a['id']}"])
+        self.inbox(FakeInbox([]))
+        _, _, = self.rows(hub)                                                                      # 没有上一份可用时
+        rows, _ = self.rows(Hub(prs={"o/dt": [pr(1, checks=[run("test")])]}))
+        self.assertIn("驿窗的送审记录这次没读到", rows["pr:dt#1"]["evidence"])
+        self.assertNotIn("没有审查或送审记录", rows["pr:dt#1"]["evidence"])
 
     def test_since_is_the_earliest_of_the_merged_parts(self):
         hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
