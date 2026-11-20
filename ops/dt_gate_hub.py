@@ -181,7 +181,7 @@ class Host:
 
     def listeners(self, port_no):
         """端口上 LISTEN 的进程 uid（root 看得到所有账号的）。"""
-        return hub_listener.listener_uids(port_no)
+        return hub_listener.listener_uids(port_no, timeout=60)
 
     def sleep(self, s):
         time.sleep(s)

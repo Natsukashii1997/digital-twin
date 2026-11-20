@@ -216,10 +216,14 @@ class ListenerCheck(unittest.TestCase):
             with self.assertRaises(HL.NotOurListener):
                 HL.check("http://127.0.0.1:3350", want="503")
 
-    @unittest.skipUnless(os.path.exists(HL.LSOF), "只在 Mac 上有 /usr/sbin/lsof（CI 是 Linux）")
     def test_real_lsof_sees_our_own_listener(self):
+        """真 lsof、真监听：正式环境（macOS）用 /usr/sbin/lsof，CI（Ubuntu）注入系统的 /usr/bin/lsof，两边都真跑，不跳过
+        （L3 第 1 轮 P2-01）。找不到 lsof 判失败，不当通过。"""
+        import shutil
         import socket
-        with socket.socket() as srv:
+        lsof = shutil.which("lsof", path="/usr/sbin:/usr/bin:/sbin:/bin")
+        self.assertIsNotNone(lsof, "本机没有 lsof：监听核对测不了（CI 里由 ci.yml 装上）")
+        with socket.socket() as srv, mock.patch.object(HL, "LSOF", lsof):
             srv.bind(("127.0.0.1", 0))
             srv.listen()
             port = srv.getsockname()[1]
@@ -227,3 +231,9 @@ class ListenerCheck(unittest.TestCase):
             HL.check(f"http://127.0.0.1:{port}", want=str(os.getuid()))
             with self.assertRaises(HL.NotOurListener):
                 HL.check(f"http://127.0.0.1:{port}", want=str(os.getuid() + 1))
+        with self.assertRaises(HL.NotOurListener):                       # 没人在听：不放行
+            with mock.patch.object(HL, "LSOF", lsof):
+                HL.check(f"http://127.0.0.1:{port}", want=str(os.getuid()))
+
+    def test_macos_uses_the_system_lsof(self):
+        self.assertEqual(HL.LSOF, "/usr/sbin/lsof")

@@ -13,17 +13,20 @@ import os
 import subprocess
 import urllib.parse
 
-LSOF = "/usr/sbin/lsof"
+LSOF = "/usr/sbin/lsof"                 # 正式环境（macOS）固定用系统的；测试按平台注入（Linux 在 /usr/bin/lsof）
 
 
 class NotOurListener(OSError):
     """端口上在听的不是该在听的账号。"""
 
 
-def listener_uids(port):
-    """本机 TCP 端口上处于 LISTEN 的进程的 uid 列表（看不到的进程不在里面）。"""
-    r = subprocess.run([LSOF, "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-Fu"], capture_output=True, text=True,
-                       timeout=10)
+def listener_uids(port, lsof=None, uid=None, timeout=10):
+    """本机 TCP 端口上处于 LISTEN 的进程的 uid 列表（看不到的进程不在里面）。lsof 不在、跑不起来抛 OSError。
+    给了 uid 就只扫这个账号的进程（-a -u）：非 root 本来就只看得到自己的，结果一样，机器忙时快得多；
+    root 要看全部账号（找冒充者）时不给 uid。"""
+    only = ["-a", "-u", str(int(uid))] if uid is not None else []
+    r = subprocess.run([lsof or LSOF, "-nP", *only, f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-Fu"], capture_output=True,
+                       text=True, timeout=timeout)
     if r.returncode not in (0, 1):
         raise NotOurListener(f"lsof 出错：{r.stderr.strip()[:100]}")
     return [int(line[1:]) for line in r.stdout.splitlines() if line.startswith("u") and line[1:].isdigit()]
@@ -37,7 +40,7 @@ def check(url, want=None):
     if u.hostname != "127.0.0.1":           # 只认这一个地址：localhost 可能先连 ::1，那里有人单独抢绑、这边的 lsof 看不到（复核 P2-e）
         raise NotOurListener(f"设了监听核对时中台地址只能是 127.0.0.1（现在 {u.hostname}），不发钥匙")
     try:
-        uids = listener_uids(u.port or 80)
+        uids = listener_uids(u.port or 80, uid=int(want), timeout=20)
     except (OSError, subprocess.SubprocessError) as e:
         raise NotOurListener(f"查不清 {u.port} 端口在听的是谁：{type(e).__name__}")
     if not uids or any(x != int(want) for x in uids):
