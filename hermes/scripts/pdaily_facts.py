@@ -315,7 +315,8 @@ def new_lessons(span, projects, notes):
 
 
 def officer_misses(span):
-    """合并官判断和真实结局对不上的（agreement.csv 的 agree=否），按「判了什么 → 结局」归类计数；够 2 次标可升提案。"""
+    """合并官判断和真实结局对不上的（agreement.csv 的 agree=否），按「判了什么 → 结局」归类计数；够 2 次标可升提案。
+    按策略合并的（owner=策略合并，#257）不算：合并官判「退回」的第一版不拦，那个结局是策略自己促成的，不是常浩推翻了判断。"""
     f = actions.SHADOW / "agreement.csv"
     if not f.exists():
         return []
@@ -323,7 +324,8 @@ def officer_misses(span):
     groups = {}
     with f.open(encoding="utf-8", errors="replace", newline="") as fh:
         for r in csv.DictReader(fh):
-            if r.get("agree") != "否" or r.get("source") != "live" or not r.get("outcome_at"):
+            if (r.get("agree") != "否" or r.get("source") != "live" or not r.get("outcome_at")
+                    or r.get("owner") == actions.POLICY_OWNER):
                 continue
             try:
                 r["outcome_at"] = actions.stamp(r["outcome_at"])     # 统一成北京时间，first / last 才能直接比

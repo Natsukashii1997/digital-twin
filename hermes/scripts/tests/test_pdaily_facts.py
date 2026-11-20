@@ -398,6 +398,7 @@ class ObservationTests(Base):
                      self.row("2026-10-20T10:00:00+08:00", pr="7"),                 # 14 天以前
                      self.row("2026-11-08T10:00:00+08:00", pr="8", source="replay"),
                      self.row("2026-11-08T10:00:00+08:00", pr="9", agree="是"),
+                     self.row("2026-11-08T10:00:00+08:00", pr="11", owner="策略合并"),   # 按策略合并的不算被推翻（#257）
                      self.row("2026-11-08T10:00:00+08:00", pr="10", tier="L2")])
         out = pf.officer_misses((W[1] - pf.LOOKBACK, W[1]))
         got = {x["what"]: (x["count"], x["threshold_met"], x["evidence"]) for x in out}
