@@ -173,12 +173,18 @@ class Deliver(Base):
             self.assertTrue(F.once()["ok"])
             flush.assert_called_once_with(7)                                   # 送达确认后提交排队的本人回答
             self.assertTrue(F.card_by_token(self.token())["hub_delivered_at"])
-            self.lark.mid = None                                     # 另一张卡发卡没拿到消息号
+            self.lark.mid = None                                     # 另一张卡发卡没拿到消息号：结果不明
             with mock.patch.object(F, "hub", lambda m, p, b=None, timeout=20: {"card": {**CARD, "id": 8}} if m == "GET"
                                    else posts.append((p, b)) or {}):
+                got = F.once()
+            self.lark.mid = "om_fixture_1"                           # 本地 lark-cli 根本没跑起来：确定没发，报 failed
+            with mock.patch.object(F, "hub", lambda m, p, b=None, timeout=20: {"card": {**CARD, "id": 9}} if m == "GET"
+                                   else posts.append((p, b)) or {}), \
+                    mock.patch.object(F, "lark", side_effect=F.SendError("发卡片：lark-cli 跑不起来（FileNotFoundError）")):
                 F.once()
         self.assertEqual(posts[0], ("/v1/cards/7/delivered", {"version": 1, "ref": "om_fixture_1"}))
-        self.assertEqual(posts[1][0], "/v1/cards/8/failed")
+        self.assertTrue(got["deferred"])                             # 结果不明是暂缓：不报 failed（第 2 轮预审 P2-B）
+        self.assertEqual([p for p, _ in posts], ["/v1/cards/7/delivered", "/v1/cards/9/failed"])
 
 
 class RecoveryGate(Base):
@@ -210,13 +216,44 @@ class RecoveryGate(Base):
         self.assertEqual([c for c in calls if c[0] == "POST"], [])    # 没报 failed、没报送达
         self.assertEqual(self.lark.keys(), [])                        # 没发飞书
 
+    def test_gate_closing_before_the_bridge_lock_writes_nothing(self):
+        """第 2 轮预审 P2-C：入口看过闸、拿到桥接锁之前停写了（维护 hold）——改卡、报送达都不做，暂缓不报 failed；
+        排空时看得到桥接正拿着锁。"""
+        self.register()
+        calls = []
+
+        def hub(method, path, body=None, timeout=20, channel=F.CHANNEL):
+            calls.append((method, path))
+            return {"card": {**CARD, "version": 2, "ref": "om_fixture_1"}} if path.startswith("/v1/cards/next") else {}
+        held = E.Refused("恢复闸关着：维护中（恢复点 p1）")
+        with mock.patch.object(Rv, "admit", side_effect=held), mock.patch.object(F, "hub", hub), \
+                mock.patch.object(F, "hub_readable", return_value=True), \
+                mock.patch.object(F, "newer_elsewhere", return_value=None):
+            out = F.once()
+            with self.assertRaisesRegex(F.Deferred, "维护中"):
+                F.report_delivered(7)
+        self.assertEqual((out["ok"], out.get("deferred")), (False, True))
+        self.assertEqual([c for c in calls if c[0] == "POST"], [])                    # 没报送达、没报 failed
+        self.assertFalse([a for a in self.lark.calls if a[:3] == ["im", "messages", "patch"]])   # 没改卡
+        self.assertFalse(F.bridge_busy())
+        with F.bridge_lock():
+            self.assertTrue(F.bridge_busy())
+            self.assertIn("飞书桥接正在处理一张卡", Rv.in_flight_writes())
+        self.assertNotIn("飞书桥接正在处理一张卡", Rv.in_flight_writes())
+
+    def test_settled_send_without_message_id_is_deferred(self):
+        """第 2 轮预审 P2-B2：出口账本记这张卡已发、却没有消息号（旧数据或人工结算没填）：不猜、不 KeyError，暂缓。"""
+        with mock.patch.object(E, "_begin", return_value={"done": True, "again": True, "manual": "x"}), \
+                self.assertRaisesRegex(F.Deferred, "没有消息号"):
+            self.register()
+
     def test_unknown_send_is_frozen_then_reconciled_without_resending(self):
         def timeout(args, what, cwd=None):
             self.lark.calls.append(args)
             raise F.SendError("发卡片：lark-cli 跑不起来（TimeoutExpired）")   # 其实飞书已经收下了
-        with mock.patch.object(F, "lark", timeout), self.assertRaises(F.SendError):
-            self.register()
-        with self.assertRaisesRegex(F.Fail, "结果不明"):
+        with mock.patch.object(F, "lark", timeout), self.assertRaisesRegex(F.Deferred, "发卡结果不明"):
+            self.register()                                          # 结果不明是暂缓，不是失败（第 2 轮预审 P2-B）
+        with self.assertRaisesRegex(F.Deferred, "结果不明"):
             self.register()                                          # 中台再给：冻结，不重发
         self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"]]), 1)
         with F.db() as con:                                          # 取登记的令牌
@@ -244,7 +281,7 @@ class RecoveryGate(Base):
         def refused(args, what, cwd=None):
             self.lark.calls.append(args)
             raise F.SendError("发卡片失败：机器人不在会话里")
-        with mock.patch.object(F, "lark", refused), self.assertRaises(F.SendError):
+        with mock.patch.object(F, "lark", refused), self.assertRaisesRegex(F.Deferred, "发卡结果不明"):
             self.register()
         with self.assertRaisesRegex(F.Deferred, "结果不明"):
             self.register()

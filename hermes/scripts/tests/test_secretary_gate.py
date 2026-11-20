@@ -42,6 +42,8 @@ import secretary_gate as SG  # noqa: E402
 import secretary_ledger as SL  # noqa: E402
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
+REAL_ENSURE_OPEN, REAL_ADMIT = R.ensure_open, R.admit           # Base 里打桩放行；要真恢复闸的用例换回来
+
 TZ = CU.TZ
 T = dt.datetime(2026, 11, 18, 14, 0, tzinfo=TZ)        # 过去的时刻：对账判「在途过久」按真实时钟
 SID = "s-20261119-100000-0123456789ab"
@@ -669,6 +671,27 @@ class RecoveryGateTests(Base):
         self.hub("UPDATE cards SET state = 'decided', choice = 0, \"by\" = '秘书'")
         SG.reconcile(now=T + dt.timedelta(minutes=5))                            # 秘书自己的对账结掉它
         self.assertEqual(R._secretary(), (None, "秘书账本没有结果不明的代批"))
+        self.assertEqual(len(self.answers()), 1)                                 # 从不重答
+
+    def test_unreconciled_is_settled_by_owner_and_then_stops_blocking(self):
+        """第 2 轮预审 P1-A：秘书核不清的决定原来没有人工结算入口，恢复闸会一直关着、只能改库。settle 要 --confirm，
+        做成了要写核到的回答；只结算核不清的；结算后恢复闸不再被它挡住。"""
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        did = self.submit()["decision"]
+        self.hub_error = None
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=5)), [(did, "unreconciled")])   # 卡还开着：核不清
+        self.assertIn(did, R._secretary()[0])
+        with self.assertRaisesRegex(SG.Refused, "confirm"):
+            SG.settle(did, "failed", "看过中台卡片", confirm=False)
+        with self.assertRaisesRegex(SG.Refused, "--ref"):
+            SG.settle(did, "done", "看过中台卡片", confirm=True)
+        self.assertEqual(SG.main(["settle", "--decision", did, "--result", "failed", "--note", "中台卡片还开着，秘书的回答没进去",
+                                  "--confirm"]), 0)
+        self.assertEqual(self.get(did)["status"], "failed")
+        self.assertIsNone(self.claim())
+        self.assertEqual(R._secretary(), (None, "秘书账本没有结果不明的代批"))
+        with self.assertRaisesRegex(SG.Refused, "核不清"):
+            SG.settle(did, "done", "再看", ref="x", confirm=True)
         self.assertEqual(len(self.answers()), 1)                                 # 从不重答
 
     def test_lease_waits_while_gate_closed(self):

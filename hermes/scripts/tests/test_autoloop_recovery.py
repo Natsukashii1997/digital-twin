@@ -3,6 +3,7 @@
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import io
+import datetime as dt
 import json
 import os
 import sys
@@ -145,8 +146,8 @@ class Order(Base):
                 con.execute("CREATE TABLE other (x)")
             R.ensure_open()                                       # 没有秘书表：照常开
             with sqlite3.connect(db) as con:
-                con.execute("CREATE TABLE secretary_decisions (id TEXT, action TEXT, status TEXT, created_at TEXT)")
-                con.executemany("INSERT INTO secretary_decisions VALUES (?, ?, ?, 'x')",
+                con.execute("CREATE TABLE secretary_decisions (id TEXT, action TEXT, status TEXT, created_at TEXT, updated_at TEXT)")
+                con.executemany("INSERT INTO secretary_decisions (id, action, status, created_at) VALUES (?, ?, ?, 'x')",
                                 [("sd-1", "ask", "unknown"), ("sd-2", "handoff", "handoff"), ("sd-3", "ask", "done")])
             with E.db() as con:
                 E.mark_dirty(con, "秘书代批 sd-1 结果不明")
@@ -274,6 +275,25 @@ class Maintenance(Base):
                         (os.getpid(), E.proc_start(os.getpid()), E.boot_id(), E.iso(now), E.iso(now), E.iso(now)))
         R.hold("p1", self.root / "snap", C1, 7)
         self.assertEqual(R.in_flight_writes(), ["出口 merge:o/r:1:h"])   # 排空前不许快照
+
+    def test_drain_counts_only_freshly_claimed_dispatch_events(self):
+        """第 2 轮预审疑点：派单事件结果不明（领走超过 60 秒、那次 POST 早已结束）不算在途——停写期间补发不了，
+        算进去排空就永远完不成；刚领走的才算。"""
+        now = G.now_tz()
+        with G.tx() as con:
+            for key, ago in (("t1:g1:start", 5), ("t2:g1:start", 600)):
+                con.execute("INSERT INTO hub_events (event_key, task_id, rule, executor, generation, kind, at, sent, claimed_at) "
+                            "VALUES (?, ?, 'r', 'claude', 1, 'start', ?, 2, ?)",
+                            (key, key[:2], G.iso(now), G.iso(now - dt.timedelta(seconds=ago))))
+        self.assertEqual(R.in_flight_writes(), ["派单事件 t1:g1:start"])
+        import sqlite3                                            # 秘书在送的代批：同样只算 2 分钟内动过的
+        db = self.root / "twin-state.db"
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE secretary_decisions (id TEXT, status TEXT, updated_at TEXT)")
+            con.executemany("INSERT INTO secretary_decisions VALUES (?, 'executing', ?)",
+                            [("sd-new", G.iso(now)), ("sd-old", G.iso(now - dt.timedelta(minutes=10)))])
+        with mock.patch.dict(os.environ, {"DT_STATE_DB": str(db)}):
+            self.assertEqual(R.in_flight_writes(), ["派单事件 t1:g1:start", "秘书代批 sd-new"])
 
     def test_retired_snapshot_can_never_be_restored(self):
         R.hold("p1", self.root / "snap", C1, 7)

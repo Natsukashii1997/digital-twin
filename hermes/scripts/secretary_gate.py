@@ -70,7 +70,10 @@
 恢复闸（批 0D，常浩 11-19「都按推荐」）：提议先看一眼 autoloop_recovery.ensure_open()，关着 → not_ready（不记账、不占额度，
   开闸后再提）；获准在 cards.db 写锁里再拿出口账本写锁核开闸资格（R.admission，锁顺序 cards.db → 出口账本 → 账本库），
   关了 → 作废、释放额度、不送；秘书决定记成结果不明时同时关闸（finish），恢复闸对账看到秘书账本里还有结果不明、核不清、
-  还在送的代批就不开闸，由下面的 reconcile 结掉（对账逻辑不变），核不清的由常浩定；lease（报送达）关着时不领卡。
+  还在送的代批就不开闸，由下面的 reconcile 结掉（对账逻辑不变），核不清的由常浩用 settle 定（第 2 轮预审 P1-A：原来没有结算
+  入口，只能改库）；lease（报送达）关着时不领卡，报送达和桥接用同一把锁、锁里再核闸。
+settle：常浩核实后手动结算一个核不清（unreconciled）的秘书决定，done 要写核到的回答 / 事件 / 评论（--ref），要 --confirm；
+  结果不明、还在送的不许跳过对账；合并（批 3）不在这里结算。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
   ① 停在 executing 超过 2 分钟、回读给不出结论的（中台库读不到，或卡片还开着）一律转 unreconciled：额度保留、冻结这张任务、
   交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
@@ -1299,7 +1302,7 @@ def lease(wait=50):
     """从 secretary 通道领一张卡：第一次领到时生成并落盘自己的 ref，报送达；中台收下后记「中台确认送达」。没有卡返回 None。
     恢复闸关着（批 0D）就不领卡，返回 paused（报送达、报失败都是往中台写）。"""
     try:
-        R.ensure_open()
+        epoch = R.ensure_open()
     except E.Refused as e:
         return {"ok": False, "paused": str(e)}
     card = F.hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20, channel=CHANNEL).get("card")
@@ -1322,14 +1325,43 @@ def lease(wait=50):
             ref = "sec-" + secrets.token_hex(8)
             con.execute("INSERT INTO secretary_cards (card_id, version, ref, leased_at) VALUES (?, ?, ?, ?)",
                         (cid, card["version"], ref, F.now()))
-    if why:
-        F.hub("POST", f"/v1/cards/{cid}/failed", {"version": card["version"], "error": why}, channel=CHANNEL)
-        return {"card": cid, "ok": False, "why": why}
-    F.hub("POST", f"/v1/cards/{cid}/delivered", {"version": card["version"], "ref": ref}, channel=CHANNEL)
+    with F.bridge_lock():                                    # 往中台写：和桥接同一把锁，锁里再核闸（维护停写排空看得到，第 2 轮预审 P2-C）
+        try:
+            F._still_open(epoch)
+        except F.Deferred as e:
+            return {"card": cid, "ok": False, "paused": str(e)}
+        if why:
+            F.hub("POST", f"/v1/cards/{cid}/failed", {"version": card["version"], "error": why}, channel=CHANNEL)
+            return {"card": cid, "ok": False, "why": why}
+        F.hub("POST", f"/v1/cards/{cid}/delivered", {"version": card["version"], "ref": ref}, channel=CHANNEL)
     with F.db(write=True) as con:                            # 只给报过的这一版记确认；其间又领到更新的版本就不记
         con.execute("UPDATE secretary_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ? AND version = ?",
                     (F.now(), cid, card["version"]))
     return {"card": cid, "ok": True, "ref": ref}
+
+
+def settle(decision_id, result, note, ref=None, confirm=False, now=None):
+    """常浩核实后手动结算一个核不清的秘书决定（第 2 轮预审 P1-A）。结算后恢复闸下次对账不再被它挡住。"""
+    if not confirm:
+        raise Refused("手动结算要常浩明确同意：加 --confirm")
+    note, ref = (note or "").strip(), (ref or "").strip() or None
+    if result not in ("done", "failed") or not note:
+        raise Refused("结果只能是 done 或 failed，并写明依据")
+    if result == "done" and not ref:
+        raise Refused("结算成做成了要写核到的回答、事件或评论（--ref）")
+    if result == "failed" and ref:
+        raise Refused("没做成的不写 --ref")
+    with SL.open_store(now) as st:
+        d = SL.get(st, decision_id)
+        if d["action"] not in ("ask", "redispatch", "reject"):
+            raise Refused(f"{d['action']} 不在这里结算")
+        if d["status"] != "unreconciled":
+            raise Refused(f"只有「核不清」的能手动结算（现在是 {d['status']}）；结果不明、还在送的先 reconcile")
+        SL.reconcile(st, decision_id, result, {"checked": f"常浩确认：{note[:300]}", "found": result == "done",
+                                               **({"ref": ref} if ref else {})}, by="user", now=now)
+        if d["action"] == "ask":
+            set_claim(d["card_id"], decision_id, "delivered" if result == "done" else None, f"常浩结算：{note[:100]}")
+    return {"decision": decision_id, "result": result, **({"ref": ref} if ref else {})}
 
 
 def show():
@@ -1360,6 +1392,12 @@ def main(argv=None):
     sub.add_parser("reconcile").add_argument("--card", type=int)
     sub.add_parser("lease").add_argument("--wait", type=int, default=50)
     sub.add_parser("show")
+    s = sub.add_parser("settle", help="常浩核实后手动结算一个核不清的秘书决定")
+    s.add_argument("--decision", required=True)
+    s.add_argument("--result", required=True, choices=("done", "failed"))
+    s.add_argument("--note", required=True)
+    s.add_argument("--ref")
+    s.add_argument("--confirm", action="store_true")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "submit":
@@ -1377,6 +1415,14 @@ def main(argv=None):
         if a.cmd == "reconcile":
             notes = reconcile(a.card)
             done_line(True, f"对账 {len(notes)} 个决定", notes=notes)
+            return 0
+        if a.cmd == "settle":
+            try:
+                out = settle(a.decision, a.result, a.note, a.ref, a.confirm)
+            except Refused as e:
+                done_line(False, str(e), result="refused")
+                return 1
+            done_line(True, f"已结算 {a.decision}：{a.result}", **out)
             return 0
         if a.cmd == "lease":
             out = lease(a.wait)

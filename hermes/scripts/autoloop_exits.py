@@ -468,19 +468,40 @@ def reconcile(readers=None, now=None, scope=None):
     return notes
 
 
-def settle(key, result, note, confirm=False):
-    """常浩核实后手动结算一条核不清的（unreconciled）；结果不明的不许手动跳过对账。"""
+SETTLE_REF = {"send_feishu": "message_id", "open_pr": "pr", "merge": "merge_commit"}   # done 时结果里要带的号
+SETTLE_NEEDS_REF = ("send_feishu",)        # 做成了却没有消息号，桥接以后报不了送达（第 2 轮预审 P2-B2）
+
+
+def settle(key, result, note, confirm=False, ref=None):
+    """常浩核实后手动结算一条核不清的（unreconciled）；结果不明的不许手动跳过对账。
+    结算成 done 时 ref 是常浩核到的外部号（飞书消息号必填；PR 号、合并提交号可选），写进结果，之后同一动作直接回它。"""
     if not confirm:
         raise Refused("手动结算要常浩明确同意：加 --confirm")
     if result not in ("done", "failed") or not (note or "").strip():
         raise Refused("结果只能是 done 或 failed，并写明依据")
     with db() as con:
-        cur = con.execute("UPDATE exits SET state = ?, evidence = ?, updated_at = ? WHERE key = ? AND state = 'unreconciled'",
-                          (result, json.dumps({"manual": note}, ensure_ascii=False), iso(now_tz()), key))
+        row = con.execute("SELECT kind FROM exits WHERE key = ? AND state = 'unreconciled'", (key,)).fetchone()
+        if row is None:
+            raise Refused("只有「核不清」的条目能手动结算；结果不明的先对账")
+        ref = (ref or "").strip() or None
+        if result == "done" and row["kind"] in SETTLE_NEEDS_REF and not ref:
+            raise Refused(f"结算成做成了要写核到的{SETTLE_REF[row['kind']]}（--ref），不然之后用不上这个结果")
+        if result == "failed" and ref:
+            raise Refused("没做成的不写 --ref")
+        if ref and row["kind"] == "open_pr":
+            if not ref.isdigit():
+                raise Refused("PR 号要是数字")
+            ref = int(ref)
+        out = {"manual": note, **({SETTLE_REF.get(row["kind"], "ref"): ref} if ref else {})}
+        cur = con.execute("UPDATE exits SET state = ?, evidence = ?, outcome = ?, updated_at = ? "
+                          "WHERE key = ? AND state = 'unreconciled'",
+                          (result, json.dumps({"manual": note}, ensure_ascii=False),
+                           json.dumps(out, ensure_ascii=False, sort_keys=True) if result == "done" else None,
+                           iso(now_tz()), key))
         if cur.rowcount != 1:
             raise Refused("只有「核不清」的条目能手动结算；结果不明的先对账")
-        log(con, key, result, f"常浩确认：{note[:200]}")
-    return {"key": key, "state": result}
+        log(con, key, result, f"常浩确认：{note[:200]}" + (f"（{ref}）" if ref else ""))
+    return {"key": key, "state": result, **({"ref": ref} if ref else {})}
 
 
 def show():
@@ -499,9 +520,10 @@ def main(argv=None):
     s.add_argument("--result", required=True)
     s.add_argument("--note", required=True)
     s.add_argument("--confirm", action="store_true")
+    s.add_argument("--ref", help="结算成 done 时核到的外部号：飞书消息号（必填）、PR 号、合并提交号")
     a = ap.parse_args(argv)
     try:
-        out = show() if a.cmd == "show" else settle(a.key, a.result, a.note, a.confirm)
+        out = show() if a.cmd == "show" else settle(a.key, a.result, a.note, a.confirm, a.ref)
     except Refused as e:
         print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))
         return 1

@@ -350,6 +350,8 @@ def _reconcile_queued(cid, attempt):
     if card and card["message_id"] and not card["hub_delivered_at"]:
         try:
             F.report_delivered(cid)              # 送达报告可能已被中台收下、本地没记上：按登记原样重报
+        except F.Deferred:                       # 锁里再核时闸关了：先不动，开闸后再对
+            return []
         except F.HubError as e:
             if e.status in DEFINITE:             # 中台不收这份送达：看看卡还开不开
                 c = read_card(cid)

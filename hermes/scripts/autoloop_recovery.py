@@ -21,7 +21,7 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
   3. 中台：/healthz 通、提交号等于锁定的版本（hub-pin.json，升级流程验证通过后才改）；不是就不开闸；
   4. 外部回读：出口账本里结果不明的逐条只读回读 GitHub / 飞书；本人点击里结果不明、在途过久的只读回读中台卡片；
      连不上的留着下次，对不上的记「核不清」交常浩；秘书账本里还有结果不明、核不清、还在送的代批就不开闸
-     （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩定）；
+     （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩 secretary_gate settle 定）；
   5. 结算开闸：记下这次的纪元和报告。仍冻结的范围（结果不明、核不清）各自继续拒绝，别的照常放行。
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
 
@@ -46,10 +46,12 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
 """
 import argparse
 import contextlib
+import datetime as dt
 import fcntl
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import urllib.request
@@ -250,8 +252,14 @@ def hold(point_id, snapshot, hub_commit, max_card):
     return {"held": point_id}
 
 
+SECRETARY_STALE = dt.timedelta(seconds=120)   # 同 secretary_gate.STALE
+
+
 def in_flight_writes():
-    """还在做的写：出口账本 executing、本人回答 inflight、派单事件在途。排空完才能做快照。"""
+    """还在做的写：出口账本 executing、本人回答 inflight、飞书桥接正持锁处理卡片（改卡、报送达）、派单事件刚领走在发、
+    秘书代批在送。排空完才能做快照（第 2 轮预审 P2-C：桥接和秘书原来没列）。停写（hold）之后桥接每轮在锁里先看闸，
+    所以「锁空着」就说明没有桥接写在途。派单事件只列刚领走（60 秒内）的：更早的那次 POST 已经结束（有超时），只是结果
+    不明，开闸后按同一 id 补发；列进来停写期间又补发不了，排空永远完不成。"""
     out = []
     with E.db(write=False) as con:
         out += [f"出口 {r['key']}" for r in con.execute("SELECT key FROM exits WHERE state = 'executing'")]
@@ -260,12 +268,38 @@ def in_flight_writes():
         if F.db_file().exists():
             with F.db() as con:
                 out += [f"本人回答 卡片 {r[0]}" for r in con.execute("SELECT card_id FROM claims WHERE state = 'inflight'")]
+            if F.bridge_busy():
+                out.append("飞书桥接正在处理一张卡")
     except ImportError:
         pass
     if G.db_path().exists():
+        now = G.now_tz()
         with G.tx() as con:
-            out += [f"派单事件 {r[0]}" for r in con.execute("SELECT event_key FROM hub_events WHERE sent = 2")]
+            out += [f"派单事件 {r[0]}" for r in con.execute("SELECT event_key, claimed_at FROM hub_events WHERE sent = 2")
+                    if now - G.parse_iso(r[1]) < G.STALE]
+    out += [f"秘书代批 {d}" for d in _secretary_sending()]
     return out
+
+
+def _secretary_sending():
+    """秘书账本里正在送的代批（executing，2 分钟内动过的；更早的是进程中途没了，由秘书对账处理，不算在途）。
+    库或表不在就是没有；读不了当作有（不做快照）。"""
+    import twin_state as TS
+    p = Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser()
+    if not p.exists():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=10)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secretary_decisions'").fetchone():
+                return []
+            now = G.now_tz()
+            return [r[0] for r in con.execute("SELECT id, updated_at FROM secretary_decisions WHERE status = 'executing'")
+                    if now - G.parse_iso(r[1]) < SECRETARY_STALE]
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return [f"（秘书账本读不了：{type(e).__name__}）"]
 
 
 def restorable(point_id):
@@ -354,7 +388,6 @@ def _secretary():
     """秘书账本里结果不明、核不清、还在送的代批（常浩 11-19「都按推荐」：有就不开闸；秘书自己的对账逻辑不改，
     由 secretary_gate.reconcile 结掉，核不清的由常浩定）。库不在、还没有秘书表就是没有（不新建）；读不了不开闸。
     返回 (不开闸的原因或 None, 说明)。"""
-    import sqlite3
     import twin_state as TS
     p = Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser()
     if not p.exists():

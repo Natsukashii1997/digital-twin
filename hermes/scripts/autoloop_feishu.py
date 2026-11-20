@@ -164,6 +164,33 @@ def bridge_lock():
         os.close(fd)                             # 关掉文件描述符即释放锁
 
 
+def bridge_busy():
+    """桥接锁现在有人拿着吗（不等）。给恢复闸排空用（第 2 轮预审 P2-C）：停写之后桥接在锁里先看闸，锁空着就没有桥接写在途。"""
+    f = db_file()
+    if not Path(f"{f}.bridge.lock").exists():
+        return False
+    fd = os.open(f"{f}.bridge.lock", os.O_WRONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def _still_open(epoch):
+    """持桥接锁后再核一次开闸资格（第 2 轮预审 P2-C）：入口看过闸之后、拿到锁之前，可能已经停写或出现结果不明。
+    改卡、补发结束通知、报送达都在这之后，排空时看到锁空着就说明没有桥接写在途。关了抛 Deferred（暂缓，不报 failed）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        with R.admission(epoch):                 # 锁顺序：桥接锁 → 出口账本（出口账本持有者从不等桥接锁）
+            pass
+    except E.Refused as e:
+        raise Deferred(str(e))
+
+
 def card_by_token(token):
     with db() as con:
         r = con.execute("SELECT * FROM feishu_cards WHERE token = ?", (token,)).fetchone()
@@ -328,12 +355,17 @@ def _deliver(card):
                 raise E.Definite(msg)
             raise
     try:                                           # 写前账本（批 0D）：先记要发，再发；结果不明不重发，对账按令牌找消息
-        mid = E.guard("send_feishu", f"send_feishu:card-{card['id']}", f"card:{card['id']}",
-                      {"chat": chat, "marker": token, "msg_type": "interactive"}, do)["message_id"]
+        got = E.guard("send_feishu", f"send_feishu:card-{card['id']}", f"card:{card['id']}",
+                      {"chat": chat, "marker": token, "msg_type": "interactive"}, do)
     except E.Definite as e:
         raise SendError(str(e))
     except E.Refused as e:
         raise Deferred(str(e))
+    except Exception as e:                         # 结果不明（出口账本已记、闸已关）：也是暂缓，不报 failed（第 2 轮预审 P2-B）
+        raise Deferred(f"发卡结果不明，冻结这张卡等对账：{type(e).__name__}: {str(e)[:200]}")
+    mid = got.get("message_id")
+    if not mid:                                    # 账本说发过却没有消息号（人工结算没填）：不猜，暂缓（第 2 轮预审 P2-B2）
+        raise Deferred(f"出口账本记这张卡已发出，但没有消息号（卡片 {card['id']}），请常浩按消息号结算")
     with db(write=True) as con:
         con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, "
                     "delivered_at = CASE WHEN delivered_at IS NULL OR version != ? THEN ? ELSE delivered_at END, "
@@ -429,7 +461,7 @@ def once(wait=50):
     import autoloop_exits as E
     import autoloop_recovery as R
     try:
-        R.ensure_open()
+        epoch = R.ensure_open()
     except E.Refused as e:
         return {"ok": False, "paused": str(e)}
     if not hub_readable():                       # 第 5 轮 P1-01：领一次就用掉中台一次尝试，读不到就先别领
@@ -440,6 +472,10 @@ def once(wait=50):
     if not card:
         return None
     with bridge_lock():
+        try:
+            _still_open(epoch)
+        except Deferred as e:                    # 领卡之后闸关了：什么都不写，中台过一会儿再给这张卡
+            return {"card": card["id"], "ok": False, "deferred": True, "why": str(e)}
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
             return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
@@ -472,8 +508,15 @@ def once(wait=50):
 
 
 def report_delivered(card_id):
-    """持桥接锁报送达（对账补报走这里，专项续审 P2-02）。"""
+    """持桥接锁报送达（对账补报走这里，专项续审 P2-02）。往中台写，过恢复闸：入口看一眼，锁里再核（闸关了抛 Deferred）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        epoch = R.ensure_open()
+    except E.Refused as e:
+        raise Deferred(str(e))
     with bridge_lock():
+        _still_open(epoch)
         _report_delivered(card_id)
 
 

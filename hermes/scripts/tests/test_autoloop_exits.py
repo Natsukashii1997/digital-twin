@@ -301,6 +301,25 @@ class Reconcile(Base):
         self.assertEqual(E.settle("merge:o/r:1:h", "failed", "GitHub 上看过没合并", confirm=True)["state"], "failed")
         self.assertEqual(E.show()["frozen"], [])
 
+    def test_settle_done_writes_the_ref_and_feishu_needs_one(self):
+        """第 2 轮预审 P2-B2：发飞书核不清、常浩结算成做成了，必须写核到的消息号，同一动作之后直接回它（桥接要拿它报送达）。"""
+        key = "send_feishu:card-7"
+        self.unknown(key, kind="send_feishu", scope="card:7")
+        E.reconcile({"send_feishu": lambda t, r, n: (None, {})})
+        with self.assertRaisesRegex(E.Refused, "--ref"):
+            E.settle(key, "done", "私聊里看到了", confirm=True)
+        with self.assertRaisesRegex(E.Refused, "不写 --ref"):
+            E.settle(key, "failed", "没看到", confirm=True, ref="om_x")
+        self.assertEqual(E.settle(key, "done", "私聊里看到了", confirm=True, ref="om_x")["ref"], "om_x")
+        got = E.guard("send_feishu", key, "card:7", {}, self.act())
+        self.assertEqual((got["again"], got["message_id"]), (True, "om_x"))
+        self.unknown("open_pr:t1:b:h", kind="open_pr", scope="task:t1")
+        E.reconcile({"open_pr": lambda t, r, n: (None, {})})
+        with self.assertRaisesRegex(E.Refused, "数字"):
+            E.settle("open_pr:t1:b:h", "done", "看过", confirm=True, ref="x")
+        E.settle("open_pr:t1:b:h", "done", "GitHub 上看到了", confirm=True, ref="12")
+        self.assertEqual(E.guard("open_pr", "open_pr:t1:b:h", "task:t1", {}, self.act())["pr"], 12)
+
     def test_reconcile_sweeps_killed_first(self):
         now = E.now_tz()
         with E.db() as con:
