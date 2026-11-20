@@ -8,6 +8,8 @@
 
 ## 0E-2 中台和网关搬进 dt-gate（ADR-015，2026-11-20，Claude；PR #268，叠在 #210 上，未合并、未安装）
 
+- **L3 通过**：审查链 r1a1f85007d100，第 2 轮通过（受审 `20d0497`，P0 0 / P1 0；CI hermes 1718、orca 48 全过）。之后只有 `b5ef2a0` 改注释（非阻断 P2-02：写准监听核对的保证边界）。等 #210 合并后变基、常浩合并；合并后按命令清单真机跑。
+
 - 做了什么：`ops/dt_gate_hub.py`（常浩用 sudo 跑：stage 复制 root 所有的运行副本并写 root 的入口 → preflight → migrate 搬家、出错自动退回、被打断可 rollback 收拾 → windows 装只读窗口 3352、秘书窄窗口 3353 → rotate-worker → update / run / status / rollback）、`ops/dt_gate_user.py`（以各账号身份跑的小工具，root 不碰账号家目录）、`hermes/scripts/gate_intake.py`（秘书窄窗口：只收秘书提议、关秘书、撤销单）、`hermes/scripts/hub_listener.py`（dt-gate 带钥匙访问本机端口前核监听者，防抢绑冒充）。
 - 独立审查（Claude 子 agent，送 L3 前）：P1 两条（日常 sudo 跑主账号能改的脚本；中台端口能被抢绑骗走钥匙）、P2 十五条，已修 P1 两条和 P2 的 1–10、13、14，11、12、15 写进命令清单；工人重连带的接单钥匙要 pf 按监听账号放行，交 0E-1。
 - 改变的已有行为（都还没装，现在实际影响为零）：autoloop_config / autoloop_grants / autoloop_feishu 设了 DT_HUB_LISTENER_UID 时先核监听者（不设不变）；凭证镜像、任务单默认路径从 `/Users/Shared/dt-autoloop/{grants,tasks}` 改到 `/Users/Shared/dt-gate/…`（autoloop_grants、dt_worktree、派单规则提示词）；秘书巡视多两个可选变量 DT_READONLY_URL、DT_SECRETARY_INTAKE，不设时照旧；dt_worktree 的环境变量 DT_AUTOLOOP_SHARED 改名 DT_GATE_SHARED；工人反向测试多查 dt-gate 家目录三项。
