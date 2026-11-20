@@ -25,5 +25,5 @@ jobs:
       - run: python -m pip install --disable-pip-version-check pyyaml==6.0.1
       # 0E-2 的监听核对（hub_listener）要用真 lsof 测；Ubuntu 镜像一般自带，没有就装上（L3 第 1 轮 P2-01：不靠跳过）
       - run: command -v lsof || (sudo apt-get update -q && sudo apt-get install -y -q lsof)
-      - run: python -B -m unittest discover -s hermes/scripts/tests
-      - run: python -B -m unittest discover -s orca/tests
+      # 两套全量按测试类分片并行跑、汇总成一个结果（常浩 2026-11-20 定提速 B）；任何一片失败或条数对不上整体失败
+      - run: python -B scripts/test_all.py

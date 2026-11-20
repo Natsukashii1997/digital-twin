@@ -31,15 +31,22 @@
 cards.db.bridge.lock，进程级排他锁，不可重入：锁里只调带下划线的内部实现）。deliver 在改飞书消息之前先核本地登记，登记已是
 更高版本就拒（不把消息改回旧版）；写登记一律带「版本不回退」条件。对账补报送达（autoloop_answer.reconcile → report_delivered）
 同样拿这把锁。报完送达就放锁，再提交排队的本人回答（autoloop_answer.flush，submit 自己会再核版本），中台慢时不堵别的卡。
-中台库读不到（PR #218 第 5 轮 P1-01，常浩 11-19 选甲）：中台每递一次卡（GET /cards/next）都算一次尝试、1 分钟后再递，9 次后
-永久放弃（given_up，改版也不再递，ask 卡没有恢复入口；见中台 kernel/decide.ts 的 nextCard、failed）。所以：
+中台库读不到（PR #218 第 5 轮 P1-01，常浩 11-19 选甲）：中台每递一次卡（GET /cards/next）都算一次尝试、1 分钟后再递，9 次
+（或离第一次尝试超过一小时）后放弃（given_up，改版也不再递；见中台 kernel/decide.ts 的 nextCard、failed）。放弃后中台不会自己
+再送，要本人「重新送」才恢复（agent-autoloop `abc8d41` 起：`agent-autoloop redeliver <卡片号>`，次数和一小时从头算；另有一种：
+来源用同一个 key 把同一条通知再说一遍，中台也会重开）。所以：
   - 领卡前先确认中台库能读（hub_readable），读不到这轮不领、不用掉尝试次数，私聊提醒常浩（同一原因 1 小时最多 1 次）；
   - 领到后仍读不到这张卡的版本（极小窗口、或卡不见了），或本地登记的版本比中台的还新（中台库被恢复成旧快照，中台下次还是递
     这一版，第 6 轮 P2-01）：不发，向中台报 failed 并写明原因（中台按 1、3、7…分钟退避重试，状态里能看到原因），放锁后提醒；
     报 failed 本身出错（卡不在、5xx、没回应）也照样提醒，写明中台可能没记上、请人工核查（单独的提醒键，第 6 轮 P2-02）；
   - 中台已是更新的版本：不发、不报，中台 1 分钟后递最新版本；
-  - run 每轮只读扫一次中台里 feishu 通道已放弃送达的卡，每张私聊告诉常浩一次（哪张、标题、试了几次、最后原因），请他手动处理；
-    自动恢复要中台扩展点，和规格第 9 节验收 12 一起向上游要。
+  - run 每轮只读扫一次中台里 feishu 通道已放弃送达的卡，私聊告诉常浩（哪张、标题、试了几次、最后原因），并给出重新送的命令
+    `agent-autoloop redeliver <卡片号>`（#278；重新送要本人钥匙，只给常浩手动用，桥接不自动调）。每一轮放弃只说一次：提醒键是
+    「卡片号 + 这一轮第一次尝试的时间」（中台重新送时把它清掉、下一次递卡重新记），所以重新送之后又放弃会再提醒一次，
+    中间桥接没扫到也一样。话按「重新送有没有用」分四种（照中台 kernel/decide.ts 的 worthSending）：卡片还开着 → 给命令；
+    已处理完、之前送到过（只是那条消息没更新成最后结果）→ 说明可以不管，命令照给；仅告知的通知、发出不到 24 小时、没送到过 →
+    说明你还没看到、给命令；其余（没送到就已结束，或通知过了 24 小时）→ 说明重新送也不会再发。同一轮放弃里送达报告迟到补上
+    （中台 delivered 把次数和第一次尝试时间清空、放弃标记留着）的不算放弃，不提醒。
 提醒记在 cards.db 的 alerts 表（提醒键 → 上次提醒时间），发不出去不记、下次再试。
 不调用 AI。
 """
@@ -354,14 +361,18 @@ def hub_readable():
 
 
 def given_up_cards():
-    """中台库只读：feishu 通道已放弃送达的卡 [{card_id, title, tries, error}]；读不到返回 None。"""
+    """中台库只读：feishu 通道已放弃送达的卡 [{card_id, title, tries, error, first_try_at, ref, state, fyi, created_at}]；
+    读不到返回 None。first_try_at：这一轮第一次尝试的时间（重新送后从头记，用来认「这是第几轮放弃」）；ref：之前送到过的
+    那条消息；state、fyi、created_at：卡片现在的状态、是不是仅告知的通知、什么时候建的（判断重新送有没有用）。
+    次数是 0 且没有第一次尝试时间的不算：那是放弃之后送达报告补上了（中台 delivered 清这两项、不清放弃标记），已经送到。"""
     import autoloop_publish as P
     try:
         con = P._hub()
         try:
-            rows = con.execute("SELECT d.card_id, c.title, d.tries, d.error FROM deliveries d LEFT JOIN cards c "
-                               "ON c.id = d.card_id WHERE d.channel = ? AND d.given_up = 1 ORDER BY d.card_id",
-                               (CHANNEL,)).fetchall()
+            rows = con.execute("SELECT d.card_id, c.title, d.tries, d.error, d.first_try_at, d.ref, c.state, c.fyi, "
+                               "c.created_at FROM deliveries d LEFT JOIN cards c ON c.id = d.card_id "
+                               "WHERE d.channel = ? AND d.given_up = 1 AND NOT (d.first_try_at IS NULL AND d.tries = 0) "
+                               "ORDER BY d.card_id", (CHANNEL,)).fetchall()
         finally:
             con.close()
     except (sqlite3.Error, OSError, ValueError, Fail):
@@ -390,15 +401,41 @@ def alert(key, text, every=ALERT_EVERY):
     return True
 
 
+FYI_WINDOW = 24 * 3600                   # 秒：仅告知的通知建了这么久以后中台不再送（中台 worthSending）
+
+
+def given_up_todo(c, now=None):
+    """放弃提醒的后半句：这张卡重新送有没有用、常浩要做什么。照中台 kernel/decide.ts 的 worthSending：
+    卡片开着、或之前送到过（有 ref）、或是建了不到 24 小时的仅告知通知，重新送才会发。"""
+    cmd = f"agent-autoloop redeliver {c['card_id']}"
+    if c.get("state") in (None, "open"):
+        return f"这张卡不会再自动送到你这里。要让它重新送，在电脑终端运行：{cmd}"
+    if c.get("ref"):                             # 已回答或结案、之前送到过：没送到的只是把那条消息更新成最后结果
+        return f"这张卡已经处理完，只是飞书里那条消息没更新成最后结果，可以不管；想更新就在电脑终端运行：{cmd}"
+    try:
+        made = dt.datetime.fromisoformat(str(c.get("created_at")).replace("Z", "+00:00"))
+        age = ((now or dt.datetime.now().astimezone()) - made).total_seconds()
+    except (TypeError, ValueError):
+        age = float("inf")
+    if c.get("fyi") and age < FYI_WINDOW:
+        return f"这是一条只告知你的通知，还没送到你这里。要让它重新送，在电脑终端运行：{cmd}（通知发出满 24 小时后就不会再送）"
+    return "这张卡没送到你这里就已经结束（或是发出超过 24 小时的通知），重新送也不会再发。"
+
+
 def check_given_up():
-    """把中台已放弃送达的卡逐张私聊告诉常浩，每张只说一次。返回这次提醒了的卡片号。"""
+    """把中台已放弃送达的卡逐张私聊告诉常浩，并给出重新送的命令（#278）。每一轮放弃只说一次：提醒键带这一轮第一次尝试的
+    时间，常浩重新送（agent-autoloop redeliver）之后又放弃是新的一轮，再说一次。返回这次提醒了的卡片号。"""
     told = []
     for c in given_up_cards() or []:
+        cid = c["card_id"]
+        with db() as con:                            # 这张卡以前提醒过别的一轮：这次是重新送之后又放弃
+            again = con.execute("SELECT 1 FROM alerts WHERE key LIKE ? LIMIT 1", (f"given-up:{cid}:%",)).fetchone()
         why = (c.get("error") or "没有记录原因")[:120]
-        text = (f"飞书桥接：中台卡片 {c['card_id']}「{c.get('title') or '（没有标题）'}」已放弃送达（试了 {c.get('tries')} 次，"
-                f"最后原因：{why}）。这张卡不会再自动送到你这里，请手动处理。")
-        if alert(f"given-up:{c['card_id']}", text, every=None):
-            told.append(c["card_id"])
+        what = "重新送之后又放弃了送达" if again else "已放弃送达"
+        text = (f"飞书桥接：中台卡片 {cid}「{c.get('title') or '（没有标题）'}」{what}（试了 {c.get('tries')} 次，"
+                f"最后原因：{why}）。{given_up_todo(c)}")
+        if alert(f"given-up:{cid}:{c.get('first_try_at') or ''}", text, every=None):
+            told.append(cid)
     return told
 
 
@@ -481,7 +518,7 @@ def run():
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
                 A.tell(A.identities()[1], text)
-            for cid in check_given_up():               # 中台已放弃送达的卡：每张私聊说一次
+            for cid in check_given_up():               # 中台已放弃送达的卡：每一轮放弃私聊说一次
                 print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
             out = once()
             if out:

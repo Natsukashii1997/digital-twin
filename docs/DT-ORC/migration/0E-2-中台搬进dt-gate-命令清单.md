@@ -28,13 +28,13 @@ cd ~/Documents/ChatGPT/个人/work/digital-twin && git checkout main && git pull
 
 ## 第 1 步：复制运行副本（stage）
 
-引擎用现在正在跑的那个提交 `d3a44ca`（只搬家、不顺带升级引擎）；本仓库填刚合并的 main 的**完整 40 位提交号**（在 GitHub 的 PR 页面上看合并提交，和本机 `git rev-parse origin/main` 对一下；脚本不认分支名，因为本机的引用主账号能改）。这是**唯一一次**从仓库里的脚本用 sudo：仓库里那份主账号能改，之后一律用 stage 装好的、root 所有的入口。
+引擎用主账号中台现在正在跑的那个提交（只搬家、不顺带升级引擎；11-20 引擎批 D 升级后是 `abc8d41efdc97efe4c25bac8376460424baec726`，跑之前用 `git -C ~/.agent-autoloop/app rev-parse HEAD` 再核一次，以它为准）；本仓库填刚合并的 main 的**完整 40 位提交号**（在 GitHub 的 PR 页面上看合并提交，和本机 `git rev-parse origin/main` 对一下；脚本不认分支名，因为本机的引用主账号能改）。这是**唯一一次**从仓库里的脚本用 sudo：仓库里那份主账号能改，之后一律用 stage 装好的、root 所有的入口。
 
 ```bash
-sudo /usr/bin/python3 -B -E -s ops/dt_gate_hub.py stage --engine-repo ~/Documents/ChatGPT/个人/work/agent-autoloop --engine-commit d3a44cac4460f4e0417c3d407baa853de7aa25ff --repo ~/Documents/ChatGPT/个人/work/digital-twin --repo-commit <合并提交的 40 位号> --node ~/.nvm/versions/node/v24.16.0/bin/node
+sudo /usr/bin/python3 -B -E -s ops/dt_gate_hub.py stage --engine-repo ~/Documents/ChatGPT/个人/work/agent-autoloop --engine-commit abc8d41efdc97efe4c25bac8376460424baec726 --repo ~/Documents/ChatGPT/个人/work/digital-twin --repo-commit <合并提交的 40 位号> --node ~/.nvm/versions/node/v24.16.0/bin/node
 ```
 
-看到「副本好了：引擎 d3a44cac4460、本仓库 …、node v24.16.0」就对了。node 签名核不过、版本不够 24、取出来的文件和提交里的对不上，都会停下。
+看到「副本好了：引擎 abc8d41efdc9、本仓库 …、node v24.16.0」就对了。node 签名核不过、版本不够 24、取出来的文件和提交里的对不上，都会停下。
 
 之后的命令都用这个入口（先在终端里设一次变量，后面的命令照抄）：
 
@@ -80,7 +80,7 @@ sudo "$GATE" rotate-worker --confirm
 sudo "$GATE" status
 ```
 
-三个服务都应是「在跑」，中台健康检查报出 `d3a44cac4460…`。把输出发回 Claude 会话，由 Claude 对照验收句判断。
+三个服务都应是「在跑」，中台健康检查报出 `abc8d41efdc9…`（即第 1 步填的引擎提交）。把输出发回 Claude 会话，由 Claude 对照验收句判断。
 
 ## 以后要用到的
 
