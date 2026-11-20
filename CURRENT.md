@@ -6,6 +6,12 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## #195 批 1 飞书拍板：卡片渲染模块，样式定丙版（2026-11-20，Claude；PR 待开，未合并、未安装）
+
+- 做了什么：新增 `hermes/scripts/autoloop_cardview.py`（和发送通道无关的渲染模块，桥接和门卫共用；接口见文件头和 PR 正文）和 `tests/test_autoloop_cardview.py`（开着 / 已定 / 已办完 / 已失效；重复点只算一次、引用回答、原有合并 / 推翻按钮照常）。没改 `autoloop_feishu.py`、`autoloop_answer.py`（甲线 line-a-0e3 在抽共用模块）。
+- 选样式：甲 对话式 / 乙 决策单 / 丙 推荐优先 × 三种状态共 9 张真卡片以猛鬼兽机器人发到常浩私聊并回读核对；常浩 11-20 回「都选丙」，已登记 `docs/DECIDED.md`，模块只留丙版。证据 `evidence/195-batch1-cards/`。
+- 下一步：Claude 子 agent 独立审 → 送 L3；桥接改用本模块等 line-a-0e3 的共用模块落地后接。
+
 ## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR #250 已合并 3c6d7a9，已安装）
 
 - 来由：项目坑 L-03（唤醒后代理没通，一周 4 次，每次只修一个脚本）；常浩 2026-11-20 批复盘提案 P9「按改过的」：体检只读 plist 键名，不读进程环境（G-42）。
