@@ -185,7 +185,7 @@
 
 - 变基到 `6120638` 后临时 HOME 全量：hermes 1390 项 1 项报错、orca 48 项全过；报错的是 `test_autoloop_feishu` 的 `test_delivered_but_crashed_before_recording_recovers_once`（清临时目录时 hub worker 还在写 `runs/2-1`，Directory not empty）。只跑这个模块不加载本 PR 的文件，PR 分支 3 次错 1 次、main 5 次全过，判为偶发、与本 PR 无关。CI `test` 通过。证据 `evidence/2026-11-19-pr217-rebase2/`。
 - 已装：`proposal_digest.py` → `~/.hermes/scripts/`，`SKILL.md` → `~/.hermes/skills/autonomous-ai-agents/proposal-digest/`，`cmp` 一致；旧版备份在 `evidence/2026-11-19-pr217-install/`。`launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway` 重启，13:00:27 飞书重新连上（pid 36084）。
-- 定时任务 `81464e7ea4e3` 没改。待：11-23（周一）10:00 第一期带「再犯与待提升」，看卡片和 `DigitalTwin/shadow/guards-decisions.md` 第一次建出来。
+- 定时任务：~~`81464e7ea4e3` 没改~~ 更正（11-20）：`81464e7ea4e3` 已于 11-11 按猛鬼兽清单删除（见下文「已删除」一行），照原写法 11-23 不会发。11-20 常浩对改动确认回「恢复独立任务」，按旧任务参数重新注册为 `4fece1545136`（`0 10 * * 1`，script `proposal_digest_draft.py`、技能 proposal-digest，结果投递 local、失败投递私聊；`hermes cron list` 读回一致；任务表前后与本地预览在 `evidence/2026-11-20-proposal-digest-restore/`）。待：11-23（周一）10:00 第一期带「再犯与待提升」（本地 `send --dry-run` 预览已含，替身通过）；`DigitalTwin/shadow/guards-decisions.md` 要等常浩回复卡片、写回结论时才建出。
 
 ## 2026-11-19 · 亚古兽接手销售 AI 侧边栏固定汇报（PR #219 已合并 `6a29c36`，已安装、已建定时任务）
 
