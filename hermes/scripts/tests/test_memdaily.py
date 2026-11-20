@@ -4,7 +4,9 @@ import datetime as dt
 import json
 import sys
 import tempfile
+import os
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -93,6 +95,12 @@ def good_draft():
 
 
 class Collect(unittest.TestCase):
+    def setUp(self):
+        # 测试隔离默认 DT_NET_WAIT_SECONDS=0（不等网络）；这里要测 lark 调用的网络重试，按正式的 300 秒预算
+        p = mock.patch.dict(os.environ, {"DT_NET_WAIT_SECONDS": "300"})
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_sources_and_filters(self):
         f = facts()
         self.assertIsNone(f["skip"])
