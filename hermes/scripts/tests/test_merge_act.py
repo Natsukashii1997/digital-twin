@@ -20,6 +20,9 @@ ACT = HERE.parent / "merge_act.py"
 #   view：任何 pr view；view_merged：合并之后的 pr view；merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
 #   comment：留言。
 # pr view / list 没写 changedFiles 的按 files 的个数补上；FAKE_DIR/off_on_view 存在时，pr view 顺手把策略记录关掉（#257）。
+# api -X PUT repos/<仓库>/pulls/<号>/merge（按策略合并的 REST 合并接口，#260）：合上就打印 {sha, merged}；版本不对 409、
+# 已不是 OPEN 405；fail.json 的 merge 在合之前断网、merge_lost 合上之后断网；FAKE_DIR/other_merges_first 存在时先被别处合掉。
+# FAKE_DIR/label_on_view2 存在时，第二次 pr view 起 PR 带 needs-info。pr list --search 按正文里的词找。
 # pr revert（#257）：在 prs.json 里新开一个撤回 PR（号 = 原号 + 100），打印它的网址；FAKE_DIR/revert_fail 存在就失败。
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -29,11 +32,21 @@ args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
     f.write(json.dumps(args, ensure_ascii=False) + "\n")
 prs = json.loads((root / "prs.json").read_text(encoding="utf-8"))
+if args[:3] == ["api", "-X", "PUT"]:                 # REST 合并接口（按策略合并用，#260）：换成内部写法 pr apimerge <号> --repo <仓库> sha=…
+    parts = args[3].split("/")
+    args = ["pr", "apimerge", parts[4], "--repo", parts[1] + "/" + parts[2]] + args[4:]
 repo = args[args.index("--repo") + 1]
 mine = prs.get(repo, {})
+def full(p):      # 没写的字段按「本仓库分支开的 PR」补：改动文件数、来源仓库
+    return {"changedFiles": len(p.get("files") or []), "isCrossRepository": False,
+            "headRepository": {"name": repo.split("/")[1]}, "headRepositoryOwner": {"login": repo.split("/")[0]}, **p}
 if args[:2] == ["pr", "list"]:
     state = args[args.index("--state") + 1]
-    print(json.dumps([{"changedFiles": len(p.get("files") or []), **p} for p in mine.values()
+    if "--search" in args:                           # 按正文里的记录号找（撤回 PR 的认领）
+        word = args[args.index("--search") + 1].split()[0]
+        print(json.dumps([{"number": p["number"], "url": "https://github.com/" + repo + "/pull/" + str(p["number"]),
+                           "state": p["state"]} for p in mine.values() if word in (p.get("body") or "")])); sys.exit(0)
+    print(json.dumps([full(p) for p in mine.values()
                       if state == "all" or p["state"] == state.upper()])); sys.exit(0)
 pr = mine.get(args[2])
 if pr is None:
@@ -58,11 +71,32 @@ if args[:2] == ["pr", "comment"]:
     msg = fail("comment")
     if msg:
         die(msg)
+if args[:2] == ["pr", "view"] and (root / "label_on_view2").exists():     # 第二次读取时已经被加了 needs-info
+    n = int((root / "label_on_view2").read_text() or 0) + 1
+    (root / "label_on_view2").write_text(str(n))
+    if n == 2:
+        pr["labels"] = [{"name": "needs-info"}]
+        (root / "prs.json").write_text(json.dumps(prs))
+if args[:2] == ["pr", "apimerge"]:
+    if fail("merge"):
+        die('Put "https://api.github.com/repos/x": EOF')
+    if (root / "other_merges_first").exists():       # 别处抢先合了：这次请求被拒，但 PR 已合并
+        pr["state"], pr["mergeCommit"] = "MERGED", {"oid": "a" * 40}
+        (root / "prs.json").write_text(json.dumps(prs))
+    if pr["state"] != "OPEN":
+        die("gh: Pull Request is not mergeable (HTTP 405)")
+    if (root / "merge_fail").exists() or [a for a in args if a.startswith("sha=")] != ["sha=" + pr["headRefOid"]]:
+        die("gh: Head branch was modified. Review and try the merge again. (HTTP 409)")
+    pr["state"], pr["mergeCommit"] = "MERGED", {"oid": "f" * 40}
+    (root / "prs.json").write_text(json.dumps(prs))
+    if fail("merge_lost"):
+        die('Put "https://api.github.com/repos/x": EOF')
+    print(json.dumps({"sha": "f" * 40, "merged": True, "message": "Pull Request successfully merged"})); sys.exit(0)
 if args[:2] == ["pr", "view"]:
     if (root / "off_on_view").exists():           # #257：取 PR 状态的当口常浩关了自动合并
         pf = Path(os.environ["DT_MERGE_DIR"]) / "policy.json"
         pf.write_text(json.dumps(dict(json.loads(pf.read_text()), enabled=False)))
-    print(json.dumps({"changedFiles": len(pr.get("files") or []), **pr})); sys.exit(0)
+    print(json.dumps(full(pr))); sys.exit(0)
 if args[:2] == ["pr", "merge"]:
     if (root / "merge_fail").exists() or args[args.index("--match-head-commit") + 1] != pr["headRefOid"]:
         sys.stderr.write("Head branch was modified. Review and try the merge again.\n"); sys.exit(1)
@@ -77,8 +111,11 @@ if args[:2] == ["pr", "revert"]:
     if (root / "revert_fail").exists():
         die("GraphQL: Something went wrong (revertPullRequest)")
     n = str(int(args[2]) + 100)
-    mine[n] = dict(pr, number=int(n), title="Revert " + pr["title"], state="OPEN", headRefOid="e" * 40, mergeCommit=None)
+    mine[n] = dict(pr, number=int(n), title="Revert " + pr["title"], state="OPEN", headRefOid="e" * 40, mergeCommit=None,
+                   body=args[args.index("--body") + 1])
     (root / "prs.json").write_text(json.dumps(prs))
+    if fail("revert_lost"):
+        die('Post "https://api.github.com/graphql": EOF')
     print("https://github.com/" + repo + "/pull/" + n); sys.exit(0)
 sys.stderr.write("fake gh: 不该调用 " + " ".join(args) + "\n"); sys.exit(2)
 '''

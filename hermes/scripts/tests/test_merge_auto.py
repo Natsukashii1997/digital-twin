@@ -13,7 +13,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import merge_officer as mo  # noqa: E402
 import merge_policy as MP  # noqa: E402
-from test_merge_act import ACT, Fixture, sh  # noqa: E402
+from test_merge_act import ACT, OFFICER, Fixture, sh  # noqa: E402
 
 EOF_NET = 'Post "https://api.github.com/graphql": EOF'
 
@@ -57,7 +57,23 @@ class Auto(Fixture, unittest.TestCase):
         return json.loads((self.fake / "prs.json").read_text())["o/app"][str(number)]["state"]
 
     def merges_called(self):
-        return [c for c in self.calls() if c[:2] == ["pr", "merge"]]
+        """按策略合并发出的合并请求（REST 合并接口）。"""
+        return [c for c in self.calls() if c[:3] == ["api", "-X", "PUT"]]
+
+    def scan_at(self, now):
+        r = self.cli(OFFICER, "scan", env={"DT_NOW": now})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def intent(self, at, mid="m-x"):
+        """账本里只有「要合」的一条（进程在记了要合之后没了）。"""
+        self.dir.mkdir(exist_ok=True)
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir), "DT_NOW": at}):
+            MP.append({"event": "intent", "id": mid, "repo": "o/app", "pr": "5", "head": self.head, "title": "PR 5"})
+
+    def mp(self, fn, *args):
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
+            return fn(*args)
 
     def fail(self, **plan):
         (self.fake / "fail.json").write_text(json.dumps(plan))
@@ -110,8 +126,7 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("没拉本机主目录、没安装", r.stdout)
         self.assertIn("撤回：merge_act.py revert app#5", r.stdout)
         (merge,) = self.merges_called()
-        self.assertEqual(merge[merge.index("--match-head-commit") + 1], self.head)        # 合并命令绑定判定时的版本
-        self.assertIn("--squash", merge)
+        self.assertEqual(merge[3:], ["repos/o/app/pulls/5/merge", "-f", "merge_method=squash", "-f", f"sha={self.head}"])   # 绑定判定时的版本
         intent, done = self.book()
         self.assertEqual((intent["event"], done["event"], intent["id"]), ("intent", "merged", done["id"]))
         for key, want in (("repo", "o/app"), ("pr", "5"), ("title", "PR 5"), ("head", self.head), ("base", self.base),
@@ -122,7 +137,7 @@ class Auto(Fixture, unittest.TestCase):
                                           "message_id": "om_sign", "signed_at": "2026-11-07T09:00:00+08:00"})
         self.assertEqual((intent["ready"]["mode"], intent["ready"]["by"]), ("handoff", "测试会话"))
         self.assertIn("未核实", intent["review"])
-        self.assertEqual((done["merge_commit"], done["by_this_call"]), ("f" * 40, True))
+        self.assertEqual((done["merge_commit"], done["base_ref"]), ("f" * 40, "main"))     # 合并提交号取自接口回执
         self.assertEqual(self.handoffs(), [])                                              # 合完，交出登记清掉
         (row,) = self.ledger()                                                             # 巡视之前就交出：补一行判定
         self.assertEqual((row["pr"], row["owner"], row["tier"]), ("5", mo.POLICY_OWNER, "L0"))
@@ -155,9 +170,11 @@ class Auto(Fixture, unittest.TestCase):
         """gh 一次最多给 100 个改动文件，改名的只给新路径：看不全就判不了有没有碰敏感路径，按例外交常浩。"""
         self.sign()
         cases = {"只读得到 1 个": {"changedFiles": 116},
-                 "有文件改名": {"files": [{"path": "docs/b.md", "changeType": "RENAMED"}]}}
+                 "有文件改名": {"files": [{"path": "docs/b.md", "changeType": "RENAMED"}]},
+                 "来自别的仓库（fork）": {"isCrossRepository": True, "headRepositoryOwner": {"login": "stranger"}},
+                 "来自别的仓库（fork）的 PR": {"headRepositoryOwner": {"login": "stranger"}}}      # 光是标志说不是外来的不够
         for word, kw in cases.items():
-            self.update_pr(files=[{"path": "docs/a.md"}], changedFiles=1)
+            self.update_pr(files=[{"path": "docs/a.md"}], changedFiles=1, isCrossRepository=False, headRepositoryOwner={"login": "o"})
             self.update_pr(**kw)
             r = self.auto()
             self.assertEqual(r.returncode, 3, word + r.stdout)
@@ -173,6 +190,11 @@ class Auto(Fixture, unittest.TestCase):
         r = self.auto()
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("改动文件总数", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
+        self.update_pr(changedFiles=1, isCrossRepository=None)        # 来源仓库读不到：同样不合
+        r = self.auto()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("来源仓库", r.stdout)
         self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
 
     def test_off_during_checks_stops_before_merge(self):
@@ -338,12 +360,15 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("结果不明，还没核对清楚", again.stdout)
         self.assertEqual(len(self.merges_called()), 1)
         out = self.scan().stdout
-        self.assertIn("只读核对：已按策略合并 app#5", out)
-        self.assertEqual(self.events(), ["intent", "unsure", "merged"])
-        self.assertTrue(self.book()[-1]["late"])
-        self.assertEqual(len(self.merges_called()), 1)               # 全程只发过一次合并命令
-        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
-            self.assertEqual((MP.unsettled(), MP.find_merged("o/app", 5)["status"]), ([], "merged"))
+        self.assertIn("只读核对：app#5", out)                         # 只看得到 PR 已合并，证明不了是这次合的
+        self.assertIn("来源不明", out)
+        self.assertEqual(self.events(), ["intent", "unsure", "merged_unknown"])
+        self.assertEqual(len(self.merges_called()), 1)               # 全程只发过一次合并请求
+        self.assertEqual((self.mp(MP.unsettled), self.mp(MP.find_merged, "o/app", 5)), ([], None))
+        r = self.cli(ACT, "revert", "app#5")                         # 来源不明的不能用撤回口令
+        self.assertIn("账本里没有按策略合并过 app#5", r.stdout)
+        self.scan()
+        self.assertNotIn("bypass", self.events())                    # 也不重复记成「没经合并执行器」
 
     def test_unsure_is_reconciled_even_when_policy_off(self):
         """结果不明之后常浩关了自动合并：只读核对照做（不然这条一直挂着，日报天天报结果不明）；不合新的。"""
@@ -354,22 +379,126 @@ class Auto(Fixture, unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
             self.assertTrue(MP.do_off("测试"))
         out = self.scan().stdout
-        self.assertIn("只读核对：已按策略合并 app#5", out)
-        self.assertEqual(self.events(), ["intent", "unsure", "merged"])
+        self.assertIn("来源不明", out)
+        self.assertEqual(self.events(), ["intent", "unsure", "merged_unknown"])
         self.assertEqual(len(self.merges_called()), 1)
 
     def test_crash_between_intent_and_result_is_unsettled(self):
-        """只记了「要合」就没了下文（进程中途没了）：按结果不明处理，只读核对后才放开。"""
+        """只记了「要合」就没了下文（进程中途没了，请求发没发出去不知道）：按结果不明处理，只读核对后才放开。"""
         self.sign()
-        self.dir.mkdir(exist_ok=True)
-        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir), "DT_NOW": "2026-11-07T09:30:00+08:00"}):
-            MP.append({"event": "intent", "id": "m-x", "repo": "o/app", "pr": "5", "head": self.head, "title": "PR 5"})
+        self.intent("2026-11-07T09:30:00+08:00")
         self.assertIn("还没核对清楚", self.auto().stdout)
         out = self.scan().stdout
         self.assertIn("只读核对：app#5", out)
         self.assertIn("没合上", out)
-        self.assertEqual(self.events(), ["intent", "failed"])
-        self.assertEqual(self.auto().returncode, 0)                  # 核对过没合，才重新合
+        self.assertIn("重新交出", out)
+        self.assertEqual(self.events(), ["intent", "not_merged"])
+        self.assertEqual(self.auto().returncode, 0)                  # 核对过没合、会话重新交出，才再合
+
+    def test_unsettled_is_never_resent_by_patrol(self):
+        """#260-P1-01：交出登记还在、检查全过、上一次请求结果不明。巡视只读核对，不管核对出什么都不在这一轮或之后自己重发。"""
+        self.sign()
+        self.running()
+        self.assertEqual(self.auto().returncode, 2)                  # 真的交出登记
+        self.passed()
+        self.intent("2026-11-07T09:55:00+08:00")                     # 5 分钟前记了要合，然后进程没了
+        self.assertEqual(self.scan().stdout, "")                     # 离发请求不到 10 分钟、PR 还开着：先不下结论
+        self.assertEqual((self.events(), len(self.handoffs()), self.merges_called()), (["intent"], 1, []))
+        out = self.scan_at("2026-11-07T10:20:00+08:00")              # 等够了还开着：确认没合上，交出登记作废
+        self.assertIn("没合上", out)
+        self.assertEqual((self.events(), self.handoffs(), self.merges_called(), self.state()), (["intent", "not_merged"], [], [], "OPEN"))
+        self.assertEqual(self.scan_at("2026-11-07T10:50:00+08:00"), "")
+        self.assertEqual((self.merges_called(), self.state()), ([], "OPEN"))      # 之后的巡视也不合：要会话重新交出
+
+    def test_network_cut_is_unsure_even_if_pr_still_open(self):
+        """合并请求发出时断网：回读 PR 还开着也不能记「没合上」放开重试（请求可能还在路上）。"""
+        self.sign()
+        self.fail(merge={"n": 1, "msg": "x"})
+        r = self.auto()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("结果不明", r.stdout)
+        self.assertEqual((self.state(), self.events()), ("OPEN", ["intent", "unsure"]))
+        self.assertEqual(self.scan().stdout, "")
+        self.assertEqual((self.events(), len(self.merges_called())), (["intent", "unsure"], 1))
+
+    def test_reply_lost_after_merge_is_unknown_source(self):
+        """GitHub 合上了、回执丢在路上：没有回执就不算这次合的。"""
+        self.sign()
+        self.fail(merge_lost={"n": 1, "msg": "x"})
+        self.assertIn("结果不明", self.auto().stdout)
+        self.assertEqual((self.state(), self.events()), ("MERGED", ["intent", "unsure"]))
+        self.assertIn("来源不明", self.scan().stdout)
+        self.assertEqual(self.events()[-1], "merged_unknown")
+
+    def test_merged_elsewhere_is_not_claimed(self):
+        """#260-P1-02：记了要合之后被别处（网页、卡片、会话直接 gh）抢先合了：不记成按策略合并，不给撤回资格。"""
+        self.sign()
+        (self.fake / "other_merges_first").write_text("x")
+        r = self.auto()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("结果不明", r.stdout)
+        self.assertEqual((self.state(), self.events()), ("MERGED", ["intent", "unsure"]))
+        self.assertIn("来源不明", self.scan().stdout)
+        self.assertIsNone(self.mp(MP.find_merged, "o/app", 5))
+        self.assertEqual(self.ledger()[0]["owner"], "")              # 判定记录里也不记「策略合并」
+
+    def test_label_added_between_reads_is_exception(self):
+        """#260-P1-04：第一次读取没有 needs-info，最后一次读取时有了：按例外办，不合，交出登记作废。"""
+        self.sign()
+        (self.fake / "label_on_view2").write_text("")
+        r = self.auto()
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("标签 needs-info", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+
+    def test_off_and_merge_start_share_one_lock(self):
+        """#260-P1-03：最后读开关、记要合、起合并请求在开关锁里做。开关锁被占着（正在关）时，合并请求起不来。"""
+        self.sign()
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}), MP.locked(1, "policy.lock"):
+            r = self.auto()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("没办成", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
+
+    def test_card_merge_takes_merge_lock(self):
+        """#260-P2-01、P2-02：卡片合并也拿合并锁；等不到就什么都不做，请常浩过会儿再点。"""
+        self.scan()                                                  # 策略没开：发了卡片
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}), MP.locked(1):
+            r = self.cli(ACT, "merge", self.ref, env={"DT_MERGE_LOCK_WAIT": "0.3"})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("合并官正在巡视", r.stdout)
+        self.assertEqual((self.state(), [c for c in self.calls() if c[:2] == ["pr", "merge"]]), ("OPEN", []))
+        self.assertEqual(self.cli(ACT, "merge", self.ref).returncode, 0)
+        self.assertEqual((self.state(), self.ledger()[0]["owner"]), ("MERGED", "合并"))
+
+    def test_card_merge_waits_for_unsettled_policy_merge(self):
+        self.scan()
+        self.sign()
+        self.intent("2026-11-07T09:58:00+08:00")
+        r = self.cli(ACT, "merge", self.ref)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("结果不明", r.stdout)
+        self.assertEqual(self.state(), "OPEN")
+
+    def test_card_sent_when_pr_becomes_exception_or_policy_turns_off(self):
+        """#260-P2-05：判定过之后才加 needs-info 的补一张卡片；策略后来关了，没发过卡片的开着的 PR 也补。"""
+        self.sign()
+        self.scan()
+        self.assertEqual(self.calls("lark.jsonl"), [])               # 普通 PR、策略生效：不发卡片
+        self.update_pr(labels=[{"name": "needs-info"}])
+        self.scan()
+        self.scan()
+        (card,) = self.calls("lark.jsonl")                           # 版本没变也补发，只发一次
+        self.assertIn("needs-info", json.dumps(card, ensure_ascii=False))
+        self.update_pr(labels=[])
+        self.set_prs({**json.loads((self.fake / "prs.json").read_text()),
+                      "o/app": {**json.loads((self.fake / "prs.json").read_text())["o/app"],
+                                "6": self.pr(6, "6" * 40, ["docs/b.md"])}})
+        self.scan()
+        self.assertEqual(len(self.calls("lark.jsonl")), 1)           # 新来的普通 PR：策略生效，不发
+        self.mp(MP.do_off, "测试")
+        self.scan()
+        self.assertEqual(len(self.calls("lark.jsonl")), 2)           # 关了以后：补上
 
     # ---------- 绕过记录 ----------
 
@@ -400,11 +529,12 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("已按策略合并 app#105", r.stdout)
         (call,) = [c for c in self.calls() if c[:2] == ["pr", "revert"]]
         self.assertIn("合错了", call[call.index("--body") + 1])
-        self.assertEqual(self.events(), ["intent", "merged", "revert_opened", "intent", "merged"])
+        self.assertEqual(self.events(), ["intent", "merged", "revert_intent", "revert_opened", "intent", "merged"])
         with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
             self.assertEqual(MP.find_merged("o/app", 5)["revert"]["revert_pr"], "105")
         again = self.cli(ACT, "revert", "app#5")
         self.assertIn("已经开过撤回 PR", again.stdout)
+        self.assertIn("撤回 PR 已经合并", again.stdout)
         self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
 
     def test_revert_pr_waits_for_owner_when_auto_off(self):
@@ -425,7 +555,25 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("已开撤回 PR：https://github.com/o/app/pull/105", r.stdout)
         self.assertIn("撤回 PR 还没合并", r.stdout)
         self.assertNotIn("没撤回", r.stdout)
-        self.assertEqual(self.events(), ["intent", "merged", "revert_opened"])
+        self.assertEqual(self.events(), ["intent", "merged", "revert_intent", "revert_opened"])
+        self.fail(view={"n": 0, "msg": ""})
+        again = self.cli(ACT, "revert", "app#5")                     # #260-P2-03：再跑一次接着合，不重复开
+        self.assertIn("已按策略合并 app#105", again.stdout)
+        self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
+
+    def test_revert_lost_reply_is_found_not_reopened(self):
+        """开撤回 PR 的请求发出去、回应丢了：再跑一次先按记录号找到已开的那个，不重复开。"""
+        self.sign()
+        self.auto()
+        self.fail(revert_lost={"n": 1, "msg": "x"})
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("不确定撤回 PR 开出来没有", r.stdout)
+        again = self.cli(ACT, "revert", "app#5")
+        self.assertIn("上次开的撤回 PR 找到了：https://github.com/o/app/pull/105", again.stdout)
+        self.assertIn("已按策略合并 app#105", again.stdout)
+        self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
+        self.assertTrue([b for b in self.book() if b["event"] == "revert_opened"][0]["adopted"])
 
     def test_revert_only_policy_merges(self):
         self.sign()
@@ -441,7 +589,10 @@ class Auto(Fixture, unittest.TestCase):
         r = self.cli(ACT, "revert", "app#5")
         self.assertEqual(r.returncode, 1)
         self.assertIn("没撤回", r.stdout)
-        self.assertEqual(self.events(), ["intent", "merged"])
+        self.assertEqual(self.events(), ["intent", "merged", "revert_intent"])
+        again = self.cli(ACT, "revert", "app#5")                     # 刚失败、GitHub 上搜不到：先不重新开
+        self.assertIn("还搜不到", again.stdout)
+        self.assertEqual(len([c for c in self.calls() if c[:2] == ["pr", "revert"]]), 1)
 
 
 class Policy(unittest.TestCase):
@@ -498,11 +649,27 @@ class Policy(unittest.TestCase):
     def test_facts_keep_file_total_and_renames(self):
         f = mo.facts_of("o/app", {"number": 1, "changedFiles": 3, "files": [
             {"path": "b.md", "changeType": "RENAMED"}, {"path": "a.md", "changeType": "MODIFIED"}]})
-        self.assertEqual((f["files_total"], f["renamed"], f["paths"]), (3, ["b.md"], ["a.md", "b.md"]))
+        self.assertEqual((f["files_total"], f["renamed"], f["paths"], f["from_fork"]), (3, ["b.md"], ["a.md", "b.md"], None))
         why = mo.exception_reasons(f, self.rules)
         self.assertEqual(len(why), 2, why)
+        own = {"number": 1, "files": [], "isCrossRepository": False, "headRepository": {"name": "App"}, "headRepositoryOwner": {"login": "O"}}
+        self.assertFalse(mo.facts_of("o/app", own)["from_fork"])
+        for change in ({"isCrossRepository": True}, {"headRepository": {"name": "app2"}}, {"headRepositoryOwner": None}):
+            self.assertTrue(mo.facts_of("o/app", {**own, **change})["from_fork"], change)
         old = mo.facts_of("o/app", {"number": 1, "files": [{"path": "a.md"}]})        # 旧记录没有这两项：照原来判
         self.assertEqual((old["files_total"], old["renamed"], mo.exception_reasons(old, self.rules)), (None, [], []))
+
+    def test_incomplete_signature_is_not_authority(self):
+        """#260-P2-04：签署记录缺字段或类型不对，哪怕范围哈希对得上也不算授权。"""
+        MP.do_sign("om_1", self.rules)
+        good = json.loads((self.tmp / "policy.json").read_text(encoding="utf-8"))
+        self.assertTrue(MP.active(self.rules)[0])
+        for change in ({"type": "run_authorization"}, {"open_id": ""}, {"signed_at": None}, {"rules_version": 2}, {"message_id": ""}):
+            bad = {**good, "signature": {**good["signature"], **change}}
+            (self.tmp / "policy.json").write_text(json.dumps(bad), encoding="utf-8")
+            ok, why, _ = MP.active(self.rules)
+            self.assertFalse(ok, change)
+            self.assertIn("不完整", why)
 
     def test_message_used_once(self):
         MP.do_sign("om_1", self.rules)

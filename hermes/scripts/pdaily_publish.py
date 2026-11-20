@@ -392,8 +392,10 @@ def auto_merge_panel(facts):
         lines.append(f"{i}. **{ref}** {clip(m.get('title'), 60)}｜{s(m.get('tier')) or '?'}｜合并官：{judge}{tail}")
     unsure = [m for m in ((facts.get("auto_merges") or {}).get("unsettled") or []) if isinstance(m, dict)]
     for m in unsure:
-        lines.append(f"- ⚠️ 结果不明：**{ref_of(m)}** {clip(m.get('title'), 60)}，"
-                     "合并命令发了、还没核对清楚，合并官下一轮只读核对")
+        lines.append(f"- ⚠️ 已合并、来源不明：**{ref_of(m)}** {clip(m.get('title'), 60)}，合并请求发出后没拿到结果，"
+                     "证明不了是猛鬼兽合的；不算在上面，不能用撤回口令" if m.get("unknown_merge") else
+                     f"- ⚠️ 结果不明：**{ref_of(m)}** {clip(m.get('title'), 60)}，"
+                     "合并请求发了、还没核对清楚，合并官下一轮只读核对")
     lines.append("<font color='grey'>不同意哪条，回「撤回 仓库#号」，猛鬼兽开撤回 PR 并合并；装过机的另外问你要不要重装。</font>")
     return panel(f"替你合并了什么 · {len(merged)} 个 · 展开", lines)
 

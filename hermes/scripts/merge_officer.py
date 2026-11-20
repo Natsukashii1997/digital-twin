@@ -16,8 +16,9 @@
 
 scan 每一轮（定时任务这样跑）：
   1. 判定新的「PR × 版本」，给已关闭的 PR 补结局；
-  2. 策略没生效（merge_policy.active 为否）：act.repos 里的仓库每个新判定发一张卡片，等常浩点（#67，和原来一样）；
-     策略生效：只给例外（问常浩）发卡片，其余交给 merge_act.auto_scan 按策略合并（交出过、机械检查全过才合）；
+  2. 策略没生效（merge_policy.active 为否）：act.repos 里开着的 PR 版本各发一张卡片，等常浩点（#67）；
+     策略生效：只给例外（问常浩）发卡片，其余交给 merge_act.auto_scan 按策略合并（交出过、机械检查全过才合）。
+     发没发过按卡片记录算：判定之后才变成例外（加了 needs-info）、或策略后来关了的，下一轮补发；
   3. 策略生效时，发现覆盖仓库的 PR 已经合并、账本里却没有合并执行器的记录，记一条 bypass（没经合并执行器）；
   4. 上次按策略合并结果不明的，只读核对（策略关了也核对）。
 
@@ -62,6 +63,7 @@ TIERS = ("L0", "L1", "L2", "L3")
 FIELDS = ["evaluated_at", "source", "repo", "pr", "title", "head_sha", "base_sha", "rules_version",
           "tier", "suggestion", "reasons", "outcome", "outcome_at", "outcome_head", "agree", "owner", "owner_at"]
 PR_FIELDS = ("number,title,state,isDraft,mergeable,headRefOid,baseRefOid,labels,files,changedFiles,"
+             "isCrossRepository,headRepository,headRepositoryOwner,"
              "statusCheckRollup,body,closingIssuesReferences,mergedAt,closedAt")
 END_FIELDS = "number,state,headRefOid,mergedAt,closedAt"
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -113,6 +115,13 @@ def facts_of(repo, pr):
     （gh 只给新路径，看不到原来的路径）。这两种都判不了有没有碰敏感路径，exception_reasons 按例外处理。"""
     checks = []
     total = pr.get("changedFiles")
+    owner, _, name = repo.partition("/")
+    if pr.get("isCrossRepository") is None:           # 没有来源信息（旧的状态快照，或 GitHub 没给）：记 None
+        from_fork = None
+    else:                                             # 来源分支就在目标仓库本身才不算外来：三样都对得上（不只看名字）
+        from_fork = not (pr.get("isCrossRepository") is False
+                         and str((pr.get("headRepositoryOwner") or {}).get("login") or "").lower() == owner.lower()
+                         and str((pr.get("headRepository") or {}).get("name") or "").lower() == name.lower())
     for c in pr.get("statusCheckRollup") or []:
         checks.append(str(c.get("conclusion") or c.get("state") or c.get("status") or "").upper())
     return {
@@ -123,6 +132,7 @@ def facts_of(repo, pr):
         "paths": sorted(f.get("path", "") for f in pr.get("files") or []),
         "files_total": total if isinstance(total, int) and not isinstance(total, bool) else None,
         "renamed": sorted(f.get("path", "") for f in pr.get("files") or [] if f.get("changeType") == "RENAMED"),
+        "from_fork": from_fork,
         "checks": checks,
         "closes": bool(pr.get("closingIssuesReferences")) or bool(CLOSES.search(pr.get("body") or "")),
     }
@@ -142,6 +152,7 @@ def exception_reasons(f, rules):
     """例外（仍然问常浩，不按策略合并）的理由；空列表就是不属于例外。
     L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签；
     改动文件没看全（超过 gh 一次给的 100 个）或有文件改名（看不到原路径）：判不了有没有碰敏感路径，按碰了处理；
+    来自别的仓库（fork）的 PR：仓库是公开的，机制不核对审查结论，外来代码一律问常浩（常浩 2026-11-20 定，#260-P1-05）；
     规则里收窄了 auto.tiers 时，风险档不在里面的也算。旧的状态快照没有 files_total / renamed，照原来判。"""
     paths = f.get("paths") or []
     ask = []
@@ -158,6 +169,8 @@ def exception_reasons(f, rules):
         ask.append(f"改动文件 {total} 个，只读得到 {len(paths)} 个，看不全有没有敏感路径")
     if f.get("renamed"):
         ask.append("有文件改名，看不到原来的路径：" + "、".join(f["renamed"][:5]))
+    if f.get("from_fork"):
+        ask.append("来自别的仓库（fork）的 PR，不是本仓库的分支")
     labels = sorted(set(f.get("labels") or []) & set(rules.get("ask_labels") or []))
     if labels:
         ask.append("标签 " + "、".join(labels))
@@ -364,9 +377,22 @@ def scan(verbose, act):
         import merge_act
         import merge_policy
         on = merge_policy.active(rules)[0]
-        by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in facts}
-        # 策略生效时只有例外发卡片（#257）。按例外理由判，不按「问常浩」判：例外同时有退回理由时建议是「退回」，照样要发
-        cards = [r for r in added if not on or exception_reasons(by_key[(r["repo"], r["pr"], r["head_sha"])], rules)]
+        # 该有卡片的：策略没生效时每个开着的 PR 版本；策略生效时只有例外（#257）。按例外理由判，不按「问常浩」判：
+        # 例外同时有退回理由时建议是「退回」，照样要发。看的是这一轮读到的全部 open PR，不只是新版本（#260-P2-05）：
+        # 判定过之后才加上 needs-info、或策略后来关了的，也补一张；发过的 send_cards 自己跳过。补发的卡片按现在的状态
+        # 写建议和理由，判定记录里那一行不改（同一个版本只判一次）。
+        by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in open_now}
+        row_by = {(r["repo"], r["pr"], r["head_sha"]): r for r in rows}
+        fresh = {(r["repo"], r["pr"], r["head_sha"]) for r in added}
+        cards = []
+        for key, f in by_key.items():
+            r = row_by.get(key)
+            if r is None or (on and not exception_reasons(f, rules)):
+                continue
+            if key not in fresh:
+                tier, sug, why = evaluate(f, rules)
+                r = {**r, "tier": tier, "suggestion": sug, "reasons": "；".join(why)}
+            cards.append(r)
         if cards:
             errors += merge_act.send_cards(cards, by_key)
         # 策略没生效也核对上次结果不明的合并（只读）：合并命令已经发过，不能因为关了开关就一直挂着

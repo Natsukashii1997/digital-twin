@@ -413,7 +413,8 @@ class CardTests(unittest.TestCase):
                                        self.auto(repo="o/github-center", pr="93", title="LESSONS 写明状态词", tier="L1",
                                                  suggestion="退回", reasons="正文没有 Closes #号"),
                                        self.auto(pr="121", revert={"revert_pr": "130", "revert_url": "u"})],
-                            "unsettled": [self.auto(pr="125", title="结果没核对清的")], "bypass": []}
+                            "unsettled": [self.auto(pr="125", title="结果没核对清的"),
+                                          {**self.auto(pr="126", title="别处也可能合了的"), "unknown_merge": True}], "bypass": []}
         c = self.card(f=f)
         els = c["body"]["elements"]
         heads = [e["content"] for e in els if e.get("tag") == "markdown" and e["content"].startswith("**")]
@@ -429,7 +430,9 @@ class CardTests(unittest.TestCase):
                                    "｜撤回口令「撤回 github-center#93」")
         self.assertTrue(lines[2].endswith("｜已开撤回 PR #130"))
         self.assertIn("⚠️ 结果不明：**my-skills#125**", lines[3])
-        self.assertIn("回「撤回 仓库#号」", lines[4])
+        self.assertIn("⚠️ 已合并、来源不明：**my-skills#126**", lines[4])
+        self.assertIn("不能用撤回口令", lines[4])
+        self.assertIn("回「撤回 仓库#号」", lines[5])
         self.assertEqual(els[3]["tag"], "hr")
 
     def test_auto_merges_missing_or_odd_data_does_not_break_card(self):

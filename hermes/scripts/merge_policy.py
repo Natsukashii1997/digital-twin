@@ -13,9 +13,14 @@
 
 文件（DT_MERGE_DIR，默认 ~/Library/Application Support/DigitalTwin/merge/，目录 700、文件 600）：
   policy.json         策略记录：enabled、signature（范围哈希、规则版本、签署消息、签署人、时间）、用过的消息、最近 50 条开关记录
-  auto-merges.jsonl   合并账本，只追加。每次按策略合并先记一行 intent（要合），再记一行结果（merged / failed / unsure），
-                      两行同一个 id；只有 intent 没有结果的算结果不明：这个 PR 不再自动重试，要人看。
-                      另有 revert_opened（撤回 PR 已开）、bypass（PR 已合并但没经合并执行器）两种单行记录。
+  auto-merges.jsonl   合并账本，只追加。每次按策略合并先记一行 intent（要合），再记结果，同一个 id：
+                        merged   合并接口回执说「这次合上了」并给了合并提交号，回读对得上（只有这种算按策略合并、能用撤回口令）
+                        failed   确定没合：请求没发出去，或 GitHub 明确拒绝且回读 PR 还开着
+                        unsure   请求发出去了、没拿到确定结果（超时、断网、回读失败、没归类的报错）
+                      只有 intent（进程中途没了）和 unsure 都算结果不明：不重发，合并官巡视时只读核对，核对后再记一行：
+                        merged_unknown  PR 已合并，但证明不了是这次合的（别处也可能合了它）：不算按策略合并，不能用撤回口令
+                        not_merged      等够时间后 PR 仍没合并（或已关闭、换了版本）：交出登记作废，要合得重新交出
+                      另有 revert_intent（要开撤回 PR）、revert_opened（撤回 PR 已开）、bypass（PR 已合并但没经合并执行器）三种单行记录。
   handoffs.json       交出登记：会话调 merge_act.py auto 时记下「仓库、PR、完整 HEAD、谁、什么时候」。绑定版本：之后 PR 有新提交，登记作废。
   auto.lock           合并锁：按策略合并、合并官巡视一次只跑一个（上限判断和写账本在同一把锁里），一轮可能占几分钟。
   policy.lock         开关锁：只在读改写 policy.json 的那一下持有。开、关不等合并锁：巡视正跑着，「关自动合并」也立刻生效；
@@ -48,8 +53,9 @@ PUNCT = " \t\r\n　。.!！~～"
 SCOPE_KEYS = ("sensitive", "repo_sensitive", "l0_paths", "rule_docs", "direction_docs", "l1_max_files", "ask_labels", "auto")
 HISTORY_KEEP = 50
 USED_KEEP_DAYS = 30
-LOCK_WAIT = 180.0
-DONE = ("merged", "failed", "unsure")
+LOCK_WAIT = float(os.environ.get("DT_MERGE_LOCK_WAIT", "180"))      # 等合并锁最多几秒（自测时调小）
+DONE = ("merged", "failed", "unsure", "merged_unknown", "not_merged")
+SIG_FIELDS = ("scope_sha256", "rules_version", "message_id", "open_id", "signed_at")
 
 
 class Rejected(Exception):
@@ -155,8 +161,9 @@ def active(rules):
     sig = d.get("signature")
     if not d["enabled"]:
         return False, "自动合并没开" + ("（签过，已关）" if sig else "（还没签）"), sig
-    if not isinstance(sig, dict) or not sig.get("scope_sha256") or not sig.get("message_id"):
-        return False, "策略记录不完整", None
+    if (not isinstance(sig, dict) or sig.get("type") != POLICY_TYPE
+            or not all(isinstance(sig.get(k), str) and sig[k] for k in SIG_FIELDS)):
+        return False, "策略记录不完整（签署记录缺字段或类型不对），要常浩重签", None
     if sig["scope_sha256"] != scope_sha(rules):
         return False, "合并规则在签过之后改了（范围哈希对不上），要常浩重签", sig
     return True, "", sig
@@ -274,6 +281,8 @@ def merges(path=None):
             by[r["id"]].update({k: v for k, v in r.items() if k not in ("at", "event")}, status=r["event"], done_at=r["at"])
         elif r["event"] == "revert_opened":
             revert[r.get("id")] = r
+        elif r["event"] == "revert_intent" and r.get("id") in by:
+            by[r["id"]]["revert_intent"] = {"at": r["at"], "reason": r.get("reason")}
     for i, r in revert.items():
         if i in by:
             by[i]["revert"] = {k: r.get(k) for k in ("at", "revert_pr", "revert_url", "reason")}
@@ -287,12 +296,13 @@ def unsettled(repo=None, pr=None):
 
 
 def merged_count(day):
-    """这一天（北京时间日历日）已经合了几个；结果不明的也算，免得顶着上限反复发合并命令。"""
-    return sum(1 for m in merges() if m["at"][:10] == day and m["status"] in ("merged", "pending", "unsure"))
+    """这一天（北京时间日历日）已经合了几个；结果不明、来源不明的也算，免得顶着上限反复发合并请求。"""
+    return sum(1 for m in merges() if m["at"][:10] == day and m["status"] in ("merged", "pending", "unsure", "merged_unknown"))
 
 
-def find_merged(repo, pr):
-    hits = [m for m in merges() if (m["repo"], str(m["pr"])) == (repo, str(pr)) and m["status"] == "merged"]
+def find_merged(repo, pr, statuses=("merged",)):
+    """账本里这个 PR 最近一条按策略合上的记录（撤回只认它）。statuses 加上 merged_unknown 可以查「合并执行器对它发过请求」。"""
+    hits = [m for m in merges() if (m["repo"], str(m["pr"])) == (repo, str(pr)) and m["status"] in statuses]
     return hits[-1] if hits else None
 
 

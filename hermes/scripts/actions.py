@@ -304,6 +304,8 @@ def policy_book(w):
                                   "revert_cmd": f"撤回 {name}#{m['pr']}", "revert": m.get("revert")})
         elif m["status"] in ("pending", "unsure") and pdaily_data.parse_ts(stamp(m["at"])) < w[1]:
             out["unsettled"].append({**base, "at": stamp(m["at"])})
+        elif m["status"] == "merged_unknown" and inside(stamp(m["done_at"]), w):     # 已合并、证明不了是这次合的：只在核对那天报
+            out["unsettled"].append({**base, "at": stamp(m["done_at"]), "unknown_merge": True})
     for r in MP.lines(MERGE_BOOK)[0]:
         if r["event"] == "bypass" and inside(stamp(r["at"]), w):
             out["bypass"].append({k: r.get(k) for k in ("repo", "pr", "title", "head", "tier", "suggestion", "merged_at")}
@@ -330,13 +332,15 @@ def policy_merges(w, notes):
                      f"审查结论未核实；撤回口令「{m['revert_cmd']}」")
             if m["revert"]:
                 proof += f"；已开撤回 PR {m['revert'].get('revert_url')}"
+        elif m.get("unknown_merge"):
+            proof = f"合并请求发出后没拿到确定结果；事后只读核对 PR 已合并，证明不了是这次合的（记为来源不明，不能用撤回口令）；{judged}"
         else:
-            proof = f"合并命令已发出，回读没成功；{judged}"
+            proof = f"合并请求已发出，没拿到确定结果；{judged}"
         out.append((act(
             action_id=f"policy:{m['repo']}#{m['pr']}@{str(m['head'])[:12]}", ts=m["at"], project_id=ids.get(m["repo"], m["repo"]),
             kind="merge", request=f"按策略合并 {ref}：{m['title']}", actor="Hermes", auth_tier="A", auth_source=source,
             decision="执行", result="业务已验证" if done else "不明", verification=proof,
-            follow_up=None if done else "合并官下一轮巡视只读核对，不重发"), "A"))
+            follow_up=None if done else ("要撤回在电脑上处理" if m.get("unknown_merge") else "合并官下一轮巡视只读核对，不重发")), "A"))
     return out
 
 

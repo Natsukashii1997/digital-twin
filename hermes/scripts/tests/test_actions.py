@@ -294,6 +294,17 @@ class PolicyMergeTests(Base):
         (a,) = [x for x in self.run_day()["actions"] if x["origin"] == "按策略合并"]
         self.assertEqual((a["result"], a["follow_up"]), ("不明", "合并官下一轮巡视只读核对，不重发"))
 
+    def test_merged_of_unknown_source_is_not_a_policy_merge(self):
+        """事后只读核对到 PR 已合并、证明不了是这次合的（#260-P1-02）：不算合上的，只在核对那天报一条「不明」。"""
+        self.book(self.intent("m1", "2026-11-08T10:00:00+08:00"),
+                  {"event": "unsure", "id": "m1", "at": "2026-11-08T10:00:05+08:00", "why": "断网"},
+                  {"event": "merged_unknown", "id": "m1", "at": "2026-11-08T10:30:00+08:00", "merge_commit": "a" * 40})
+        book = actions.policy_book(actions.pdaily_data.window(D))
+        self.assertEqual((book["merged"], [m.get("unknown_merge") for m in book["unsettled"]]), ([], [True]))
+        (a,) = [x for x in self.run_day()["actions"] if x["origin"] == "按策略合并"]
+        self.assertEqual((a["result"], a["follow_up"]), ("不明", "要撤回在电脑上处理"))
+        self.assertIn("来源不明", a["verification"])
+
     def test_policy_owner_rows_not_reported_as_card_clicks(self):
         self.ledger([self.row("2026-11-08T09:00:00+08:00", owner="策略合并", owner_at="2026-11-08T10:00:05+08:00")])
         ids = [x["action_id"] for x in self.run_day()["actions"]]
