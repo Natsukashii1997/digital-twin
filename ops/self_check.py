@@ -4,7 +4,7 @@
 每天 10:00 由个人项目日报发送（pdaily_publish.py send，#159）调用，输出并进日报卡片：空输出算正常，退出码非 0 卡片里写「自检没跑成」。
 也可以手动跑看结果。
 （launchd 起的 python 读不了 ~/Documents，所以要读仓库、名册和 Vault 的检查放在这里，不放 health_check.py。）
-每天：仓库 main 上已提交的源文件和安装副本逐字节比对（memdaily_* 比亚古兽 profile 下的副本，#182），只报缺失或不一致的路径；main 上 hermes/install_hold.txt 列着的「按计划先不装」的文件，没装就不报，装了但和 main 不同照报（#236），安装位置多出的文件不管。
+每天：仓库 main 上已提交的源文件和安装副本逐字节比对（memdaily_* 比亚古兽 profile 下的副本，#182），只报缺失或不一致的路径；main 上 hermes/install_hold.txt 列着的「按计划先不装」的文件，没装就不报，装了但和 main 不同照报（#236；清单里写了「@blob 号」钉住旧版的，安装副本是那一版也不报，#251），安装位置多出的文件不管。
 每天：再在 github-center 目录下跑 node bin/health.js（Github·Tidings 健康检查），它的输出原样作为一段。
 每天：跑同目录 ai_access.py status --json（AI 接入，P-13），车间默认执行方不能用、Hermes 主模型走本机 Claude 而 Claude 没登录（#180，G-27）、或配置读不了才说；没装 ai_access.py 就跳过（安装副本比对会报缺失）。
 每天：跑同目录 custody.py status --json（托管状态，#131，只读），托管没关（开着、排空中、冻结）、状态读不了、已签策略失效或
@@ -15,6 +15,7 @@
 TIDINGS_REPO、TIDINGS_NODE 改 github-center 目录和 node 路径，自测用。
 """
 import datetime as dt
+import hashlib
 import json
 import os
 import subprocess
@@ -96,11 +97,25 @@ HOLD_FILE = "hermes/install_hold.txt"
 
 
 def install_hold():
-    """main 上「按计划先不装」的源文件路径（#236）：一行一个，# 后面是说明；取不到就当空的（照常报缺失）。"""
+    """main 上「按计划先不装」的源文件（#236）：{路径: 钉住的 git blob 号或 None}。
+
+    一行一个，# 后面是说明；路径后可写「@<40 位 blob 号>」，表示安装位置按计划停在这一版旧的（#251）。
+    取不到就当空的（照常报缺失）。"""
     r = git("show", f"main:{HOLD_FILE}")
     if r.returncode != 0:
-        return set()
-    return {ln.split("#", 1)[0].strip() for ln in r.stdout.decode().splitlines()} - {""}
+        return {}
+    hold = {}
+    for ln in r.stdout.decode().splitlines():
+        path, _, pin = ln.split("#", 1)[0].strip().partition(" @")
+        if path.strip():
+            pin = pin.strip().lower()
+            hold[path.strip()] = pin if len(pin) == 40 and all(c in "0123456789abcdef" for c in pin) else None
+    return hold
+
+
+def blob_id(data):
+    """和 git hash-object 相同的 blob 号。"""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
 def check_drift():
@@ -117,7 +132,8 @@ def check_drift():
             issues.append(f"取不到 main:{src}（{git_err(blob)}）")
             continue
         try:
-            if dst.read_bytes() != blob.stdout:
+            data = dst.read_bytes()
+            if data != blob.stdout and not (hold.get(src) and blob_id(data) == hold[src]):   # 钉住的旧版不报（#251）
                 issues.append(f"{tilde(dst)} 和 {src} 内容不同")
         except FileNotFoundError:
             if src not in hold:                  # 按计划先不装的（#236）：没装不算问题

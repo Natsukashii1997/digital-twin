@@ -290,6 +290,26 @@ class ScriptTest(unittest.TestCase):
         sh(self.repo, "commit", "-qam", "清单 2")
         self.assertIn("p.md 和 hermes/prompts/p.md 内容不同", self.run_script())   # 装了但不同：照报
 
+    def test_install_hold_pin_keeps_known_old_version_quiet(self):
+        """#251：清单里「路径 @安装副本的 git blob 号」= 按计划停在这一版旧的；是钉住那版或 main 版都不报，第三种照报。"""
+        old = self.home / "hermes/scripts/a.py"
+        self.write(old, "装着的旧版\n")
+        pin = subprocess.run(["git", "hash-object", str(old)], capture_output=True, text=True, check=True).stdout.strip()
+        self.write(self.repo / "hermes/install_hold.txt", f"hermes/scripts/a.py @{pin}  # 等批 0E\n")
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-qm", "钉住")
+        self.assertEqual(self.run_script(), "")                                  # 还是钉住的那版：不报
+        self.write(old, "源 hermes/scripts/a.py\n")
+        self.assertEqual(self.run_script(), "")                                  # 已换成 main 版：不报
+        self.write(old, "又被改了\n")
+        self.assertIn("- ~/hermes/scripts/a.py 和 hermes/scripts/a.py 内容不同", self.run_script())   # 第三种：照报
+        old.unlink()
+        self.assertNotIn("a.py", self.run_script())                              # 钉住的也算先不装：没装不报
+        self.write(old, "装着的旧版\n")
+        self.write(self.repo / "hermes/install_hold.txt", f"hermes/scripts/a.py @{pin[:12]}\n")
+        sh(self.repo, "commit", "-qam", "写短了")
+        self.assertIn("a.py 和 hermes/scripts/a.py 内容不同", self.run_script())   # 只认完整 40 位：写短了不算钉住
+
     def test_uncommitted_repo_changes_are_not_drift(self):
         self.write(self.repo / "hermes/scripts/a.py", "工作区改了没提交\n")
         self.write(self.repo / "hermes/prompts/新提示词.md", "没跟踪\n")
