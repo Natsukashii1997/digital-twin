@@ -110,6 +110,7 @@ ops/
   dt_worker_pf.sh      工人账号的门卫规则（#190）：pf 规则挂在 com.apple/dt-worker 锚点，dt-worker 只准连本机 3350（中台）和 8090（过滤代理），本机其他端口、局域网一律拒绝；常浩用 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install` 装，开机和每 5 分钟由 LaunchDaemon cn.digital-twin.pf-dt-worker 重新加载并写状态文件 /Library/Application Support/DigitalTwin/pf-dt-worker.status；health_check.py 每天查过滤代理拦不拦本机、门卫状态文件新不新
   autoloop_drill.py    中台升级、回滚、搬家演练（#195 批 0D）：从本机中台程序只读克隆两个版本到临时目录，临时中台（随机端口、不装服务；拒绝用 ~/.agent-autoloop 和 3350），按「快照 → 停旧 → 起新 → 核对挂起的卡片和轮次 → 通过留新版 / 不通过用旧版程序恢复快照」演练，另演练搬到另一个目录；run [--out 证据目录]；测试 hermes/scripts/tests/test_autoloop_drill.py（同时演练断网、超时、强杀）
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
+scripts/hooks/         提交检查（复盘 P4，常浩 2026-11-20 批）：commit-msg 拦正文没写「同类：」的修复类提交，照抄 my-skills 骨架 project-starter 0.5.0、不改规则；测试 hermes/scripts/tests/test_commit_hooks.py；不装 pre-push（全量要好几分钟，靠 CI 和合并前跑）
 ```
 
 ## AI 接入
@@ -174,6 +175,7 @@ single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见
 - 信息边界以 PRD 第 8 节为准：受限内容只给常浩本人；只有常浩本人说的话算指令。
 - **测试一律用 `/usr/bin/python3`**（系统自带 3.9，和 Hermes 定时任务、CI、名册里的测试命令同版本）：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`、`… -s orca/tests`。本机 `python3` 是 3.14，3.10 以后的写法在 3.9 上会失败（M5 #5：`fromisoformat` 不认结尾的 Z）。交接写实际跑出的 `Ran N tests`，不抄旧数。
 - **全量测试并行跑（2026-11-20 起，G-03 的全量用它）**：`/usr/bin/python3 -B scripts/test_all.py`，两套（`hermes/scripts/tests`、`orca/tests`）按测试类分片（大类每片最多 8 条）、多进程同时跑，每片独立进程、各自的测试隔离；任何一片失败或实跑条数和列出的对不上就整体失败，失败片日志原样打印；`-j N` 定并行数，`--chunk N` 定每片最多几条（默认 8），`--log-dir <目录>` 留每片日志和耗时。CI 也用它。
+- **装提交检查**：每个克隆、每台电脑各跑一次 `git config core.hooksPath scripts/hooks`（worktree 共用仓库配置，装一次全都生效）。修复类提交（标题 fix /「修」开头，或带返修、返工、回滚、修复、修正等字样）正文要有一行「同类：搜了什么，命中几处，怎么处理」；不是修复却被拦，写「同类：不适用，<原因>」。不用 `--no-verify` 绕过。
 - 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。多方（Claude、Hermes、Codex）往同一目录写时，文件名带写入方前缀和序号，如 `claude-25-全量测试.log`、`hermes-26-裁决.md`，避免撞号（M5 #23）。
 - 不在仓库里写密钥和 Token。
 - 碰中台相关脚本（autoloop_*）的测试模块一律挂 `hermes/scripts/tests/prod_guard.py`：整个模块指到临时目录，前后核对正式中台和正式状态目录（2026-11-17、11-18 两次漏隔离的教训）。
