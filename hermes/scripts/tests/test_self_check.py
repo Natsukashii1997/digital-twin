@@ -29,15 +29,13 @@ SOURCES = {
     "hermes/scripts/tests/fixture.json": None,
     "hermes/scripts/assets/banner.png": "hermes/scripts/assets/banner.png",
     "hermes/scripts/tests/test_a.py": None,
-    "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
-    "hermes/skills/workshop/references/r.md": "hermes/skills/autonomous-ai-agents/workshop/references/r.md",
+    "hermes/skills/workshop/SKILL.md": None,   # 技能以安装副本为准，不比对（常浩 2026-11-20「全部放开，hermes自己改了就算」）
+    "hermes/skills/workshop/references/r.md": None,
     "hermes/prompts/p.md": "hermes/prompts/p.md",
     "hermes/scripts/memdaily_job.py": "hermes/profiles/agumon/scripts/memdaily_job.py",   # 亚古兽的（#182）
     "hermes/prompts/memdaily_report.md": "hermes/profiles/agumon/prompts/memdaily_report.md",
     "hermes/scripts/sidebar_reports.py": "hermes/profiles/agumon/scripts/sidebar_reports.py",   # 亚古兽的销售侧边栏汇报
-    "hermes/skills/sales-sidebar/SKILL.md": "hermes/profiles/agumon/skills/productivity/sales-sidebar/SKILL.md",
-    "hermes/skills/sales-sidebar/references/feedback.md":
-        "hermes/profiles/agumon/skills/productivity/sales-sidebar/references/feedback.md",
+    "hermes/skills/sales-sidebar/SKILL.md": None,   # 亚古兽的技能同样不比对
     "ops/health_check.py": "bin/health_check.py",
     "ops/check_repos.py": "bin/check_repos.py",
     "ops/self_check.py": "hermes/scripts/self_check.py",
@@ -223,16 +221,21 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("托管策略失效：托管策略 v3 已于", self.run_script())
 
     def test_missing_installed_files_listed_by_path(self):
-        for dst in ("hermes/skills/autonomous-ai-agents/workshop/references/r.md", "bin/health_check.py",
-                    "hermes/scripts/self_check.py"):
+        for dst in ("hermes/prompts/p.md", "bin/health_check.py", "hermes/scripts/self_check.py"):
             (self.home / dst).unlink()
         out = self.run_script()
         self.assertEqual(out.splitlines()[:3], ["🔧 工程自检", "", "🔁 安装副本不一致：3 项和仓库 main 对不上"])
         self.assertIn("- ~/bin/health_check.py 缺失（源：ops/health_check.py）", out)
-        self.assertIn("- ~/hermes/skills/autonomous-ai-agents/workshop/references/r.md 缺失"
-                      "（源：hermes/skills/workshop/references/r.md）", out)
+        self.assertIn("- ~/hermes/prompts/p.md 缺失（源：hermes/prompts/p.md）", out)
         self.assertIn("- ~/hermes/scripts/self_check.py 缺失（源：ops/self_check.py）", out)
         self.assertNotIn("多出", out)
+
+    def test_skills_not_compared(self):
+        """常浩 2026-11-20「全部放开，hermes自己改了就算」：猛鬼兽、亚古兽可自改技能，以安装副本为准；内容不同、缺失都不报。"""
+        self.write(self.home / "hermes/skills/autonomous-ai-agents/workshop/SKILL.md", "猛鬼兽自己改过\n")
+        self.write(self.home / "hermes/profiles/agumon/skills/productivity/sales-sidebar/SKILL.md", "亚古兽自己改过\n")
+        self.assertEqual(self.run_script(), "")
+        self.assertNotIn("workshop", self.run_script())
 
     def test_script_assets_checked(self):
         (self.home / "hermes/scripts/assets/banner.png").unlink()
@@ -289,6 +292,26 @@ class ScriptTest(unittest.TestCase):
         self.write(self.repo / "hermes/install_hold.txt", "hermes/prompts/p.md\n")
         sh(self.repo, "commit", "-qam", "清单 2")
         self.assertIn("p.md 和 hermes/prompts/p.md 内容不同", self.run_script())   # 装了但不同：照报
+
+    def test_install_hold_pin_keeps_known_old_version_quiet(self):
+        """#251：清单里「路径 @安装副本的 git blob 号」= 按计划停在这一版旧的；是钉住那版或 main 版都不报，第三种照报。"""
+        old = self.home / "hermes/scripts/a.py"
+        self.write(old, "装着的旧版\n")
+        pin = subprocess.run(["git", "hash-object", str(old)], capture_output=True, text=True, check=True).stdout.strip()
+        self.write(self.repo / "hermes/install_hold.txt", f"hermes/scripts/a.py @{pin}  # 等批 0E\n")
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-qm", "钉住")
+        self.assertEqual(self.run_script(), "")                                  # 还是钉住的那版：不报
+        self.write(old, "源 hermes/scripts/a.py\n")
+        self.assertEqual(self.run_script(), "")                                  # 已换成 main 版：不报
+        self.write(old, "又被改了\n")
+        self.assertIn("- ~/hermes/scripts/a.py 和 hermes/scripts/a.py 内容不同", self.run_script())   # 第三种：照报
+        old.unlink()
+        self.assertNotIn("a.py", self.run_script())                              # 钉住的也算先不装：没装不报
+        self.write(old, "装着的旧版\n")
+        self.write(self.repo / "hermes/install_hold.txt", f"hermes/scripts/a.py @{pin[:12]}\n")
+        sh(self.repo, "commit", "-qam", "写短了")
+        self.assertIn("a.py 和 hermes/scripts/a.py 内容不同", self.run_script())   # 只认完整 40 位：写短了不算钉住
 
     def test_uncommitted_repo_changes_are_not_drift(self):
         self.write(self.repo / "hermes/scripts/a.py", "工作区改了没提交\n")
@@ -417,7 +440,7 @@ class MonthlyGateTest(unittest.TestCase):
         self.assertEqual(out.split("\n\n"), [
             "🔧 工程自检",
             "\n".join(["🔁 安装副本不一致：12 项和仓库 main 对不上", *[f"- 漂移{i}" for i in range(10)],
-                       "- ……另有 2 项", "处理：从仓库 main 复制到安装位置；技能、提示词改了要重启网关。"]),
+                       "- ……另有 2 项", "处理：从仓库 main 复制到安装位置；提示词改了要重启网关。"]),
             "🌟 Github·Tidings 自检\n- 虚构问题",
             "🧹 沙盒提醒（每月 1 号）\n- 扫不了 ~/Documents/Codex（Operation not permitted）",
             "📦 仓库自检提醒（每月 1 号）\n- a：不是私有仓库\n",

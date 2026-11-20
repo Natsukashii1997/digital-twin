@@ -57,6 +57,10 @@ metadata:
 - 派单只开到 PR。合并、安装、改定时任务照旧要常浩另说。
 - 不手改 `<日期>.dispatch.json`，一律通过 `G mark` 写。
 
+## 6. 常浩质疑报告内容
+
+他说某条总结「和原文对不上」「怎么得出的」：先按 `references/report-content-audit.md` 用当天产物对账（material → report → card.sent），分清是总结错、还是卡片面板放错原文，再回复；涉及改 `groupdigest.py` 的，走 workshop 派单，只开到 PR。
+
 ## 失败信号
 
 - 回复里说「已派」，却没跑过 `D new` 和 `G mark`，或单号和输出对不上：说明在编，按脚本输出重说。
