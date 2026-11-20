@@ -1,251 +1,317 @@
 {
- "open": {
-  "schema": "2.0",
-  "config": {
-   "update_multi": true,
-   "enable_forward": false
-  },
-  "header": {
-   "title": {
-    "tag": "plain_text",
-    "content": "README 的安装命令用哪个工具"
+ "说明": "定稿丙版「推荐优先」的样例（docs/DECIDED.md 2026-11-20）：input 是中台 cardView，card 是 render(input, 按钮值 {autoloop: 0123456789abcdef, o: 选项号, v: 版本}, mark=\"尾号 cdef\") 的结果；test_autoloop_cardview 逐字比对，改样子要先过 DECIDED。",
+ "states": {
+  "open": {
+   "input": {
+    "id": 12,
+    "kind": "ask",
+    "title": "README 的安装命令用哪个工具",
+    "text": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。",
+    "options": [
+     "统一写 uv",
+     "保留 pip",
+     "两种都写"
+    ],
+    "recommend": 0,
+    "rule": "dispatch-dt-sandbox-claude",
+    "answer": null,
+    "by": null,
+    "result": null,
+    "state": "open",
+    "version": 1,
+    "choice": null
    },
-   "template": "indigo"
-  },
-  "body": {
-   "elements": [
-    {
-     "tag": "markdown",
-     "content": "**我建议：统一写 uv**",
-     "text_size": "heading"
+   "card": {
+    "schema": "2.0",
+    "config": {
+     "update_multi": true,
+     "enable_forward": false
     },
-    {
-     "tag": "markdown",
-     "content": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。"
-    },
-    {
-     "tag": "button",
-     "text": {
+    "header": {
+     "title": {
       "tag": "plain_text",
-      "content": "✅ 按推荐：统一写 uv"
+      "content": "README 的安装命令用哪个工具"
      },
-     "type": "primary_filled",
-     "behaviors": [
-      {
-       "type": "callback",
-       "value": {
-        "autoloop": "0123456789abcdef",
-        "o": 0,
-        "v": 1
-       }
-      }
-     ],
-     "width": "fill",
-     "size": "large"
+     "template": "indigo"
     },
-    {
-     "tag": "collapsible_panel",
-     "expanded": false,
-     "background_color": "grey-50",
-     "border": {
-      "color": "grey",
-      "corner_radius": "6px"
-     },
-     "padding": "4px 10px 8px 10px",
-     "vertical_spacing": "8px",
-     "header": {
-      "title": {
-       "tag": "plain_text",
-       "content": "不同意？其他选择 · 展开"
-      },
-      "width": "fill",
-      "vertical_align": "center",
-      "icon": {
-       "tag": "standard_icon",
-       "token": "down-small-ccm_outlined",
-       "color": "grey",
-       "size": "16px 16px"
-      },
-      "icon_position": "right",
-      "icon_expanded_angle": -180
-     },
+    "body": {
      "elements": [
       {
-       "tag": "button",
-       "text": {
-        "tag": "plain_text",
-        "content": "改选：保留 pip"
-       },
-       "type": "default",
-       "behaviors": [
-        {
-         "type": "callback",
-         "value": {
-          "autoloop": "0123456789abcdef",
-          "o": 1,
-          "v": 1
-         }
-        }
-       ],
-       "width": "fill"
+       "tag": "markdown",
+       "content": "**我建议：统一写 uv**",
+       "text_size": "heading"
+      },
+      {
+       "tag": "markdown",
+       "content": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。"
       },
       {
        "tag": "button",
        "text": {
         "tag": "plain_text",
-        "content": "改选：两种都写"
+        "content": "✅ 按推荐：统一写 uv"
        },
-       "type": "default",
+       "type": "primary_filled",
        "behaviors": [
         {
          "type": "callback",
          "value": {
           "autoloop": "0123456789abcdef",
-          "o": 2,
+          "o": 0,
           "v": 1
          }
         }
        ],
-       "width": "fill"
+       "width": "fill",
+       "size": "large"
+      },
+      {
+       "tag": "collapsible_panel",
+       "expanded": false,
+       "background_color": "grey-50",
+       "border": {
+        "color": "grey",
+        "corner_radius": "6px"
+       },
+       "padding": "4px 10px 8px 10px",
+       "vertical_spacing": "8px",
+       "header": {
+        "title": {
+         "tag": "plain_text",
+         "content": "不同意？其他选择 · 展开"
+        },
+        "width": "fill",
+        "vertical_align": "center",
+        "icon": {
+         "tag": "standard_icon",
+         "token": "down-small-ccm_outlined",
+         "color": "grey",
+         "size": "16px 16px"
+        },
+        "icon_position": "right",
+        "icon_expanded_angle": -180
+       },
+       "elements": [
+        {
+         "tag": "button",
+         "text": {
+          "tag": "plain_text",
+          "content": "改选：保留 pip"
+         },
+         "type": "default",
+         "behaviors": [
+          {
+           "type": "callback",
+           "value": {
+            "autoloop": "0123456789abcdef",
+            "o": 1,
+            "v": 1
+           }
+          }
+         ],
+         "width": "fill"
+        },
+        {
+         "tag": "button",
+         "text": {
+          "tag": "plain_text",
+          "content": "改选：两种都写"
+         },
+         "type": "default",
+         "behaviors": [
+          {
+           "type": "callback",
+           "value": {
+            "autoloop": "0123456789abcdef",
+            "o": 2,
+            "v": 1
+           }
+          }
+         ],
+         "width": "fill"
+        }
+       ]
+      },
+      {
+       "tag": "markdown",
+       "content": "<font color='grey'>卡片 #12 · 第 1 版｜来源 dispatch-dt-sandbox-claude｜尾号 cdef｜点按钮就算你定了，只能点一次。</font>",
+       "text_size": "notation"
       }
      ]
-    },
-    {
-     "tag": "markdown",
-     "content": "<font color='grey'>卡片 #12 · 第 1 版｜来源 dispatch-dt-sandbox-claude｜尾号 cdef｜点按钮就算你定了，只能点一次。也可以引用这张卡片回一句，例如「1」「按推荐」或选项原文。</font>",
-     "text_size": "notation"
     }
-   ]
-  }
- },
- "decided": {
-  "schema": "2.0",
-  "config": {
-   "update_multi": true,
-   "enable_forward": false
+   }
   },
-  "header": {
-   "title": {
-    "tag": "plain_text",
-    "content": "README 的安装命令用哪个工具"
+  "decided": {
+   "input": {
+    "id": 12,
+    "kind": "ask",
+    "title": "README 的安装命令用哪个工具",
+    "text": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。",
+    "options": [
+     "统一写 uv",
+     "保留 pip",
+     "两种都写"
+    ],
+    "recommend": 0,
+    "rule": "dispatch-dt-sandbox-claude",
+    "answer": null,
+    "by": "ou_owner",
+    "result": null,
+    "state": "decided",
+    "version": 2,
+    "choice": 0
    },
-   "template": "green"
-  },
-  "body": {
-   "elements": [
-    {
-     "tag": "markdown",
-     "content": "**✅ 已按推荐：统一写 uv**",
-     "text_size": "heading"
+   "card": {
+    "schema": "2.0",
+    "config": {
+     "update_multi": true,
+     "enable_forward": false
     },
-    {
-     "tag": "markdown",
-     "content": "你选了「统一写 uv」，已记下，等 Agent 接着做。"
+    "header": {
+     "title": {
+      "tag": "plain_text",
+      "content": "README 的安装命令用哪个工具"
+     },
+     "template": "green"
     },
-    {
-     "tag": "collapsible_panel",
-     "expanded": false,
-     "background_color": "grey-50",
-     "border": {
-      "color": "grey",
-      "corner_radius": "6px"
-     },
-     "padding": "4px 10px 8px 10px",
-     "vertical_spacing": "8px",
-     "header": {
-      "title": {
-       "tag": "plain_text",
-       "content": "当时问的是什么 · 展开"
-      },
-      "width": "fill",
-      "vertical_align": "center",
-      "icon": {
-       "tag": "standard_icon",
-       "token": "down-small-ccm_outlined",
-       "color": "grey",
-       "size": "16px 16px"
-      },
-      "icon_position": "right",
-      "icon_expanded_angle": -180
-     },
+    "body": {
      "elements": [
       {
        "tag": "markdown",
-       "content": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。"
+       "content": "**✅ 已按推荐：统一写 uv**",
+       "text_size": "heading"
+      },
+      {
+       "tag": "markdown",
+       "content": "你选了「统一写 uv」，已记下，等 Agent 接着做。"
+      },
+      {
+       "tag": "collapsible_panel",
+       "expanded": false,
+       "background_color": "grey-50",
+       "border": {
+        "color": "grey",
+        "corner_radius": "6px"
+       },
+       "padding": "4px 10px 8px 10px",
+       "vertical_spacing": "8px",
+       "header": {
+        "title": {
+         "tag": "plain_text",
+         "content": "当时问的是什么 · 展开"
+        },
+        "width": "fill",
+        "vertical_align": "center",
+        "icon": {
+         "tag": "standard_icon",
+         "token": "down-small-ccm_outlined",
+         "color": "grey",
+         "size": "16px 16px"
+        },
+        "icon_position": "right",
+        "icon_expanded_angle": -180
+       },
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。"
+        }
+       ]
+      },
+      {
+       "tag": "markdown",
+       "content": "<font color='grey'>卡片 #12 · 第 2 版｜来源 dispatch-dt-sandbox-claude｜尾号 cdef</font>",
+       "text_size": "notation"
       }
      ]
-    },
-    {
-     "tag": "markdown",
-     "content": "<font color='grey'>卡片 #12 · 第 2 版｜来源 dispatch-dt-sandbox-claude｜尾号 cdef</font>",
-     "text_size": "notation"
     }
-   ]
-  }
- },
- "closed": {
-  "schema": "2.0",
-  "config": {
-   "update_multi": true,
-   "enable_forward": false
+   }
   },
-  "header": {
-   "title": {
-    "tag": "plain_text",
-    "content": "README 的安装命令用哪个工具"
+  "closed": {
+   "input": {
+    "id": 12,
+    "kind": "ask",
+    "title": "README 的安装命令用哪个工具",
+    "text": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。",
+    "options": [
+     "统一写 uv",
+     "保留 pip",
+     "两种都写"
+    ],
+    "recommend": 0,
+    "rule": "dispatch-dt-sandbox-claude",
+    "answer": null,
+    "by": null,
+    "result": "Agent 后来在 CONTRIBUTING.md 里查到仓库约定只用 uv，自己按约定写了",
+    "state": "closed",
+    "version": 2,
+    "choice": null
    },
-   "template": "grey"
-  },
-  "body": {
-   "elements": [
-    {
-     "tag": "markdown",
-     "content": "**⏹ 这件事不用你定了**",
-     "text_size": "heading"
+   "card": {
+    "schema": "2.0",
+    "config": {
+     "update_multi": true,
+     "enable_forward": false
     },
-    {
-     "tag": "markdown",
-     "content": "原因：Agent 后来在 CONTRIBUTING.md 里查到仓库约定只用 uv，自己按约定写了"
+    "header": {
+     "title": {
+      "tag": "plain_text",
+      "content": "README 的安装命令用哪个工具"
+     },
+     "template": "grey"
     },
-    {
-     "tag": "collapsible_panel",
-     "expanded": false,
-     "background_color": "grey-50",
-     "border": {
-      "color": "grey",
-      "corner_radius": "6px"
-     },
-     "padding": "4px 10px 8px 10px",
-     "vertical_spacing": "8px",
-     "header": {
-      "title": {
-       "tag": "plain_text",
-       "content": "当时问的是什么 · 展开"
-      },
-      "width": "fill",
-      "vertical_align": "center",
-      "icon": {
-       "tag": "standard_icon",
-       "token": "down-small-ccm_outlined",
-       "color": "grey",
-       "size": "16px 16px"
-      },
-      "icon_position": "right",
-      "icon_expanded_angle": -180
-     },
+    "body": {
      "elements": [
       {
        "tag": "markdown",
-       "content": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。"
+       "content": "**⏹ 这件事不用你定了**",
+       "text_size": "heading"
+      },
+      {
+       "tag": "markdown",
+       "content": "原因：Agent 后来在 CONTRIBUTING.md 里查到仓库约定只用 uv，自己按约定写了"
+      },
+      {
+       "tag": "collapsible_panel",
+       "expanded": false,
+       "background_color": "grey-50",
+       "border": {
+        "color": "grey",
+        "corner_radius": "6px"
+       },
+       "padding": "4px 10px 8px 10px",
+       "vertical_spacing": "8px",
+       "header": {
+        "title": {
+         "tag": "plain_text",
+         "content": "当时问的是什么 · 展开"
+        },
+        "width": "fill",
+        "vertical_align": "center",
+        "icon": {
+         "tag": "standard_icon",
+         "token": "down-small-ccm_outlined",
+         "color": "grey",
+         "size": "16px 16px"
+        },
+        "icon_position": "right",
+        "icon_expanded_angle": -180
+       },
+       "elements": [
+        {
+         "tag": "markdown",
+         "content": "我在给 dt-sandbox 的 README 补安装说明，发现仓库里两种写法都有：依赖是用 **uv** 锁的（`uv.lock`），但 CI 脚本还在用 **pip** 装。说明里只写一种，新手照着做才不会出错。"
+        }
+       ]
+      },
+      {
+       "tag": "markdown",
+       "content": "<font color='grey'>卡片 #12 · 第 2 版｜来源 dispatch-dt-sandbox-claude｜尾号 cdef</font>",
+       "text_size": "notation"
       }
      ]
-    },
-    {
-     "tag": "markdown",
-     "content": "<font color='grey'>卡片 #12 · 第 2 版｜来源 dispatch-dt-sandbox-claude｜尾号 cdef</font>",
-     "text_size": "notation"
     }
-   ]
+   }
   }
  }
 }

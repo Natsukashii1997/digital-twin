@@ -13,18 +13,20 @@ title、text、options、recommend、choice、answer、by、result、rule、crea
       结束了的卡（decided / done / closed）不画任何按钮。
       样式是定稿的丙版「推荐优先」（常浩 2026-11-20 从三版里选定，登记在 docs/DECIDED.md）：开着时大字写建议、一个通栏大按钮
       「✅ 按推荐：…」，其余选项收在「不同意？其他选择」折叠面板里；没有推荐（或是通知卡）时所有选项平铺，不替常浩挑；
-      结束后大字写结果，原问题收进「当时问的是什么」折叠面板。
+      结束后大字写结果（一行；Agent 的总结放在大字下面），原问题收进「当时问的是什么」折叠面板；通知卡（含中台一建出来
+      就关的只读通知）结束后正文直接摊开。
       mark：页脚小字（如卡片令牌尾号，回读时认卡用）；
       secretary：秘书在 by 里的名字（同 autoloop_config.SECRETARY）；hint：开着时的「怎么回」提示，None 用默认。
   outcome(card, secretary="秘书") -> str | None   结束的卡写什么结果（开着的卡返回 None）
-  parse_reply(text, card) -> int | None           引用卡片打字回答：认「1」「①」「按推荐」或选项原文，认不出返回 None。
+  parse_reply(text, card) -> int | None           引用卡片打字回答：认「1」「①」「按推荐」或选项原文；几种认法指向不同选项、
+      认不出、卡片已结束都返回 None。
       只给出「想选哪一项」，算不算批准由调用方定（ADR-015 修订 1：私聊打字只能发起提议，批准要门卫卡上的点击）。
   button_values(content) -> list[dict]            从渲染结果里取出全部按钮回调值（回读核对、测试用）
 """
 import re
 
 NUMS = "①②③④⑤⑥⑦⑧⑨⑩"
-DEFAULT_HINT = "点按钮就算你定了，只能点一次。也可以引用这张卡片回一句，例如「1」「按推荐」或选项原文。"
+DEFAULT_HINT = "点按钮就算你定了，只能点一次。"   # 引用回答在 ADR-015 下只算提议，怎么写等门卫接上再定（DECIDED「还没定」）
 COLOR = {"open": "indigo", "decided": "green", "done": "green", "closed": "grey"}
 
 
@@ -48,17 +50,24 @@ def chosen(card):
     return card.get("answer")
 
 
+def one_line(text):
+    """进大字标题的文字（选项、结果）压成一行：多行的总结不把标题撑乱。"""
+    return re.sub(r"\s*\n\s*", " ", str(text or "")).strip()
+
+
 def who(card, secretary):
     return "秘书替你" if card.get("by") == secretary else "你"
 
 
 def outcome(card, secretary="秘书"):
-    """结束的卡写什么（开着的卡 None）。closed 对提问卡就是「不用定了」：中台关卡时写了原因（Agent 自己解决了、后来跑成了…）。"""
-    state, pick = card.get("state"), chosen(card)
+    """结束的卡写什么（开着的卡 None），一句话、不带 Agent 的总结（总结由 render 放在大字下面）。
+    closed 对提问卡就是「不用定了」：中台关卡时写了原因（Agent 自己解决了、后来跑成了…）。"""
+    state, pick = card.get("state"), one_line(chosen(card))
+    picked = f"{who(card, secretary)}选了「{pick}」" if pick else f"{who(card, secretary)}定了"
     if state == "decided":
-        return f"{who(card, secretary)}选了「{pick}」，已记下，等 Agent 接着做。"
+        return f"{picked}，已记下，等 Agent 接着做。"
     if state == "done":
-        return f"{who(card, secretary)}选了「{pick}」，" + (f"已办完：{card['result']}" if card.get("result") else "已办完。")
+        return f"{picked}，已办完。"
     if state == "closed":
         reason = card.get("result") or ""
         if card.get("kind") == "ask":
@@ -128,7 +137,7 @@ def render(card, value_for, mark=None, secretary="秘书", hint=None):
     btns = buttons_open(card, value_for)
     explain = [md(card["text"])] if card.get("text") else []
     if btns and rec is not None and card.get("kind") == "ask":
-        els.append(md(f"**我建议：{opts[rec]}**", text_size="heading"))
+        els.append(md(f"**我建议：{one_line(opts[rec])}**", text_size="heading"))
         els += explain
         i, label, value = btns[rec]
         els.append(button(f"✅ 按推荐：{label}", value, "primary_filled", width="fill", size="large"))
@@ -143,17 +152,25 @@ def render(card, value_for, mark=None, secretary="秘书", hint=None):
         els.append(footer(card, mark, hint))
     else:
         icon = {"decided": "✅", "done": "🏁", "closed": "⏹"}.get(state, "•")
-        followed = (state in ("decided", "done") and rec is not None and card.get("choice") == rec)
-        dropped = state == "closed" and card.get("kind") == "ask"         # 提问卡被关：不用常浩定了，下面写原因
-        headline = (f"已按推荐：{chosen(card)}" if followed else "这件事不用你定了" if dropped
-                    else outcome(card, secretary) or "已结束。")
-        els.append(md(f"**{icon} {headline}**", text_size="heading"))
-        if dropped and card.get("result"):
-            els.append(md(f"原因：{card['result']}"))
-        elif followed:
-            els.append(md(outcome(card, secretary)))
-        if card.get("text"):
-            els.append(panel("当时问的是什么 · 展开", explain))
+        result = card.get("result") or ""
+        if card.get("kind") != "ask":              # 通知卡（含中台一建出来就关的只读通知）：正文直接摊开，不收起
+            if result or not explain:
+                els.append(md(f"**{icon} {one_line(result) or '已结束。'}**", text_size="heading"))
+            els += explain
+        else:
+            followed = state in ("decided", "done") and rec is not None and card.get("choice") == rec
+            dropped = state == "closed"                # 提问卡被关：不用常浩定了，下面写原因
+            headline = (f"已按推荐：{one_line(chosen(card))}" if followed else "这件事不用你定了" if dropped
+                        else outcome(card, secretary))
+            els.append(md(f"**{icon} {headline}**", text_size="heading"))
+            if followed:
+                els.append(md(outcome(card, secretary)))
+            if dropped and result:
+                els.append(md(f"原因：{result}"))
+            elif state == "done" and result:           # Agent 这一轮的总结：普通字号，放在大字下面
+                els.append(md(result))
+            if explain:
+                els.append(panel("当时问的是什么 · 展开", explain))
         els.append(footer(card, mark))
     return card_json(head(title, COLOR.get(state, "grey")), els)
 
@@ -181,22 +198,26 @@ _REC = re.compile(r"^(就?按推荐(的)?(来|办|选)?|推荐(的|那个)?|就�
 _PICK = re.compile(r"^(选|就选|要)?(第)?([0-9]{1,2}|[一二三四五六七八九十]|[①-⑩])(个|项|条|号)?$")
 
 
+def _norm(text):
+    """回答和选项用同一套规整：去空白和常见标点、引号，忽略大小写。"""
+    return re.sub(r"[\s，。,.!！?？~～「」“”‘’\"']+", "", str(text or "")).casefold()
+
+
 def parse_reply(text, card):
-    """引用卡片打字回答 → 选项号（从 0 起）。只认一种明确的意思，含糊、超范围、卡片已结束都返回 None。"""
+    """引用卡片打字回答 → 选项号（从 0 起）。「按推荐」、选项原文、编号三种认法，命中的意思只有一个才算；
+    几种认法指向不同选项（如选项本身是「2」「1」时回「1」，或有个选项叫「推荐」）、超范围、卡片已结束都返回 None。"""
     if not is_open(card) or card.get("kind") != "ask":
         return None
-    opts = options(card)
-    t = re.sub(r"[\s，。,.!！~～「」“”\"']+", "", str(text or ""))
+    opts, t = options(card), _norm(text)
     if not t:
         return None
-    if _REC.match(t):
-        return recommend(card)
-    exact = [i for i, o in enumerate(opts) if re.sub(r"\s+", "", o) == t]
-    if len(exact) == 1:
-        return exact[0]
+    hits = {i for i, o in enumerate(opts) if _norm(o) == t}
+    if _REC.match(t) and recommend(card) is not None:
+        hits.add(recommend(card))
     m = _PICK.match(t)
-    if not m:
-        return None
-    g = m.group(3)
-    n = NUMS.index(g) + 1 if g in NUMS else _CN.get(g) or int(g)          # ③ 的 isdigit() 也是真，先认圈号
-    return n - 1 if 1 <= n <= len(opts) else None
+    if m:
+        g = m.group(3)
+        n = NUMS.index(g) + 1 if g in NUMS else _CN.get(g) or int(g)      # ③ 的 isdigit() 也是真，先认圈号
+        if 1 <= n <= len(opts):
+            hits.add(n - 1)
+    return hits.pop() if len(hits) == 1 else None

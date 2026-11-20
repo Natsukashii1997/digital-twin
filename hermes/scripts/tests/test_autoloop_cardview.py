@@ -1,5 +1,6 @@
-"""中台卡片渲染模块（#195 批 1「飞书拍板」）自测：定稿的丙版「推荐优先」× 开着 / 已定 / 已办完 / 已失效；
-批 1 验收里和渲染相关的三条：重复点只算一次、引用回答可用、原有合并 / 推翻按钮照常。
+"""中台卡片渲染模块（#195 批 1「飞书拍板」）自测：定稿的丙版「推荐优先」× 开着 / 已定 / 已办完 / 已失效，和定稿样例逐字比对；
+批 1 验收里和渲染相关的三条，本模块负责的那一段：重复点只算一次（渲染出的按钮值原样交给 autoloop_answer，去重是它的），
+引用回答可用（只测解析，调用方还没接），原有合并 / 推翻按钮照常（插件原有测试原样再跑一遍）。
 不发飞书、不起中台：桥接和插件都用 test_autoloop_feishu / test_merge_buttons_plugin 同样的假件。"""
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import json
@@ -96,10 +97,34 @@ class Render(unittest.TestCase):
         head = lambda card: V.render(card, bridge())["body"]["elements"][0]["content"]  # noqa: E731
         self.assertEqual(head({**DECIDED, "choice": 0}), "**✅ 已按推荐：统一写 uv**")
         self.assertEqual(head(DECIDED), "**✅ 你选了「保留 pip」，已记下，等 Agent 接着做。**")
-        self.assertEqual(head(DONE), "**🏁 你选了「保留 pip」，已办完：已改好并开了 PR**")
+        self.assertEqual(head(DONE), "**🏁 你选了「保留 pip」，已办完。**")
+        self.assertEqual(head({**DONE, "choice": 0}), "**🏁 已按推荐：统一写 uv**")
         self.assertEqual(head(CLOSED), "**⏹ 这件事不用你定了**")
         self.assertEqual(head({**NOTICE, "state": "closed", "result": "后来跑成了"}), "**⏹ 后来跑成了**")  # 通知卡不说「不用你定」
-        self.assertEqual(head({**NOTICE, "state": "closed"}), "**⏹ 已结束。**")
+        self.assertEqual(head({**NOTICE, "state": "closed", "text": ""}), "**⏹ 已结束。**")
+        self.assertEqual(head({**DECIDED, "choice": None, "answer": None}), "**✅ 你定了，已记下，等 Agent 接着做。**")
+
+    def test_agent_summary_stays_out_of_the_headline(self):
+        """已办完时 result 是 Agent 这一轮的整段总结：放在大字下面的普通字号里，大字只写一行。"""
+        c = V.render({**DONE, "result": "第一行\n第二行"}, bridge())
+        els = c["body"]["elements"]
+        self.assertNotIn("第一行", els[0]["content"])
+        self.assertIn({"tag": "markdown", "content": "第一行\n第二行"}, els)
+        c = V.render({**DECIDED, "choice": None, "answer": "多行\n回答"}, bridge())
+        self.assertEqual(c["body"]["elements"][0]["content"], "**✅ 你选了「多行 回答」，已记下，等 Agent 接着做。**")
+        c = V.render({**ASK, "options": ["统一\n写 uv", "保留 pip"]}, bridge())
+        self.assertEqual(c["body"]["elements"][0]["content"], "**我建议：统一 写 uv**")
+
+    def test_closed_notice_shows_its_text_unfolded(self):
+        """中台的只读通知（fyi）一建出来就是 closed、没有 result：正文直接摊开，不收进折叠面板（审查 P2-1）。"""
+        fyi = {**NOTICE, "state": "closed", "options": [], "result": None, "text": "第 3 轮跑完了：改好了 README"}
+        c = V.render(fyi, bridge())
+        self.assertEqual(c["body"]["elements"][0], {"tag": "markdown", "content": "第 3 轮跑完了：改好了 README"})
+        self.assertNotIn("collapsible_panel", text(c))
+        self.assertNotIn("当时问的是什么", text(c))
+        handled = V.render({**fyi, "result": "已处理"}, bridge())
+        self.assertEqual(handled["body"]["elements"][0]["content"], "**⏹ 已处理**")
+        self.assertIn("第 3 轮跑完了", handled["body"]["elements"][1]["content"])
 
     def test_secretary_decision_is_labelled(self):
         self.assertIn("秘书替你", text(V.render({**DECIDED, "by": "秘书"}, bridge())))
@@ -112,7 +137,8 @@ class Render(unittest.TestCase):
         c = V.render(ASK, bridge(), mark="尾号 cdef")
         self.assertIn("卡片 #7 · 第 3 版", text(c))
         self.assertIn("尾号 cdef", text(c))
-        self.assertIn("按推荐", text(V.render(ASK, bridge())))
+        self.assertIn(V.DEFAULT_HINT, text(V.render(ASK, bridge())))
+        self.assertNotIn("引用", V.DEFAULT_HINT)                         # 引用回答在 ADR-015 下只算提议：默认不教
         self.assertIn("自定提示", text(V.render(ASK, bridge(), hint="自定提示")))
         self.assertNotIn("引用这张卡片", text(V.render(DECIDED, bridge())))  # 结束的卡不再教怎么回
 
@@ -125,12 +151,40 @@ class QuotedReply(unittest.TestCase):
                            ("4", None), ("0", None), ("uv", None), ("1 和 2", None), ("", None), (None, None)):
             self.assertEqual(V.parse_reply(said, ASK), want, said)
 
+    def test_two_readings_that_disagree_are_refused(self):
+        """选项本身是数字、或有个选项叫「推荐」时，编号 / 原文 / 按推荐几种认法会指向不同选项：不挑，返回 None（审查 P2-2）。"""
+        nums = {**ASK, "options": ["2", "1"], "recommend": None}
+        self.assertIsNone(V.parse_reply("1", nums))
+        self.assertIsNone(V.parse_reply("2", nums))
+        self.assertEqual(V.parse_reply("第一个", nums), 0)
+        self.assertEqual(V.parse_reply("4", {**ASK, "options": ["4", "5"]}), 0)         # 编号超范围，只剩原文一种认法
+        self.assertEqual(V.parse_reply("2", {**ASK, "options": ["2", "x"]}), None)      # 原文是第 1 项，编号是第 2 项
+        self.assertEqual(V.parse_reply("1", {**ASK, "options": ["1", "x"]}), 0)         # 两种认法一致
+        named = {**ASK, "options": ["统一写 uv", "保留 pip", "推荐"]}
+        self.assertIsNone(V.parse_reply("推荐", named))
+        self.assertIsNone(V.parse_reply("同一", {**ASK, "options": ["同一", "同 一"]}))   # 规整后两个选项一样
+
+    def test_option_text_normalised_the_same_way(self):
+        self.assertEqual(V.parse_reply("UV", {**ASK, "options": ["uv", "pip"]}), 0)
+        self.assertEqual(V.parse_reply("是的", {**ASK, "options": ["是的。", "不是"]}), 0)
+
     def test_no_recommendation_means_follow_recommendation_is_unclear(self):
         self.assertIsNone(V.parse_reply("按推荐", {**ASK, "recommend": None}))
 
     def test_ended_or_notice_cards_take_no_reply(self):
         for card in (DECIDED, CLOSED, NOTICE):
             self.assertIsNone(V.parse_reply("1", card))
+
+
+class Sample(unittest.TestCase):
+    """定稿样例逐字比对：改了样子这条就红，要先过 docs/DECIDED.md（全局规则第 15 节）。"""
+    def test_render_matches_the_decided_sample(self):
+        sample = json.loads((HERE.parents[1] / "samples" / "autoloop-card-c.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(sample["states"]), {"open", "decided", "closed"})
+        for name, s in sample["states"].items():
+            card = s["input"]
+            got = V.render(card, lambda i: {"autoloop": "0123456789abcdef", "o": i, "v": card["version"]}, mark="尾号 cdef")
+            self.assertEqual(got, s["card"], name)
 
 
 class DuplicateClick(TF.Base):

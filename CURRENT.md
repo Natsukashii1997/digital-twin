@@ -8,9 +8,10 @@
 
 ## #195 批 1 飞书拍板：卡片渲染模块，样式定丙版（2026-11-20，Claude；PR #256，未合并、未安装）
 
-- 做了什么：新增 `hermes/scripts/autoloop_cardview.py`（和发送通道无关的渲染模块，桥接和门卫共用；接口见文件头和 PR 正文）和 `tests/test_autoloop_cardview.py`（开着 / 已定 / 已办完 / 已失效；重复点只算一次、引用回答、原有合并 / 推翻按钮照常）。没改 `autoloop_feishu.py`、`autoloop_answer.py`（甲线 line-a-0e3 在抽共用模块）。
+- 做了什么：新增 `hermes/scripts/autoloop_cardview.py`（和发送通道无关的渲染模块，桥接和门卫共用；接口见文件头和 PR 正文）和 `tests/test_autoloop_cardview.py`（开着 / 已定 / 已办完 / 已失效、和定稿样例逐字比对；批 1 验收里本模块负责的一段：渲染出的按钮值经 `autoloop_answer` 点两次只答一次、引用回答的解析（调用方还没接）、插件原有合并 / 推翻按钮测试原样再跑）。没改 `autoloop_feishu.py`、`autoloop_answer.py`（甲线 line-a-0e3 在抽共用模块）。
 - 选样式：甲 对话式 / 乙 决策单 / 丙 推荐优先 × 三种状态共 9 张真卡片以猛鬼兽机器人发到常浩私聊并回读核对；常浩 11-20 回「都选丙」，已登记 `docs/DECIDED.md`，模块只留丙版。证据 `evidence/195-batch1-cards/`。
-- 下一步：Claude 子 agent 独立审 → 送 L3；桥接改用本模块等 line-a-0e3 的共用模块落地后接。
+- Claude 子 agent 独立审：无 P1，4 条 P2 改了 3 条半（只读通知摊开、引用回答有歧义就不认、默认提示不教引用回答、Agent 总结不进大字；markdown 转义没做：正文本来就是 Agent 写的 markdown，同一信任级别）。
+- 下一步：送 L3；桥接改用本模块等 line-a-0e3 的共用模块落地后接。
 ## #251 工程自检报的 7 项安装副本不一致已收口（2026-11-20，Claude；PR #252 已合并 `cb9443b`，已安装）
 
 - 来由：11-20 代验 11-14 那期日报，工程自检报安装副本不一致 7 项；常浩看逐项方案回「按推荐办」，对 7b 回「7b不改」，对旧版副本选「甲：钉住旧版」，PR 回「合并」。
