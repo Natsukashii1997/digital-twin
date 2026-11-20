@@ -6,12 +6,13 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
-## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR 待开、待常浩合并）
+## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR #250 已合并 3c6d7a9，已安装）
 
 - 来由：项目坑 L-03（唤醒后代理没通，一周 4 次，每次只修一个脚本）；常浩 2026-11-20 批复盘提案 P9「按改过的」：体检只读 plist 键名，不读进程环境（G-42）。
 - 改了什么：新增 `hermes/scripts/netwait.py`（开跑闸门 gate / guard、重试预算 Budget、网络错误判断 is_net_error）；`report_data`、`pdaily_data`、`memdaily_data` 原来各自的等待重试删掉、改调它；8 个在跑的无模型定时任务入口和暂停中的合并官、夜跑主控开跑前先过闸门，等不到明确失败写原因（写稿类记进产物、由发送那次报）；`DT_MODEL_WAIT_SECONDS`、`DT_GH_WAIT_SECONDS` 合成 `DT_NET_WAIT_SECONDS`。`ops/health_check.py` 加网关 plist 代理变量名检查（G-19）和定时任务晚点 / 失败附 pmset 睡眠记录（G-20）；`ops/self_check.py` 把 netwait.py、report_data.py 的亚古兽副本也纳入比对。
 - 姊妹 PR：agent-kit#102（G-19、G-20 升〔体检〕）、my-skills#119（automation-checkup 两项）。
-- 未做：装进 `~/.hermes`（猛鬼兽 scripts 和亚古兽 profile scripts 各一份 netwait.py、report_data.py）、`~/Library/Application Support/DigitalTwin/bin/health_check.py`，等常浩回「合」后做；脚本改动不用重启网关。
+- 合并与安装（常浩 11-20 回「合」）：#250 squash 合并 `3c6d7a9`，agent-kit#102 `8eefcfd`、my-skills#119 `e190bdd`（这两个合并前已变基到最新 main 并重跑测试）。按 `self_check.install_pairs` 装了 21 处：猛鬼兽 `~/.hermes/scripts/` 16 个（含新的 netwait.py、self_check.py），亚古兽 `~/.hermes/profiles/agumon/scripts/` 4 个（memdaily_data、memdaily_job、netwait、report_data），`DigitalTwin/bin/health_check.py`；装前核对旧副本都等于改动前 main，备份在 `evidence/p9-env-ready/install-before/`，装后逐字节回读 21 处一致，两处 scripts 目录导入冒烟通过。都是脚本，没重启网关。agent-kit 用 `tools/install.mjs --apply` 同步了运行副本 LESSONS（设置文件无变化）；automation-checkup 的技能链接指向 my-skills 主目录，已拉齐生效。
+- 未做：主目录 `digital-twin` 没拉齐：里面有别人没提交的 `projects.json`，和要拉下来的改动冲突，`git pull --ff-only` 被拒；按规矩没 stash、没 reset，等常浩处理。真实环境下的第一次闸门运行是明早 07:30 记忆日报、09:15 日报写稿，09:45 巡检第一次带两项新检查。
 - 测试：hermes 全量 `Ran 1607 tests`，`FAILED (failures=117, errors=3)`：117 条是 `test_secretary_gate` / `test_secretary_patrol`，origin/main `241b22b` 上单独跑同样 117 条失败（「本机没有 yaml 库」，本改动之前就有）；3 条是 memdaily 重试测试被隔离默认的「不等网络」关掉了重试，已修，复跑 `test_memdaily`、`test_netwait` 49 条 OK。orca 48 条 OK。
 - 证据：`evidence/p9-env-ready/`（全量日志、复跑日志、真机只读核对 `claude-06-真机体检两项只读.txt`）。
 
