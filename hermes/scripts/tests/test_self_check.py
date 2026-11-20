@@ -77,6 +77,12 @@ class ScriptTest(unittest.TestCase):
         sh(self.repo, "add", "-A")
         sh(self.repo, "commit", "-q", "-m", "起步")
         self.write(self.home / "hermes/scripts/check_repos.py", "源 ops/check_repos.py\n")   # check_repos.py 装两处
+        for f in ("netwait.py", "report_data.py"):                                          # 两只机器人各一份（P9）
+            self.write(self.repo / "hermes/scripts" / f, f"源 {f}\n")
+            for d in ("hermes/scripts", "hermes/profiles/agumon/scripts"):
+                self.write(self.home / d / f, f"源 {f}\n")
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-q", "-m", "共用脚本")
         self.write(self.home / "hermes/scripts/安装处多出的.py", "不管\n")
         self.write(self.home / "tidings/bin/health.js", "")   # 健康：什么都不打印
 
@@ -248,6 +254,15 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("- ~/hermes/profiles/agumon/scripts/memdaily_job.py 和 hermes/scripts/memdaily_job.py 内容不同", out)
         self.assertNotIn("~/hermes/scripts/memdaily", out)
 
+    def test_shared_scripts_checked_in_both_profiles(self):
+        """netwait.py、report_data.py 猛鬼兽和亚古兽各装一份，两处都比对（P9）。"""
+        self.write(self.home / "hermes/profiles/agumon/scripts/netwait.py", "旧的\n")
+        (self.home / "hermes/scripts/report_data.py").unlink()
+        out = self.run_script()
+        self.assertIn("- ~/hermes/profiles/agumon/scripts/netwait.py 和 hermes/scripts/netwait.py 内容不同", out)
+        self.assertIn("- ~/hermes/scripts/report_data.py 缺失（源：hermes/scripts/report_data.py）", out)
+        self.assertNotIn("~/hermes/scripts/netwait.py", out)
+
     def test_check_repos_checked_in_both_install_places(self):
         (self.home / "hermes/scripts/check_repos.py").unlink()
         self.assertIn("- ~/hermes/scripts/check_repos.py 缺失（源：ops/check_repos.py）", self.run_script())
@@ -259,6 +274,21 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("- ~/hermes/prompts/p.md 和 hermes/prompts/p.md 内容不同", out)
         self.assertIn("- ~/hermes/scripts/a.py 和 hermes/scripts/a.py 内容不同", out)
         self.assertNotIn("秘密", out)
+
+    def test_install_hold_skips_missing_but_not_stale(self):
+        """#236：main 上 hermes/install_hold.txt 列着的「按计划先不装」，没装不报；装了但和 main 不同照报；没提交的清单不算。"""
+        (self.home / "hermes/scripts/a.py").unlink()
+        self.write(self.home / "hermes/prompts/p.md", "旧的\n")
+        self.write(self.repo / "hermes/install_hold.txt", "# 说明\nhermes/scripts/a.py  # 等批 0E\n")
+        self.assertIn("a.py 缺失", self.run_script())                      # 清单还没提交到 main：照报
+        sh(self.repo, "add", "-A")
+        sh(self.repo, "commit", "-qm", "清单")
+        out = self.run_script()
+        self.assertNotIn("a.py", out)
+        self.assertIn("- ~/hermes/prompts/p.md 和 hermes/prompts/p.md 内容不同", out)
+        self.write(self.repo / "hermes/install_hold.txt", "hermes/prompts/p.md\n")
+        sh(self.repo, "commit", "-qam", "清单 2")
+        self.assertIn("p.md 和 hermes/prompts/p.md 内容不同", self.run_script())   # 装了但不同：照报
 
     def test_uncommitted_repo_changes_are_not_drift(self):
         self.write(self.repo / "hermes/scripts/a.py", "工作区改了没提交\n")

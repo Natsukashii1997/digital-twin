@@ -230,10 +230,11 @@ def raw_errors(action, received, reply):
 
 def issue(store, *, session_id, project, action, target, basis, revocability, category=None, context="", question="",
           summary="", ask_owner="", cites=(), expires_at=None, received=None, reply=None, reason=None, card_version=None,
-          by="hermes", now=None, status_reader=None):
+          card=None, by="hermes", now=None, status_reader=None):
     """后闸记账（规格第 7 节）：决定号、原文、额度原子预占。四类要准入、清单允许、额度够；handoff 只记账。
     card_version：① 必填（正整数，可信侧现读的卡片版本），同一张卡同一版本只许一个可送达的 ①（v6 唯一索引）；
-    对象带卡片的交常浩可以写，用来复查。返回决定（dict）。任何一项不满足抛 LedgerError，库里什么都不写、原文删掉。"""
+    对象带卡片的交常浩可以写，用来复查；card 只给交常浩用：对象里没有卡片（② 通知卡）时写明这笔是哪张卡，记进 card_id 列、
+    不改对象（PR #225 第 2 轮 P1-04）；同一次会话里同卡同版本只记一笔交常浩，第二次抛 DuplicateHandoff（e.existing 是已有决定号）。返回决定（dict）。任何一项不满足抛 LedgerError，库里什么都不写、原文删掉。"""
     fixed_now = now
     now = L._now(now)
     status_reader = status_reader or SECRETARY.status_reader
@@ -277,8 +278,12 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
         raise LedgerError(f"依据只能引用决定号：{cites}", "BadInput")
     if action == "ask" and not _pos_int(card_version):
         raise LedgerError("① 答提问卡要写卡片版本（card_version，正整数）：同一张卡同一版本只许一个可送达的决定", "BadInput")
-    if card_version is not None and not (_pos_int(card_version) and "card" in target):
-        raise LedgerError("只有对象带卡片时才写卡片版本（正整数）", "BadInput")
+    if card is not None and (action != "handoff" or not _pos_int(card) or target.get("card") not in (None, card)
+                             or not _pos_int(card_version)):        # 成对给（PR #225 第 3 轮 P2-05）：只给卡片不给版本会悄悄失去去重
+        raise LedgerError("card 只给交常浩写，要是正整数，对象里有卡片时要一致，而且要同时给 card_version", "BadInput")
+    card_id = target.get("card") if isinstance(target, dict) and target.get("card") is not None else card
+    if card_version is not None and not (_pos_int(card_version) and card_id is not None):
+        raise LedgerError("只有对象带卡片（或交常浩写了 card）时才写卡片版本（正整数）", "BadInput")
     task = target["task"]
 
     def gate(t):
@@ -287,6 +292,15 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
             pol = sess.get("policy") or {}
             if not (_pos_int(pol.get("version")) and re.fullmatch(r"[0-9a-f]{64}", str(pol.get("sha256")))):
                 raise LedgerError("现在这次秘书会话没有绑定清单版本，记不了", "WrongSession")
+            if card_version is not None:     # 同一次会话里同一张卡同一版本只记一笔交常浩（PR #225 第 1 轮 P1-04；和插入在同一个写事务里）
+                dup = store.conn.execute("SELECT id FROM secretary_decisions WHERE action = 'handoff' AND session_id = ? "
+                                         "AND card_id = ? AND card_version = ? ORDER BY created_at LIMIT 1",
+                                         (session_id, card_id, card_version)).fetchone()
+                if dup:
+                    err = LedgerError(f"卡片 {card_id} 第 {card_version} 版这次已经交过常浩（{dup[0]}）",
+                                      "DuplicateHandoff")
+                    err.existing = dup[0]
+                    raise err
             return "handoff", [], {"policy_version": pol["version"], "policy_sha256": pol["sha256"]}
         pol = L._admitted(store, session_id, t, status_reader, SECRETARY)
         if (pol.get("categories") or {}).get(action) is not True:
@@ -320,7 +334,7 @@ def issue(store, *, session_id, project, action, target, basis, revocability, ca
     row = {"project": project, "action": action, "category": category, "target": L._j(target), "task_id": task,
            "reason": reason or "", "context": context.strip(), "question": question.strip(), "summary": summary.strip(),
            "ask_owner": ask_owner.strip(), "basis": basis.strip(), "cites": L._j(cites), "revocability": revocability,
-           "card_id": target.get("card"), "card_version": card_version}
+           "card_id": card_id, "card_version": card_version}
     payload = {"session": session_id, "project": project, "action": action, "category": category, "target": target,
                "reason": reason, "revocability": revocability, "cites": cites, "expires_at": C.iso(exp) if exp else None,
                "card_version": card_version}

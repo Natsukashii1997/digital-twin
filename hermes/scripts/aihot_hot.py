@@ -33,6 +33,7 @@ from urllib.parse import quote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 from feishu_home import home_chat  # noqa: E402
+import netwait  # noqa: E402  唤醒后先等网络（P9）
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
 PROFILE = "cli_a96f5f9ac63adcd4"                       # 猛鬼兽应用（PRD D12）
@@ -296,6 +297,8 @@ def main(argv=None):
     sent = state.setdefault("sent", {})
     if day in sent and not (a.force or a.dry_run):
         return 0
+    if not a.dry_run:
+        netwait.guard("aihot", ("aihot", "feishu"), "今天的 AI HOT 热点榜")   # 唤醒后先等网络（P9），等不到说原因、退出码 1
     rec = {"day": day, "at": now.isoformat(timespec="seconds"), "ok": False}
     warnings = []
     try:

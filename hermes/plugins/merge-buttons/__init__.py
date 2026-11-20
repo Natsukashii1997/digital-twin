@@ -7,9 +7,14 @@
   - 中台卡片（#195 批 0B-4）：{"autoloop": "16 位十六进制令牌", "o": 选项号, "v": 版本号} → `autoloop_answer.py <令牌> <选项号>
     --version <版本号> --chat <聊天号> --operator <点击人>`（点击人取网关的 HERMES_SESSION_USER_ID，0B-3 实测是飞书给的 open_id；
     v 是按钮所在那一版的版本号，#218 第 3 轮 P1-03）；没带 v 的旧样式按钮照样转，不带 --version，由脚本拒绝并在私聊说明；
+  - 个人项目日报的拍板按钮（#235）：{"pdaily": "16 位十六进制卡片令牌", "n": 编号（0 = 其余全部）} → 先**同步**跑
+    `pdaily_act.py button <令牌> <编号> --chat <聊天号> --operator <点击人>`（核对常浩本人、常浩私聊、最新一张日报卡、记拍板账），
+    认了就用 ctx.inject_message 往常浩私聊的会话注入一句话，让猛鬼兽按 pdaily-act 技能办；再在后台跑 `pdaily_act.py after`
+    把卡片原地改成「已定」（注入没成，after 顺带在私聊说请引用卡片回一句）。注入要 Hermes 配置
+    plugins.entries.merge-buttons.allow_gateway_injection: true（常浩点头才开）；没开时 inject_message 返回 False，照样记账。
   - 按钮实测探针（#195 批 0B-3）：{"probe": "16 位十六进制"} → 不起脚本，只把网关给的会话信息（点击人、聊天、消息号的样子）
     追加到 evidence/button-probe/clicks.jsonl，由 `button_probe.py show` 和登记的测试卡对照。只记录，不触发任何动作。
-不回复，是因为网关回复按钮点击会失败（拿回调 token 当消息号）；进度和结果由脚本直接发到私聊。
+除日报按钮的注入外都不回复，是因为网关回复按钮点击会失败（拿回调 token 当消息号）；进度和结果由脚本直接发到私聊。
 核对规则全在脚本里（只认常浩私聊、只认发过的卡片），这里只做转交。
 """
 import datetime as dt
@@ -22,6 +27,7 @@ from pathlib import Path
 PYTHON = os.environ.get("DT_MERGE_PYTHON", "/usr/bin/python3")
 SCRIPT = Path(os.environ.get("DT_MERGE_ACT", "~/.hermes/scripts/merge_act.py")).expanduser()
 ANSWER_SCRIPT = Path(os.environ.get("DT_AUTOLOOP_ANSWER", "~/.hermes/scripts/autoloop_answer.py")).expanduser()
+PDAILY_SCRIPT = Path(os.environ.get("DT_PDAILY_ACT", "~/.hermes/scripts/pdaily_act.py")).expanduser()
 CUSTODY_SCRIPT = Path(os.environ.get("DT_CUSTODY_REPORT", "~/.hermes/scripts/custody_report.py")).expanduser()
 LOG = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/DigitalTwin/shadow")).expanduser() / "buttons.log"
 REF = re.compile(r"^[\w.-]+#\d+@[0-9a-f]{7,40}$")
@@ -63,6 +69,50 @@ def probe(value):
     return None
 
 
+_CTX = None   # register 时存下插件上下文：日报按钮要用它注入会话
+
+
+def pdaily(value):
+    """日报拍板按钮（#235）：脚本核对、记账后，注入一句话叫猛鬼兽办；卡片在后台原地改。"""
+    token, n = str(value.get("pdaily")), value.get("n")
+    if set(value) != {"pdaily", "n"} or not CARD.match(token) or type(n) is not int or not 0 <= n <= 20:
+        return None
+    chat, operator = _chat_id(), _session("HERMES_SESSION_USER_ID")
+    try:
+        r = subprocess.run([PYTHON, str(PDAILY_SCRIPT), "button", token, str(n), "--chat", chat, "--operator", operator],
+                           capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        out = json.loads((r.stdout.strip().splitlines() or ["{}"])[-1])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        out = {}
+    _log(f"pdaily {n}：{out.get('msg', '脚本没给结果')}")
+    if not out.get("ok"):
+        if out.get("msg") and out["msg"] != "不认":       # 点击人核对过、但办不了（旧卡片等）：在私聊说一句
+            _spawn(PDAILY_SCRIPT, ["say", "--text", out["msg"]], f"pdaily say {n}")
+        return None
+    if not out.get("entries"):
+        if out.get("tell"):                             # 已经定过：说一句现在的状态（审查 P3）
+            _spawn(PDAILY_SCRIPT, ["say", "--text", out["tell"]], f"pdaily say {n}")
+        return None
+    injected = False
+    if _CTX is not None and out.get("inject"):
+        try:
+            injected = bool(_CTX.inject_message(out["inject"], origin={
+                "platform": "feishu", "chat_id": chat, "chat_type": "dm", "user_id": operator}))
+        except Exception:  # noqa: BLE001  注入失败不影响记账：after 会在私聊说怎么办
+            injected = False
+    return _spawn(PDAILY_SCRIPT, ["after", "--day", str(out.get("day")), "--entries", ",".join(out["entries"]),
+                                  "--injected", "1" if injected else "0"], f"pdaily after {n} injected={injected}")
+
+
+def _log(line):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {line}\n")
+    except OSError:
+        pass
+
+
 def parse(raw_args):
     """`button {...}` → (脚本, verb, ref, 额外参数)；不认识的按钮返回 None。"""
     tag, _, payload = (raw_args or "").strip().partition(" ")
@@ -94,6 +144,8 @@ def handle(raw_args):
         value = None
     if isinstance(value, dict) and "probe" in value:          # 探针只认 {"probe": 令牌}，多带别的键一律不认
         return probe(value) if set(value) == {"probe"} else None
+    if isinstance(value, dict) and "pdaily" in value:
+        return pdaily(value)
     if isinstance(value, dict) and "autoloop" in value:       # 中台卡片只认 {"autoloop": 令牌, "o": 选项号[, "v": 版本号]}
         o, v = value.get("o"), value.get("v")
         if set(value) - {"v"} != {"autoloop", "o"} or not CARD.match(str(value["autoloop"])) or type(o) is not int \
@@ -122,4 +174,6 @@ def _spawn(script, args, what):
 
 
 def register(ctx):
-    ctx.register_command("card", handler=handle, description="卡片按钮：PR 合并 / 退回（#78），托管推翻 / 合并 revert PR（#133），中台卡片、按钮实测探针（#195）")
+    global _CTX
+    _CTX = ctx
+    ctx.register_command("card", handler=handle, description="卡片按钮：PR 合并 / 退回（#78），托管推翻 / 合并 revert PR（#133），中台卡片、按钮实测探针（#195），日报拍板（#235）")

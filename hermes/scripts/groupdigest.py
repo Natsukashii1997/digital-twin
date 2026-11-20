@@ -982,6 +982,12 @@ def mark(day, item, project=None, order=None, skip=False):
 
 # ---------- 入口 ----------
 
+def record_collect_error(day, reason):
+    """取数没成的原因写进 <统计日>.collect-error.json，由 10:45 的发送报出来（run_build 和定时任务入口的网络闸门共用）。"""
+    DIR.mkdir(parents=True, exist_ok=True)
+    write_json(DIR / f"{day.isoformat()}.collect-error.json", {"error": reason})
+
+
 def run_build(day, reply=None):
     """collect + build。失败原因写进 collect-error.json，由 10:45 的发送报出来。"""
     d = day.isoformat()
@@ -992,7 +998,7 @@ def run_build(day, reply=None):
         collect(day)
         return build(day, reply)
     except Exception as e:  # noqa: BLE001  任何失败都要留一句原因
-        write_json(DIR / f"{d}.collect-error.json", {"error": f"取数失败（{clip(e, 160)}）"})
+        record_collect_error(day, f"取数失败（{clip(e, 160)}）")
         raise
     finally:
         marker.unlink(missing_ok=True)

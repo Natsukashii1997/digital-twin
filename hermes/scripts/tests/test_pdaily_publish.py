@@ -395,7 +395,7 @@ class CardTests(unittest.TestCase):
         btn = [e for e in c["body"]["elements"] if e["tag"] == "button"][0]
         self.assertEqual(btn["behaviors"][0]["default_url"], "https://x.feishu.cn/docx/abc")
         self.assertNotIn("今日推进", self.text(c))
-        self.assertNotIn("callback", self.text(c))          # 第 1 批没有回调按钮
+        self.assertNotIn("callback", self.text(c))          # 没给令牌（预览）：没有按钮
 
     def test_no_doc_drops_button_and_says_why(self):
         c = self.card(doc_error="云文档接口超时")
@@ -630,8 +630,10 @@ class SendTests(unittest.TestCase):
                 open({str(self.tmp / "sent.json")!r}, "w").write(content)
                 print(json.dumps({{"ok": True, "data": {{"message_id": "om_1"}}}}))
             elif cmd == "im +messages-mget":
-                title = json.loads(open({str(self.tmp / "sent.json")!r}).read())["header"]["title"]["content"]
-                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">'}}]}}}}))
+                card = json.loads(open({str(self.tmp / "sent.json")!r}).read())
+                title = card["header"]["title"]["content"]
+                foot = card["body"]["elements"][-1].get("content", "") if not os.environ.get("FAKE_DROP_FOOT") else ""
+                print(json.dumps({{"ok": True, "data": {{"messages": [{{"msg_type": "interactive", "content": f'<card title="{{title}}">{{foot}}</card>'}}]}}}}))
             """), encoding="utf-8")
         self.cli.chmod(0o755)
         self.patch = mock.patch.object(pp, "LARK", str(self.cli))
@@ -698,6 +700,30 @@ class SendTests(unittest.TestCase):
         d = self.deliv()
         self.assertTrue(d["sent"] and d["read_back"])
         self.assertEqual(d["message_id"], "om_1")
+        cols = [c for e in sent["body"]["elements"] if e.get("tag") == "column_set" for c in e["columns"]]
+        values = [c["elements"][0]["behaviors"][0]["value"] for c in cols]
+        self.assertEqual(values, [{"pdaily": d["card_token"], "n": 0}, {"pdaily": d["card_token"], "n": 1}])   # #235
+        self.assertRegex(d["card_token"], r"^[0-9a-f]{16}$")
+        self.assertEqual([c["elements"][0]["text"]["content"] for c in cols], ["全部按推荐", "① 按推荐"])
+        snap = json.loads((self.out / f"{DAY}.decisions.sent.json").read_text())      # 拍板快照（审查 P1-1）
+        self.assertEqual([x["item"] for x in snap["decisions"]], ["夜跑收尾"])
+        self.assertEqual(len(d["decisions_sha"]), 64)
+        self.assertIn(f"卡片 {d['card_token'][-6:]}", sent["body"]["elements"][-1]["content"])
+
+    def test_failed_resend_keeps_original_record(self):
+        """复审 P3-C：当天已发出的卡，再 --force 重发没发出去，原来的发卡记录、卡片、快照都不动。"""
+        self.assertIsNone(pp.send(DAY, self.out))
+        before = {n: (self.out / f"{DAY}.{n}").read_text() for n in ("delivery.json", "card.sent.json", "decisions.sent.json")}
+        with mock.patch.object(pp, "lark", side_effect=pp.SendError("发卡片失败：网络")):
+            self.assertIn("网络", pp.send(DAY, self.out, force=True))
+        self.assertEqual({n: (self.out / f"{DAY}.{n}").read_text() for n in before}, before)
+        self.assertIn("网络", (self.out / f"{DAY}.delivery.retry.json").read_text())
+
+    def test_read_back_must_see_card_mark(self):
+        """飞书回读不带按钮的值：靠页脚的令牌尾号认出发出去的是这一张；看不到就不算回读通过（按钮不认）。"""
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}):
+            self.assertIn("回读对不上", pp.send(DAY, self.out))
+        self.assertFalse(self.deliv()["read_back"])
         send_args = json.loads(self.calls.read_text().splitlines()[1])
         self.assertEqual(send_args[send_args.index("--as") + 1], "bot")
         self.assertEqual(send_args[send_args.index("--chat-id") + 1], pp.CHAT)
@@ -737,12 +763,67 @@ class SendTests(unittest.TestCase):
         self.assertIn("没出成", (self.tmp / "sent.json").read_text())
         self.assertNotIn("docs +create", self.cmds())
 
+    def test_no_build_failure_card_carries_recorded_reason(self):
+        """P9：09:15 写稿前网络等不到，原因记进 build-error.json，10:00 的失败卡片写明。"""
+        for f in self.out.glob(f"{DAY}.*"):
+            if not f.name.endswith("facts.json"):
+                f.unlink()
+        pp.record_build_error(DAY, "写稿前网络 / 代理 300 秒没通（github：URLError: refused）", self.out)
+        self.assertIsNone(pp.send(DAY, self.out))
+        sent = (self.tmp / "sent.json").read_text()
+        self.assertIn("09:15 的写稿没跑成：写稿前网络 / 代理 300 秒没通", sent)
+
     def test_cli_send_quiet_on_success(self):
         from io import StringIO
         buf = StringIO()
         with mock.patch("sys.stdout", buf):
             rc = pp.main(["send", "--date", DAY, "--out", str(self.out)])
         self.assertEqual((rc, buf.getvalue()), (0, ""))
+
+    def test_send_starts_checks_only_for_real_daily_dir(self):
+        """#236：定时任务（不带 --out）发成功后，在后台派「猛鬼兽查」的只读单；带 --out（补发到别处、测试）不派。"""
+        with mock.patch.object(pp, "start_checks") as sc, mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY]), 0)
+        sc.assert_called_once_with(DAY)
+        with mock.patch.object(pp, "start_checks") as sc, mock.patch("sys.stdout"):
+            pp.main(["send", "--date", DAY, "--out", str(self.out), "--force"])
+        sc.assert_not_called()
+        with mock.patch.dict(os.environ, {"FAKE_DROP_FOOT": "1"}), mock.patch.object(pp, "start_checks") as sc, \
+                mock.patch.object(pp, "DAILY", self.out), mock.patch("sys.stdout"):
+            self.assertEqual(pp.main(["send", "--date", DAY, "--force"]), 0)    # 定时任务入口：没发好也是输出一句原因、退出码 0
+        sc.assert_called_once_with(DAY)                               # 发出去了、只是回读没过：照样派（复审 P3-4）
+
+
+class CheckDestinationTests(unittest.TestCase):
+    """#236：风险的第三种去向「猛鬼兽查」。"""
+    def errs(self, card):
+        f = facts()
+        pp.normalize(f, card)
+        return pp.check(f, card, report_text())
+
+    def test_check_risk_valid_and_shown(self):
+        r = dict(card_fields()["risks"][0], check={"project": "牛马之家", "task": "查清主目录 15 处改动是什么、该提交还是丢弃"})
+        card = card_fields(risks=[r])
+        self.assertEqual(self.errs(card), [])
+        rows = pp.risk_rows([r], None)
+        self.assertEqual(rows[0]["g"], "猛鬼兽派只读单查，明天报")
+        m = {k: (v, n) for k, v, n in pp.metrics(facts(), card)}
+        self.assertEqual(m["风险与阻塞"], ("1 类", "1 类猛鬼兽查"))
+
+    def test_check_risk_rules(self):
+        r = card_fields()["risks"][0]
+        for c, why in (({"project": "外星项目", "task": "x"}, "check 要写成"), ({"project": "猛鬼兽", "task": "x"}, "check 要写成"),
+                       ({"project": "牛马之家"}, "check 要写成"), ("查一下", "check 要写成")):
+            e = self.errs(card_fields(risks=[dict(r, check=c)]))
+            self.assertTrue(any(why in x for x in e), (c, e))
+        long = card_fields(risks=[dict(r, check={"project": "牛马之家", "task": "长" * 400})])
+        self.assertEqual(self.errs(long), [])                         # 超长截断记提醒，不算核对失败（复审 P3-5）
+        self.assertLessEqual(len(long["risks"][0]["check"]["task"]), 301)
+        e = self.errs(card_fields(risks=[dict(r, to_decisions=[1], check={"project": "牛马之家", "task": "x"})]))
+        self.assertTrue(any("就不用猛鬼兽查" in x for x in e), e)
+        three = [dict(r, cause=f"类{i}", check={"project": "牛马之家", "task": "x"}) for i in range(3)]
+        e = self.errs(card_fields(risks=three))
+        self.assertTrue(any("最多 2 类" in x for x in e), e)
 
 
 class SampleLayoutTests(unittest.TestCase):
@@ -906,6 +987,7 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         card = json.loads((self.tmp / "o" / f"{DAY}.card.json").read_text(encoding="utf-8"))
         self.assertIn("取数失败（RuntimeError：gh 挂了）", json.dumps(card, ensure_ascii=False))
+        self.assertIn("取数失败（RuntimeError：gh 挂了）", pp.build_error(DAY, self.tmp / "o"))   # 10:00 的失败卡片也用它
 
 
 class MaterialTests(unittest.TestCase):

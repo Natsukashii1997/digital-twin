@@ -1,6 +1,6 @@
 # hermes/scripts 自测
 
-名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`python3 -B -m unittest discover -s hermes/scripts/tests`。
+名册里 digital-twin 的 test 就是这条命令，合并前会自动跑：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`。一律用系统自带的 `/usr/bin/python3`（3.9，和 Hermes 定时任务、CI 同版本）：3.10 以后的写法（如 `fromisoformat` 认结尾的 Z）在 3.9 上会失败，本机 3.14 全过不算数。用别的版本跑，输出最后会提示一句（`test_python_version.py`），不判失败。
 
 ## 统一测试隔离（_isolation，#212）
 
@@ -37,16 +37,16 @@ Hermes 网关一直在写心跳和运行状态（`~/.hermes/state/`、`gateway_s
 只需要 Python 3.8 或以上版本的标准库，无需安装依赖。在仓库根目录执行：
 
 ```sh
-python3 -B -m unittest discover -s hermes/scripts/tests -v
+/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests -v
 ```
 
 也可以直接运行脚本：
 
 ```sh
-python3 -B hermes/scripts/tests/test_dispatch_followup.py
+/usr/bin/python3 -B hermes/scripts/tests/test_dispatch_followup.py
 ```
 
-预期：全部测试均显示 `ok`（派单续跑 13 项 + 项目进展 7 项 + 派单接 GitHub 15 项 + 进展里的 PR 和 issue 2 项 + 每日巡检 11 项 + 工程自检 28 项 + 仓库自检 6 项 + 日报周报 13 项 + 持久状态底座 38 项 + 飞书身份桥接 26 项 + 统一事件接入 26 项 + 派单状态通知 10 项 + 持久调度 40 项 + 调度生命体征 / 取消 / 重试 / 报告 17 项 + 调度端到端 5 项 + 派单锁与进程身份 9 项 + 调度返修 18 项 + Tidings 周报推送 19 项 + AI HOT 热点榜推送 13 项 + 影子合并官 21 项 + 每周提案收口 16 项 + 飞书一句话合并 16 项，等，2026-11-11 实测全目录共 747 项；分项只列了一部分），末尾显示 `Ran 747 tests in ...s` 和 `OK`，退出码为 0。耗时随机器变化。`-B` 禁止生成字节码缓存。
+预期：全部测试均显示 `ok`，末尾显示 `Ran N tests in ...s` 和 `OK`，退出码为 0。总数随新增测试变化，这里不写死；交接里写实际跑出的 `Ran N tests`，和上一次交接比，少了要查原因。耗时随机器变化。`-B` 禁止生成字节码缓存。
 
 测试会调用源文件 `dispatch.py` 的命令行入口，解析 `run` / `--followup` 参数。每项测试使用独立临时目录中的虚构台账、任务和回执，把派单根目录、worktree 根目录、worker 路径、名册路径全部替换为临时路径；`subprocess.run` 由假 worker 接管，并检查命令和输出目录。假 worker 像真实 worker 一样原位重写 `receipt.json`，因此能检出把原回执直接硬链接成历史文件的错误。测试结束自动清理临时数据，不调用真实模型、外部服务、Git 或安装文件，不接触真实派单。
 
@@ -151,6 +151,12 @@ PATH 不动，用 `DT_LARK_CLI` 指向假 `lark-cli`（`fake_lark.py`，不联�
 - 取消：自有车间收 SIGTERM 停下、台账 failed、任务保持 canceled；与自然完成竞争不发信号；身份不明 0 信号；不理 SIGTERM 只报告不升级；真实派单根目录拒绝发信号、命令行只出建议。
 - 重试分级、低噪声报告（未确认送达每轮再报、`ack` 后才安静、重启后去重仍在、没有待报时 `--quiet` 空输出）；`tick --execute` 默认关闭。
 - 端到端：任务书 S7 场景 1、2、3、7、8（其余场景在上面各文件里），对照表在 `test_twin_scheduler_e2e.py` 文件头。
+
+## 车间只读单（test_run_worker_readonly.py、claude_readonly_probe.py）
+
+`test_run_worker_readonly.py` 钉住 `run_worker.py` 的只读参数：Claude 只读单只加载 Read / Grep / Glob（`--tools`）、不加载 MCP（`--strict-mcp-config`）、权限模式 `dontAsk`，续跑同样受限；写入单和 Codex（`-s read-only`）不变。来由：只加 `--allowedTools` 时，本机 `bypassPermissions` 下只读单照样能用 Bash、Write 和 MCP 写文件（2026-11-19 实测）。
+
+`claude_readonly_probe.py` 是真 claude 的反向验证（会用会员额度、要联网，不进全量测试）：升级 Claude Code 或改了只读参数后手动跑 `python3 -B hermes/scripts/tests/claude_readonly_probe.py <证据目录>`。它用真实 `~/.claude` 设置、临时假仓库（项目设置故意放行 Write、Edit、`Bash(touch *)`），让模型真的去试 Write、Bash、MCP 写文件；工具只有 Read / Grep / Glob、没有 MCP、`dontAsk`、一个探测文件都没写出来才退出码 0。
 
 ## 派单锁与进程身份（test_dispatch_lock.py）
 

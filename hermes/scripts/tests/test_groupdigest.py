@@ -351,6 +351,12 @@ class Send(Base):
         self.assertIn("取数失败", err)
         self.assertIn("取数失败", self.sends()[0][self.sends()[0].index("--content") + 1])
 
+    def test_入口网络闸门的原因_由发送报出(self):
+        """P9：10:00 取数前网络等不到，入口记 collect-error.json，10:45 的卡片写明。"""
+        (self.dir / f"{DAY}.build.json").unlink()
+        gd.record_collect_error(gd.dt.date.fromisoformat(DAY), "取数失败（网络 / 代理 300 秒没通（feishu：URLError: refused））")
+        self.assertIn("300 秒没通", gd.send(DAY))
+
     def test_回读对不上或没有私聊号_报原因(self):
         self.reply({**json.loads((self.fake / "replies.json").read_text(encoding="utf-8")),
                     "+messages-mget": {"ok": True, "data": {"messages": [{"msg_type": "text", "content": "x"}]}}})
