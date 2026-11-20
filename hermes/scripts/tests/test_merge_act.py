@@ -24,14 +24,37 @@ ACT = HERE.parent / "merge_act.py"
 # 已不是 OPEN 405；fail.json 的 merge 在合之前断网、merge_lost 合上之后断网；FAKE_DIR/other_merges_first 存在时先被别处合掉。
 # FAKE_DIR/label_on_view2 存在时，第二次 pr view 起 PR 带 needs-info。
 # pr list 和真 gh 一样只给 --limit 个（按 prs.json 里的顺序）；FAKE_DIR/hide_from_list 里写的 PR 号不出现在列表里（pr view 照常）。
-# FAKE_DIR/merge_deny 存在时合并接口报 403（权限不够）。
+# FAKE_DIR/merge_deny 存在时合并接口报 403（权限不够）；FAKE_DIR/merge_error 里写报错原文：合并接口照这句话拒绝（限流、要审批等）。
+# FAKE_DIR/real_git 里写裸仓库路径时（test_merge_auto 用，#260-P1-07），合并和撤回像 GitHub 那样真的动 Git 对象：
+#   合并接口在裸仓库 main 上做出 squash 提交，回执和 mergeCommit 是它的提交号（PR 在裸仓库里没有 refs/pull/<号>/head 的照旧用 f×40）；
+#   pr revert 在 main 最新提交上做出撤回提交（以原合并提交为基的三方合并），推成 refs/pull/<新号>/head，headRefOid 是它；
+#   FAKE_DIR/revert_head 里写了提交号就用它当撤回 PR 的版本（模拟开出后、第一次读取前被人换了提交）。
+# 撤回 PR 的 createdAt 取环境里的 DT_NOW。
 # FAKE_DIR/merge_hang 里写秒数：合并接口先挂住这么久再处理（请求发出去、迟迟没回应）；revert_hang 同理，挂在开撤回 PR 上。
 # pr revert（#257）：在 prs.json 里新开一个撤回 PR（号 = 原号 + 100，文件同原 PR、增删行数对调），打印它的网址；
 # FAKE_DIR/revert_fail 存在就失败。fail.json 的 view_revert 只让「号大于 100 的 PR」的 pr view 失败。
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 root = Path(os.environ["FAKE_DIR"])
+real = (root / "real_git").read_text().strip() if (root / "real_git").exists() else ""
+def git(*a):
+    if not real:
+        return ""
+    r = subprocess.run(["git", "-C", real, "-c", "user.name=gh", "-c", "user.email=gh@t", *a], capture_output=True, text=True)
+    return r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
+def land(n):                                          # 真的 squash 合并进裸仓库的 main；做不了返回空
+    tree = git("merge-tree", "--write-tree", "--no-messages", "refs/heads/main", "refs/pull/%s/head" % n)
+    sha = tree and git("commit-tree", tree, "-p", "refs/heads/main", "-m", "squash #%s" % n)
+    if sha:
+        git("update-ref", "refs/heads/main", sha)
+    return sha or "f" * 40
+def undo(merged, n):                                  # 真的撤回提交：以原合并提交为基，把它的父提交合到 main 最新提交上
+    tree = git("merge-tree", "--write-tree", "--no-messages", "--merge-base=" + merged, "refs/heads/main", merged + "^")
+    sha = tree and git("commit-tree", tree, "-p", "refs/heads/main", "-m", "Revert #%s" % n)
+    if sha:
+        git("update-ref", "refs/pull/%s/head" % n, sha)
+    return sha or "e" * 40
 args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
     f.write(json.dumps(args, ensure_ascii=False) + "\n")
@@ -100,13 +123,16 @@ if args[:2] == ["pr", "apimerge"]:
         die("gh: Pull Request is not mergeable (HTTP 405)")
     if (root / "merge_deny").exists():               # 权限不够：等多久都不会自己好
         die("gh: Resource not accessible by personal access token (HTTP 403)")
+    if (root / "merge_error").exists():
+        die((root / "merge_error").read_text().strip())
     if (root / "merge_fail").exists() or [a for a in args if a.startswith("sha=")] != ["sha=" + pr["headRefOid"]]:
         die("gh: Head branch was modified. Review and try the merge again. (HTTP 409)")
-    pr["state"], pr["mergeCommit"] = "MERGED", {"oid": "f" * 40}
+    sha = land(pr["number"])
+    pr["state"], pr["mergeCommit"] = "MERGED", {"oid": sha}
     (root / "prs.json").write_text(json.dumps(prs))
     if fail("merge_lost"):
         die('Put "https://api.github.com/repos/x": EOF')
-    print(json.dumps({"sha": "f" * 40, "merged": True, "message": "Pull Request successfully merged"})); sys.exit(0)
+    print(json.dumps({"sha": sha, "merged": True, "message": "Pull Request successfully merged"})); sys.exit(0)
 if args[:2] == ["pr", "view"]:
     if (root / "off_on_view").exists():           # #257：取 PR 状态的当口常浩关了自动合并
         pf = Path(os.environ["DT_MERGE_DIR"]) / "policy.json"
@@ -126,7 +152,11 @@ if args[:2] == ["pr", "revert"]:
     if (root / "revert_fail").exists():
         die("GraphQL: Something went wrong (revertPullRequest)")
     n = str(int(args[2]) + 100)
-    mine[n] = dict(pr, number=int(n), title="Revert " + pr["title"], state="OPEN", headRefOid="e" * 40, mergeCommit=None,
+    head = undo((pr.get("mergeCommit") or {}).get("oid") or "", n)
+    if (root / "revert_head").exists():
+        head = (root / "revert_head").read_text().strip()
+    mine[n] = dict(pr, number=int(n), title="Revert " + pr["title"], state="OPEN", headRefOid=head, mergeCommit=None,
+                   createdAt=os.environ.get("DT_NOW"),
                    body=args[args.index("--body") + 1], url="https://github.com/" + repo + "/pull/" + n,
                    files=[dict(f, additions=f.get("deletions", 0), deletions=f.get("additions", 0)) for f in pr.get("files") or []])
     (root / "prs.json").write_text(json.dumps(prs))
@@ -427,7 +457,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     EOF = 'Post "https://api.github.com/graphql": EOF'
 
-    def fail(self, **plan):
+    def gh_fails(self, **plan):      # 不叫 fail：那会盖住 unittest 自己的 fail，断言失败会变成 TypeError
         (self.fake / "fail.json").write_text(json.dumps({k: {"n": n, "msg": m} for k, (n, m) in plan.items()}))
 
     def kinds(self):
@@ -435,7 +465,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_read_retries_through_network_blip(self):
         self.scan()
-        self.fail(view=(2, self.EOF))
+        self.gh_fails(view=(2, self.EOF))
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn(f"已合并 {self.ref}", r.stdout)
@@ -449,13 +479,13 @@ class MergeAct(Fixture, unittest.TestCase):
                     "read tcp 127.0.0.1:50000->127.0.0.1:8086: read: connection reset by peer",
                     'Post "https://api.github.com/graphql": dial tcp: lookup api.github.com: no such host'):
             with self.subTest(msg=msg):
-                self.fail(view=(1, msg))
+                self.gh_fails(view=(1, msg))
                 r = self.cli(ACT, "return", self.ref, "试")                 # 退回不改 PR 状态，可以连试几种
                 self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_network_down_said_in_four_parts(self):
         self.scan()
-        self.fail(view=(3, self.EOF))                                     # 一次加两次重试都断
+        self.gh_fails(view=(3, self.EOF))                                     # 一次加两次重试都断
         r = self.cli(ACT, "button", "merge", self.ref, "--chat", "oc_test0001")
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.texts()[-1], "没合并：在『取 PR 状态』这一步连不上 GitHub（网络中途断开：Post "
@@ -472,7 +502,7 @@ class MergeAct(Fixture, unittest.TestCase):
                 ("HTTP 403: API rate limit exceeded for user ID 1", "被 GitHub 拒绝：超出频率限制", "过一小时再点一次合并")):
             with self.subTest(msg=msg):
                 before = len(self.kinds())
-                self.fail(view=(3, msg))
+                self.gh_fails(view=(3, msg))
                 r = self.cli(ACT, "merge", self.ref)
                 self.assertEqual(r.returncode, 1)
                 self.assert_four(r.stdout, "取 PR 状态", why, "PR 没有任何改动", todo)
@@ -481,7 +511,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_long_raw_error_clipped_to_80(self):
         self.scan()
-        self.fail(view=(1, "HTTP 401: " + "x" * 200))
+        self.gh_fails(view=(1, "HTTP 401: " + "x" * 200))
         r = self.cli(ACT, "merge", self.ref)
         raw = r.stdout.split("gh 登录失效（", 1)[1].split("）。", 1)[0]
         self.assertEqual(len(raw), 80)
@@ -497,7 +527,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_merge_request_lost_is_not_retried(self):
         self.scan()
-        self.fail(merge=(1, self.EOF))
+        self.gh_fails(merge=(1, self.EOF))
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 1)
         self.assert_four(r.stdout, "执行合并", "连不上 GitHub（网络中途断开：", "回读确认 PR 还是 OPEN，PR 没有任何改动",
@@ -509,7 +539,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_merged_but_reply_lost_counts_as_merged(self):
         self.scan()
-        self.fail(merge_lost=(1, self.EOF))
+        self.gh_fails(merge_lost=(1, self.EOF))
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn(f"已合并 {self.ref}（PR 5）→ fffffff", r.stdout)
@@ -518,7 +548,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_readback_down_after_merge_says_unsure(self):
         self.scan()
-        self.fail(view_merged=(3, self.EOF))
+        self.gh_fails(view_merged=(3, self.EOF))
         r = self.cli(ACT, "merge", self.ref)
         self.assertEqual(r.returncode, 1)
         self.assert_four(r.stdout, "合并后回读", "连不上 GitHub", "合并命令已经发出，但回读没成功，不知道合上没有",
@@ -531,7 +561,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_return_network_down_said_in_four_parts(self):
         self.scan()
-        self.fail(view=(3, self.EOF))
+        self.gh_fails(view=(3, self.EOF))
         r = self.cli(ACT, "return", self.ref, "标题不清楚")
         self.assertEqual(r.returncode, 1)
         self.assert_four(r.stdout, "取 PR 状态", "连不上 GitHub", "PR 没有任何改动",
@@ -540,7 +570,7 @@ class MergeAct(Fixture, unittest.TestCase):
 
     def test_return_comment_lost_says_unsure(self):
         self.scan()
-        self.fail(comment=(1, self.EOF))
+        self.gh_fails(comment=(1, self.EOF))
         r = self.cli(ACT, "return", self.ref, "标题不清楚")
         self.assertEqual(r.returncode, 1)
         self.assert_four(r.stdout, "留言退回", "连不上 GitHub", "不确定留言发出去没有", "看一眼这条留言在不在", head="没退回")

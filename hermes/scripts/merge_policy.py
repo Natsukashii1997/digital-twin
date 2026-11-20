@@ -19,13 +19,18 @@
                         unsure   请求发出去了、没拿到确定结果（超时、断网、回读失败、没归类的报错）
                       只有 intent（进程中途没了）和 unsure 都算结果不明：不重发，合并官巡视时只读核对，核对后再记一行：
                         merged_unknown  PR 已合并，但证明不了是这次合的（别处也可能合了它）：不算按策略合并，不能用撤回口令
-                        not_merged      PR 仍没合并，而且能证明那次合并请求已经终止（或 PR 已关闭、换了版本）：交出登记作废，要合得重新交出
-                      合并请求的起止也记在同一个 id 下（#260-P1-01），都不算结果：
+                        not_merged      PR 没合并，而且已经关闭或换了版本（那次请求绑着旧版本，合不了它），本机也没有那次请求的
+                                        进程：交出登记作废，要合得重新交出
+                      PR 还开着、版本没变的结果不明，没有「GitHub 不会再处理那次请求」的凭据，一直不结算（#260-P1-01）。
+                      合并请求的起点也记在同一个 id 下，不算结果：
                         started  合并请求的看门进程已经起来（进程号、期限秒数）；结果行里的 ended 是它怎么结束的
-                        killed   巡视时发现这次的合并请求进程过了期限还活着，已经停掉
-                        quiet    巡视时查过本机进程表，这次的合并请求进程已经不在（之后再隔一段时间 PR 仍开着，才记 not_merged）
-                      另有 revert_intent（要开撤回 PR）、revert_opened（撤回 PR 已开；revert_head 是开出当时核对过的版本，
-                      只有这个版本会被接着自动合并）、bypass（PR 已合并但没经合并执行器）三种单行记录。
+                      撤回（都带原合并记录的 id）：
+                        revert_intent   要开撤回 PR
+                        revert_opened   撤回 PR 已开；revert_head 是开出当时核对过身份和内容的版本，只有它会被接着自动合并
+                        revert_unsure   开撤回 PR 的请求结束了、没拿到撤回 PR 的网址（sent：请求发出去没有）
+                        revert_quiet    再跑撤回时查过本机进程表，上次开撤回 PR 的请求进程已经不在
+                                        （后两种的时间是重新开之前静默期的起点）
+                      另有 bypass（PR 已合并但没经合并执行器）单行记录。
   handoffs.json       交出登记：会话调 merge_act.py auto 时记下「仓库、PR、完整 HEAD、谁、什么时候」。绑定版本：之后 PR 有新提交，登记作废
                       （合并官确认 PR 关了、合了或换了版本才作废；只是没列出来的不算）。
   auto.lock           合并锁：按策略合并、合并官巡视一次只跑一个（上限判断和写账本在同一把锁里），一轮可能占几分钟。
@@ -287,15 +292,13 @@ def merges(path=None):
             by[r["id"]].update({k: v for k, v in r.items() if k not in ("at", "event")}, status=r["event"], done_at=r["at"])
         elif r["event"] == "started" and r.get("id") in by:
             by[r["id"]]["started"] = {k: r.get(k) for k in ("at", "pid", "limit")}
-        elif r["event"] == "quiet" and r.get("id") in by:
-            by[r["id"]]["quiet_at"] = r["at"]
-        elif r["event"] == "killed" and r.get("id") in by:      # 刚停掉过一个活着的请求：之前的「已经不在」不算数
-            by[r["id"]]["killed_at"] = r["at"]
-            by[r["id"]].pop("quiet_at", None)
         elif r["event"] == "revert_opened":
             revert[r.get("id")] = r
-        elif r["event"] == "revert_intent" and r.get("id") in by:
-            by[r["id"]]["revert_intent"] = {"at": r["at"], "reason": r.get("reason")}
+        elif r["event"] == "revert_intent" and r.get("id") in by:   # 又要开一次：静默期重新算；first_at 留第一次的
+            first = (by[r["id"]].get("revert_intent") or {}).get("first_at") or r["at"]
+            by[r["id"]]["revert_intent"] = {"at": r["at"], "first_at": first, "reason": r.get("reason")}
+        elif r["event"] in ("revert_unsure", "revert_quiet") and by.get(r.get("id"), {}).get("revert_intent"):
+            by[r["id"]]["revert_intent"]["quiet_at"] = r["at"]
     for i, r in revert.items():
         if i in by:
             by[i]["revert"] = {k: r.get(k) for k in ("at", "revert_pr", "revert_url", "reason", "revert_head", "head_unverified")}
@@ -368,7 +371,7 @@ def drop_handoff(repo, pr):
 
 
 def note_once(key, day):
-    """同一件事一天只说一次（上限拦下、某个 PR 被拒绝、进程表查不了）：第一次返回 True 并记下。调用方持合并锁。
+    """同一件事一天只说一次（上限拦下、某个 PR 被拒绝、结果不明一直挂着）：第一次返回 True 并记下。调用方持合并锁。
     前些天说过的顺手清掉，这份记录不会越攒越多。"""
     d = _handoff_doc()
     said = {k: v for k, v in (d.get("said") or {}).items() if v == day}
@@ -412,7 +415,8 @@ def describe(st):
     for h in st["handoffs"]:
         out.append(f"等着合：{h['repo']}#{h['pr']}@{h['head'][:7]}（{h['by']} {h['at'][:16]} 交出）")
     for m in st["unsettled"]:
-        out.append(f"结果不明，不再自动重试：{m['repo']}#{m['pr']}@{str(m['head'])[:7]}（{m['at'][:16]}），到 GitHub 上看合上没有")
+        out.append(f"结果不明，不再自动重试：{m['repo']}#{m['pr']}@{str(m['head'])[:7]}（{m['at'][:16]}）。到 GitHub 上看合上没有；"
+                   "还开着的话不会自己放开，要合就推一个新提交再重新交出")
     if st["bad_lines"]:
         out.append(f"账本有 {st['bad_lines']} 行读不出来：{st['ledger']}")
     return "\n".join(out)

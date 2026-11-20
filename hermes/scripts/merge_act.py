@@ -9,9 +9,12 @@
    每轮巡视再试（auto_scan）。例外不合，仍发卡片问常浩：L3、改定方向文档、ask_labels、改动文件没看全、来自 fork 的 PR（merge_officer.exception_reasons）。
    合并官判「退回」的不拦，理由写进账本。每次合并在 merge_policy 的账本先记「要合」、再记结果；合并走 REST 合并接口，
    只有接口回执说这次合上了才记成按策略合并（_merge_verdict，和托管合并同一套证据标准）；结果不明的不重发，巡视时只读核对。
-   合并请求由独立的看门进程起、自带硬期限（发起它的进程死了也到点收场）；巡视要先证明那次请求已经终止才下「没合上」的结论
-   （reconcile_unsettled，#260-P1-01）。合并后不拉本机主目录、不安装、不发布（常浩定：装机、发布、部署不放）。
-   撤回用 revert：撤回 PR 只自动合并开出当时核对过并记下的那个版本（#260-P1-07）。
+   合并请求由独立的看门进程起、自带硬期限（发起它的进程死了也到点收场）。结果不明、PR 还开着且版本没变的，没有
+   「GitHub 那头不会再处理这次请求」的凭据，所以一直挂着不结算、不放开重新交出：PR 换了版本（旧请求绑的是旧版本）
+   或关掉了，且本机没有这次请求的进程，才记没合上（reconcile_unsettled，#260-P1-01）。脚本不停任何进程（#260-P2-14）。
+   合并后不拉本机主目录、不安装、不发布（常浩定：装机、发布、部署不放）。
+   撤回用 revert：撤回 PR 只自动合并开出当时核对过并记下的那个版本；核对到内容：撤回提交的树必须正好等于
+   「把原合并提交倒回去」的结果，只取 Git 对象、不检出、不运行（_revert_content_why，#260-P1-07）。
 
 不变基、不改代码、不安装、不写 CURRENT。
 
@@ -40,7 +43,7 @@
                                              仓库没覆盖）；1 其他（结果不明、被上限拦下、出错）
   merge_act.py revert <仓库#PR> [原因]        撤回一个按策略合并的 PR：开撤回 PR，记进账本
 环境变量同 merge_officer.py，另有 DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）、
-DT_MERGE_REQ_TIMEOUT（按策略合并、开撤回 PR 的请求最多活几秒，默认 60）、DT_PGREP（查进程表用的 pgrep，自测用）。
+DT_MERGE_REQ_TIMEOUT（按策略合并、开撤回 PR 的请求最多活几秒，默认 60）、DT_PGREP / DT_PS（查进程表用的 pgrep、ps，自测用）。
 
 托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
 内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
@@ -83,9 +86,13 @@ UNCHANGED = "PR 没有任何改动"
 STEP = ["核对版本"]                                    # 现在做到哪一步，失败提示开头说卡在这里
 UNSURE = "不确定合上没有"
 REJECTED = re.compile(r"protected ref|rule violations|not mergeable|base branch policy|Head branch was modified|"
-                      r"\b40[1359]\b|\b422\b|bad credentials|not accessible|permission", re.I)  # GitHub 明确拒绝合并
-PERMANENT = re.compile(r"\b40[13]\b|bad credentials|gh auth login|not logged in|not accessible|permission|forbidden|"
-                       r"protected ref|rule violations|base branch policy", re.I)   # 等多久都不会自己好的拒绝（#260-P2-13）
+                      r"Base branch was modified|rate limit|\b40[1359]\b|\b422\b|\b429\b|bad credentials|not accessible|"
+                      r"permission", re.I)                     # GitHub 明确拒绝合并（限流也是：这次请求没被处理）
+# 明确拒绝里，过一阵可能自己好的只有这几类（限流、版本或主分支刚变、另一个合并正在进行）：下一轮巡视再试。
+# 其余一律当成等多久都不会自己好（登录、权限、要人审批、分支规则、校验失败……）：当天不再对这个版本发请求（#260-P2-13）。
+# 反过来列是有意的：漏认一种临时拒绝只是当天少试几次；漏认一种永久拒绝是每半小时撞一次。
+TRANSIENT = re.compile(r"rate limit|\b429\b|secondary|abuse|Head branch was modified|Base branch was modified|\b409\b|"
+                       r"merge already in progress", re.I)
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SECURITY = "/usr/bin/security"
 CUSTODY_CRED = {"Natsukashii1997/dt-sandbox": ("dt-merge-executor", "dt-sandbox")}  # 托管合并凭据（#132）：完整仓库名 → 钥匙串 (service, account)
@@ -416,9 +423,10 @@ def _gh_write(cmd, env, secret=None):
 
 REQ_TIMEOUT = float(os.environ.get("DT_MERGE_REQ_TIMEOUT") or mo.TIMEOUT)     # 按策略合并、开撤回 PR 的请求最多活几秒
 PGREP = os.environ.get("DT_PGREP", "pgrep")
+PS = os.environ.get("DT_PS", "ps")
 # 看门进程（#260-P1-01）：请求的硬期限不能靠发起它的进程。发起方被杀掉之后，子进程不会跟着死；所以 gh 由这个独立的
 # 小进程起，它自己计时，到点杀掉 gh 再退出（退出码 124），和发起方死活无关。gh 起不来退出码 127。
-# 收到 TERM / HUP / INT 时先杀 gh 再退；被 KILL 掉拦不住，那种情况靠巡视时查进程表（live_requests）发现。
+# 收到 TERM / HUP / INT 时先杀 gh 再退；被 KILL 掉拦不住，那种情况巡视时查进程表（live_requests）会看到，告诉常浩，脚本不去停它。
 WATCHDOG = r"""
 import signal, subprocess, sys
 try:
@@ -480,25 +488,29 @@ def _gh_finish(proc):
 def live_requests(grep, *needles):
     """本机进程表里还活着、完整命令行同时含 needles 的进程号（看门进程和它起的 gh 的命令行里都带着请求的地址和参数）。
     grep：不含正则特殊字符的片段，交给 pgrep -f 粗筛；筛出来的逐个用 ps 读完整命令行再核对（一次只读一个进程，
-    命令行里有换行也不会认错行）。进程表查不了返回 None：调用方按「证明不了请求已经终止」处理，不能当成没有。"""
+    命令行里有换行也不会认错行）。只用来看，不停任何进程（#260-P2-14）。
+    查不了返回 None，调用方按「证明不了请求的进程已经不在」处理，不能当成没有：pgrep 跑不了；或者 pgrep 筛出了一个
+    进程、ps 却读不出它的命令行，而它又不是「确实已经没了」（#260-P1-01：ps 失败不等于没有这个进程）。"""
     try:
         r = subprocess.run([PGREP, "-f", grep], capture_output=True, text=True, timeout=30)
         if r.returncode not in (0, 1):                # 1 是一个都没筛到
             return None
         out = []
-        for pid in r.stdout.split():
-            c = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True, timeout=30)
-            if c.returncode == 0 and int(pid) != os.getpid() and all(n in c.stdout for n in needles):
-                out.append(int(pid))
+        for pid in map(int, r.stdout.split()):
+            if pid == os.getpid():
+                continue
+            c = subprocess.run([PS, "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=30)
+            if c.returncode != 0 or not c.stdout.strip():
+                try:
+                    os.kill(pid, 0)                   # 信号 0 只探测，不影响进程
+                except ProcessLookupError:
+                    continue                          # 筛出来之后它自己退出了
+                return None                           # 进程还在（或探测不了），命令行却读不出：不能当它不是
+            if all(n in c.stdout for n in needles):
+                out.append(pid)
         return out
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
-
-
-def kill_requests(pids):
-    for pid in pids:
-        with contextlib.suppress(OSError):
-            os.kill(pid, signal.SIGKILL)
 
 
 def _merge_verdict(res, reply, detail, after, head):
@@ -717,7 +729,8 @@ def cmd_merge(ref):
         raise Stop("这个仓库还没开飞书合并（merge_rules.json 的 act.repos）", "在电脑上交给 Claude 会话处理")
     path, main = project_of(card["repo"].split("/")[-1])
     if MP.unsettled(card["repo"], card["pr"]):
-        raise Stop("这个 PR 上一次按策略合并结果不明，还没核对清楚", "等合并官下一轮巡视核对（最多半小时）{again}")
+        raise Stop("这个 PR 上一次按策略合并结果不明，还没核对清楚",
+                   "先到 GitHub 上看它合上没有：已经合上就不用再点；还开着的话，请开 PR 的会话推一个新提交，等新卡片再决定")
     if not conf.get("ci"):
         at("跑测试")
         raise Stop("这个仓库没有 CI；主账号不执行 PR 里的代码，飞书合并不在本机跑测试",
@@ -811,7 +824,8 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
     if not (act_repos(rules).get(name) or {}).get("ci"):
         return _res("uncovered", f"{ref} 没合并：这个仓库不在合并执行器覆盖范围里（merge_rules.json 的 act.repos，要登记了 CI）。仍等常浩说合并。")
     if MP.unsettled(repo, pr):
-        return _res("frozen", f"{ref} 没合并：上一次按策略合并结果不明，还没核对清楚。合并官下一轮巡视会只读核对，不要另外合并。")
+        return _res("frozen", f"{ref} 没合并：上一次按策略合并结果不明，还没核对清楚。合并官巡视时只读核对，不会重发，这期间不要另外合并。"
+                              "PR 一直开着、版本没变的不会自己放开：要合就给它推一个新提交，再重新交出。")
     path, main = project_of(name)
     at("取 PR 状态")
     p = gh_read(["pr", "view", str(pr), "--repo", repo, "--json", VIEW_FIELDS], f"{ref} 取状态")
@@ -900,38 +914,44 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
                     f"要安装、发布或写 CURRENT，仍先问常浩。撤回：merge_act.py revert {ref}", id=mid, merge_commit=sha, warn=wrong)
     if verdict == "failed":                                 # 确定没合：请求没发出去，或 GitHub 明确拒绝且 PR 还开着
         why = clip(res["why"])
-        permanent = not res["launched"] or bool(PERMANENT.search(detail))     # 登录、权限、分支规则、gh 跑不起来：不会自己好
+        permanent = not res["launched"] or not TRANSIENT.search(detail)       # 只有限流、版本刚变这几类会自己好
         MP.append({"event": "failed", "id": mid, "why": why, "sent": res["launched"], "permanent": permanent, "ended": ended})
         return _res("failed", f"{ref}@{head[:7]} 没合上：" + (f"GitHub 明确拒绝（{why}），回读确认 PR 还开着，没有被改动。"
                                                              if res["launched"] else f"合并请求没发出去（{why}）。"),
                     id=mid, why=why, permanent=permanent)
     MP.append({"event": "unsure", "id": mid, "why": f"合并请求：{clip(res['why']) or '已返回'}{read_why}", "ended": ended})
     return _res("unsure", f"{ref}@{head[:7]} 结果不明：合并请求已经发出，没拿到确定的结果（{clip(res['why']) or '回执和回读对不上'}{read_why}）。"
-                          "合并官下一轮巡视会只读核对，不会重发；这期间不要另外合并。", id=mid)
+                          "合并官巡视时只读核对，不会重发；这期间不要另外合并。之后它一直开着的话不会自己放开："
+                          "要合就推一个新提交再重新交出。", id=mid)
 
 
-SETTLE_HOLD = 600      # 秒。结果不明的请求发出后至少过这么久、PR 仍开着，才往「没合上」的结论走（请求自己的期限是 REQ_TIMEOUT）
-QUIET_HOLD = 120       # 秒。确认合并请求的进程已经不在之后，再过这么久 PR 仍开着，才记「没合上」（留给已经到了 GitHub 的请求）
+SETTLE_HOLD = 600      # 秒。结果不明的请求发出后过了这么久还没结清，开始每天提醒常浩；重新开撤回 PR 前的静默期也是它
 
 
 def _age(stamp):
     return (dt.datetime.fromisoformat(mo.now()) - dt.datetime.fromisoformat(stamp)).total_seconds()
 
 
-def reconcile_unsettled():
-    """上次结果不明的合并（只记了要合、或记了 unsure）：只读核对，从不重发（调用方持 MP.locked()）。和策略现在开没开无关。
-    核对只能看到 PR 现在的状态，证明不了是谁合的；PR 还开着也不等于那次请求已经停了（发起它的进程死了，请求的进程
-    可能还活着，#260-P1-01）。所以每条先查本机进程表里还有没有这次请求的进程，再读 PR：
-      已合并 → merged_unknown（已合并、来源不明）：不算按策略合并，不能用撤回口令；
-      进程表查不了 → 证明不了请求已经终止：一直保持结果不明，每天说一次；
-      请求的进程还活着 → 过了 SETTLE_HOLD 就停掉它（记 killed）并告诉常浩，这一轮不下结论；
-      进程不在、PR 已关闭或换了版本 → not_merged（绑着旧版本的请求合不了它）；
-      进程不在、PR 还开着、版本没变 → 发请求不到 SETTLE_HOLD 的先等；到了以后要有「进程已经不在」的记录
-        （unsure 的结果行本身就是：记它的时候请求已经结束；只有 intent 的先记一行 quiet），那条记录之后再过
-        QUIET_HOLD 仍开着，才记 not_merged、交出登记作废：不自动重试，要合得由会话重新交出。
-    返回要常浩知道的话。"""
-    said = []
-    for m in MP.unsettled():
+def reconcile_unsettled(repo=None, pr=None, remind=True):
+    """上次结果不明的合并（只记了要合、或记了 unsure）：只读核对，从不重发，也不停任何进程（调用方持 MP.locked()）。
+    和策略现在开没开无关。repo、pr：只核对这一个 PR；remind=False 时不发每天一次的提醒（会话当场核对用）。
+    核对只能看到 PR 现在的状态，证明不了是谁合的。同步合并接口也没有「这次请求在 GitHub 那头已经结束」的凭据可取：
+    本机进程没了、过了多久，都不等于 GitHub 不会再处理它（#260-P1-01）。所以只在下面两种有远端依据的情况下结算：
+      PR 已合并 → merged_unknown（已合并、来源不明）：不算按策略合并，不能用撤回口令；
+      PR 已关闭或换了版本，且本机没有这次请求的进程 → not_merged：那次请求用 sha 绑着旧版本，GitHub 不会拿它合别的
+        版本，关着的 PR 也合不了；交出登记作废，要合得由会话重新交出。
+    其余一律保持结果不明，不放开重新交出：
+      PR 还开着、版本没变 → 一直挂着。要合：给 PR 推一个新提交（上面第二种）再重新交出；
+      进程表查不了 → 证明不了请求的进程已经不在；
+      请求的进程还活着 → 脚本不去停它（按命令行认进程有认错的可能，#260-P2-14），给出进程号请常浩在电脑上确认后停。
+    后三种过了 SETTLE_HOLD 每天说一次。返回要常浩知道的话。"""
+    said, day = [], mo.now()[:10]
+
+    def once(kind, m, text):
+        if remind and _age(m["at"]) >= SETTLE_HOLD and MP.note_once(f"{kind}:{m['id']}", day):
+            said.append(text)
+
+    for m in MP.unsettled(repo, pr):
         ref = f"{m['repo'].split('/')[-1]}#{m['pr']}@{str(m['head'])[:7]}"
         alive = live_requests(f"pulls/{m['pr']}/merge", f"repos/{m['repo']}/pulls/{m['pr']}/merge", f"sha={m['head']}")
         try:                                               # 先查进程、后读 PR：读到的状态一定不早于这次进程检查
@@ -946,31 +966,21 @@ def reconcile_unsettled():
             MP.drop_handoff(m["repo"], m["pr"])
             said.append(f"只读核对：{ref} 现在已合并，但证明不了是这次按策略合的（合并请求发出后没拿到确定结果，别处也可能合了它）。"
                         "记成「已合并、来源不明」：不算按策略合并，不能用撤回口令，要撤回在电脑上处理。")
-            continue
-        if alive is None:
-            if MP.note_once(f"ps:{m['id']}", mo.now()[:10]):
-                said.append(f"只读核对：{ref} 还开着，但本机进程表查不了，证明不了那次合并请求已经停了。先一直按结果不明挂着，"
-                            "不放开重新交出；请在电脑上交给 Claude 会话看。")
-            continue
-        if alive:
-            if _age(m["at"]) >= SETTLE_HOLD:
-                kill_requests(alive)
-                MP.append({"event": "killed", "id": m["id"], "pids": alive})
-                said.append(f"只读核对：{ref} 那次合并请求的进程过了期限还活着（发起它的进程已经没了），已经停掉。"
-                            "这一轮先不下结论，下一轮再核对。")
-            continue
-        if state == "OPEN" and now_head == m["head"]:
-            if _age(m["at"]) < SETTLE_HOLD:
-                continue                                   # 请求可能刚到 GitHub
-            quiet = m.get("quiet_at") or (m.get("done_at") if m["status"] == "unsure" and not m.get("killed_at") else None)
-            if not quiet:
-                MP.append({"event": "quiet", "id": m["id"]})
-                continue
-            if _age(quiet) < QUIET_HOLD:
-                continue
-        MP.append({"event": "not_merged", "id": m["id"], "why": f"只读核对：PR 现在是 {state}，版本 {str(now_head)[:7]}；本机已没有这次合并请求的进程"})
-        MP.drop_handoff(m["repo"], m["pr"])
-        said.append(f"只读核对：{ref} 没合上（PR 现在是 {state}）。不会自动重试：还要合的话，请开 PR 的会话重新交出。")
+        elif alive is None:
+            once("ps", m, f"只读核对：{ref} 没合并，但本机进程表查不了，证明不了那次合并请求的进程已经不在。先一直按结果不明挂着，"
+                          "不放开重新交出；请在电脑上交给 Claude 会话看。")
+        elif alive:
+            once("alive", m, f"只读核对：{ref} 那次合并请求的进程过了期限还活着（进程号 {'、'.join(map(str, alive))}）。脚本不会去停它："
+                             "请在电脑上确认是它之后手动停掉。停掉之前这个 PR 一直按结果不明挂着。")
+        elif state == "OPEN" and now_head == m["head"]:
+            once("open", m, f"只读核对：{ref} 还开着、版本没变。那次合并请求 GitHub 到底处理没有，查不到凭据，所以一直按结果不明挂着，"
+                            "不重发、不放开。要合：给这个 PR 推一个新提交（旧请求绑的是旧版本，合不了新版本），再由会话重新交出；"
+                            "不要了就关掉 PR。")
+        else:
+            MP.append({"event": "not_merged", "id": m["id"],
+                       "why": f"只读核对：PR 现在是 {state}，版本 {str(now_head)[:7]}（那次请求绑的是 {str(m['head'])[:7]}）；本机已没有这次合并请求的进程"})
+            MP.drop_handoff(m["repo"], m["pr"])
+            said.append(f"只读核对：{ref} 没合上（PR 现在是 {state}，版本 {str(now_head)[:7]}）。不会自动重试：还要合的话，请开 PR 的会话重新交出。")
     return said
 
 
@@ -1047,23 +1057,31 @@ def cmd_auto(ref, by):
     name, pr, want = m.groups()
     repo = repo_of(name)
     with MP.locked():
+        pending = MP.unsettled(repo, pr)
+        if pending:                                        # 上次结果不明：先当场只读核对（PR 换了版本就能结清），不用等巡视
+            for line in reconcile_unsettled(repo, pr, remind=False):
+                print(line)
+            if any(m["id"] == pending[-1]["id"] and m["status"] == "merged_unknown" for m in MP.merges()):
+                return 1                                   # 核对出来已经合并了（来源不明）：没有可合的
         res = auto_try(repo, pr, by, mo.load_rules(), want=want, register=True)
     print(res["text"])
     return AUTO_EXIT.get(res["status"], 1)
 
 
 REVERT_VIEW = ("number,url,state,body,baseRefName,headRefOid,isCrossRepository,headRepository,headRepositoryOwner,"
-               "files,changedFiles")
+               "files,changedFiles,createdAt")
 REVERT_LIST = 100      # 找已经开出的撤回 PR 时，一次列最近创建的多少个 PR
+CLOCK_SLACK = 600      # 秒。比撤回 PR 的创建时间时，GitHub 的时钟和本机的差这么多以内都算正常
 
 
 def _utc(stamp):
     return dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
 
 
-def _revert_mismatch(p, repo, pr, hit, main, orig):
-    """一个 PR 是不是「撤回 <仓库>#<pr> 的那个撤回 PR」：身份和内容逐项核对（刚开出时、事后认领时共用，#260-P2-03）。
-    p 是它的完整信息（REVERT_VIEW），orig 是原 PR 的 files、changedFiles。返回对不上的地方；空列表才算对得上。"""
+def _revert_mismatch(p, repo, pr, hit, main, orig, since):
+    """一个 PR 是不是「撤回 <仓库>#<pr> 的那个撤回 PR」：身份逐项核对（刚开出时、事后认领时共用，#260-P2-03）。
+    p 是它的完整信息（REVERT_VIEW），orig 是原 PR 的 files、changedFiles，since 是第一次要开撤回 PR 的时间。
+    返回对不上的地方；空列表才算对得上。这里比的改动只是 GitHub 给的文件名和增删行数；内容另由 _revert_content_why 核对。"""
     bad = []
     body = p.get("body") or ""
     if not (hit["id"] in body and f"{repo}#{pr}" in body and str(hit.get("merge_commit")) in body):
@@ -1074,6 +1092,12 @@ def _revert_mismatch(p, repo, pr, hit, main, orig):
         bad.append("来源分支不在本仓库")
     if not SHA40.match(str(p.get("headRefOid") or "")):
         bad.append("读不到完整的版本号")
+    try:                                                   # 早就有的 PR 后来把正文改成带记录号的，不是这次开出来的
+        early = (_utc(since) - _utc(p.get("createdAt"))).total_seconds() > CLOCK_SLACK
+    except (TypeError, ValueError):
+        early = True
+    if early:
+        bad.append(f"它的创建时间（{p.get('createdAt') or '读不到'}）早于这次撤回（{str(since)[:16]}），不是这次开出来的")
     want = {f.get("path"): (f.get("deletions") or 0, f.get("additions") or 0) for f in orig.get("files") or []}
     got = {f.get("path"): (f.get("additions") or 0, f.get("deletions") or 0) for f in p.get("files") or []}
     if not want or got != want or orig.get("changedFiles") != len(want) or p.get("changedFiles") != len(got):
@@ -1081,15 +1105,50 @@ def _revert_mismatch(p, repo, pr, hit, main, orig):
     return bad
 
 
+def _revert_content_why(path, main, number, head, merge_commit):
+    """撤回 PR 的版本 head 是不是「正好把原合并提交倒回去」：按内容核对（#260-P1-07；文件名和增删行数一样、内容不同的
+    提交，_revert_mismatch 认不出来）。只取 Git 对象：在项目主目录 fetch 主分支和 refs/pull/<number>/head，不检出、
+    不运行里面的任何东西（#190）。要同时成立：
+      head 只有一个父提交 B；原合并提交 M 只有一个父提交（squash 合并出来的）；
+      M 是 B 的祖先，B 在 origin/<main> 上：撤回提交直接落在主分支的某个提交上，下面没有夹带别的提交；
+      以 M 为基、把 M 的父提交合到 B 上得到的树（git revert M 做的就是这个三方合并），等于 head 的树。
+    版本号是内容的哈希：核对过的 head 不会再变，之后的合并请求又用 sha 绑着它，所以这里核对的就是会被合进去的东西。
+    返回对不上的原因；空字符串才算对得上。任何一步做不了（对象取不到、git 太旧、倒回去有冲突）都算对不上。"""
+    if not (SHA40.match(str(head)) and SHA40.match(str(merge_commit))):
+        return "撤回 PR 的版本号或原合并提交号不完整"
+
+    def holds(older, newer):
+        return subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", older, newer],
+                              capture_output=True, timeout=120).returncode == 0
+    try:
+        git(path, "fetch", "-q", "origin", main, f"refs/pull/{number}/head")
+        h = git(path, "rev-list", "--parents", "-n", "1", head + "^{commit}").split()
+        m = git(path, "rev-list", "--parents", "-n", "1", merge_commit + "^{commit}").split()
+        if len(h) != 2:
+            return f"撤回 PR 的版本有 {len(h) - 1} 个父提交，不是单独一个撤回提交"
+        if len(m) != 2:
+            return f"原合并提交有 {len(m) - 1} 个父提交，不是 squash 合并出来的"
+        if not holds(merge_commit, h[1]):
+            return "撤回提交没有落在包含原合并提交的提交上"
+        if not holds(h[1], f"origin/{main}"):
+            return f"撤回提交下面夹着不在 {main} 上的提交"
+        want = git(path, "merge-tree", "--write-tree", "--no-messages", f"--merge-base={merge_commit}", h[1], m[1]).split()[0]
+        if git(path, "rev-parse", head + "^{tree}") != want:
+            return "撤回提交的内容不是正好把原合并倒回去（文件内容对不上）"
+        return ""
+    except (Stop, OSError, IndexError, subprocess.SubprocessError) as e:
+        return f"核对不了撤回提交的内容（{clip(getattr(e, 'why', None) or type(e).__name__)}）"
+
+
 def _find_revert(repo, hit, since):
     """正文带这条记录号的 PR（号）。用列表接口（实时；正文搜索有索引延迟，搜不到不等于没创建，#260-P2-03）：
-    列表从新到旧，要么不满一页（全列到了），要么最旧的一个早于 since（上次要开撤回 PR 的时间），才算把 since 之后
+    列表从新到旧，要么不满一页（全列到了），要么最旧的一个早于 since（第一次要开撤回 PR 的时间），才算把 since 之后
     创建的都看到了；否则证明不了没漏，抛 Stop。"""
     got = [x for x in gh_read(["pr", "list", "--repo", repo, "--state", "all", "--limit", str(REVERT_LIST),
                                "--json", "number,body,createdAt"], "找已经开出的撤回 PR") if isinstance(x, dict)]
     if len(got) >= REVERT_LIST:
         try:
-            complete = min(_utc(x.get("createdAt")) for x in got) < _utc(since)
+            complete = min(_utc(x.get("createdAt")) for x in got) < _utc(since) - dt.timedelta(seconds=CLOCK_SLACK)
         except (TypeError, ValueError):
             complete = False
         if not complete:
@@ -1097,13 +1156,57 @@ def _find_revert(repo, hit, since):
     return [str(x["number"]) for x in got if hit["id"] in (x.get("body") or "")]
 
 
+def _adopt_revert(repo, pr, hit, path, main, orig, again):
+    """上次要开撤回 PR、账本里没有它开出来的记录（超时、断网、GitHub 报错、发起的进程没了）：先找，不重发（#260-P2-03）。
+    返回认领到的撤回 PR；返回 None 表示可以重新开；其余情况抛 Stop 停下，脚本不停进程、不重开已关掉的 PR。
+    认领：从第一次要开到现在的 PR 列表里，正文带记录号的正好一个；它是这次撤回之后创建的，身份和内容都核对得上，
+    而且还开着或已经合并（被关掉的停下交人）。
+    重新开要同时满足：本机没有上次那个请求的进程；列表里一个候选都没有；「上次的请求已经结束」有记录（请求返回时记的
+    revert_unsure，或这里第一次看到进程不在时记的 revert_quiet），那条记录之后又过了 SETTLE_HOLD（留给已经到了
+    GitHub、撤回 PR 还没出现在列表里的请求）。"""
+    alive = live_requests("pr revert", f"pr revert {pr} --repo {repo} ")
+    if alive is None:
+        raise Stop("本机进程表查不了，证明不了上一次开撤回 PR 的请求已经停了", "在电脑上交给 Claude 会话看")
+    if alive:
+        raise Stop(f"上一次开撤回 PR 的请求还在跑（进程号 {'、'.join(map(str, alive))}）",
+                   "过几分钟再试；它一直不退的话，在电脑上确认是它之后手动停掉，脚本不会去停")
+    since = again["first_at"]
+    found = _find_revert(repo, hit, since)
+    if len(found) > 1:
+        raise Stop(f"找到 {len(found)} 个正文带记录号 {hit['id']} 的 PR（#{'、#'.join(found)}），认不出哪个是撤回 PR",
+                   "在电脑上交给 Claude 会话看")
+    if found:
+        cand = gh_read(["pr", "view", found[0], "--repo", repo, "--json", REVERT_VIEW], "核对找到的撤回 PR")
+        bad = _revert_mismatch(cand, repo, pr, hit, main, orig, since)
+        if not bad and cand.get("state") not in ("OPEN", "MERGED"):
+            raise Stop(f"上次开的撤回 PR #{found[0]} 找到了，但它已经被关掉", "在电脑上看一下是谁、为什么关的：还要撤回就把它重新打开再跑一次，"
+                                                                  "或在电脑上另开；脚本不会自己重开或另开")
+        if not bad:
+            why = _revert_content_why(path, main, found[0], cand["headRefOid"], hit.get("merge_commit"))
+            bad = [why] if why else []
+        if bad:
+            raise Stop(f"找到正文带记录号的 PR #{found[0]}，但核对不上，不认它是撤回 PR：{'；'.join(bad)}",
+                       "在电脑上交给 Claude 会话看")
+        rev = {"revert_pr": found[0], "revert_url": cand.get("url"), "reason": again.get("reason"),
+               "head_unverified": "事后认领的，没看到它开出时的版本"}
+        MP.append({"event": "revert_opened", "id": hit["id"], "repo": repo, "pr": str(pr), "adopted": True, **rev})
+        print(f"上次开的撤回 PR 找到了：{rev['revert_url']}。")
+        return rev
+    wait = f"过 {SETTLE_HOLD // 60} 分钟再试：还找不到才会重新开"
+    if not again.get("quiet_at"):
+        MP.append({"event": "revert_quiet", "id": hit["id"], "repo": repo, "pr": str(pr)})
+        raise Stop("上一次开撤回 PR 没留下结果，GitHub 上还找不到它；刚确认本机已经没有那次请求的进程", wait)
+    if _age(again["quiet_at"]) < SETTLE_HOLD:
+        raise Stop("上一次开撤回 PR 结果不明，GitHub 上还找不到它", wait)
+    return None
+
+
 def cmd_revert(ref, reason):
     """撤回一个按策略合并的 PR：只认账本里合并执行器按策略合过的；用 gh pr revert 开撤回 PR（经看门进程，不重试），记进账本。
     auto.revert_auto_merge 开着、策略有效时，撤回 PR 接着按同一套检查合并（它自己的 CI 过了才合），但只合
-    「开出当时核对过并记下的那个版本」（revert_head，#260-P1-07）：之后有了新提交、开出时没读到版本、或是事后认领的
-    （没亲眼看到开出时的版本），都不自动合并，说清楚，要合得由会话重新交出那个新版本（merge_act.py auto）。
-    上次要开、没记下结果的（超时、断网、进程没了）：先确认那次请求的进程已经不在，再从 PR 列表里按正文的记录号找，
-    找到的逐项核对身份和内容、只有一个才认领；一个都没有、且离上次已过 SETTLE_HOLD，才重新开。"""
+    「开出当时核对过并记下的那个版本」（revert_head，#260-P1-07）：身份（_revert_mismatch）和内容（_revert_content_why）
+    都核对得上才记。之后有了新提交、开出时没核对上、或是事后认领的（没亲眼看到开出时的版本），都不自动合并，说清楚，
+    要合得由会话重新交出那个版本（merge_act.py auto）。上次要开、没记下它开出来的，见 _adopt_revert。"""
     m = AUTO_REF.match(ref.strip())
     if not m:
         raise Stop(f"看不懂「{ref}」（要写成 仓库#PR，例如 my-skills#121）", "")
@@ -1114,7 +1217,7 @@ def cmd_revert(ref, reason):
         hit = MP.find_merged(repo, pr)
         if not hit:
             raise Stop(f"账本里没有按策略合并过 {name}#{pr}（只撤回合并执行器按策略合的，有接口回执为证的）", "")
-        main = project_of(name)[1]
+        path, main = project_of(name)
         rev = hit.get("revert")
         if rev:
             print(f"{name}#{pr} 已经开过撤回 PR：{rev.get('revert_url')}（{rev['at'][:16]}）。")
@@ -1122,49 +1225,32 @@ def cmd_revert(ref, reason):
             at("开撤回 PR")
             orig = gh_read(["pr", "view", str(pr), "--repo", repo, "--json", "files,changedFiles"], "读原 PR 的改动")
             again = hit.get("revert_intent")
-            if again:                                      # 上次要开撤回 PR、没记下结果：先找，不重发
-                old = _age(again["at"]) >= SETTLE_HOLD
-                alive = live_requests("pr revert", f"pr revert {pr} --repo {repo} ")
-                if alive is None:
-                    raise Stop("本机进程表查不了，证明不了上一次开撤回 PR 的请求已经停了", "在电脑上交给 Claude 会话看")
-                if alive:
-                    if old:
-                        kill_requests(alive)
-                    raise Stop("上一次开撤回 PR 的请求" + ("过了期限还挂着，已经停掉" if old else "还在跑"), "过几分钟再试")
-                found = _find_revert(repo, hit, again["at"])
-                if len(found) > 1:
-                    raise Stop(f"找到 {len(found)} 个正文带记录号 {hit['id']} 的 PR（#{'、#'.join(found)}），认不出哪个是撤回 PR",
-                               "在电脑上交给 Claude 会话看")
-                if found:
-                    cand = gh_read(["pr", "view", found[0], "--repo", repo, "--json", REVERT_VIEW], "核对找到的撤回 PR")
-                    bad = _revert_mismatch(cand, repo, pr, hit, main, orig)
-                    if bad:
-                        raise Stop(f"找到正文带记录号的 PR #{found[0]}，但核对不上，不认它是撤回 PR：{'；'.join(bad)}",
-                                   "在电脑上交给 Claude 会话看")
-                    rev = {"revert_pr": found[0], "revert_url": cand.get("url"), "reason": again.get("reason"),
-                           "head_unverified": "事后认领的，没看到它开出时的版本"}
-                    MP.append({"event": "revert_opened", "id": hit["id"], "repo": repo, "pr": str(pr), "adopted": True, **rev})
-                    print(f"上次开的撤回 PR 找到了：{rev['revert_url']}。")
-                elif not old:
-                    raise Stop("上一次开撤回 PR 结果不明，GitHub 上还找不到它", f"过 {SETTLE_HOLD // 60} 分钟再试：还找不到才会重新开")
+            if again:
+                rev = _adopt_revert(repo, pr, hit, path, main, orig, again)
         if not rev:
             reason = (reason or "").strip() or "常浩要求撤回"
             body = (f"撤回按策略合并的 {repo}#{pr}（合并提交 `{hit.get('merge_commit')}`，记录 {hit['id']}）。\n\n"
                     f"原因：{reason}\n\n由合并执行器开出（merge_act.py revert，#257）。")
+            since = (again or {}).get("first_at") or mo.now()
             MP.append({"event": "revert_intent", "id": hit["id"], "repo": repo, "pr": str(pr), "reason": reason})
             r = _gh_finish(_gh_start([mo.GH, "pr", "revert", str(pr), "--repo", repo, "--body", body]))
             url = PULL_URL.search(r["stdout"] or "")
-            if r["returncode"] != 0 or not url:
+            if r["returncode"] != 0 or not url:                # 没拿到撤回 PR 的网址：这次请求已经结束，记下来当静默期的起点
+                MP.append({"event": "revert_unsure", "id": hit["id"], "repo": repo, "pr": str(pr), "sent": r["launched"],
+                           "why": clip(r["why"]), "ended": r.get("ended")})
                 stop = gh_stop(r["why"], other="撤回 PR 没开出来")
-                stop.state = "不确定撤回 PR 开出来没有（再跑一次会先找，不会重复开）" if (r["timed_out"] or NET_ERR.search(r["why"])) \
-                    else "没有开出撤回 PR"
+                stop.state = "不确定撤回 PR 开出来没有（再跑一次会先找，不会重复开）" if r["launched"] \
+                    else "没有开出撤回 PR（请求没发出去）"
                 raise stop
             rev = {"revert_pr": url.group(1), "revert_url": url.group(0), "reason": reason}
             try:                                           # 马上读它开出时的版本并核对：只有这个版本以后会被自动合并
                 born = gh_read(["pr", "view", rev["revert_pr"], "--repo", repo, "--json", REVERT_VIEW], "读撤回 PR 开出时的版本")
-                bad = _revert_mismatch(born, repo, pr, hit, main, orig)
+                bad = _revert_mismatch(born, repo, pr, hit, main, orig, since)
             except Stop as e:
                 born, bad = {}, [f"开出后没读到它（{clip(e.why)}）"]
+            if not bad:
+                why = _revert_content_why(path, main, rev["revert_pr"], born["headRefOid"], hit.get("merge_commit"))
+                bad = [why] if why else []
             if bad:
                 rev["head_unverified"] = "；".join(bad)
             else:
@@ -1178,10 +1264,10 @@ def cmd_revert(ref, reason):
         rref = f"{name}#{rev['revert_pr']}"
         how = f"要合：看过它的内容后，由会话交出 merge_act.py auto {rref}，或常浩在电脑上合。"
         want = rev.get("revert_head")
-        if not want:
-            print(f"撤回 PR 没有自动合并：没记下它开出时的版本（{rev.get('head_unverified') or '没有记录'}），"
-                  f"证明不了现在的版本就是当时开出的。{how}")
-            return 0
+
+        def later(e):
+            why = f"在『{e.step}』这一步{e.why}" if isinstance(e, Stop) else str(e)
+            return f"撤回 PR 还没合并：{why}。过一会儿再跑一次 merge_act.py revert {name}#{pr} 会接着合，或等常浩说合并。"
 
         def moved(now):
             return (f"撤回 PR {rref} 在开出之后又有新提交（开出时是 {want[:7]}，现在是 {str(now)[:7]}），不自动合并："
@@ -1189,18 +1275,22 @@ def cmd_revert(ref, reason):
 
         try:
             now = gh_read(["pr", "view", rev["revert_pr"], "--repo", repo, "--json", "state,headRefOid"], "看撤回 PR 状态")
-            if now.get("state") != "OPEN":
-                print("撤回 PR 已经合并。" if now.get("state") == "MERGED" else f"撤回 PR 现在是 {now.get('state')}，没有合并。")
-            elif now.get("headRefOid") != want:
-                print(moved(now.get("headRefOid")))
-            else:
+        except Stop as e:
+            now, unread = None, e
+        if now and now.get("state") != "OPEN":
+            print("撤回 PR 已经合并。" if now.get("state") == "MERGED" else f"撤回 PR 现在是 {now.get('state')}，没有合并。")
+        elif not want:
+            print(f"撤回 PR 没有自动合并：没记下它开出时的版本（{rev.get('head_unverified') or '没有记录'}），"
+                  f"证明不了现在的版本就是当时开出的。{how}")
+        elif now is None:
+            print(later(unread))
+        elif now.get("headRefOid") != want:
+            print(moved(now.get("headRefOid")))
+        else:
+            try:
                 print(auto_try(repo, rev["revert_pr"], f"撤回 {name}#{pr}", rules, want=want, register=True)["text"])
-        except (Stop, MP.Rejected) as e:                   # 撤回 PR 已经开出、记了账；只是接着合并这一步没做成
-            if getattr(e, "moved", False):                 # 两次读取之间又被推了新提交
-                print(moved("另一个版本"))
-                return 0
-            why = f"在『{e.step}』这一步{e.why}" if isinstance(e, Stop) else str(e)
-            print(f"撤回 PR 还没合并：{why}。过一会儿再跑一次 merge_act.py revert {name}#{pr} 会接着合，或等常浩说合并。")
+            except (Stop, MP.Rejected) as e:               # 撤回 PR 已经开出、记了账；只是接着合并这一步没做成
+                print(moved("另一个版本") if getattr(e, "moved", False) else later(e))     # moved：两次读取之间又被推了新提交
     return 0
 
 
@@ -1307,7 +1397,8 @@ def main(argv=None):
         return with_merge_lock(cmd_return, a.ref, " ".join(a.reason))
     except Stop as e:
         if a.cmd in ("auto", "revert"):                  # 这两个不是从卡片来的，不套「再点一次」的说法
-            print(f"{'没合并' if a.cmd == 'auto' else '没撤回'}：在『{e.step}』这一步{e.why}。{e.state}。")
+            todo = e.todo.replace("{again}", "再跑一次同一条命令")      # 怎么办也要说（原来这两条命令只说了卡在哪、为什么）
+            print(f"{'没合并' if a.cmd == 'auto' else '没撤回'}：在『{e.step}』这一步{e.why}。{e.state}。" + (f"{todo}。" if todo else ""))
             return 1
         print(fail_text(a.cmd, e))
         return 1
