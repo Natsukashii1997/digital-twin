@@ -13,7 +13,8 @@
 - **定了什么**
   1. `Natsukashii1997/agent-autoloop` 是常浩自己的项目，引擎可以直接改，不再同步上游，做法参照驿窗（`NOTICE` 写明出处和「不再与上游同步」）。
   2. 本机仓库去掉 `upstream` 远端（2026-11-20 已做）。
-- **还没定、逐项问的**：删镜像分支 main、dt 改名为 main、删旧远端分支、main 分支保护；`projects.json` 里 `write_allowed` 要不要放开；`update`、一键安装和文档链接指向谁；插件仓库 `dt-autoloop-plugins` 的分工要不要改；ADR-015 第 39 行「私有镜像引擎」由起草它的会话改。
+  3. 常浩 11-20 在问题卡里逐项选定并已执行：删上游镜像分支 main（常浩本人在终端删）；dt 改名为 main 并作默认分支；删已合并的旧远端分支 `claude/ci-save-minutes`、`claude/h01-channel-scope`，未合并的 `codex/audit-fix-1118` 保留；main 开分支保护，必需检查 `check (ubuntu-latest)`（CI 的 job 带系统矩阵，实际检查名带括号），管理员可绕过。
+- **还没定、逐项问的**：`projects.json` 里 `write_allowed` 要不要放开；`update`、一键安装和文档链接指向谁；插件仓库 `dt-autoloop-plugins` 的分工要不要改；ADR-015 第 39 行「私有镜像引擎」由起草它的会话改。
 
 ## 2026-11-20 · 每周提案卡片恢复为独立定时任务
 
