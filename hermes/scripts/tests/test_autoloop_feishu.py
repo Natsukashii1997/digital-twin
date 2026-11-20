@@ -841,7 +841,8 @@ class BridgeLock(Base):
         """常驻每轮先扫一次已放弃的卡；中台库读不到（paused）时歇 30 秒再看，不空转。"""
         calls = []
 
-        def once():
+        def once(ready=None):
+            self.assertIsNone(ready)                                             # 猛鬼兽不传 ready（门卫才传）
             calls.append("once")
             if calls.count("once") > 1:
                 raise KeyboardInterrupt                                          # 第二轮停下
