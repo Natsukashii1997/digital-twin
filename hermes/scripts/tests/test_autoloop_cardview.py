@@ -220,7 +220,9 @@ class DuplicateClick(TF.Base):
         self.assertEqual(again[0], 1)
         self.assertIn("已经点过", again[1])
         answers = [c for c in self.calls if c[0].endswith("/answer")]
-        self.assertEqual(answers, [("/v1/cards/7/answer", {"choice": 1, "by": TF.OWNER, "ref": "om_fixture_1"})])
+        # 按钮里的版本号一路带到中台（#278 引擎批 C：中台按版本核对，点旧版的不收）
+        self.assertEqual(answers, [("/v1/cards/7/answer", {"choice": 1, "by": TF.OWNER, "ref": "om_fixture_1",
+                                                           "version": 1})])
 
     def test_clicking_the_rendered_button_twice_answers_once(self):
         self.twice()
