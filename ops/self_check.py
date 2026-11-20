@@ -26,7 +26,10 @@ REPO = Path(os.environ.get("DT_REPO", "~/Documents/ChatGPT/个人/work/digital-t
 HERMES = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
 BIN = Path(os.environ.get("DT_BIN", "~/Library/Application Support/DigitalTwin/bin")).expanduser()
 OPS_TARGETS = {"ops/health_check.py": [BIN], "ops/dt_worker_egress.py": [BIN], "ops/check_repos.py": [BIN, HERMES / "scripts"],
-               "ops/self_check.py": [HERMES / "scripts"]}
+               "ops/self_check.py": [HERMES / "scripts"],
+               # 亚古兽的记忆日报也 import 这两个：除猛鬼兽的 scripts 外，亚古兽 profile 下还有一份（P9）
+               "hermes/scripts/netwait.py": [HERMES / "profiles/agumon/scripts"],
+               "hermes/scripts/report_data.py": [HERMES / "profiles/agumon/scripts"]}
 SANDBOX_DIRS = [HOME / "Sandbox", HOME / "Documents/Codex"]   # M3-Q3：沙盒和 Codex 按日期建的旧目录
 SANDBOX_STALE_DAYS = 30
 CHECK_REPOS_SCRIPT = Path(__file__).with_name("check_repos.py")

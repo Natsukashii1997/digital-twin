@@ -456,7 +456,7 @@ class GitHubTests(Base):
         (self.state / "fail").write_text("Post \"https://api.github.com/graphql\": read: connection reset by peer\n")
         hub, slept = self.hub(wait=300, recover_after=2)
         self.assertEqual([p["number"] for p in hub.merged_prs("o/fx")], [5])
-        self.assertEqual(slept, [pd.GH_RETRY_INTERVAL] * 2)
+        self.assertEqual(slept, [pd.netwait.INTERVAL] * 2)
         self.assertIsNone(hub.down)
         self.assertEqual(len(hub.closed_issues("o/fx")), 0)          # 通了以后照常，不再等
 
@@ -485,15 +485,6 @@ class GitHubTests(Base):
             hub.merged_prs("o/fx")
         self.assertEqual(slept, [])
         self.assertIsNone(hub.down)
-
-    def test_gh_wait_from_env(self):
-        with mock.patch.dict(os.environ, {"DT_GH_WAIT_SECONDS": "0"}):
-            self.assertEqual(pd.gh_wait(), 0)
-        with mock.patch.dict(os.environ, {"DT_GH_WAIT_SECONDS": "坏的"}):
-            self.assertEqual(pd.gh_wait(), 300)
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("DT_GH_WAIT_SECONDS", None)
-            self.assertEqual(pd.gh_wait(), 300)
 
     def test_merged_prs_are_unverified_with_quotes_only(self):
         old = "\n## 更早（#4）（2026-11-07）\n- 已安装：旧的\n"      # 统计日开始前就在主分支上

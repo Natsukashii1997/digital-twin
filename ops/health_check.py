@@ -4,12 +4,16 @@
 --dry-run 只打印，不发消息。
 由 launchd 任务 cn.digital-twin.health 每天 09:45 调用，只查网关、飞书连接、24 小时内异常退出、回退模型、
 辅助任务失败和定时任务；网关、异常退出、回退、辅助任务猛鬼兽和亚古兽各查一遍（#147），另提醒飞书技能源头有更新。
+另查两件唤醒类的事（P9，全局坑 G-19 / G-20）：网关 launchd plist 的 EnvironmentVariables 里代理变量齐不齐
+（只读键名，不读、不输出值；也不读任何进程的环境变量，G-42）；定时任务最近一次晚点或失败时，附那段时间 pmset 的睡眠 / 唤醒记录。
 另查工人账号 dt-worker 的两道隔离（#190）：过滤代理在跑且拦得住本机地址、门卫规则（pf）在生效。
 launchd 起的 python 读不了 ~/Documents，沙盒和仓库自检已搬到 self_check.py（Hermes 无模型定时任务调用）。
 """
 import datetime as dt
 import json
 import os
+import plistlib
+import re
 import socket
 import sqlite3
 import subprocess
@@ -29,6 +33,10 @@ BOTS = (("猛鬼兽", "ai.hermes.gateway", ""), ("亚古兽", "ai.hermes.gateway
 EGRESS_PORT = 8090                       # 工人账号的过滤代理（ops/dt_worker_egress.py，#190）
 PF_STATUS = Path("/Library/Application Support/DigitalTwin/pf-dt-worker.status")   # 门卫规则每 5 分钟刷新一次
 PF_STALE_MIN = 20
+LAUNCH_AGENTS = HOME / "Library/LaunchAgents"
+PROXY_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy")   # G-19：大小写两套
+LATE_MIN = 10                            # 定时任务晚这么多分钟才派发算晚点
+PMSET_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) [+-]\d{4} (Sleep|Wake|DarkWake) *\t(.*)$")   # 不含「Wake Requests」
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + str(HOME / ".local/bin")
 
 
@@ -119,13 +127,131 @@ def check_skill_sync():
     return [f"飞书技能源头（~/.agents/skills）比机器人副本新，核对后同步（副本里机器人自己加的内容先留存）：{'；'.join(stale)}"]
 
 
+def env_key_names(path):
+    """plist 的 EnvironmentVariables 里有哪些变量名。只取键名，值不进内存以外的任何地方（不打印、不记日志）。"""
+    with open(path, "rb") as f:
+        env = plistlib.load(f).get("EnvironmentVariables") or {}
+    return set(env) if isinstance(env, dict) else set()
+
+
+def dotenv_key_names(path):
+    """.env 里写了哪些变量名（只看等号左边）。"""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return set()
+    return {m.group(1) for line in lines if (m := re.match(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", line))}
+
+
+def check_gateway_proxy(label, home=None, agents=None):
+    """G-19：网关 plist 里代理变量齐不齐（大小写两套）。只报缺了哪些变量名；plist 不在由 check_gateway 报「没有加载」。"""
+    path = (agents or LAUNCH_AGENTS) / f"{label}.plist"
+    try:
+        keys = env_key_names(path)
+    except FileNotFoundError:
+        return []
+    except Exception as e:   # noqa: BLE001  格式坏了也只报文件名和错误类型
+        return [f"读不了网关配置 {path.name}（{type(e).__name__}），代理变量没法核对"]
+    missing = [k for k in PROXY_KEYS if k not in keys]
+    if not missing:
+        return []
+    backed = all(k in dotenv_key_names((home or HERMES) / ".env") for k in missing)
+    why = ("对应 .env 里有，网关启动时会读进来，暂时不影响；但说明 plist 被 `hermes gateway restart` 之类重写过"
+           if backed else "对应 .env 里也没有，网关会直连、模型请求超时")
+    return [f"网关 plist（{path.name}）的 EnvironmentVariables 缺代理变量 {', '.join(missing)}（只核对了变量名）：{why}；"
+            "按全局坑 G-19 补回，改完 `plutil -lint`，再 bootout / bootstrap 重装"]
+
+
+def _parse_time(s):
+    try:
+        t = dt.datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo else t.astimezone()
+
+
+_pmset_cache = []
+
+
+def pmset_events():
+    """pmset -g log 里的睡眠 / 唤醒记录 [(本地时间, 类型, 说明)]；同一次巡检只读一遍。读不了返回 None。"""
+    if not _pmset_cache:
+        try:
+            r = run(["pmset", "-g", "log"], timeout=300)   # 日志十几 MB，机器忙时要一两分钟
+            text = r.stdout if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            text = None
+        events = None
+        if text is not None:
+            events = []
+            for line in text.splitlines():
+                m = PMSET_LINE.match(line)
+                if m:
+                    events.append((dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"), m.group(2), m.group(3)))
+        _pmset_cache.append(events)
+    return _pmset_cache[0]
+
+
+def _event_note(kind, text):
+    why = re.search(r"due to '?([^':]+)", text)
+    power = re.search(r"Using (Batt|AC)\w*(?: \(Charge:\s*(\d+)%\))?", text, re.I)
+    bits = [kind]
+    if why and kind == "Sleep":   # 唤醒的原因多是硬件代号，不列
+        bits.append(why.group(1).strip()[:40])
+    if power:
+        bits.append(f"电池 {power.group(2)}%" if power.group(1).lower() == "batt" and power.group(2)
+                    else "电池" if power.group(1).lower() == "batt" else "插电")
+    return " ".join(bits)
+
+
+def sleep_summary(start, end, events=None):
+    """G-20：[start, end] 这段时间机器醒没醒。start、end 是带时区的时间。"""
+    events = pmset_events() if events is None else events
+    if events is None:
+        return "读不了 pmset 睡眠记录，没法判断当时机器醒没醒"
+    lo, hi = (start.astimezone().replace(tzinfo=None), end.astimezone().replace(tzinfo=None))
+    hit = [e for e in events if lo <= e[0] <= hi]
+    if not hit:
+        return "那段时间 pmset 里没有睡眠 / 唤醒记录，机器应该醒着，原因要另查"
+    counts = {k: sum(1 for e in hit if e[1] == k) for k in ("Sleep", "DarkWake", "Wake")}
+    shown = "；".join(f"{e[0]:%H:%M} {_event_note(e[1], e[2])}" for e in hit[:4]) + ("；…" if len(hit) > 4 else "")
+    told = "、".join(f"{k} {n} 次" for k, n in counts.items() if n)
+    return f"那段时间机器在睡（pmset：{told}；{shown}），多半是睡眠拖的（全局坑 G-20），插电不合盖就好"
+
+
+def check_job_timing(home=None, now=None, late_min=LATE_MIN):
+    """定时任务最近一次晚点或失败（过去 24 小时内），附那段时间的睡眠记录。只读 jobs.json，不运行 hermes。"""
+    now = now or dt.datetime.now().astimezone()
+    try:
+        data = json.loads(((home or HERMES) / "cron/jobs.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    jobs = data.get("jobs", data) if isinstance(data, dict) else data
+    issues = []
+    for j in jobs if isinstance(jobs, list) else []:
+        if not isinstance(j, dict) or not j.get("enabled"):
+            continue
+        name = str(j.get("name") or j.get("id") or "?").split("（")[0][:30]
+        ld = j.get("last_dispatch") if isinstance(j.get("last_dispatch"), dict) else {}
+        sched, sent = _parse_time(ld.get("scheduled_at")), _parse_time(ld.get("dispatched_at"))
+        ran = _parse_time(j.get("last_run_at"))
+        late = ld.get("lateness_seconds")
+        if sched and sent and isinstance(late, (int, float)) and late >= late_min * 60 and now - sched <= dt.timedelta(days=1):
+            issues.append(f"定时任务「{name}」{sched.astimezone():%m-%d %H:%M} 的那次晚了 {int(late // 60)} 分钟才派发；"
+                          + sleep_summary(sched, sent))
+        elif j.get("last_status") not in (None, "ok") and ran and now - ran <= dt.timedelta(days=1):
+            start = sent or ran - dt.timedelta(minutes=30)
+            issues.append(f"定时任务「{name}」{ran.astimezone():%m-%d %H:%M} 那次没跑成；" + sleep_summary(start, ran))
+    return issues
+
+
 def check_bots():
-    """每只机器人各查一遍：网关、异常退出、回退模型、辅助任务失败；问题前标明是哪只。"""
+    """每只机器人各查一遍：网关、网关代理变量、异常退出、回退模型、辅助任务失败、定时任务晚点或失败；问题前标明是哪只。"""
     issues = []
     for name, label, sub in BOTS:
         home = bot_home(sub)
-        found = (check_gateway(label, home) + check_unclean_exits(home)
-                 + check_fallback(home=home) + check_aux_errors(home=home))
+        found = (check_gateway(label, home) + check_gateway_proxy(label, home) + check_unclean_exits(home)
+                 + check_fallback(home=home) + check_aux_errors(home=home) + check_job_timing(home))
         issues += [f"{name}：{i}" for i in found]
     return issues
 

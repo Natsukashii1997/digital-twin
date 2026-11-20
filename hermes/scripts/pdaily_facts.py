@@ -437,7 +437,7 @@ def main():
     except (OSError, ValueError, KeyError) as e:
         print(f"取数失败：读不了项目名册 {progress_data.ROSTER}（{e}）")
         raise SystemExit(1)
-    facts = build(day, projects, pdaily_data.gh_wait())   # 唤醒后代理没通：最多等 300 秒（#176）
+    facts = build(day, projects, pdaily_data.netwait.wait_seconds())   # 唤醒后代理没通：gh 最多等 300 秒（#176、P9）
     if a.dry_run:
         print(json.dumps(facts, ensure_ascii=False, indent=2))
         return

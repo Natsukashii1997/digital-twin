@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from feishu_home import home_chat  # noqa: E402
+import netwait  # noqa: E402  唤醒后先等网络（P9）
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
 PROFILE = "cli_a96f5f9ac63adcd4"               # 猛鬼兽应用（PRD D12：飞书只保留这一个机器人）
@@ -241,6 +242,7 @@ def main(argv=None):
     if a.dry_run:
         print(json.dumps({"msg_type": "interactive" if kind == "card" else "text", "content": payload}, ensure_ascii=False, indent=2))
         return 0
+    netwait.guard("tidings-weekly", ("feishu",), "Tidings 周报")   # 到点要发才等网络（P9），没到点的每 15 分钟不探测
     chat = home_chat()
     if not chat.startswith("oc_"):
         print("Tidings 周报没发出：没有私聊 chat_id（FEISHU_HOME_CHANNEL，环境变量和 ~/.hermes/.env 里都没有）。")

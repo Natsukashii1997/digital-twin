@@ -12,10 +12,8 @@ import tempfile
 import threading
 import time
 import unittest
-import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from unittest import mock
 
 HERE = Path(__file__).parent
 DATA = HERE.parent / "report_data.py"
@@ -77,7 +75,7 @@ class Base(unittest.TestCase):
                     "DT_DAILY_DOC": DAILY, "DT_WEEKLY_DOC": WEEKLY, "DT_LEDGER_SEED": str(self.seed),
                     "DT_PROGRESS": str(progress), "DT_REPORT_EVIDENCE": str(self.root / "evidence"),
                     "HERMES_HOME": str(self.root / "hermes"),   # 留痕读的 Hermes 会话库换成临时目录
-                    "DT_MODEL_WAIT_SECONDS": "0"}   # 默认不探主模型通道，不联网（#140 的用例单独打开）
+                    "DT_NET_WAIT_SECONDS": "0"}   # 默认不探网络，不联网（#140 / P9 的用例单独打开）
         self.state({})
 
     def tearDown(self):
@@ -262,120 +260,6 @@ class Publish(Base):
         self.assertIn("周号", r.stdout)
 
 
-sys.path.insert(0, str(HERE.parent))
-import report_data  # noqa: E402
-
-
-class FakeClock:
-    """假时钟：sleep 推进时间，记下每次睡了多久。"""
-    def __init__(self):
-        self.now, self.sleeps = 0.0, []
-
-    def clock(self):
-        return self.now
-
-    def sleep(self, s):
-        self.sleeps.append(s)
-        self.now += s
-
-
-class ModelRouteWait(unittest.TestCase):
-    """#140：开跑前等主模型通道连通，到上限放行，只记证据不写 stdout。"""
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.log = Path(self.tmp.name) / "evidence" / "model-route-wait.jsonl"
-        patcher = mock.patch.object(report_data, "WAIT_LOG", self.log)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        self.addCleanup(self.tmp.cleanup)
-        self.fc = FakeClock()
-
-    def wait(self, answers, limit=300):
-        seq = iter(answers)
-        report_data.wait_model_route("daily", limit=limit, probe=lambda: next(seq),
-                                     sleep=self.fc.sleep, clock=self.fc.clock)
-
-    def records(self):
-        return [json.loads(x) for x in self.log.read_text(encoding="utf-8").splitlines()]
-
-    def test_reachable_goes_straight_on(self):
-        self.wait([(True, "")])
-        self.assertEqual(self.fc.sleeps, [])
-        r, = self.records()
-        self.assertEqual((r["kind"], r["ok"], r["attempts"], r["waited_s"], r["error"]), ("daily", True, 1, 0, ""))
-
-    def test_waits_until_reachable(self):
-        self.wait([(False, "URLError: refused"), (False, "URLError: refused"), (True, "")])
-        self.assertEqual(self.fc.sleeps, [15, 15])
-        r, = self.records()
-        self.assertEqual((r["ok"], r["attempts"], r["waited_s"]), (True, 3, 30))
-
-    def test_gives_up_at_limit_and_releases(self):
-        self.wait([(False, "URLError: refused")] * 100)
-        self.assertEqual(sum(self.fc.sleeps), 300)          # 不超过上限
-        r, = self.records()
-        self.assertEqual((r["ok"], r["attempts"], r["waited_s"], r["error"]), (False, 21, 300, "URLError: refused"))
-
-    def test_zero_disables(self):
-        report_data.wait_model_route("daily", limit=0, probe=lambda: self.fail("不该探测"), sleep=self.fc.sleep)
-        self.assertFalse(self.log.exists())
-
-    def test_env_limit_and_bad_value(self):
-        with mock.patch.dict(os.environ, {"DT_MODEL_WAIT_SECONDS": "0"}):
-            report_data.wait_model_route("daily", probe=lambda: self.fail("不该探测"))
-        with mock.patch.dict(os.environ, {"DT_MODEL_WAIT_SECONDS": "abc"}):   # 写错了按默认 300
-            report_data.wait_model_route("daily", probe=lambda: (False, "x"), sleep=self.fc.sleep, clock=self.fc.clock)
-        self.assertEqual(sum(self.fc.sleeps), 300)
-
-    def test_log_write_failure_does_not_raise(self):
-        blocker = Path(self.tmp.name) / "file"
-        blocker.write_text("x", encoding="utf-8")
-        with mock.patch.object(report_data, "WAIT_LOG", blocker / "sub" / "log.jsonl"):
-            self.wait([(True, "")])   # 证据目录写不了，取数照常
-
-    def test_probe_classifies_responses(self):
-        err = urllib.error.HTTPError("https://chatgpt.com/", 403, "Forbidden", {}, None)
-        with mock.patch("urllib.request.urlopen", side_effect=err):
-            self.assertEqual(report_data.model_reachable("https://x.test/"), (True, ""))   # 有 HTTP 响应就是通
-        for exc in (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")), TimeoutError("timed out"),
-                    OSError("Tunnel connection failed: 502 Bad Gateway"), RuntimeError("怪响应")):
-            with mock.patch("urllib.request.urlopen", side_effect=exc):
-                ok, why = report_data.model_reachable("https://x.test/")
-                self.assertFalse(ok)
-                self.assertIn(type(exc).__name__, why)
-
-    def config(self, text):
-        cfg = Path(self.tmp.name) / "config.yaml"
-        cfg.write_text(text, encoding="utf-8")
-        return mock.patch.object(report_data, "HERMES_CONFIG", cfg)
-
-    def test_probe_url_follows_main_provider(self):
-        cases = {
-            "model:\n  default: claude-opus-5-5[1m]\n  provider: claude-subscription-directsdk-experimental\n": "https://api.anthropic.com/",
-            "model:\n  default: gpt-6.1-sol\n  provider: openai-codex\n  base_url: https://chatgpt.com/backend-api/codex\n": "https://chatgpt.com/",
-            "model:\n  provider: 'anthropic'\n": "https://api.anthropic.com/",
-            "model:\n  provider: deepseek\nfallback_model:\n  provider: openai-codex\n": None,   # 只看 model 段
-            "fallback_model:\n  provider: openai-codex\n": None,
-        }
-        with mock.patch.dict(os.environ, {"DT_MODEL_PROBE_URL": ""}):
-            for text, want in cases.items():
-                with self.config(text):
-                    self.assertEqual(report_data.model_probe_url(), want, text)
-            with mock.patch.object(report_data, "HERMES_CONFIG", Path(self.tmp.name) / "missing.yaml"):
-                self.assertIsNone(report_data.model_probe_url())
-        with mock.patch.dict(os.environ, {"DT_MODEL_PROBE_URL": "http://127.0.0.1:9/"}), self.config("model:\n  provider: openai-codex\n"):
-            self.assertEqual(report_data.model_probe_url(), "http://127.0.0.1:9/")   # 显式指定优先
-
-    def test_unknown_provider_does_not_wait(self):
-        with mock.patch.dict(os.environ, {"DT_MODEL_PROBE_URL": ""}), self.config("model:\n  provider: deepseek\n"), \
-                mock.patch("urllib.request.urlopen") as urlopen:
-            report_data.wait_model_route("daily", limit=300, sleep=self.fc.sleep, clock=self.fc.clock)
-        urlopen.assert_not_called()
-        self.assertEqual(self.fc.sleeps, [])
-        r, = self.records()
-        self.assertTrue(r["ok"])
-        self.assertIn("没有对应的探测地址", r["error"])
-
 class Status403(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(403)
@@ -385,28 +269,27 @@ class Status403(BaseHTTPRequestHandler):
         pass
 
 
-class ModelRouteWaitEndToEnd(Base):
-    """真起子进程：通道不通时放行、输出和不等待时一字不差；通道回 403 时算连通。"""
+class NetGateEndToEnd(Base):
+    """真起子进程：主模型或飞书不通时明确失败（P9 起不再放行交给回退）；回 403 算连通，照常出材料。"""
     def setUp(self):
         super().setUp()
         self.state({"im": [msg("oc_p2p", "p2p", "ou_x", "hi", partner="ou_x")]})
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
             self.env.pop(k, None)
-        self.env.update({"no_proxy": "*", "NO_PROXY": "*"})   # 本机端口直连，不走系统代理
+        self.env.update({"no_proxy": "*", "NO_PROXY": "*", "DT_NETWAIT_LOG": str(self.root / "netwait.jsonl")})   # 本机端口直连
 
     def log(self):
-        p = self.root / "evidence" / "model-route-wait.jsonl"
+        p = self.root / "netwait.jsonl"
         return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
 
-    def test_unreachable_releases_with_same_output(self):
-        base = self.run_py(DATA, "daily", "--date", "2026-10-27")
-        self.assertEqual(self.log(), [])
-        self.env.update({"DT_MODEL_WAIT_SECONDS": "1", "DT_MODEL_PROBE_URL": "http://127.0.0.1:9/"})
+    def test_unreachable_fails_with_reason(self):
+        self.env.update({"DT_NET_WAIT_SECONDS": "1", "DT_MODEL_PROBE_URL": "http://127.0.0.1:9/",
+                         "DT_PROBE_URL_FEISHU": "http://127.0.0.1:9/"})
         r = self.run_py(DATA, "daily", "--date", "2026-10-27")
-        self.assertEqual((r.returncode, r.stdout), (base.returncode, base.stdout))
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stdout.startswith("取数失败：网络 / 代理"), r.stdout)
         rec, = self.log()
-        self.assertFalse(rec["ok"])
-        self.assertEqual(rec["attempts"], 1)
+        self.assertEqual((rec["kind"], rec["ok"], rec["attempts"]), ("report-daily", False, 1))
         self.assertIn("refused", rec["error"].lower())
 
     def test_http_403_counts_as_reachable(self):
@@ -414,14 +297,15 @@ class ModelRouteWaitEndToEnd(Base):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        self.env.update({"DT_MODEL_WAIT_SECONDS": "60", "DT_MODEL_PROBE_URL": f"http://127.0.0.1:{srv.server_port}/"})
+        url = f"http://127.0.0.1:{srv.server_port}/"
+        self.env.update({"DT_NET_WAIT_SECONDS": "60", "DT_MODEL_PROBE_URL": url, "DT_PROBE_URL_FEISHU": url})
         self.state({}, daily=INTRO + "\n## 📅 2026-10-27（周二）\n\n本周二\n")
         t = time.monotonic()
         r = self.run_py(DATA, "weekly", "--week-start", "2026-10-26")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertLess(time.monotonic() - t, 14)   # 一次就通，没睡 15 秒
         rec, = self.log()
-        self.assertEqual((rec["kind"], rec["ok"], rec["attempts"]), ("weekly", True, 1))
+        self.assertEqual((rec["kind"], rec["ok"], rec["attempts"]), ("report-weekly", True, 1))
 
 
 if __name__ == "__main__":
