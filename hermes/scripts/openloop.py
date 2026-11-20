@@ -9,7 +9,8 @@ DigitalTwin/openloop/（ledger.json 当前账本、history/<日期>.json 每天�
 
 来源（5a-1）：
   GitHub     名册活跃仓库里开着的 PR，现查（gh api graphql）；不用合并官的 facts.jsonl（停更，且只记第一次看到的样子）
-  主线清单   各项目 CURRENT「主线」节里的 ✅▶⏳❓⏸📌✖；✅ ✖ 不进账本，⏸ 📌 只计数（parked），解析不了的记 unparsed
+  主线清单   各项目 CURRENT「主线」节里的 ✅▶⏳❓⏸📌✖；✅ ✖ 不进账本，⏸ 📌 只计数（parked），解析不了的记 unparsed；
+             同名的主线只认最上面一节（下面的是它以前的样子），标题写「旧主线」的不收，两种都列在 coverage 里
 
 一行的字段照规格第 4 节：id、what、state、owner、evidence、next、check_at、blocked、done_when、links、since；
 另带 source、project、evidence_at、stalled（到 check_at 证据没变）。owner 只照来源写的填，判不出来写「未知」。
@@ -54,6 +55,7 @@ WAIT = {
 STALE_LEDGER = dt.timedelta(hours=24)   # show：账本这么久没更新就在最上面说一句
 PR_PAGE, PR_PAGES = 50, 4               # 每个仓库最多取 200 个开着的 PR，到了上限在 coverage 里标出来
 FILES_MAX = 100                         # 文件列表只取前 100 个：取不全就不判 L0
+FETCH_TIMEOUT = 60                      # 拉一个项目最多等这么多秒：代理没通时不让整本账挂着
 LOOKUP_MAX = 60                         # 每个仓库一次最多核这么多个「待合并」里提到的号
 
 PR_QUERY = """query($o:String!,$n:String!,$c:String){repository(owner:$o,name:$n){pullRequests(states:OPEN,first:%d,after:$c,
@@ -67,10 +69,14 @@ LOOKUP = ("i%d: issueOrPullRequest(number:%d){__typename ... on PullRequest{stat
           "... on Issue{state closedAt closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state mergedAt closedAt}}}}")
 
 HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
-MAINLINE = re.compile(r"^(?:#{1,6}\s*)?(旧)?主线[：:]\s*(.+?)\s*$")
+MAINLINE = re.compile(r"^(?:#{1,6}\s*)?\**(旧)?(?:当前)?主线(?:清单)?\**(?:\s*[：:]\s*(.*?))?\**\s*$")   # 一节主线的标题行
+INLINE = re.compile(r"^\s*(?:[-*+]\s+)?\**(旧)?(?:当前)?主线\**\s*[：:]?\s*(.*)$")   # 标题和各项写在同一行的主线
 RULE = re.compile(r"^-{3,}\s*$")
-ITEM = re.compile(r"^(\s*)(?:[-*+]\s+)?([✅▶⏳❓⏸📌✖])️?\s*(.*)$")
+MARK = "[✅▶⏳❓⏸📌✖]"
+ITEM = re.compile(r"^(\s*)(?:[-*+]\s+|\d+[.、)）]\s*)?(" + MARK + r")\ufe0f?\s*(.*)$")
+ODD_ITEM = re.compile(r"^\s*\S{0,3}\s*" + MARK)   # 标记不在行首（表格行之类）：认不出是哪一项，记「未解析」
 BULLET = re.compile(r"^[-*+]\s+(.*)$")   # 顶格、没有标记的列表项：主线节里出现就是「未解析」
+LOOKS_LIKE = re.compile(r"主线.*完成\s*\d+\s*/\s*\d+")   # 像主线标题、却没被认成一节的行：记「未解析」
 LABEL_END = re.compile(r"[：:（(。；;，,]")
 NUM = re.compile(r"(?<![A-Za-z0-9_./-])#(\d+)")   # 本仓库的号；「postpane#466」这种别的仓库的不算
 PENDING = re.compile(r"(?:待|等)[^，,。；;（）()\s]{0,6}合并|未合并")   # 待合并、待常浩合并、待常浩定合并、等常浩合并、未合并
@@ -225,6 +231,7 @@ def tier_of(repo, node, rules):
 
 def pr_row(repo, node, rules, reviews=()):
     """一个开着的 PR 现在是哪种状态（规格第 5 节 GitHub 一列）。几种情况同时成立时取最需要人的那种。
+    顺序就是谁更需要人：检查失败、有冲突、审查要求修改（卡住）先于草稿和检查在跑（在做），草稿但检查红了也算卡住。
     reviews：别的来源给的审查记录（5a-2 的驿窗送审），和 GitHub 上的审查一起按时间排，最新一条有结论的算数。"""
     name = repo.split("/")[-1]
     commit = ((((node.get("commits") or {}).get("nodes")) or [{}])[-1] or {}).get("commit") or {}
@@ -237,14 +244,14 @@ def pr_row(repo, node, rules, reviews=()):
     last = verdicts[-1] if verdicts else None
     base = dict(id_=f"pr:{name}#{node['number']}", source="pr", project=name, what=node.get("title") or "",
                 done_when="PR 合并或关闭", url=node.get("url"))
-    if node.get("isDraft"):
-        return make(state="在做", owner=writer, at=pushed, evidence="最近一次提交（草稿 PR）",
-                    next_=f"{who}做完后转成可审", wait="draft", **base)
     if checks["failing"]:
         names = "、".join(n for n, _ in checks["failing"])
         failed = max((t for _, t in checks["failing"] if t), default=pushed)
         return make(state="卡住", owner=writer, at=failed, evidence=f"检查失败：{names}", next_=f"{who}看失败原因并修",
                     wait="ci_failed", blocked=f"CI 失败：{names}", **base)
+    if node.get("isDraft"):
+        return make(state="在做", owner=writer, at=pushed, evidence="最近一次提交（草稿 PR）",
+                    next_=f"{who}做完后转成可审", wait="draft", **base)
     if node.get("mergeable") == "CONFLICTING":
         return make(state="卡住", owner=writer, at=pushed, evidence="最近一次提交；和主分支有冲突",
                     next_=f"{who}变基解决冲突", wait="conflict", blocked="和主分支有冲突", **base)
@@ -297,16 +304,41 @@ def label_of(text):
     return label or text
 
 
+def inline_mainline(line, no):
+    """「主线：名字｜完成 5/12：✅ 甲 ✅ 乙 ⏳ 丙」这种一行写完的主线 → 一节；不是这种写法返回 None。
+    拆出来的项只有数字（「主线：x｜✅2 ▶1」是答复里的计数行，不是清单）时不拆，整行记「未解析」。"""
+    m = INLINE.match(line)
+    first = re.search(MARK, line)
+    if not m or not first or first.start() < m.start(2):
+        return None
+    rest = m.group(2)
+    cut = re.search(MARK, rest).start()
+    items = [{"mark": piece[0], "text": piece[1:].strip("\ufe0f ；;，,。"), "line": no} for piece in re.split("(?=" + MARK + ")", rest[cut:]) if piece]
+    section = {"title": rest[:cut].strip(" ：:") or "（没写名字）", "old": bool(m.group(1)), "line": no, "end": no, "items": items, "unparsed": []}
+    if any(re.fullmatch(r"[\d\s｜|]*", it["text"]) for it in items):
+        section.update(items=[], stray=True, unparsed=[{"text": clip(line, 160), "line": no}])
+    return section
+
+
 def mainlines(text):
-    """CURRENT 里的主线节：[{title, old, line, end, items:[{mark, text, line}], unparsed:[{text, line}]}]。行号从 1 起。"""
+    """CURRENT 里的主线节：[{title, old, line, end, items:[{mark, text, line}], unparsed:[{text, line}]}]。行号从 1 起。
+    认三种写法：标题行加下面的清单；一行写完的；像主线标题却认不出的（stray，只带一条 unparsed）。"""
     out, cur = [], None
     for no, line in enumerate(text.splitlines(), 1):
+        one = inline_mainline(line, no)
+        if one:
+            out.append(one)
+            cur = None
+            continue
         m = MAINLINE.match(line)
         if m:
-            cur = {"title": m.group(2), "old": bool(m.group(1)), "line": no, "end": no, "items": [], "unparsed": []}
+            cur = {"title": m.group(2) or "（没写名字）", "old": bool(m.group(1)), "line": no, "end": no, "items": [], "unparsed": []}
             out.append(cur)
             continue
         if cur is None:
+            if LOOKS_LIKE.search(line):
+                out.append({"title": "像主线、没认出来", "old": False, "stray": True, "line": no, "end": no, "items": [],
+                            "unparsed": [{"text": clip(line, 160), "line": no}]})
             continue
         if HEADING.match(line) or RULE.match(line):
             cur = None
@@ -315,7 +347,7 @@ def mainlines(text):
         item = ITEM.match(line)
         if item:
             cur["items"].append({"mark": item.group(2), "text": item.group(3).strip(), "line": no})
-        elif BULLET.match(line):
+        elif ODD_ITEM.match(line) or BULLET.match(line):
             cur["unparsed"].append({"text": clip(line, 160), "line": no})
     return out
 
@@ -339,7 +371,7 @@ def blame_times(root, ref, a, b):
 
 def mainline_key(title):
     m = NUM.search(title)
-    return f"#{m.group(1)}" if m else re.sub(r"\s+", "", label_of(title.split("｜")[0]))[:16]
+    return f"#{m.group(1)}" if m else re.sub(r"[\s「」“”\"']+", "", label_of(title.split("｜")[0]))[:16]
 
 
 def mainline_rows(name, section, times, seen):
@@ -347,13 +379,13 @@ def mainline_rows(name, section, times, seen):
     rows, parked, pending = [], [], []
     for it in section["items"]:
         mark, text = it["mark"], it["text"]
-        if mark in DONE:
-            continue
         label = label_of(text)
         id_ = f"mainline:{name}/{mainline_key(section['title'])}/" + re.sub(r"\s+", "", label)[:24]
-        seen[id_] = seen.get(id_, 0) + 1
+        seen[id_] = seen.get(id_, 0) + 1   # 做完的项也占序号：前一项标 ✅ 之后，后一项的编号不变
         if seen[id_] > 1:
             id_ += f"~{seen[id_]}"
+        if mark in DONE:
+            continue
         if PENDING.search(text):
             pending.append({"text": text, "line": it["line"], "kind": "主线项"})
         if mark in PARKED:
@@ -407,9 +439,15 @@ def mainline_source(projects, fetch):
     for p in projects:
         name, root, main = key_of(p), root_of(p), p.get("main") or "main"
         if fetch and p.get("github"):
-            r = subprocess.run(["git", "-C", str(root), "fetch", "-q", "origin", main], capture_output=True, text=True)
-            if r.returncode:
-                cover["fetch_failed"][name] = clip(r.stderr or r.stdout or f"git 退出码 {r.returncode}", 120)
+            try:
+                r = subprocess.run(["git", "-C", str(root), "fetch", "-q", "origin", main], capture_output=True, text=True,
+                                   timeout=FETCH_TIMEOUT, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                if r.returncode:
+                    cover["fetch_failed"][name] = clip(r.stderr or r.stdout or f"git 退出码 {r.returncode}", 120)
+            except subprocess.TimeoutExpired:
+                cover["fetch_failed"][name] = f"{FETCH_TIMEOUT} 秒没拉完"
+            except OSError as e:
+                cover["fetch_failed"][name] = clip(e, 120)
         try:
             ref = pdaily_data.main_ref(root, main)
             text = pdaily_data.show(root, ref, "CURRENT.md")
@@ -423,14 +461,23 @@ def mainline_source(projects, fetch):
         seen = {}
         for c in heading_candidates(text):
             candidates.append({**c, "project": name, "repo": p.get("github")})
+        names = set()
         for s in mainlines(text):
-            if s["old"]:
-                cover["old"].append({"project": name, "title": clip(s["title"], 60)})
+            title = clip(s["title"], 60)
+            if s.get("stray"):   # 像主线却认不出的行、只有计数的行：只报「未解析」，不占这条主线的名字
+                unparsed += [{"project": name, "mainline": title, **u} for u in s["unparsed"]]
                 continue
+            if s["old"]:
+                cover["old"].append({"project": name, "title": title, "why": "标题写着旧主线"})
+                continue
+            if mainline_key(s["title"]) in names:   # CURRENT 新记录在上：下面同名的一节是这条主线以前的样子
+                cover["old"].append({"project": name, "title": title, "why": "同名主线的旧快照，只认最上面一节"})
+                continue
+            names.add(mainline_key(s["title"]))
             got, held, pend = mainline_rows(name, s, blame_times(root, ref, s["line"], s["end"]), seen)
             rows += got
             parked += held
-            unparsed += [{"project": name, "mainline": clip(s["title"], 60), **u} for u in s["unparsed"]]
+            unparsed += [{"project": name, "mainline": title, **u} for u in s["unparsed"]]
             candidates += [{**c, "project": name, "repo": p.get("github")} for c in pend]
     return rows, parked, unparsed, candidates, cover
 
@@ -468,13 +515,16 @@ def fact_of(n, node, named=()):
 
 def mismatches_of(candidates, hub):
     """（对不上的，没核成的 {项目: 原因}）。"""
-    by_repo, out, failed = {}, [], {}
+    by_repo, out, failed, used = {}, [], {}, {}
     for c in candidates:
         c["numbers"] = pending_numbers(c["text"])
         if c["repo"] and c["numbers"]:
             by_repo.setdefault(c["repo"], []).append(c)
     for repo, items in by_repo.items():
-        numbers = sorted({n for c in items for n in c["numbers"]})[:LOOKUP_MAX]
+        numbers = sorted({n for c in items for n in c["numbers"]})
+        if len(numbers) > LOOKUP_MAX:
+            failed[items[0]["project"]] = f"「待合并」里提到 {len(numbers)} 个号，只核了前 {LOOKUP_MAX} 个"
+            numbers = numbers[:LOOKUP_MAX]
         try:
             states = lookup(hub, repo, numbers)
         except (pdaily_data.Fail, Fail) as e:
@@ -483,7 +533,9 @@ def mismatches_of(candidates, hub):
         for c in items:
             facts = [f for f in (fact_of(n, states[n], c["numbers"]) for n in c["numbers"] if n in states) if f]
             if facts:
-                out.append({"id": f"mismatch:{c['project']}/CURRENT:{'+'.join(f'#{n}' for n in c['numbers'])}@{c['kind']}",
+                id_ = f"mismatch:{c['project']}/CURRENT:{'+'.join(f'#{n}' for n in c['numbers'])}@{c['kind']}"
+                used[id_] = used.get(id_, 0) + 1   # 两节标题提到同一个号：后来的加 ~2，各记各的进账本时间
+                out.append({"id": id_ + (f"~{used[id_]}" if used[id_] > 1 else ""),
                             "project": c["project"], "where": f"CURRENT.md 第 {c['line']} 行（{c['kind']}）",
                             "text": clip(c["text"], 200), "fact": "；".join(facts), "since": None})
     return out, failed
@@ -503,17 +555,20 @@ def read_ledger(folder=None):
         return None
 
 
-def carry(prev, source, cover):
-    """这一类来源里这次没取到的项目，把上一份账本里它的行原样带过来（标 carried），不当成事情没了。"""
-    lost = set(cover.get("failed") or {})
-    return [{**r, "carried": True} for r in (prev or {}).get("rows", []) if r.get("source") == source and r.get("project") in lost]
+def carry(prev, kind, failed, source=None):
+    """这次没取到的项目，把上一份账本里它的东西原样带过来（标 carried、记下原来是哪次取的），不当成事情没了。
+    kind：rows / parked / mismatches；failed：{项目: 原因}；source：只带这一类来源的行。"""
+    return [{**x, "carried": True, "carried_from": x.get("carried_from") or (prev or {}).get("generated_at")}
+            for x in (prev or {}).get(kind, []) if x.get("project") in failed and (source is None or x.get("source") == source)]
 
 
 def build(now, projects, hub, rules, prev=None, fetch=True):
     prs, gh_cover = github_source(projects, hub, rules)
     lines, parked, unparsed, candidates, ml_cover = mainline_source(projects, fetch)
     mismatches, unchecked = mismatches_of(candidates, hub)
-    rows = prs + carry(prev, "pr", gh_cover) + lines + carry(prev, "mainline", ml_cover)
+    rows = prs + carry(prev, "rows", gh_cover["failed"], "pr") + lines + carry(prev, "rows", ml_cover["failed"], "mainline")
+    parked += carry(prev, "parked", ml_cover["failed"])
+    mismatches += carry(prev, "mismatches", {**ml_cover["failed"], **unchecked})
     since = {x["id"]: x.get("since") for kind in ("rows", "parked", "mismatches") for x in (prev or {}).get(kind, [])}
     for x in rows + parked + mismatches:
         x["since"] = since.get(x["id"]) or iso(now)
@@ -522,7 +577,8 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
         r["stalled"] = bool(check and now >= check)
     rows.sort(key=lambda r: (STATES.index(r["state"]), not r["stalled"], r.get("check_at") or "9", r["id"]))
     counts = {s: sum(1 for r in rows if r["state"] == s) for s in STATES}
-    counts.update({"停了": sum(1 for r in rows if r["stalled"]), "只计数": len(parked), "对不上": len(mismatches), "未解析": len(unparsed)})
+    counts.update({"停了": sum(1 for r in rows if r["stalled"]), "只计数": len(parked), "对不上": len(mismatches), "未解析": len(unparsed),
+                   "沿用": sum(1 for x in rows + parked + mismatches if x.get("carried"))})
     return {
         "version": VERSION, "generated_at": iso(now), "counts": counts, "rows": rows, "parked": parked,
         "mismatches": mismatches, "unparsed": unparsed,
@@ -561,7 +617,8 @@ def summary(ledger):
     c = ledger["counts"]
     parts = [f"{s} {c[s]}" for s in STATES if c.get(s)]
     return (f"未闭环账本｜{stamp(parse_ts(ledger['generated_at']))} 扫描｜共 {len(ledger['rows'])} 行"
-            + (f"：{'｜'.join(parts)}" if parts else "") + f"｜其中停了 {c['停了']}｜对不上 {c['对不上']}｜只计数 {c['只计数']}｜未解析 {c['未解析']}")
+            + (f"：{'｜'.join(parts)}" if parts else "") + f"｜其中停了 {c['停了']}｜对不上 {c['对不上']}｜只计数 {c['只计数']}｜未解析 {c['未解析']}"
+            + (f"｜沿用上一份 {c['沿用']} 条" if c.get("沿用") else "") + (f"｜没取到 {len(gaps(ledger))} 处" if gaps(ledger) else ""))
 
 
 def gaps(ledger):
@@ -569,13 +626,13 @@ def gaps(ledger):
     cov, out = ledger["coverage"], []
     for src, label in (("github", "GitHub"), ("mainline", "主线清单")):
         for name, why in (cov[src].get("failed") or {}).items():
-            out.append(f"{label}·{name}：{why}（沿用上一份账本里的行）")
+            out.append(f"{label}·{name}：{why}（这个项目沿用上一份账本里的）")
     for name in cov["github"].get("capped") or []:
         out.append(f"GitHub·{name}：开着的 PR 超过 {PR_PAGE * PR_PAGES} 个，只取了前面的")
     for name, why in (cov["mainline"].get("fetch_failed") or {}).items():
         out.append(f"拉取·{name}：{why}（CURRENT 读的是本机已有的版本，可能旧）")
     for name, why in (cov.get("mismatch_unchecked") or {}).items():
-        out.append(f"对不上·{name}：{why}（这个项目的「待合并」没核）")
+        out.append(f"对不上·{name}：{why}（这个项目的「待合并」没核全，沿用上一份里它的）")
     if cov.get("rules"):
         out.append(cov["rules"])
     return out
@@ -594,7 +651,7 @@ def render(ledger, now=None):
         out.append(f"\n【{state}】{len(rows)}")
         for r in rows:
             flag = "⚠ 停了｜" if r["stalled"] else ""
-            out.append(f"  {flag}{r['id']}｜{r['what']}" + ("（沿用上一份）" if r.get("carried") else ""))
+            out.append(f"  {flag}{r['id']}｜{r['what']}" + (f"（沿用 {stamp(parse_ts(r.get('carried_from')))} 那份）" if r.get("carried") else ""))
             out.append(f"      谁：{r['owner']}｜证据：{r['evidence']}｜下一步：{r['next']}"
                        + (f"｜卡在：{r['blocked']}" if r["blocked"] else "")
                        + (f"｜下次看：{stamp(parse_ts(r['check_at']))}" if r["check_at"] else "｜下次看：不催")
@@ -614,7 +671,7 @@ def render(ledger, now=None):
             out.append(f"  {x['mark']} {x['project']}｜{x['what']}")
     old = ledger["coverage"]["mainline"].get("old") or []
     if old:
-        out.append("\n【没收的旧主线】" + "；".join(f"{o['project']}「{o['title']}」" for o in old))
+        out.append("\n【没收的旧主线】" + "；".join(f"{o['project']}「{o['title']}」（{o.get('why', '旧主线')}）" for o in old))
     miss = gaps(ledger)
     if miss:
         out.append("\n【这次没取到的】")
@@ -648,6 +705,9 @@ def main(argv=None):
         return 0
     except Fail as e:
         print(f"账本没更新：{e}")
+        return 1
+    except Exception as e:   # 没料到的错也收成一句：定时跑的时候要看得出「今天没更新」，不是一屏回溯
+        print(f"账本没更新：出错（{type(e).__name__}：{e}）")
         return 1
 
 

@@ -174,6 +174,10 @@ class PrState(unittest.TestCase):
         self.assertEqual(r["check_at"], "2026-11-20T16:20:00+08:00")
         self.assertEqual(r["done_when"], "PR 合并或关闭")
 
+    def test_draft_with_a_red_check_is_stuck(self):
+        r = self.row(draft=True, checks=[run("test", "FAILURE")])
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "CI 失败：test"))
+
     def test_failed_check_wins_over_an_approval(self):
         r = self.row(checks=[run("test", "TIMED_OUT")], reviews=[review("APPROVED")])
         self.assertEqual(r["state"], "卡住")
@@ -271,7 +275,46 @@ class Mainline(Base):
         self.assertEqual([[i["text"] for i in s["items"]] for s in got], [["甲"], ["乙", "丙等常浩决定"]])
 
     def test_mentions_of_the_word_are_not_sections(self):
-        self.assertEqual(ol.mainlines("## 2026-11-19 · #239 工作台主线页\n- ▶ 甲\n**主线**：x｜✅2\n- ▶ 乙\n"), [])
+        self.assertEqual(ol.mainlines("## 2026-11-19 · #239 工作台主线页\n- ▶ 甲\n主线暂停于：0D\n- ▶ 乙\n"), [])
+
+    def test_more_header_styles(self):
+        for head in ("## 主线", "## 主线清单：底座", "**主线：底座**", "## 当前主线：底座", "### 主线: 底座"):
+            got = ol.mainlines(f"{head}\n\n1. ▶ 甲\n2、✅ 乙\n- ⏳ 丙\n")
+            self.assertEqual([[i["mark"] + i["text"] for i in s["items"]] for s in got], [["▶甲", "✅乙", "⏳丙"]], head)
+
+    def test_one_line_mainline_is_split_into_items(self):
+        text = "- 别的\n  - 主线：接力根治｜完成 2/4：✅ S1（#423）✅ 全链路梳理 ⏳ 第 0 批装机（等 #442 合并）；▶️ 第 1 批\n- 主线「设计规范」（完成 1/2）：✅ 提炼；❓ 机检做不做\n"
+        got = ol.mainlines(text)
+        self.assertEqual([(s["title"], s["line"]) for s in got], [("接力根治｜完成 2/4", 2), ("「设计规范」（完成 1/2）", 3)])
+        self.assertEqual([i["mark"] + i["text"] for i in got[0]["items"]], ["✅S1（#423）", "✅全链路梳理", "⏳第 0 批装机（等 #442 合并）", "▶第 1 批"])
+        self.assertEqual([i["mark"] + i["text"] for i in got[1]["items"]], ["✅提炼", "❓机检做不做"])
+        self.roster(self.project("pp", text))
+        led = self.build(Hub())
+        self.assertEqual(sorted((r["id"], r["state"]) for r in led["rows"]),
+                         [("mainline:pp/接力根治/第0批装机", "等外部"), ("mainline:pp/接力根治/第1批", "在做"), ("mainline:pp/设计规范/机检做不做", "等你")])
+
+    def test_what_cannot_be_parsed_is_reported_not_dropped(self):
+        text = ("**主线**：底座｜✅2 ▶1 ⏸1\n\n"                      # 答复里的计数行，不是清单
+                "## 11-12 · 主线推进｜完成 3/4（见下）\n\n"            # 像主线标题，认不出
+                "## 主线：底座｜完成 0/2\n| ▶ | 表格里的一项 |\n- ▶ 正常的一项\n")
+        self.roster(self.project("dt", text))
+        led = self.build(Hub())
+        self.assertEqual([r["id"] for r in led["rows"]], ["mainline:dt/底座/正常的一项"])
+        self.assertEqual([(u["line"], u["mainline"]) for u in led["unparsed"]], [(1, "底座｜"), (3, "像主线、没认出来"), (6, "底座｜完成 0/2")])
+
+    def test_only_the_top_section_of_a_repeated_mainline_counts(self):
+        text = ("### 主线：审计修复｜完成 2/2\n✅ 第 2 项\n✅ 验证\n\n## 更早的一节\n\n"
+                "### 主线：审计修复｜完成 0/2\n❓ 第 2 项：等常浩确认\n📌 验证\n")
+        self.roster(self.project("cc", text))
+        led = self.build(Hub())
+        self.assertEqual((led["rows"], led["parked"]), ([], []))        # 下面那节是这条主线以前的样子：不收
+        self.assertEqual(led["coverage"]["mainline"]["old"], [{"project": "cc", "title": "审计修复｜完成 0/2", "why": "同名主线的旧快照，只认最上面一节"}])
+
+    def test_ids_do_not_shift_when_an_earlier_twin_is_done(self):
+        for first in ("▶", "✅"):
+            self.roster(self.project(f"p{ord(first)}", f"## 主线：落地｜完成 0/2\n- {first} 第 1 页：甲\n- ▶ 第 1 页：乙\n"))
+            ids = [r["id"].split("/", 1)[1] for r in self.build(Hub())["rows"] if "乙" in r["next"]]
+            self.assertEqual(ids, ["落地/第1页~2"], first)
 
     def test_rows_states_ids_and_parked(self):
         p = self.project("dt", CURRENT)
@@ -292,7 +335,7 @@ class Mainline(Base):
         self.assertEqual(ask["check_at"], "2026-11-18T12:30:00+08:00")
         self.assertEqual([(x["mark"], x["what"]) for x in led["parked"]], [("⏸", "#136 托管合并"), ("📌", "批 6 驿窗只显示")])
         self.assertEqual([u["line"] for u in led["unparsed"]], [18])
-        self.assertEqual(led["coverage"]["mainline"]["old"], [{"project": "dt", "title": "托管上线（#126）｜完成 3/8"}])
+        self.assertEqual(led["coverage"]["mainline"]["old"], [{"project": "dt", "title": "托管上线（#126）｜完成 3/8", "why": "标题写着旧主线"}])
         self.assertEqual((led["counts"]["只计数"], led["counts"]["未解析"]), (2, 1))
 
     def test_inline_question_mark_means_waiting_for_owner(self):
@@ -301,13 +344,6 @@ class Mainline(Base):
         rows = self.build(Hub())["rows"]
         self.assertEqual([(r["id"], r["state"]) for r in rows], [("mainline:th/落地/第1页", "等你"), ("mainline:th/落地/第1页~2", "在做")])
         self.assertEqual(rows[0]["next"], "常浩定：等常浩合并")
-
-    def test_same_titles_in_two_sections_do_not_share_an_id(self):
-        text = "### 主线：审计修复（v3.0）｜完成 0/1\n📌 全量验证\n▶ 修\n\n### 主线：审计修复（v3.0）｜完成 0/1\n📌 全量验证\n▶ 修\n"
-        self.roster(self.project("cc", text))
-        led = self.build(Hub())
-        self.assertEqual([x["id"] for x in led["parked"]], ["mainline:cc/审计修复/全量验证", "mainline:cc/审计修复/全量验证~2"])
-        self.assertEqual(sorted(r["id"] for r in led["rows"]), ["mainline:cc/审计修复/修", "mainline:cc/审计修复/修~2"])
 
     def test_project_without_current_or_repo_is_reported_not_fatal(self):
         gone = {"id": "gone", "name": "gone", "path": str(self.root / "不存在"), "main": "main", "category": "活跃", "github": None}
@@ -369,6 +405,30 @@ class Mismatch(Base):
         self.assertEqual(led["counts"]["对不上"], 2)
         self.assertEqual(hub.calls.count(("o/dt", "lookup")), 1)   # 一个仓库只查一次
 
+    def test_two_headings_about_the_same_pr_get_their_own_ids(self):
+        text = "## 审计 PR #171 二次刷新（待合并）\n\n## 审计 PR #171 刷新（待合并）\n"
+        self.roster(self.project("dt", text))
+        hub = Hub(numbers={"o/dt": {171: {"__typename": "PullRequest", "state": "MERGED", "mergedAt": "2026-11-20T03:00:00Z"}}})
+        self.assertEqual([m["id"] for m in self.build(hub)["mismatches"]],
+                         ["mismatch:dt/CURRENT:#171@节标题", "mismatch:dt/CURRENT:#171@节标题~2"])
+
+    def test_too_many_numbers_is_said_out_loud(self):
+        self.roster(self.project("dt", "".join(f"## 第 {n} 件（PR #{n} 待合并）\n\n" for n in range(1, 6))))
+        with mock.patch.object(ol, "LOOKUP_MAX", 3):
+            led = self.build(Hub())
+        self.assertEqual(led["coverage"]["mismatch_unchecked"], {"dt": "「待合并」里提到 5 个号，只核了前 3 个"})
+
+    def test_parked_and_mismatches_survive_a_project_that_cannot_be_read(self):
+        self.roster(self.project("dt", CURRENT))
+        hub = Hub(numbers={"o/dt": {253: {"__typename": "PullRequest", "state": "MERGED", "mergedAt": "2026-11-20T03:00:00Z"}}})
+        first = self.build(hub)
+        with mock.patch.object(ol.pdaily_data, "show", side_effect=pdaily_data.Fail("CURRENT.md 不是 UTF-8 编码")):
+            led = self.build(hub, prev=first, now=NOW + dt.timedelta(hours=1))
+        self.assertEqual(led["coverage"]["mainline"]["failed"], {"dt": "CURRENT.md 不是 UTF-8 编码"})
+        for kind in ("rows", "parked", "mismatches"):
+            self.assertEqual([x["id"] for x in led[kind]], [x["id"] for x in first[kind]], kind)
+            self.assertTrue(all(x["carried"] and x["since"] == "2026-11-20T16:00:00+08:00" for x in led[kind]), kind)
+
     def test_lookup_failure_is_reported_not_silently_clean(self):
         self.roster(self.project("dt", CURRENT))
         led = self.build(Hub(down={"o/dt"}))
@@ -427,7 +487,10 @@ class Ledger(Base):
         self.assertIn("dt", led["coverage"]["github"]["failed"])
         text = ol.render(led, now=NOW + dt.timedelta(hours=1))
         self.assertIn("GitHub·dt：", text)
-        self.assertIn("（沿用上一份）", text)
+        self.assertIn("（沿用 11-20 16:00 那份）", text)
+        self.assertIn("沿用上一份 3 条｜没取到 2 处", text.splitlines()[0])
+        again = self.scan(Hub(prs={"o/dt": []}, down={"o/dt"}), now=NOW + dt.timedelta(hours=2))
+        self.assertEqual({r["carried_from"] for r in again["rows"] if r.get("carried")}, {"2026-11-20T16:00:00+08:00"})   # 连着两次没取到：还是记最初那次
 
     def test_pagination_collects_every_page_and_flags_the_cap(self):
         many = [pr(n, checks=[run("test")]) for n in range(1, 6)]
@@ -442,7 +505,7 @@ class Ledger(Base):
         text = ol.render(self.scan(hub), now=NOW)
         for part in ("未闭环账本｜11-20 16:00 扫描", "【卡住】1", "pr:dt#2｜红的", "卡在：CI 失败：test", "【待验证】1", "【在做】",
                      "【记录和事实对不上】1", "PR #253 已合并（11-20 11:00）", "【主线清单里没解析出来的】1", "【只计数，不催】⏸ 1｜📌 1",
-                     "【没收的旧主线】dt「托管上线（#126）｜完成 3/8」", "下次看：不催"):
+                     "【没收的旧主线】dt「托管上线（#126）｜完成 3/8」（标题写着旧主线）", "下次看：不催"):
             self.assertIn(part, text)
         self.assertNotIn("已超过 24 小时", text)
         self.assertIn("已超过 24 小时", ol.render(json.loads((self.out / "ledger.json").read_text()), now=NOW + dt.timedelta(hours=25)))
@@ -457,6 +520,32 @@ class Ledger(Base):
                 self.assertEqual(ol.main(["show"]), 1)
             self.assertIn("先跑 scan", buf.getvalue())
 
+    def test_scan_command_reports_failure_in_one_line(self):
+        env = {"DT_OPENLOOP_DIR": str(self.out)}
+        for boom, want in ((ol.Fail("读不了项目名册"), "账本没更新：读不了项目名册"), (KeyError("意外"), "账本没更新：出错（KeyError：'意外'）")):
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, env), mock.patch.object(ol, "scan", side_effect=boom), contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(["scan", "--no-fetch"]), 1)
+            self.assertEqual(buf.getvalue().strip(), want)
+        self.assertFalse(self.out.exists())
+
+    def test_scan_command_writes_or_dry_runs(self):
+        hub = Hub(prs={"o/dt": self.prs})
+        real = ol.scan
+        with mock.patch.dict(os.environ, {"DT_OPENLOOP_DIR": str(self.out), "DT_NOW": "2026-11-20T16:00:00+08:00"}), \
+                mock.patch.object(ol.merge_officer, "load_rules", return_value=RULES), \
+                mock.patch.object(ol, "scan", side_effect=lambda **kw: real(hub=hub, **{**kw, "fetch": False})):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(["scan", "--dry-run"]), 0)
+            self.assertEqual(json.loads(buf.getvalue())["counts"]["卡住"], 1)
+            self.assertFalse(self.out.exists())                      # 试跑不写文件
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(["scan"]), 0)
+            self.assertIn("未闭环账本｜11-20 16:00 扫描", buf.getvalue())
+            self.assertTrue((self.out / "ledger.json").exists())
+
     def test_bad_roster_fails_loudly_and_leaves_the_ledger_alone(self):
         self.scan(Hub(prs={"o/dt": self.prs}))
         before = (self.out / "ledger.json").read_text()
@@ -464,6 +553,49 @@ class Ledger(Base):
             with self.assertRaises(ol.Fail):
                 self.scan(Hub())
         self.assertEqual((self.out / "ledger.json").read_text(), before)
+
+
+class Fetch(Base):
+    """scan 默认先拉各项目的远端主分支：读到的是远端现在的 CURRENT，不是本机旧的。"""
+
+    def setUp(self):
+        super().setUp()
+        self.p = self.project("dt", "## 主线：底座｜完成 0/1\n- ▶ 旧的一项\n")
+        self.repo = Path(self.p["path"])
+        self.bare = self.root / "remote.git"
+        sh(self.root, "clone", "-q", "--bare", str(self.repo), str(self.bare))
+        sh(self.repo, "remote", "add", "origin", str(self.bare))
+        sh(self.repo, "fetch", "-q", "origin")
+        other = self.root / "other"                                   # 别的会话在远端推了新的 CURRENT，本机没拉
+        sh(self.root, "clone", "-q", str(self.bare), str(other))
+        commit_current(other, "## 主线：底座｜完成 0/1\n- ▶ 远端新写的一项\n", "2026-11-20 15:00:00 +0800")
+        sh(other, "push", "-q", "origin", "main")
+        self.roster(self.p)
+
+    def whats(self, fetch):
+        led = ol.build(NOW, ol.roster(), Hub(), RULES, fetch=fetch)
+        return [r["what"] for r in led["rows"]], led["coverage"]["mainline"]["fetch_failed"]
+
+    def test_fetch_reads_what_the_remote_has_now(self):
+        self.assertEqual(self.whats(False), (["旧的一项"], {}))
+        before = sh(self.repo, "rev-parse", "main"), sh(self.repo, "status", "--porcelain")
+        self.assertEqual(self.whats(True), (["远端新写的一项"], {}))
+        self.assertEqual((sh(self.repo, "rev-parse", "main"), sh(self.repo, "status", "--porcelain")), before)   # 本地分支和工作区没动
+
+    def test_fetch_failure_and_timeout_are_reported(self):
+        sh(self.repo, "remote", "set-url", "origin", str(self.root / "没有这个远端"))
+        rows, failed = self.whats(True)
+        self.assertEqual(rows, ["旧的一项"])
+        self.assertIn("dt", failed)
+        real = subprocess.run
+
+        def slow(cmd, **kw):
+            if "fetch" in cmd:
+                self.assertEqual((kw["timeout"], kw["env"]["GIT_TERMINAL_PROMPT"]), (ol.FETCH_TIMEOUT, "0"))
+                raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+            return real(cmd, **kw)
+        with mock.patch.object(ol.subprocess, "run", side_effect=slow):
+            self.assertEqual(self.whats(True)[1], {"dt": "60 秒没拉完"})
 
 
 class RealGhPath(Base):
