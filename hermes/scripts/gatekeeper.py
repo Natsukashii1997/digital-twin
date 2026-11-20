@@ -12,11 +12,12 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
   lark-cli 经环境变量 LARKSUITE_CLI_APP_ID / LARKSUITE_CLI_APP_SECRET 拿凭据（本机 1.0.96 实测认这两个变量、
   不碰钥匙串），配置目录单独放 DigitalTwin/gate/lark-cli/。lark-cli 本体必须是绝对路径、从 / 起每一级只有 root 或
   dt-gate 能改（DT_GATE_LARK_CLI，默认 /Library/Application Support/DigitalTwin/bin/lark-cli）：别人能换掉它就能偷密钥。
-代码信任（L3 第 1 轮 P1-04）：真正的保证在部署：门卫脚本装在 root 所有、只有 root 能改的目录，由 root 的 LaunchDaemon 以
-  dt-gate 身份用 /usr/bin/python3 -I -S -B 启动（run 不满足这两条就拒绝启动，0E-3c 安装）。代码里的检查是加固：作为主程序
-  启动时，导入任何同目录脚本之前先核解释器、本目录每个条目和 sys.path；读密钥前再核一次，连同已加载的全部模块（每个进程
-  核过一次即可：能改这些属性的只有 root 和本账号）。
-状态文件（P1-02）：门卫目录、gate.db、app.json 每次用前核路径信任（含 ACL）、不认链接；run、doctor 另核卡片库 cards.db。
+代码信任（L3 第 1 轮 P1-04）：真正的保证在部署：门卫脚本装在 root 所有、只有 root 能改的目录；所有命令（常驻的 run 和
+  手动的 setup、doctor、bind）都只经 root 装的入口 ops/dt_gatekeeper.sh 跑：清空环境、用 /usr/bin/python3 -I -S -B、
+  脚本路径写死（主账号能改的 python3、标准库、PYTHON* 变量都碰不到 dt-gate 进程）。main 对每个子命令都要求 -I -S -B，
+  run 另要求代码属 root（0E-3c 安装）。代码里的检查是加固：作为主程序启动时，导入任何同目录脚本之前先核解释器、本目录
+  每个条目和 sys.path；读密钥前再核一次，连同已加载的全部模块（每个进程核过一次即可：能改这些属性的只有 root 和本账号）。
+状态文件（P1-02）：门卫目录、gate.db、app.json 每次用前核路径信任（含 ACL）、不认链接；卡片库 cards.db 在 run、doctor 启动时核。
 
 收点击：lark-cli event consume card.action.trigger（飞书长连接，门卫主动连出去，本机不开端口；dt-gate 是控制面，
 门卫规则不限制它）。长连接进程在 stderr 打出就绪标记之后才领中台卡片，断开、重连期间暂停领卡，领到卡、发出去之前再看一次
@@ -30,7 +31,8 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
   ① bind start --email <常浩的飞书邮箱> | --open-id <ou_…>：只有 dt-gate 账号里能发起；发一张绑定卡（按钮带一次性绑定码，
     10 分钟有效）。常浩点了，门卫只把这条回调的点击人和私聊号记成「待确认」，在点的那张卡上现给一个 6 位确认码（点击时才
     生成，只有点卡的人看得到）；已有别人点过这张卡就不认（常浩重新 bind start）；
-  ② bind confirm <确认码>：常浩回到 dt-gate 终端输入，对上了才正式登记（点击后 10 分钟内，输错 3 次这次绑定作废）。
+  ② bind confirm <确认码>：常浩回到 dt-gate 终端输入，先显示待绑定的人（open_id 尾号、私聊号）、输入 yes 确认，确认码
+    对上了才正式登记（点击后 10 分钟内，输错 3 次这次绑定作废）。
   邮箱 / open_id 只用来把卡送到，登记的值只取回调。已绑定时要 --replace 才能换绑（同样两步，换到别的私聊会告诉旧私聊）；
   绑定前不领中台卡片（领了发不出去，还会用掉中台的重试次数）、不认任何点击。
 
@@ -52,6 +54,7 @@ import json
 import os
 import re
 import secrets
+import select
 import sqlite3
 import stat
 import subprocess
@@ -98,7 +101,7 @@ def check_path(path, what, checked=None):
         sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real
         if st.st_uid not in (0, os.geteuid()) or (st.st_mode & 0o022 and not sticky) or allow_acl(q):
             raise Untrusted(f"{what}：路径上的 {q} 别人能改（属主、权限位或 ACL），不用（换掉它就能拿到门卫密钥）")
-        if checked is not None and stat.S_ISDIR(st.st_mode):
+        if checked is not None and stat.S_ISDIR(st.st_mode) and not sticky:   # 靠粘滞位放过的不算核过（复核 P2-1）
             checked.add(q)
     return real
 
@@ -229,8 +232,7 @@ def state_file(f, what):
 def cards_trusted():
     """卡片库 cards.db（发卡登记的私聊、消息号、令牌都在里面，由 autoloop_feishu 管）：所在目录和文件同门卫状态。"""
     f = F.db_file()
-    if f.parent.exists():
-        trusted(f.parent, "卡片库目录")
+    trusted(nearest(f.parent), "卡片库目录")     # 还没建就核最近的上级（之后由 F.db 在那里建）
     state_file(f, "卡片库")
 
 
@@ -302,12 +304,18 @@ def root_code():
             raise F.Fail(f"门卫代码 {p} 不属 root：要装在只有 root 能改的目录（0E-3c 安装）")
 
 
-def launch_ok():
-    """常驻服务的启动要求（P1-04）：/usr/bin/python3 -I -S -B 启动（不读 PYTHON* 环境变量、不加载任何 site-packages、
-    不写字节码），代码属 root（root_code）。不满足抛 Fail。"""
+def launch_flags():
+    """所有命令都要 -I -S -B（不读 PYTHON* 环境变量、不加载任何 site-packages、不写字节码）。本身挡不住已经跑起来的
+    恶意解释器，作用是逼人走 root 装的入口 ops/dt_gatekeeper.sh（复核 P1-1）。"""
     f = sys.flags
     if not (f.isolated and f.no_site and f.dont_write_bytecode):
-        raise F.Fail("门卫常驻要用 /usr/bin/python3 -I -S -B 启动")
+        raise F.Fail("门卫只经入口脚本跑（/Library/Application Support/DigitalTwin/bin/gatekeeper，即 /usr/bin/python3 "
+                     "-I -S -B）；不要直接 python3 gatekeeper.py")
+
+
+def launch_ok():
+    """常驻服务的启动要求（P1-04）：-I -S -B 启动（launch_flags），代码属 root（root_code）。不满足抛 Fail。"""
+    launch_flags()
     root_code()
 
 
@@ -491,6 +499,15 @@ def handle_bind(ev, nonce):
     return {"ok": True, "pending_confirm": operator[-6:]}
 
 
+def bind_candidate():
+    """等确认的那次点击：点击人、私聊号、点击时间（bind confirm 写入前给常浩看，复核 P2-5）。"""
+    with db() as con:
+        p = con.execute("SELECT cand_open_id, cand_chat_id, clicked_at FROM bind_pending WHERE cand_open_id IS NOT NULL").fetchone()
+    if not p:
+        raise F.Fail("没有等确认的绑定：先 bind start，在飞书门卫私聊点「绑定」")
+    return dict(p)
+
+
 def bind_confirm(code):
     """第二步：常浩在 dt-gate 终端输入卡上的确认码，对上了才正式登记（只有 dt-gate 账号能写门卫库，所以能跑这一步的
     就是能操作 dt-gate 终端的人）。输错 BIND_TRIES 次这次绑定作废；点击后 BIND_TTL 秒内有效。"""
@@ -622,38 +639,66 @@ _LISTEN_LOCK = threading.Lock()
 
 def consume_once(on_event=handle_event, log=print):
     """起一次长连接消费进程，逐行处理，进程退出时返回退出码。stdin 一直开着（lark-cli 遇到 stdin 关闭就退出）。
-    stderr 出现就绪标记才置 LISTENING，进程退出（含出错）立刻撤掉（L3 第 1 轮 P1-03）。"""
+    stderr 出现就绪标记才置 LISTENING；出现退出标记、错误信封，或进程退出（含出错），立刻撤掉（L3 第 1 轮 P1-03）。
+    stdout 按 1 秒超时轮询读：进程退了即使有子进程还占着管道也不卡住（复核 P2-2）。"""
     LISTENING.clear()
     cmd, env = GATE.command(["event", "consume", EVENT_KEY, "--as", "bot"])
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                            text=True, bufsize=1)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     alive = [True]
 
-    def errors():                                # lark-cli 的就绪标记、断线、错误信封都在 stderr
-        for line in proc.stderr:
-            if line.strip() == READY_MARK:
-                with _LISTEN_LOCK:               # 退出后才读到的就绪行不算
-                    if alive[0]:
-                        LISTENING.set()
-            log(json.dumps({"at": F.now(), "lark_cli": line.rstrip()[:300]}, ensure_ascii=False))
-    t = threading.Thread(target=errors, daemon=True)
-    t.start()
-    try:
-        for line in proc.stdout:
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                log(json.dumps({"at": F.now(), "ok": False, "why": "回调行不是 JSON"}, ensure_ascii=False))
-                continue
-            try:
-                rec = on_event(ev)
-            except Exception as e:               # 一条出错不断开长连接
-                rec = {"ok": False, "why": f"{type(e).__name__}: {str(e)[:200]}"}
-            log(json.dumps({"at": F.now(), **rec}, ensure_ascii=False))
-    finally:
+    def stop_listening():
         with _LISTEN_LOCK:
             alive[0] = False
             LISTENING.clear()
+
+    def errors():                                # lark-cli 的就绪标记、断线、错误信封都在 stderr
+        for raw in proc.stderr:
+            line = raw.decode("utf-8", "replace").strip()
+            if line == READY_MARK:
+                with _LISTEN_LOCK:               # 退出后才读到的就绪行不算
+                    if alive[0]:
+                        LISTENING.set()
+            elif line.startswith("[event] exited") or line.startswith("{"):
+                stop_listening()                 # 退出标记、JSON 错误信封：长连接已经不在了
+            log(json.dumps({"at": F.now(), "lark_cli": line[:300]}, ensure_ascii=False))
+    t = threading.Thread(target=errors, daemon=True)
+    t.start()
+
+    def handle(line):
+        if not line.strip():
+            return
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            log(json.dumps({"at": F.now(), "ok": False, "why": "回调行不是 JSON"}, ensure_ascii=False))
+            return
+        try:
+            rec = on_event(ev)
+        except Exception as e:                   # 一条出错不断开长连接
+            rec = {"ok": False, "why": f"{type(e).__name__}: {str(e)[:200]}"}
+        log(json.dumps({"at": F.now(), **rec}, ensure_ascii=False))
+    fd, buf, gone = proc.stdout.fileno(), b"", None
+    try:
+        while True:
+            if proc.poll() is not None:
+                stop_listening()                 # 进程一退就撤，不等管道读完
+                gone = gone or time.monotonic()
+                if time.monotonic() - gone > 5:  # 子进程占着管道还在写：不再等
+                    break
+            if not select.select([fd], [], [], 1.0)[0]:
+                if proc.poll() is not None:
+                    break
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                handle(line.decode("utf-8", "replace"))
+        handle(buf.decode("utf-8", "replace"))
+    finally:
+        stop_listening()
         if proc.poll() is None:
             proc.terminate()                     # SIGTERM：让 lark-cli 正常退订（不 kill -9）
             try:
@@ -662,8 +707,10 @@ def consume_once(on_event=handle_event, log=print):
                 proc.kill()
                 proc.wait()
         t.join(timeout=5)
-        for fh in (proc.stdin, proc.stdout, proc.stderr):
+        for fh in (proc.stdin, proc.stdout):
             fh.close()
+        if not t.is_alive():                     # 子进程还占着 stderr 时线程还在读，这时 close 会等它读完（卡住）；留给守护线程
+            proc.stderr.close()
     return proc.returncode
 
 
@@ -751,6 +798,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     F.use(GATE)
     try:
+        launch_flags()                           # 每个子命令都要经入口脚本（复核 P1-1）
         if a.cmd == "run":
             run()
         elif a.cmd == "setup":
@@ -760,7 +808,13 @@ def main(argv=None):
         elif a.cmd == "bind" and a.action == "start":
             out = bind_start(a.email, a.open_id, a.replace)
         elif a.cmd == "bind" and a.action == "confirm":
-            out = bind_confirm(a.code)
+            c = bind_candidate()
+            print(f"待绑定：open_id 尾号 {c['cand_open_id'][-6:]}，私聊 {c['cand_chat_id']}，{c['clicked_at']} 点的卡。")
+            try:
+                yes = input("确认是你本人刚在飞书门卫私聊点的？输入 yes 继续：").strip() == "yes"
+            except EOFError:
+                yes = False
+            out = bind_confirm(a.code) if yes else {"ok": False, "why": "没确认，这次没绑定（确认码没用掉，可以再来）"}
         elif a.cmd == "bind":
             bd = binding()
             out = {"binding": bd and {k: bd[k] for k in ("open_id", "chat_id", "bound_at")}}

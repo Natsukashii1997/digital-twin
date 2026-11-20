@@ -239,8 +239,35 @@ class Config(Base):
                            capture_output=True, text=True, timeout=120)
         os.chmod(code, 0o755)
         self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertIn("别人能改", r.stdout)
-        self.assertFalse(marker.exists())
+        try:                                                            # 本机解释器可信就该挡在脚本目录；CI 的解释器
+            G.check_path(sys.executable, "解释器")                       # （/opt/hostedtoolcache）不可信，会更早挡在解释器
+            self.assertIn("门卫脚本目录", r.stdout)
+        except G.Untrusted:
+            self.assertIn("Python 解释器", r.stdout)
+        self.assertFalse(marker.exists())                               # 不管挡在哪，同目录被换掉的脚本一行都没跑
+
+    def test_sticky_parent_exemption_is_not_cached_as_checked(self):
+        """复核 P2-1：/tmp 这类谁都能写、带粘滞位的目录，作为上级被放过，不能顺带让它自己当目标时也被放过。"""
+        d = Path(self.tmp.name) / "sticky"
+        (d / "child").mkdir(parents=True)
+        os.chmod(d, 0o1777)
+        done = set()
+        G.check_path(d / "child", "子目录", done)                          # 作为上级：粘滞位豁免
+        with self.assertRaises(G.Untrusted):
+            G.check_path(G.nearest(d / "nope/sub"), "还不存在的搜索路径", done)   # 落到它自己：别人能在里面建目录
+
+    def test_every_command_requires_the_entry_script_and_launcher_is_locked_down(self):
+        """复核 P1-1：手动命令也只能经入口脚本（-I -S -B）；入口脚本清空环境、用系统 python3、路径写死。"""
+        out = []
+        with mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))):
+            for argv in (["show"], ["doctor"], ["bind", "show"], ["bind", "confirm", "123456"], ["setup", "--app-id", APP]):
+                self.assertEqual(G.main(argv), 1)
+                self.assertIn("入口脚本", out[-1])
+        self.assertFalse((Path(os.environ["DT_GATE_HOME"]) / "app.json").exists())
+        sh = (HERE.parent.parent.parent / "ops/dt_gatekeeper.sh").read_text(encoding="utf-8")
+        self.assertIn("exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin", sh)
+        self.assertIn('/usr/bin/python3 -I -S -B "$GATE_DIR/gatekeeper.py" "$@"', sh)
+        self.assertEqual(subprocess.run(["/bin/sh", "-n", str(HERE.parent.parent.parent / "ops/dt_gatekeeper.sh")]).returncode, 0)
 
     @unittest.skipUnless(sys.platform == "darwin", "ACL 只在 macOS 上核")
     def test_acl_allow_entry_is_detected(self):
@@ -323,6 +350,24 @@ class Bind(Base):
         self.assertEqual(A.identities(), (OWNER, CHAT))
         with self.assertRaisesRegex(F.Fail, "没有等确认的绑定"):         # 用过一次就没了
             G.bind_confirm(code)
+
+    def test_confirm_command_shows_candidate_and_needs_yes(self):
+        """复核 P2-5：终端里先显示待绑定的人，输入 yes 才写；不确认不消耗确认码。"""
+        G.bind_start(open_id=OWNER)
+        nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
+        self.click_bind(nonce, "e1")
+        code, out = self.shown_code(), []
+        with mock.patch.object(G, "launch_flags", lambda: None), \
+                mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))):
+            with mock.patch("builtins.input", return_value="no"):
+                self.assertEqual(G.main(["bind", "confirm", code]), 1)
+            self.assertIn(OWNER[-6:], out[0])                            # 先给看是谁
+            self.assertIsNone(G.binding())
+            with mock.patch("builtins.input", side_effect=EOFError):
+                self.assertEqual(G.main(["bind", "confirm", code]), 1)
+            with mock.patch("builtins.input", return_value="yes"):
+                self.assertEqual(G.main(["bind", "confirm", code]), 0)
+        self.assertEqual(G.binding()["open_id"], OWNER)
 
     def test_wrong_confirm_code_three_times_voids_the_bind(self):
         G.bind_start(open_id=OWNER)
@@ -665,6 +710,22 @@ class StateFiles(Base):
         with self.assertRaisesRegex(F.Fail, "门卫库"):
             G.binding()
 
+    @unittest.skipUnless(sys.platform == "darwin", "ACL 只在 macOS 上核")
+    def test_real_acl_on_gate_dir_is_refused(self):
+        """复核 P2-3：不只 mock allow_acl，真给门卫目录加一条放行 ACL。"""
+        d = self.fresh_home("real-acl")
+        subprocess.run(["/bin/chmod", "+a", "everyone allow add_file,delete_child", str(d)], check=True)
+        with self.assertRaisesRegex(F.Fail, "别人能改"):
+            G.binding()
+
+    def test_cards_db_parent_not_created_yet_is_checked_at_nearest_ancestor(self):
+        loose = Path(self.tmp.name) / "loose"
+        loose.mkdir()
+        os.chmod(loose, 0o777)
+        with mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(loose / "autoloop/cards.db")}):
+            with self.assertRaisesRegex(F.Fail, "卡片库目录"):
+                G.cards_trusted()
+
     def test_cards_db_checked_by_run_and_doctor(self):
         self.bind()
         F.deliver(dict(CARD))
@@ -712,6 +773,51 @@ class Listening(Base):
         self.assertEqual(seen, [(0, False), (1, True)])
         self.assertFalse(G.LISTENING.is_set())                          # 进程退出立刻撤掉
 
+    def fake_cli(self, body):
+        d = Path(self.tmp.name) / "bin"
+        d.mkdir(exist_ok=True)
+        exe = d / "lark-cli"
+        exe.write_text("#!/usr/bin/python3\nimport json, subprocess, sys, time\n" + textwrap.dedent(body))
+        os.chmod(exe, 0o755)
+        sec = Path(os.environ["DT_GATE_SECRET_FILE"])
+        if not sec.exists():
+            sec.parent.mkdir(parents=True)
+            sec.write_text("s\n")
+            os.chmod(sec, 0o600)
+            G.setup(APP)
+        return exe
+
+    def test_exited_marker_drops_listening_before_process_ends(self):
+        exe = self.fake_cli("""\
+            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
+            time.sleep(0.5)
+            print(json.dumps({"n": 1})); sys.stdout.flush()
+            time.sleep(0.5)
+            sys.stderr.write("[event] exited reason=bus_disconnected\\n"); sys.stderr.flush()
+            time.sleep(0.5)
+            print(json.dumps({"n": 2})); sys.stdout.flush()
+            """)
+        seen = []
+        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
+            G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
+        self.assertEqual(seen, [(1, True), (2, False)])
+
+    def test_child_holding_the_pipe_does_not_hang_after_exit(self):
+        """复核 P2-2：lark-cli 退了，但它起的子进程还占着 stdout：不能卡住、就绪要撤。"""
+        exe = self.fake_cli("""\
+            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
+            subprocess.Popen(["/bin/sleep", "20"])
+            time.sleep(0.5)
+            sys.exit(4)
+            """)
+        import time as _t
+        t0 = _t.monotonic()
+        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
+            code = G.consume_once(lambda ev: {"ok": True}, lambda line: None)
+        self.assertEqual(code, 4)
+        self.assertLess(_t.monotonic() - t0, 15)
+        self.assertFalse(G.LISTENING.is_set())
+
     def test_card_loop_claims_only_while_listening(self):
         """三段：没就绪 → 就绪后领一次、长连接断了 → 重连后再领。没就绪时一次都不调中台领卡接口。"""
         gets, sleeps = [], []
@@ -752,6 +858,10 @@ class Listening(Base):
         self.assertEqual(posts[0][0], "/v1/cards/7/failed")
         self.assertIn("长连接", posts[0][1]["error"])
         self.assertEqual(len(self.lark.calls), sends)                   # 没发卡
+        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "hub_readable", lambda: True):
+            out = F.once(ready=mock.Mock(side_effect=OSError("ls 跑不起来")))   # 复核 P2-6：核对本身出错也报 failed
+        self.assertIn("OSError", posts[-1][1]["error"])
+        self.assertEqual(len(self.lark.calls), sends)
 
 
 if __name__ == "__main__":

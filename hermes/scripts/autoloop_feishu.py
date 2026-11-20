@@ -447,7 +447,10 @@ def once(wait=50, ready=None):
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
-    why = ready() if ready else None
+    try:
+        why = ready() if ready else None
+    except Exception as e:                       # 核对本身出错也报 failed，不让卡空等中台租约过期（复核 P2-6）
+        why = f"领到卡后核对能不能发时出错（{type(e).__name__}）"
     if why:
         hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
         return {"card": card["id"], "ok": False, "paused": why}
