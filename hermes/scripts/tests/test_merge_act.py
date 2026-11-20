@@ -19,6 +19,7 @@ ACT = HERE.parent / "merge_act.py"
 # FAKE_DIR/fail.json 模拟网络或 GitHub 报错：{种类: {"n": 次数, "msg": 报错}}，每次调用用掉一次。
 #   view：任何 pr view；view_merged：合并之后的 pr view；merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
 #   comment：留言。
+# pr view / list 没写 changedFiles 的按 files 的个数补上；FAKE_DIR/off_on_view 存在时，pr view 顺手把策略记录关掉（#257）。
 # pr revert（#257）：在 prs.json 里新开一个撤回 PR（号 = 原号 + 100），打印它的网址；FAKE_DIR/revert_fail 存在就失败。
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -32,7 +33,8 @@ repo = args[args.index("--repo") + 1]
 mine = prs.get(repo, {})
 if args[:2] == ["pr", "list"]:
     state = args[args.index("--state") + 1]
-    print(json.dumps([p for p in mine.values() if state == "all" or p["state"] == state.upper()])); sys.exit(0)
+    print(json.dumps([{"changedFiles": len(p.get("files") or []), **p} for p in mine.values()
+                      if state == "all" or p["state"] == state.upper()])); sys.exit(0)
 pr = mine.get(args[2])
 if pr is None:
     sys.stderr.write("no pull requests found\n"); sys.exit(1)
@@ -57,7 +59,10 @@ if args[:2] == ["pr", "comment"]:
     if msg:
         die(msg)
 if args[:2] == ["pr", "view"]:
-    print(json.dumps(pr)); sys.exit(0)
+    if (root / "off_on_view").exists():           # #257：取 PR 状态的当口常浩关了自动合并
+        pf = Path(os.environ["DT_MERGE_DIR"]) / "policy.json"
+        pf.write_text(json.dumps(dict(json.loads(pf.read_text()), enabled=False)))
+    print(json.dumps({"changedFiles": len(pr.get("files") or []), **pr})); sys.exit(0)
 if args[:2] == ["pr", "merge"]:
     if (root / "merge_fail").exists() or args[args.index("--match-head-commit") + 1] != pr["headRefOid"]:
         sys.stderr.write("Head branch was modified. Review and try the merge again.\n"); sys.exit(1)

@@ -6,7 +6,7 @@
    只认发过的卡片，不认别的 PR 或版本。
 2. 按策略合并（#257，ADR-016，owner_approved_policy）：常浩 2026-11-20 定，L0–L2 的 PR 不再逐张等他点。策略记录有效
    （merge_policy.active）时，开 PR 的会话调 auto 交出一个版本，机械检查全过就合；当时还不能合的（CI 在跑等）由合并官
-   每轮巡视再试（auto_scan）。例外不合，仍发卡片问常浩：L3、改定方向文档、ask_labels（merge_officer.exception_reasons）。
+   每轮巡视再试（auto_scan）。例外不合，仍发卡片问常浩：L3、改定方向文档、ask_labels、改动文件没看全（merge_officer.exception_reasons）。
    合并官判「退回」的不拦，理由写进账本。每次合并在 merge_policy 的账本先记「要合」、再记结果；结果不明的下一轮只读核对。
    合并后不拉本机主目录、不安装、不发布（常浩定：装机、发布、部署不放）。撤回用 revert。
 
@@ -239,7 +239,7 @@ def record_owner(card, decision):
 
 
 def _mark_owner(repo, pr, head, decision, f=None, rules=None):
-    """调用方持全局锁。这个版本还没判定过（会话在合并官巡视之前就交出了）而且给了 f，就补一行判定。"""
+    """调用方持合并锁。这个版本还没判定过（会话在合并官巡视之前就交出了）而且给了 f，就补一行判定。"""
     rows = mo.read_rows()
     key = (repo, str(pr), head)
     hit = [r for r in rows if (r["repo"], r["pr"], r["head_sha"]) == key]
@@ -706,6 +706,8 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
         raise Stop("PR 状态不对：" + "；".join(bad), "")
     if want and not head.startswith(want):
         raise Stop(f"PR 现在的版本是 {head[:7]}，不是交出的 {want[:7]}（之后又有提交）", "")
+    if f["files_total"] is None:
+        raise Stop("GitHub 没给出改动文件总数，核对不了改动文件有没有看全", "")
     tier, sug, reasons = mo.evaluate(f, rules)
     exc = mo.exception_reasons(f, rules)
     if exc:
@@ -730,6 +732,9 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
     if cap is not None and MP.merged_count(day) >= cap:
         return _res("capped", f"{ref} 没合并：今天按策略已经合了 {MP.merged_count(day)} 个，到上限 {cap} 了。"
                               "明天自动继续；要今天合，常浩说一声。")
+    on, why, sig = MP.active(rules)                         # 核对花了时间：发合并命令前再读一次开关（关不等合并锁）
+    if not on:
+        return _res("off", f"{ref} 没合并：{why}。这个 PR 仍等常浩说合并。")
     mid = "m-" + re.sub(r"\D", "", mo.now())[:14] + "-" + os.urandom(3).hex()
     MP.append({"event": "intent", "id": mid, "repo": repo, "pr": str(pr), "title": f["title"], "url": p.get("url"),
                "head": head, "base": f["base_sha"], "tier": tier, "rules_version": rules["version"],
@@ -764,23 +769,33 @@ def _settle(mid, repo, pr, head, after, f=None, rules=None, r=None, late=False):
                               f"要安装、发布或写 CURRENT，仍先问常浩。撤回：merge_act.py revert {ref}", id=mid, merge_commit=sha)
     why = clip(r["why"]) if r else f"只读核对：PR 现在是 {after.get('state')}，版本 {str(after.get('headRefOid'))[:7]}"
     MP.append({"event": "failed", "id": mid, "why": why, "late": late})
+    if after.get("state") == "MERGED":                      # 合并了，但不是这次要合的版本：别处合的，不算这次的
+        return _res("failed", f"{ref}@{head[:7]} 不是这次合上的：{why}。PR 现在已合并，版本是 "
+                              f"{str(after.get('headRefOid'))[:7]}，不是交出的那个；到 GitHub 上看一眼是谁合的。", id=mid)
     return _res("failed", f"{ref}@{head[:7]} 没合上：{why}。回读确认 PR 是 {after.get('state')}，没有被改动。", id=mid)
 
 
-def auto_scan(rules, open_now, settled, listed):
-    """合并官每轮巡视时调（调用方持 MP.locked()，策略已确认生效）。open_now：这一轮读到的 open PR 状态；
-    settled：这一轮刚有了结局的判定行；listed：这一轮成功列出 open PR 的仓库。返回要常浩知道的话（没有就是空列表）：
-    结果不明、只读核对的结论、到上限；合成功的默认不说，进日报（auto.notify 为 each 时每个都说）。"""
+def reconcile_unsettled():
+    """上次结果不明的合并：只读核对，不重发（调用方持 MP.locked()）。和策略现在开没开无关：合并命令已经发过，
+    关了开关也要核对清楚，不然这条一直挂着。返回要常浩知道的话。"""
     said = []
-    conf = MP.auto_conf(rules)
-    covered = lambda repo: bool((act_repos(rules).get(repo.split("/")[-1]) or {}).get("ci"))  # noqa: E731
-    for m in MP.unsettled():                               # 1. 上次结果不明的：只读核对，不重发
+    for m in MP.unsettled():
         try:
             after = gh_read(["pr", "view", str(m["pr"]), "--repo", m["repo"], "--json", "state,mergeCommit,headRefOid"],
                             "只读核对")
         except Stop:
             continue                                       # 这一轮读不到，下一轮再核对
         said.append("只读核对：" + _settle(m["id"], m["repo"], m["pr"], m["head"], after, late=True)["text"])
+    return said
+
+
+def auto_scan(rules, open_now, settled, listed):
+    """合并官每轮巡视时调（调用方持 MP.locked()，策略已确认生效）。open_now：这一轮读到的 open PR 状态；
+    settled：这一轮刚有了结局的判定行；listed：这一轮成功列出 open PR 的仓库。返回要常浩知道的话（没有就是空列表）：
+    结果不明、只读核对的结论、到上限；合成功的默认不说，进日报（auto.notify 为 each 时每个都说）。"""
+    conf = MP.auto_conf(rules)
+    covered = lambda repo: bool((act_repos(rules).get(repo.split("/")[-1]) or {}).get("ci"))  # noqa: E731
+    said = reconcile_unsettled()                           # 1. 上次结果不明的：只读核对，不重发
     done = MP.bypassed()                                   # 2. 已合并却没经合并执行器的：留一条记录
     for r in settled:
         key = (r["repo"], r["pr"])
@@ -862,7 +877,11 @@ def cmd_revert(ref, reason):
                    "revert_url": url.group(0), "reason": reason})
         print(f"已开撤回 PR：{url.group(0)}（撤回 {name}#{pr}，原因：{reason}）。已经装机的改动撤回后要不要重装，仍先问常浩。")
         if MP.auto_conf(rules).get("revert_auto_merge") and MP.active(rules)[0]:
-            print(auto_try(repo, url.group(1), f"撤回 {name}#{pr}", rules, register=True)["text"])
+            try:
+                print(auto_try(repo, url.group(1), f"撤回 {name}#{pr}", rules, register=True)["text"])
+            except Stop as e:                              # 撤回 PR 已经开出、记了账；只是接着合并这一步没做成
+                print(f"撤回 PR 还没合并：在『{e.step}』这一步{e.why}。过一会儿对它再交出一次："
+                      f"merge_act.py auto {name}#{url.group(1)}，或等常浩说合并。")
         else:
             print("撤回 PR 没有自动合并，等常浩说合并。")
     return 0

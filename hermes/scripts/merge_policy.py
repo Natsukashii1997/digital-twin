@@ -17,7 +17,9 @@
                       两行同一个 id；只有 intent 没有结果的算结果不明：这个 PR 不再自动重试，要人看。
                       另有 revert_opened（撤回 PR 已开）、bypass（PR 已合并但没经合并执行器）两种单行记录。
   handoffs.json       交出登记：会话调 merge_act.py auto 时记下「仓库、PR、完整 HEAD、谁、什么时候」。绑定版本：之后 PR 有新提交，登记作废。
-  auto.lock           全局锁：按策略合并一次只跑一个（上限判断和写账本在同一把锁里）。
+  auto.lock           合并锁：按策略合并、合并官巡视一次只跑一个（上限判断和写账本在同一把锁里），一轮可能占几分钟。
+  policy.lock         开关锁：只在读改写 policy.json 的那一下持有。开、关不等合并锁：巡视正跑着，「关自动合并」也立刻生效；
+                      merge_act 在发合并命令之前再读一次开关。
 
 用法：
   merge_policy.py status [--json]          现在开没开、有效没有、今天合了几个、等着的交出、结果不明的；没签时给出要发的口令
@@ -84,11 +86,11 @@ def _read_json(path, empty):
 
 
 @contextlib.contextmanager
-def locked(wait=None):
-    """全局锁。等不到抛 Rejected（调用方按「这一轮没做」处理）。"""
+def locked(wait=None, name="auto.lock"):
+    """合并锁（默认）或开关锁（name="policy.lock"）。等不到抛 Rejected（调用方按「这一轮没做」处理）。"""
     wait = LOCK_WAIT if wait is None else wait
     home().mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(home() / "auto.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(str(home() / name), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         deadline = time.monotonic() + wait
         while True:
@@ -97,7 +99,7 @@ def locked(wait=None):
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise Rejected(f"另一个按策略合并正在跑（等锁超过 {wait:g} 秒）")
+                    raise Rejected(f"{'另一个按策略合并正在跑' if name == 'auto.lock' else '策略记录正被另一个进程改'}（等锁超过 {wait:g} 秒）")
                 time.sleep(0.1)
         yield
     finally:
@@ -203,7 +205,7 @@ def do_sign(message_id, rules=None):
     sha = scope_sha(rules)
     if cmd.group(1).lower() != sha[:12]:
         raise Rejected(f"哈希对不上：现在的授权范围是 {sha[:12]}，口令里是 {cmd.group(1).lower()}（规则改过，或抄错了）")
-    with locked(10):
+    with locked(10, "policy.lock"):
         d = load_state()
         if message_id in (d.get("used_messages") or {}):
             raise Rejected("这条飞书消息已经用过：一条消息只开一次，要再开请常浩再说一次")
@@ -217,7 +219,8 @@ def do_sign(message_id, rules=None):
 
 
 def do_off(source, reason=""):
-    with locked(10):
+    """关。只拿开关锁，不等合并锁：巡视或合并正跑着也立刻关上，正在核对的那个 PR 在发合并命令前会再读一次开关。"""
+    with locked(10, "policy.lock"):
         d = load_state()
         was = d["enabled"]
         d["enabled"] = False
@@ -232,7 +235,7 @@ def ledger_path():
 
 
 def append(rec):
-    """追加一行。O_APPEND 一次写完；调用方在全局锁里（bypass 记录除外，它只是旁注）。"""
+    """追加一行。O_APPEND 一次写完；调用方在合并锁里（bypass 记录除外，它只是旁注）。"""
     home().mkdir(parents=True, exist_ok=True, mode=0o700)
     line = json.dumps({"schema": "dt-merge-auto/1", "at": mo.now(), **rec}, ensure_ascii=False, sort_keys=True) + "\n"
     fd = os.open(str(ledger_path()), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -315,7 +318,7 @@ def _save_handoffs(d):
 
 
 def add_handoff(repo, pr, head, by):
-    """登记交出（同一个 PR 只留最新的版本）。调用方持全局锁。"""
+    """登记交出（同一个 PR 只留最新的版本）。调用方持合并锁。"""
     d = _handoff_doc()
     keep = [h for h in d["handoffs"] if (h["repo"], str(h["pr"])) != (repo, str(pr))]
     old = next((h for h in d["handoffs"] if (h["repo"], str(h["pr"]), h["head"]) == (repo, str(pr), head)), None)
@@ -333,7 +336,7 @@ def drop_handoff(repo, pr):
 
 
 def note_once(key, day):
-    """同一件事一天只说一次（上限拦下）：第一次返回 True 并记下。调用方持全局锁。"""
+    """同一件事一天只说一次（上限拦下）：第一次返回 True 并记下。调用方持合并锁。"""
     d = _handoff_doc()
     said = d.setdefault("said", {})
     if said.get(key) == day:

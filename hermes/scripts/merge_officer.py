@@ -18,7 +18,8 @@ scan 每一轮（定时任务这样跑）：
   1. 判定新的「PR × 版本」，给已关闭的 PR 补结局；
   2. 策略没生效（merge_policy.active 为否）：act.repos 里的仓库每个新判定发一张卡片，等常浩点（#67，和原来一样）；
      策略生效：只给例外（问常浩）发卡片，其余交给 merge_act.auto_scan 按策略合并（交出过、机械检查全过才合）；
-  3. 策略生效时，发现覆盖仓库的 PR 已经合并、账本里却没有合并执行器的记录，记一条 bypass（没经合并执行器）。
+  3. 策略生效时，发现覆盖仓库的 PR 已经合并、账本里却没有合并执行器的记录，记一条 bypass（没经合并执行器）；
+  4. 上次按策略合并结果不明的，只读核对（策略关了也核对）。
 
 用法：
   merge_officer.py [scan] [--verbose]    见上（不带子命令就是 scan；没有要常浩知道的事就不输出）
@@ -60,7 +61,7 @@ POLICY_OWNER = "策略合并"          # agreement.csv 的 owner 列：merge_act
 TIERS = ("L0", "L1", "L2", "L3")
 FIELDS = ["evaluated_at", "source", "repo", "pr", "title", "head_sha", "base_sha", "rules_version",
           "tier", "suggestion", "reasons", "outcome", "outcome_at", "outcome_head", "agree", "owner", "owner_at"]
-PR_FIELDS = ("number,title,state,isDraft,mergeable,headRefOid,baseRefOid,labels,files,"
+PR_FIELDS = ("number,title,state,isDraft,mergeable,headRefOid,baseRefOid,labels,files,changedFiles,"
              "statusCheckRollup,body,closingIssuesReferences,mergedAt,closedAt")
 END_FIELDS = "number,state,headRefOid,mergedAt,closedAt"
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -107,8 +108,11 @@ def _any(patterns, p):
 
 
 def facts_of(repo, pr):
-    """把 gh 的 PR JSON 收成判定要用的状态快照（也是回放的依据）。"""
+    """把 gh 的 PR JSON 收成判定要用的状态快照（也是回放的依据）。
+    files_total：GitHub 报的改动文件总数（gh 的 files 一次最多给 100 个，对不上就是没看全）；renamed：改名的文件
+    （gh 只给新路径，看不到原来的路径）。这两种都判不了有没有碰敏感路径，exception_reasons 按例外处理。"""
     checks = []
+    total = pr.get("changedFiles")
     for c in pr.get("statusCheckRollup") or []:
         checks.append(str(c.get("conclusion") or c.get("state") or c.get("status") or "").upper())
     return {
@@ -117,6 +121,8 @@ def facts_of(repo, pr):
         "draft": bool(pr.get("isDraft")), "mergeable": pr.get("mergeable") or "UNKNOWN",
         "labels": sorted(l.get("name", "") for l in pr.get("labels") or []),
         "paths": sorted(f.get("path", "") for f in pr.get("files") or []),
+        "files_total": total if isinstance(total, int) and not isinstance(total, bool) else None,
+        "renamed": sorted(f.get("path", "") for f in pr.get("files") or [] if f.get("changeType") == "RENAMED"),
         "checks": checks,
         "closes": bool(pr.get("closingIssuesReferences")) or bool(CLOSES.search(pr.get("body") or "")),
     }
@@ -135,7 +141,8 @@ def tier_of(repo, paths, rules):
 def exception_reasons(f, rules):
     """例外（仍然问常浩，不按策略合并）的理由；空列表就是不属于例外。
     L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签；
-    规则里收窄了 auto.tiers 时，风险档不在里面的也算。"""
+    改动文件没看全（超过 gh 一次给的 100 个）或有文件改名（看不到原路径）：判不了有没有碰敏感路径，按碰了处理；
+    规则里收窄了 auto.tiers 时，风险档不在里面的也算。旧的状态快照没有 files_total / renamed，照原来判。"""
     paths = f.get("paths") or []
     ask = []
     tier = tier_of(f["repo"], paths, rules)
@@ -146,6 +153,11 @@ def exception_reasons(f, rules):
     docs = [p for p in paths if _any(rules.get("direction_docs") or [], p)]
     if docs:
         ask.append("改动定方向文档：" + "、".join(docs[:5]))
+    total = f.get("files_total")
+    if total is not None and total != len(paths):
+        ask.append(f"改动文件 {total} 个，只读得到 {len(paths)} 个，看不全有没有敏感路径")
+    if f.get("renamed"):
+        ask.append("有文件改名，看不到原来的路径：" + "、".join(f["renamed"][:5]))
     labels = sorted(set(f.get("labels") or []) & set(rules.get("ask_labels") or []))
     if labels:
         ask.append("标签 " + "、".join(labels))
@@ -357,8 +369,8 @@ def scan(verbose, act):
         cards = [r for r in added if not on or exception_reasons(by_key[(r["repo"], r["pr"], r["head_sha"])], rules)]
         if cards:
             errors += merge_act.send_cards(cards, by_key)
-        if on:
-            said = merge_act.auto_scan(rules, open_now, settled, listed)
+        # 策略没生效也核对上次结果不明的合并（只读）：合并命令已经发过，不能因为关了开关就一直挂着
+        said = merge_act.auto_scan(rules, open_now, settled, listed) if on else merge_act.reconcile_unsettled()
     if verbose:
         for r in added:
             print(f"{r['repo']}#{r['pr']} {r['tier']} {r['suggestion']}  {r['title'][:40]}"

@@ -151,6 +151,39 @@ class Auto(Fixture, unittest.TestCase):
             self.assertIn(word, r.stdout)
         self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
 
+    def test_file_list_not_fully_visible_is_exception(self):
+        """gh 一次最多给 100 个改动文件，改名的只给新路径：看不全就判不了有没有碰敏感路径，按例外交常浩。"""
+        self.sign()
+        cases = {"只读得到 1 个": {"changedFiles": 116},
+                 "有文件改名": {"files": [{"path": "docs/b.md", "changeType": "RENAMED"}]}}
+        for word, kw in cases.items():
+            self.update_pr(files=[{"path": "docs/a.md"}], changedFiles=1)
+            self.update_pr(**kw)
+            r = self.auto()
+            self.assertEqual(r.returncode, 3, word + r.stdout)
+            self.assertIn("属于例外", r.stdout)
+            self.assertIn(word, r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+        self.scan()                                                  # 和别的例外一样发卡片问常浩
+        self.assertEqual(len(self.calls("lark.jsonl")), 1)
+
+    def test_unknown_file_total_stops(self):
+        self.sign()
+        self.update_pr(changedFiles=None)
+        r = self.auto()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("改动文件总数", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
+
+    def test_off_during_checks_stops_before_merge(self):
+        """核对到一半常浩关了自动合并：合并命令发出前再读一次开关，不合、不记要合。"""
+        self.sign()
+        (self.fake / "off_on_view").write_text("x")
+        r = self.auto()
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("自动合并没开（签过，已关）", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book()), ("OPEN", [], []))
+
     def test_tier_outside_policy_is_exception(self):
         self.set_auto(tiers=["L0"])
         self.sign()
@@ -312,6 +345,19 @@ class Auto(Fixture, unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
             self.assertEqual((MP.unsettled(), MP.find_merged("o/app", 5)["status"]), ([], "merged"))
 
+    def test_unsure_is_reconciled_even_when_policy_off(self):
+        """结果不明之后常浩关了自动合并：只读核对照做（不然这条一直挂着，日报天天报结果不明）；不合新的。"""
+        self.sign()
+        self.fail(view_merged={"n": 3, "msg": EOF_NET})
+        self.auto()
+        self.assertEqual(self.events(), ["intent", "unsure"])
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
+            self.assertTrue(MP.do_off("测试"))
+        out = self.scan().stdout
+        self.assertIn("只读核对：已按策略合并 app#5", out)
+        self.assertEqual(self.events(), ["intent", "unsure", "merged"])
+        self.assertEqual(len(self.merges_called()), 1)
+
     def test_crash_between_intent_and_result_is_unsettled(self):
         """只记了「要合」就没了下文（进程中途没了）：按结果不明处理，只读核对后才放开。"""
         self.sign()
@@ -368,6 +414,18 @@ class Auto(Fixture, unittest.TestCase):
         r = self.cli(ACT, "revert", "app#5")
         self.assertIn("撤回 PR 没有自动合并，等常浩说合并", r.stdout)
         self.assertEqual(self.state(105), "OPEN")
+
+    def test_revert_pr_opened_but_merge_step_stops(self):
+        """撤回 PR 开出来了，接着自动合并那一步读不到状态：说清撤回 PR 已开、没合，不说成「没撤回」。"""
+        self.sign()
+        self.auto()
+        self.fail(view={"n": 9, "msg": "GraphQL: Could not resolve to a PullRequest"})
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("已开撤回 PR：https://github.com/o/app/pull/105", r.stdout)
+        self.assertIn("撤回 PR 还没合并", r.stdout)
+        self.assertNotIn("没撤回", r.stdout)
+        self.assertEqual(self.events(), ["intent", "merged", "revert_opened"])
 
     def test_revert_only_policy_merges(self):
         self.sign()
@@ -426,6 +484,25 @@ class Policy(unittest.TestCase):
         self.assertFalse(MP.do_off("本机命令"))
         hist = MP.load_state()["history"]
         self.assertEqual([(h["event"], h["source"]) for h in hist], [("on", "飞书私聊"), ("off", "飞书私聊"), ("off", "本机命令")])
+
+    def test_off_and_sign_do_not_wait_for_merge_lock(self):
+        """合并官巡视、按策略合并占着合并锁的时候，「关自动合并」照样立刻生效（开关用自己的小锁）。"""
+        MP.do_sign("om_1", self.rules)
+        with MP.locked():
+            with unittest.mock.patch.object(MP.time, "sleep", side_effect=AssertionError("不该等合并锁")):
+                self.assertTrue(MP.do_off("飞书私聊"))
+                self.assertFalse(MP.active(self.rules)[0])
+                MP.do_sign("om_2", self.rules)
+        self.assertTrue(MP.active(self.rules)[0])
+
+    def test_facts_keep_file_total_and_renames(self):
+        f = mo.facts_of("o/app", {"number": 1, "changedFiles": 3, "files": [
+            {"path": "b.md", "changeType": "RENAMED"}, {"path": "a.md", "changeType": "MODIFIED"}]})
+        self.assertEqual((f["files_total"], f["renamed"], f["paths"]), (3, ["b.md"], ["a.md", "b.md"]))
+        why = mo.exception_reasons(f, self.rules)
+        self.assertEqual(len(why), 2, why)
+        old = mo.facts_of("o/app", {"number": 1, "files": [{"path": "a.md"}]})        # 旧记录没有这两项：照原来判
+        self.assertEqual((old["files_total"], old["renamed"], mo.exception_reasons(old, self.rules)), (None, [], []))
 
     def test_message_used_once(self):
         MP.do_sign("om_1", self.rules)
