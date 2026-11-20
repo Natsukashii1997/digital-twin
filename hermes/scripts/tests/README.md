@@ -7,7 +7,7 @@
 测试碰不到本机正式环境，不靠每个测试自己记得隔离（来由：11-17 反向验证误装进正式中台、10-27 假模型名写进正式凭证 G-13、11-11 覆盖正式配置）：
 
 - **每个测试模块第一句（文档字符串之后）写 `import _isolation`**，在导入任何被测脚本之前。`test_isolation_guard.py` 扫描本目录，漏写或写在别的 import 后面就失败。按上面的命令跑时 `_isolation` 包排在所有 `test_*.py` 前面先被导入，漏写的模块也已在隔离里；单跑一个文件靠第一句。
-- 导入时：清掉 `DT_*`、`HERMES_*`、`FEISHU_*` 等可能指向正式环境的变量（`DT_HUB_E2E`、`DT_AUTOLOOP_CLI` 两个开关保留），把 `HOME`、`XDG_*`、`AGENT_AUTOLOOP_HOME`、`HERMES_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS`、`DT_AUTOLOOP_SHARED`、`DT_PUBLISH_OUTBOX` 指到本次运行的临时目录（要只读核对真正的正式目录、读上游源码，用 `_isolation.REAL_HOME`，不用 `~`），`DT_HUB` 指到不监听的 127.0.0.1:9；git 用临时全局配置。
+- 导入时：清掉 `DT_*`、`HERMES_*`、`FEISHU_*` 等可能指向正式环境的变量（`DT_HUB_E2E`、`DT_AUTOLOOP_CLI` 两个开关保留），把 `HOME`、`XDG_*`、`AGENT_AUTOLOOP_HOME`、`HERMES_HOME`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS`、`DT_GATE_SHARED`、`DT_GATE_ROOT`、`DT_GATE_LOGS`、`DT_GATE_DAEMONS`、`DT_PUBLISH_OUTBOX` 指到本次运行的临时目录（要只读核对真正的正式目录、读上游源码，用 `_isolation.REAL_HOME`，不用 `~`），`DT_HUB` 指到不监听的 127.0.0.1:9；git 用临时全局配置。
 - 默认禁网：本进程连非回环地址、解析外部域名抛 `_isolation.BlockedNetwork`（`OSError` 子类）；回环放行，但本机正式服务端口（3350、3352、5433、8085、8086、8090）也拦。子进程拿到指向死端口的 `HTTP(S)_PROXY`。
 - `PATH` 最前面放拦截桩：`launchctl`、`security`、`sudo`、`crontab`、`osascript`、`pfctl`、`lark-cli`、`hermes`、`claude`、`codex`、`gh`、`multica`、`docker` 调到就退出码 97。测试要用假命令，照旧把自己的目录放在 `PATH` 更前面或用 `DT_*_CLI` 指定。
 - 进程退出时把拦下的连接和命令汇总打到 stderr。缺口：测试给子进程拼全新环境（如 `PATH` 只写 `/usr/bin:/bin`、不带 `HOME`）时桩和代理管不到那个子进程，这种写法要自己指好临时目录。

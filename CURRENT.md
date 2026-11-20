@@ -6,6 +6,15 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 0E-2 中台和网关搬进 dt-gate（ADR-015，2026-11-20，Claude；PR 待开，叠在 #210 上，未合并、未安装）
+
+- 做了什么：`ops/dt_gate_hub.py`（常浩用 sudo 跑：stage 复制 root 所有的运行副本并写 root 的入口 → preflight → migrate 搬家、出错自动退回、被打断可 rollback 收拾 → windows 装只读窗口 3352、秘书窄窗口 3353 → rotate-worker → update / run / status / rollback）、`ops/dt_gate_user.py`（以各账号身份跑的小工具，root 不碰账号家目录）、`hermes/scripts/gate_intake.py`（秘书窄窗口：只收秘书提议、关秘书、撤销单）、`hermes/scripts/hub_listener.py`（dt-gate 带钥匙访问本机端口前核监听者，防抢绑冒充）。
+- 独立审查（Claude 子 agent，送 L3 前）：P1 两条（日常 sudo 跑主账号能改的脚本；中台端口能被抢绑骗走钥匙）、P2 十五条，已修 P1 两条和 P2 的 1–10、13、14，11、12、15 写进命令清单；工人重连带的接单钥匙要 pf 按监听账号放行，交 0E-1。
+- 改变的已有行为（都还没装，现在实际影响为零）：autoloop_config / autoloop_grants / autoloop_feishu 设了 DT_HUB_LISTENER_UID 时先核监听者（不设不变）；凭证镜像、任务单默认路径从 `/Users/Shared/dt-autoloop/{grants,tasks}` 改到 `/Users/Shared/dt-gate/…`（autoloop_grants、dt_worktree、派单规则提示词）；秘书巡视多两个可选变量 DT_READONLY_URL、DT_SECRETARY_INTAKE，不设时照旧；dt_worktree 的环境变量 DT_AUTOLOOP_SHARED 改名 DT_GATE_SHARED；工人反向测试多查 dt-gate 家目录三项。
+- 常浩照做的命令清单：`docs/DT-ORC/migration/0E-2-中台搬进dt-gate-命令清单.md`（合并后在 main 上跑；钥匙和令牌不经 AI）。
+- 测试：见 PR；端到端用例在临时目录起真中台、假账号、假 launchd 走完 stage → 中途出错退回 → 搬家 → 窗口 → 换工人钥匙 → 回滚。真跨账号、真 launchd 只能常浩真机验。
+- 没做 / 另议：0D（#211）合并后补「停写 → 排空」；派单提议、飞书桥接、点击直收到 0E-3；过滤代理 8090 没人登录时不在（转发的加速器 8086 也要登录），单改 8090 不够。
+
 ## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR 待开、待常浩合并）
 
 - 来由：项目坑 L-03（唤醒后代理没通，一周 4 次，每次只修一个脚本）；常浩 2026-11-20 批复盘提案 P9「按改过的」：体检只读 plist 键名，不读进程环境（G-42）。

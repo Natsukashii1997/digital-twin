@@ -79,7 +79,8 @@ class Isolation(unittest.TestCase):
     def test_env_points_into_this_runs_temp_dir(self):
         self.assertFalse(inside(ISO.ROOT, ISO.REAL_HOME))
         for k in ("HOME", "AGENT_AUTOLOOP_HOME", "HERMES_HOME", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
-                  "DT_GRANTS_STATUS", "DT_GRANTS_TASKS", "DT_AUTOLOOP_SHARED", "DT_PUBLISH_OUTBOX"):
+                  "DT_GRANTS_STATUS", "DT_GRANTS_TASKS", "DT_GATE_SHARED", "DT_GATE_ROOT", "DT_GATE_LOGS",
+                  "DT_GATE_DAEMONS", "DT_PUBLISH_OUTBOX"):
             self.assertTrue(inside(os.environ[k], ISO.ROOT), k)
         self.assertEqual(Path.home(), ISO.HOME)
         self.assertEqual(os.path.expanduser("~"), str(ISO.HOME))
@@ -120,7 +121,7 @@ class Isolation(unittest.TestCase):
         self.assertIsInstance(cm.exception.reason, ISO.BlockedNetwork)
 
     def test_local_prod_service_ports_are_refused(self):
-        for port in (3350, 3352, 8090):
+        for port in (3350, 3352, 3353, 8090):
             with socket.socket() as s, self.assertRaises(ISO.BlockedNetwork):
                 s.connect(("127.0.0.1", port))
 
