@@ -61,8 +61,20 @@ def event(value, eid="ev_1", operator=OWNER, chat=CHAT, mid="om_gate_msg_0001", 
             "action_value": json.dumps(value), **kw}
 
 
+REAL_CODE_TRUSTED = G.code_trusted
+
+
+def skip_code_trust(test):
+    """门卫自身代码的路径信任（code_trusted）看的是本机解释器和仓库目录的属主、权限，换台机器（CI 的
+    /opt/hostedtoolcache）结论就不同；除专测它的用例外一律跳过，它自己在临时目录里专门测。"""
+    p = mock.patch.object(G, "code_trusted", lambda: None)
+    p.start()
+    test.addCleanup(p.stop)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
+        skip_code_trust(self)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         t = Path(self.tmp.name)
@@ -141,11 +153,20 @@ class Config(Base):
         f.parent.mkdir(parents=True)
         f.write_text("s3cret\n")
         os.chmod(f, 0o600)
-        self.assertEqual(G.read_secret(), "s3cret")                     # 仓库目录本身是本账号的，能过
         code = Path(self.tmp.name) / "code"
         (code / "__pycache__").mkdir(parents=True)
         (code / "gatekeeper.py").write_text("")
-        with mock.patch.object(G, "HERE", code):
+        py = Path(self.tmp.name) / "py/python3"
+        py.parent.mkdir()
+        py.write_text("")
+        os.chmod(py, 0o755)
+        with mock.patch.object(G, "code_trusted", REAL_CODE_TRUSTED), mock.patch.object(G, "HERE", code), \
+                mock.patch.object(G.sys, "executable", str(py)):
+            self.assertEqual(G.read_secret(), "s3cret")                 # 解释器、脚本目录都只有本账号能改，能过
+            os.chmod(py, 0o777)
+            with self.assertRaisesRegex(F.Fail, "Python 解释器"):      # 解释器别人能改
+                G.read_secret()
+            os.chmod(py, 0o755)
             os.chmod(code, 0o777)
             with self.assertRaisesRegex(F.Fail, "门卫脚本目录"):
                 G.read_secret()
@@ -175,6 +196,9 @@ class Config(Base):
 
 class RealCommand(unittest.TestCase):
     """GateBot 真的起 lark-cli 子进程：凭据只经环境变量给，不继承别的环境，身份固定 --as bot。"""
+    def setUp(self):
+        skip_code_trust(self)
+
     def test_env_carries_only_credentials_and_bot_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             t = Path(tmp)
