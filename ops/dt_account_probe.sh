@@ -26,7 +26,7 @@ secret=${DT_PROBE_SECRET:-$home/.dt/probe.secret}
 clean() { tr '\n\r\t' '   ' | cut -c1-200; }
 kv() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | clean)"; }
 
-# 一次网络探测：「HTTP 码/curl 退出码」。000/7 连不上、000/28 超时、000/6 解析不了、000/35 TLS 失败、000/56 代理拒绝（L3 P2-03）
+# 一次网络探测：「HTTP 码/curl 退出码」。000/7 连不上、000/28 超时、000/6 解析不了、000/35 TLS 失败、000/56 收数据失败（L3 P2-03）
 probe_url() {
   local via=$1 url=$2 code rc
   if [ "$via" = direct ]; then
@@ -76,7 +76,9 @@ redact() { sed -E 's#://[^@/]*@#://***@#'; }
 } > "$out.tmp" 2>/dev/null
 
 chmod 644 "$out.tmp"
-# 每次开机后的第一份结果另存一份（结果文件之后每 10 分钟会被新的覆盖），留作冷启动证据
+# 每次开机后的第一份结果另存一份（结果文件之后每 10 分钟会被新的覆盖），留作冷启动证据；主账号要能读，一律 644。
+# 已有的也每次核一遍权限：11-20 第一份是旧版在 umask 077 下建的 600，主账号读不到（L3 第 3 轮 P2-07）
 boot_copy="$(dirname "$out")/boot-$(sysctl -n kern.boottime 2>/dev/null | sed 's/^{ sec = \([0-9]*\),.*/\1/').txt"
-[ -e "$boot_copy" ] || cp -p "$out.tmp" "$boot_copy"   # -p 保留 644；umask 077 下新建的是 600
+[ -e "$boot_copy" ] || cp "$out.tmp" "$boot_copy"
+for f in "$(dirname "$out")"/boot-*.txt; do [ -f "$f" ] && [ ! -L "$f" ] && chmod 644 "$f"; done
 mv -f "$out.tmp" "$out"

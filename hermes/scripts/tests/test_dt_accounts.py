@@ -20,6 +20,7 @@ PF = OPS / "dt_worker_pf.sh"
 PROBE = OPS / "dt_account_probe.sh"
 SETUP = OPS / "dt_accounts_setup.sh"
 VERIFY = OPS / "dt_pf_verify.py"
+GUARD = OPS / "dt_root_guard.sh"
 HAVE_ACCOUNTS = all(subprocess.run(["id", u], capture_output=True).returncode == 0 for u in ("dt-worker", "dt-secretary"))
 
 
@@ -165,6 +166,25 @@ class Probe(unittest.TestCase):
         self.assertEqual(f["real_home"], "")
         self.assertEqual(f["home_match"], "no")
 
+    def test_existing_boot_copies_fixed_to_644(self):
+        """L3 第 3 轮 P2-07：已经存在的开机副本（旧版在 umask 077 下建成 600）每次都改回 644，主账号读得到。"""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        boot = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
+        boot = re.match(r"\{ sec = (\d+),", boot).group(1)
+        old, cur = Path(d.name) / "boot-1.txt", Path(d.name) / f"boot-{boot}.txt"
+        for f in (old, cur):
+            f.write_text("x")
+            f.chmod(0o600)
+        env = dict(os.environ, DT_PROBE_OUT=str(Path(d.name) / "result.txt"), DT_PROBE_SECRET=str(Path(d.name) / "s"),
+                   PATH=f"{self.fakebin()}:{os.environ['PATH']}")
+        r = subprocess.run(["bash", "-c", 'umask 077; exec bash "$0"', str(PROBE)], capture_output=True, text=True,
+                           env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for f in (old, cur):
+            self.assertEqual(f.stat().st_mode & 0o777, 0o644, f.name)
+        self.assertEqual(cur.read_text(), "x")          # 已有的开机副本不覆盖
+
     def test_missing_secret(self):
         _, f = self.run_probe(None)
         self.assertEqual(f["secret_read"], "no")
@@ -179,14 +199,14 @@ class Probe(unittest.TestCase):
 
 class Setup(unittest.TestCase):
     def test_syntax(self):
-        for p in (PF, PROBE, SETUP, OPS / "dt_account_init_user.sh"):
+        for p in (PF, PROBE, SETUP, GUARD, OPS / "dt_account_init_user.sh"):
             r = subprocess.run(["bash", "-n", str(p)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, f"{p.name}: {r.stderr}")
 
     def test_no_bare_var_before_chinese(self):
         """macOS 自带的 bash 3.2 在没设 UTF-8 的环境（sudo、LaunchDaemon）里，会把「$u：」的中文首字节当成变量名的一部分吞掉，
         中文前的变量一律写成 ${u}。"""
-        for p in (PF, PROBE, SETUP, OPS / "dt_account_init_user.sh"):
+        for p in (PF, PROBE, SETUP, GUARD, OPS / "dt_account_init_user.sh"):
             bad = [l for l in p.read_text().splitlines() if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", l)]
             self.assertEqual(bad, [], p.name)
 
@@ -223,7 +243,7 @@ class RootNeverTouchesAccountFiles(unittest.TestCase):
         for line in s.splitlines():
             if '"$home"' in line:
                 self.assertRegex(line.strip(), r'^(\[ "\$home" = "/Users/\$u" \]|\[ -d|\[ -n \"\$home\" \] && echo|chown "\$u:staff" "\$home"|chmod 700 "\$home"|echo|out=\$\(sudo -u "\$u")', line)
-        self.assertIn('root_dir /Users', s)
+        self.assertIn('root_path /Users', s)
         self.assertIn('out=$(sudo -u "$u" -H /bin/bash -s -- "$home" "$MARK" < "$INIT_USER")', s)
 
     def test_result_file_read_as_account(self):
@@ -240,10 +260,12 @@ class RootNeverTouchesAccountFiles(unittest.TestCase):
         self.assertLess(s.index('root_dir "$SHARED"'), s.index('chmod 755 "$SHARED"'))
         self.assertLess(s.index('root_dir "$SHARED/probe"'), s.index('install -d -o "$u" -g staff -m 755 "$SHARED/probe/$u"'))
 
-    def root_dir(self, path, acl=None, name="root_dir"):
-        """acl 给了就把 ls -led 换成桩，假装目录上有这条 ACL。"""
+    def root_dir(self, path, acl=None, name="root_dir", ls_fails=False):
+        """acl 给了就把 ls -led 换成桩，假装目录上有这条 ACL；ls_fails 假装读不出 ACL。"""
         stub = f"ls() {{ command ls \"$@\"; echo ' 0: {acl}'; }}\n" if acl else ""
-        return subprocess.run(["bash", "-c", f"{stub}{func(SETUP, name)}\n{name} \"$1\"", "x", str(path)]).returncode == 0
+        if ls_fails:
+            stub = "ls() { return 1; }\n"
+        return subprocess.run(["bash", "-c", f". {GUARD}\n{stub}{name} \"$1\"", "x", str(path)]).returncode == 0
 
     @unittest.skipUnless(sys.platform == "darwin", "root_dir 用 macOS 的 stat -f，只在 Mac 上测")
     def test_root_dir(self):
@@ -264,9 +286,27 @@ class RootNeverTouchesAccountFiles(unittest.TestCase):
         self.assertFalse(self.root_dir("/", acl="user:dt-gate allow delete_child"))
         self.assertTrue(self.root_dir("/", acl="group:everyone deny delete"))   # 拒绝类 ACL 只会收紧
 
+    @unittest.skipUnless(sys.platform == "darwin", "ACL 按 macOS 的 ls -le 测")
+    def test_acl_unreadable_rejected(self):
+        """L3 第 3 轮 P2-05：ACL 读不出来不当成没有。"""
+        self.assertFalse(self.root_dir("/", ls_fails=True))
+
+    @unittest.skipUnless(sys.platform == "darwin", "按 macOS 的 stat -f 测")
+    def test_root_path_checks_every_level(self):
+        """L3 第 3 轮 P2-05：从 / 起每一级都要只有 root 能改；不认相对路径、. 和 ..。"""
+        for good in ("/", "/Library", "/Library/Application Support", "/Library/LaunchDaemons", "/Users"):
+            self.assertTrue(self.root_dir(good, name="root_path"), good)
+        for bad in ("/private/tmp/x", "/tmp", "Library", "/Library/../Library", "/Library/./LaunchDaemons"):
+            self.assertFalse(self.root_dir(bad, name="root_path"), bad)
+        d = tempfile.mkdtemp(dir="/private/tmp")                 # 上一级谁都能写：下面再干净也不算
+        self.addCleanup(os.rmdir, d)
+        self.assertFalse(self.root_dir(d, name="root_path"))
+        # 某一级上有放行 ACL（桩对每一级都生效）：不算
+        self.assertFalse(self.root_dir("/Library/LaunchDaemons", acl="user:dt-gate allow add_file", name="root_path"))
+
     @unittest.skipUnless(sys.platform == "darwin", "按 macOS 的 stat -f 测")
     def test_sticky_dir(self):
-        self.assertTrue(self.root_dir("/private/tmp", name="sticky_dir"))   # root 的、带粘滞位
+        self.assertTrue(self.root_dir("/private/tmp", name="sticky_dir"))   # root 的、带粘滞位、上一级只有 root 能改
         self.assertFalse(self.root_dir("/tmp", name="sticky_dir"))          # 是链接
         self.assertFalse(self.root_dir("/", name="sticky_dir"))             # 没有粘滞位
         self.assertFalse(self.root_dir("/private/tmp", acl="user:dt-gate allow delete_child", name="sticky_dir"))
@@ -277,7 +317,7 @@ class HomePath(unittest.TestCase):
 
     def harden(self, home):
         stubs = (f'dscl() {{ echo "NFSHomeDirectory: {home}"; }}\n'
-                 'root_dir() { return 0; }\nno_link() { return 0; }\n'
+                 'root_dir() { return 0; }\nroot_path() { return 0; }\nuid_ok() { return 0; }\nno_link() { return 0; }\n'
                  'chown() { echo "CHOWN $*"; }\nchmod() { echo "CHMOD $*"; }\nsudo() { echo "SUDO"; }\n')
         return subprocess.run(["bash", "-c", stubs + func(SETUP, "harden") + "\nharden dt-gate"],
                               capture_output=True, text=True)
@@ -290,17 +330,33 @@ class HomePath(unittest.TestCase):
             self.assertNotIn("CHOWN", r.stdout, home)
             self.assertNotIn("CHMOD", r.stdout, home)
 
+    def test_uid_rechecked_before_touching(self):
+        """L3 第 3 轮 P1-01：紧挨着 chown、sudo -u 之前再核一次 uid，不过就不动。"""
+        stubs = ('dscl() { echo "NFSHomeDirectory: /Users/dt-gate"; }\nuid_ok() { echo UIDCHECK; return 1; }\n'
+                 'no_link() { return 0; }\n'
+                 'root_path() { return 0; }\nchown() { echo CHOWN; }\nchmod() { echo CHMOD; }\nsudo() { echo SUDO; }\n')
+        r = subprocess.run(["bash", "-c", stubs + func(SETUP, "harden") + "\nharden dt-gate"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("UIDCHECK", r.stdout)
+        for word in ("CHOWN", "CHMOD", "SUDO"):
+            self.assertNotIn(word, r.stdout)
+
 
 class AccountGuards(unittest.TestCase):
-    """L3 P2-02：远程登录 / 屏幕共享开着时，账号要不在系统的允许名单里；允许名单不存在 = 所有人都能登。"""
+    """L3 P2-02（第 3 轮）：账号核对里任何一项查不清（目录服务、dseditgroup、ps 出错）都当成「不过」；远程管理开着时要核权限。"""
+
+    MEMBER = {True: 'echo "yes $3 is a member of $5"; return 0', False: 'echo "no $3 is NOT a member of $5"; return 67',
+              None: 'echo "Group not found."; return 64'}
+
+    def bash(self, stubs, body):
+        return subprocess.run(["bash", "-c", f". {GUARD}\n{stubs}\n{body}"], capture_output=True, text=True)
 
     def remote(self, on, group, member):
         stubs = (f'launchctl() {{ return {0 if on else 1}; }}\n'
                  f'dscl() {{ return {0 if group else 1}; }}\n'
-                 f'dseditgroup() {{ return {0 if member else 1}; }}\n')
-        return subprocess.run(["bash", "-c", stubs + func(SETUP, "remote_access") +
-                               '\nremote_access dt-gate com.openssh.sshd com.apple.access_ssh 远程登录'],
-                              capture_output=True, text=True)
+                 f'dseditgroup() {{ {self.MEMBER[member]}; }}\n')
+        return self.bash(stubs, func(SETUP, "remote_access") +
+                         '\nremote_access dt-gate com.openssh.sshd com.apple.access_ssh 远程登录')
 
     def test_remote_access(self):
         self.assertEqual(self.remote(False, False, False).returncode, 0)   # 没开
@@ -309,26 +365,130 @@ class AccountGuards(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("[停下]", r.stdout)
         self.assertNotEqual(self.remote(True, True, True).returncode, 0)   # 开着，在名单里
+        self.assertNotEqual(self.remote(True, True, None).returncode, 0)   # 开着，查不清
+
+    def test_is_member_three_states(self):
+        for member, code in ((True, 0), (False, 1), (None, 2)):
+            r = self.bash(f'dseditgroup() {{ {self.MEMBER[member]}; }}', "is_member dt-gate admin")
+            self.assertEqual(r.returncode, code, member)
+
+    def test_admin_unclear_stops(self):
+        """「查不清是不是管理员」不当成「不是」。"""
+        stubs = ('id() { return 0; }\nuid_ok() { return 0; }\n' f'dseditgroup() {{ {self.MEMBER[None]}; }}\n'
+                 'dscl() { return 1; }\nfdesetup() { :; }\nsudo() { echo "User $3 is not allowed to run sudo"; }\n'
+                 'defaults() { return 1; }\nremote_access() { return 0; }\nard_access() { return 0; }\n')
+        r = self.bash(stubs, func(SETUP, "check_account") + "\ncheck_account dt-gate")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("查不清 dt-gate 是不是管理员", r.stdout)
+
+    def test_uid_checked_first(self):
+        """L3 第 3 轮 P1-01：uid 不过直接停，后面的核对都不做。"""
+        stubs = 'id() { return 0; }\nuid_ok() { return 1; }\ndseditgroup() { echo CALLED; }\n'
+        r = self.bash(stubs, func(SETUP, "check_account") + "\ncheck_account dt-gate")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("uid", r.stdout)
+        self.assertNotIn("CALLED", r.stdout)
+
+    def test_uid_ok(self):
+        """uid 大于 0、目录服务里只对应这一个账号；目录服务出错、空、uid 是 0、重复都不过。"""
+        def run(uid, listing, dscl_rc=0):
+            stubs = (f'id() {{ echo {uid}; }}\n'
+                     f'dscl() {{ printf "%s\\n" {listing}; return {dscl_rc}; }}\n')
+            return self.bash(stubs, "uid_ok dt-gate").returncode
+        self.assertEqual(run(503, "'root 0' 'nat 501' 'dt-gate 503'"), 0)
+        self.assertNotEqual(run(0, "'dt-gate 0'"), 0)                                # uid 是 0（哪怕目录服务里只有它）
+        self.assertNotEqual(run(503, "'dt-gate 503' 'evil 503'"), 0)                 # 重复
+        self.assertNotEqual(run(503, "'dt-gate 503'", dscl_rc=1), 0)                 # 目录服务出错
+        self.assertNotEqual(run(503, "''"), 0)                                       # 空
+        self.assertNotEqual(run(503, "'other 503'"), 0)                              # 对应的是别的账号
+        self.assertNotEqual(run("x", "'dt-gate 503'"), 0)
+
+    def ard(self, pgrep_rc, all_users="0", privs="No such key: naprivs", groups=("staff",), member=False):
+        stubs = (f'pgrep() {{ return {pgrep_rc}; }}\n'
+                 f'defaults() {{ echo {all_users}; }}\n'
+                 f'dscl() {{ case "$2" in -read) echo "{privs}";; -list) printf "%s\\n" {" ".join(groups)};; esac; }}\n'
+                 f'dseditgroup() {{ {self.MEMBER[member]}; }}\n')
+        return self.bash(stubs, func(SETUP, "ard_access") + "\nard_access dt-gate")
+
+    def test_ard_access(self):
+        """远程管理开着时不再只提示：所有本地用户、账号带 naprivs、在 ARD 授权组里、查不清，都停下。"""
+        self.assertEqual(self.ard(1).returncode, 0)                                   # 没开
+        self.assertNotEqual(self.ard(2).returncode, 0)                                # pgrep 出错
+        self.assertEqual(self.ard(0).returncode, 0)                                   # 开着，没给它权限
+        self.assertNotEqual(self.ard(0, all_users="1").returncode, 0)                 # 允许所有本地用户
+        self.assertNotEqual(self.ard(0, privs="naprivs: -1073741569").returncode, 0)  # 账号上有权限
+        self.assertNotEqual(self.ard(0, privs="DS Error: -14009").returncode, 0)      # 查不清
+        g = ("staff", "com.apple.local.ard_admin")
+        self.assertEqual(self.ard(0, groups=g, member=False).returncode, 0)
+        self.assertNotEqual(self.ard(0, groups=g, member=True).returncode, 0)
+        self.assertNotEqual(self.ard(0, groups=g, member=None).returncode, 0)
+
+    def no_proc(self, procs=None, err=None):
+        if err:
+            stub = f"ps() {{ echo '{err}' >&2; return 1; }}\n"
+        elif procs is None:
+            stub = "ps() { return 1; }\n"                                            # 这个账号没有进程
+        else:
+            stub = "ps() { printf '%s\\n' " + " ".join(f"'{p}'" for p in procs) + "; }\n"
+        return subprocess.run(["bash", "-c", stub + func(SETUP, "no_processes") + "\nno_processes dt-gate"],
+                              capture_output=True, text=True)
 
     def test_no_processes_ignores_system_agents(self):
-        """macOS 给每个账号起的自带后台进程（SIP 保护目录里的）不算；别的程序在跑就停下。"""
-        def run(procs):
-            stub = "ps() { printf '%s\\n' " + " ".join(f"'{p}'" for p in procs) + "; }\n"
-            return subprocess.run(["bash", "-c", stub + func(SETUP, "no_processes") + "\nno_processes dt-gate"],
-                                  capture_output=True, text=True)
+        """macOS 给每个账号起的自带后台进程（SIP 保护目录里的）不算；别的程序、解释器在跑就停下；ps 出错也停下。"""
         system = ["/usr/sbin/distnoted", "/usr/libexec/lsd",
                   "/System/Library/Frameworks/CoreServices.framework/Versions/A/Support/mdbulkimport"]
-        self.assertEqual(run(system).returncode, 0)
-        for other in ("/usr/local/bin/node", "/Users/dt-gate/bin/x", "/tmp/x", "/Applications/A.app/Contents/MacOS/A"):
-            r = run(system + [other])
+        self.assertEqual(self.no_proc(system).returncode, 0)
+        self.assertEqual(self.no_proc(None).returncode, 0)
+        for other in ("/usr/local/bin/node", "/Users/dt-gate/bin/x", "/tmp/x", "/Applications/A.app/Contents/MacOS/A",
+                      "/bin/bash", "/bin/sh", "/bin/zsh", "/usr/bin/python3", "/usr/bin/perl5.34", "/usr/bin/osascript"):
+            r = self.no_proc(system + [other])
             self.assertNotEqual(r.returncode, 0, other)
             self.assertIn(other, r.stdout)
+        r = self.no_proc(err="ps: something broke")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("查不清", r.stdout)
 
     def test_checks_present(self):
         s = code(SETUP)
         for needle in ('sudo -l -U "$u"', "autoLoginUser", "com.apple.access_ssh", "com.apple.access_screensharing",
-                       "ARDAgent", 'no_processes "$u"'):
+                       "ARDAgent", 'no_processes "$u"', 'uid_ok "$u"', 'ard_access "$u"', 'is_member "$u" admin'):
             self.assertIn(needle, s)
+
+    def test_init_refuses_root(self):
+        """兜底：以 root 身份跑账号初始化就停下，什么都不写（uid 被改成 0 的情况，L3 第 3 轮 P1-01）。"""
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        fake = Path(d.name) / "bin"
+        fake.mkdir()
+        (fake / "id").write_text("#!/bin/bash\necho 0\n")
+        (fake / "id").chmod(0o755)
+        home = Path(d.name) / "home"
+        home.mkdir()
+        r = subprocess.run(["bash", str(OPS / "dt_account_init_user.sh"), str(home), "# mark"], capture_output=True,
+                           text=True, env=dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(list(home.iterdir()), [])
+
+    def test_no_relative_self_after_cd(self):
+        """两个脚本开头都 cd /：之后再用相对的 $0 就找不到自己（sudo bash ops/dt_worker_pf.sh install）。"""
+        for path in (SETUP, PF):
+            c = code(path)
+            after = c[c.index("\ncd /\n"):]
+            self.assertNotRegex(after, r'(install|cp)[^\n]*(?<!basename )"\$0"', path.name)
+
+    def test_root_paths_checked_before_writes(self):
+        """L3 第 3 轮 P2-05：两个脚本都先核对路径再写，用的是同一份核对函数。"""
+        for path in (SETUP, PF):
+            c = code(path)
+            self.assertIn('. "$HERE/dt_root_guard.sh"', c)
+            self.assertNotIn("root_dir() {", c)                   # 不各写一份
+        c = code(SETUP)
+        self.assertLess(c.index('root_path "$(dirname "$DIR")"'), c.index('mkdir -m 755 "$DIR"'))
+        self.assertLess(c.index('root_path /Library/LaunchDaemons'), c.index('write_plist "$u" "$nonce"'))
+        c = code(PF)
+        self.assertLess(c.index('root_path "$(dirname "$DIR")"'), c.index('mkdir -m 755 "$DIR"'))
+        self.assertLess(c.index('root_path "$(dirname "$PLIST")"'), c.index('cat > "$PLIST"'))
+        self.assertLess(c.index('root_path "$DIR" ||'), c.index('write_status "state=applying"'))
 
 
 class ProbeResult(unittest.TestCase):
@@ -362,18 +522,35 @@ class ProbeResult(unittest.TestCase):
         self.assertIn("<key>HOME</key><string>/Users/$u</string>", SETUP.read_text())
 
 
-@unittest.skipUnless(sys.platform == "darwin" and HAVE_ACCOUNTS, "要 macOS 的 pfctl、dscl 和本机的两个账号")
+@unittest.skipUnless(sys.platform == "darwin" and HAVE_ACCOUNTS, "要 macOS 的 pfctl 和本机的两个账号")
 class PfApply(unittest.TestCase):
-    """L3 P1-03 故障注入：apply 换上假 pfctl（加载、主规则集、开关、回读都可控），逐条核对不过就写 state=failed。"""
+    """L3 P1-03 故障注入：apply 换上假 pfctl（加载、主规则集、别的锚点、开关、回读都可控），核对不过就写 state=failed；
+    规则没变不重新加载（L3 第 3 轮 P1-02）。root 动手前的核对（dt_root_guard.sh）换成桩，按场景放行或不放行。"""
 
     FAKE = r"""#!/bin/bash
 S=$FAKE_DIR; sc=$SCENARIO
 case "$*" in
   "-s info") [ "$sc" = disabled ] && echo "Status: Disabled" || echo "Status: Enabled" ;;
   "-q -E") [ "$sc" = disabled ] && exit 1; exit 0 ;;
-  "-s rules") [ "$sc" = no_anchor ] || echo 'anchor "com.apple/*" all' ;;
+  "-s rules")
+    case $sc in
+      no_anchor) ;;
+      early_pass) echo 'pass out quick all'; echo 'anchor "com.apple/*" all' ;;
+      *) echo 'scrub-anchor "com.apple/*" all fragment reassemble'; echo 'anchor "com.apple/*" all' ;;
+    esac ;;
+  "-a com.apple -s Anchors") [ "$sc" = anchors_fail ] && exit 1
+                             echo "  com.apple/250.ApplicationFirewall"; echo "  com.apple/dt-worker"
+                             [ "$sc" = odd_anchor ] && echo "  AirDrop"; exit 0 ;;
+  "-a com.apple/250.ApplicationFirewall -s Anchors") [ "$sc" = nested_pass ] && echo "  com.apple/250.ApplicationFirewall/x"; exit 0 ;;
+  "-a com.apple/250.ApplicationFirewall/x -s Anchors") exit 0 ;;
+  "-a com.apple/250.ApplicationFirewall/x -s rules") echo 'pass in quick on lo0 all' ;;
+  "-a com.apple/250.ApplicationFirewall -s rules")
+    [ "$sc" = sibling_pass ] && echo 'pass out quick proto tcp all flags S/SA keep state'
+    [ "$sc" = sibling_fail ] && exit 1
+    echo 'block drop in all'; exit 0 ;;
   "-q -f /etc/pf.conf") exit 0 ;;
   "-q -a com.apple/dt-worker -f "*) cp "${@: -1}" "$S/loaded.rules"; cp "$STATUS_PATH" "$S/status_at_load"
+                                    echo x >> "$S/loads"
                                     [ "$sc" = load_fail ] && exit 1; exit 0 ;;
   "-nvf "*) /sbin/pfctl -nvf "${@: -1}" 2>/dev/null ;;
   "-a com.apple/dt-worker -s rules")
@@ -388,7 +565,12 @@ case "$*" in
 esac
 """
 
-    def apply(self, scenario):
+    GUARD_STUB = """root_dir() { return 0; }
+root_path() { [ "$SCENARIO" != dir_bad ]; }
+uid_ok() { [ "$SCENARIO" != uid_bad ]; }
+"""
+
+    def setup_dir(self):
         d = Path(tempfile.mkdtemp())
         self.addCleanup(subprocess.run, ["rm", "-rf", str(d)])
         fake = d / "pfctl"
@@ -399,11 +581,18 @@ esac
         script = script.replace("chown root:wheel", ": chown root:wheel")   # 不是 root，改不了属主
         script = re.sub(r'^\[ "\$\(id -u\)" = 0 \].*$', "", script, flags=re.M)
         (d / "pf.sh").write_text(script)
+        (d / "dt_root_guard.sh").write_text(self.GUARD_STUB)
+        return d
+
+    def apply(self, scenario, d=None):
+        d = d or self.setup_dir()
         env = dict(os.environ, FAKE_DIR=str(d), SCENARIO=scenario, STATUS_PATH=str(d / "pf-dt-worker.status"))
         r = subprocess.run(["bash", str(d / "pf.sh"), "apply"], capture_output=True, text=True, env=env)
-        status = (d / "pf-dt-worker.status").read_text()
+        st = d / "pf-dt-worker.status"
+        status = st.read_text() if st.exists() else ""
         fields = dict(kv.split("=", 1) for kv in status.split() if "=" in kv)
         at_load = (d / "status_at_load").read_text() if (d / "status_at_load").exists() else ""
+        self.loads = len((d / "loads").read_text().split()) if (d / "loads").exists() else 0
         return r, fields, at_load
 
     def test_ok(self):
@@ -412,16 +601,47 @@ esac
         self.assertEqual(f["state"], "ok")
         self.assertEqual(f["users"], "dt-worker,dt-secretary")
         self.assertEqual(f["rules"], "9")          # 工人 2 条放行 + 2 条拒绝，秘书 3 + 2
+        self.assertEqual(f["reloaded"], "yes")
         self.assertIn("state=applying", at_load)  # 加载前先写「进行中」
+
+    def test_unchanged_not_reloaded(self):
+        """L3 第 3 轮 P1-02：实际加载的和应有的一样，就不重新加载（两次偶发漏过都在重新加载附近）；被改了才重新加载。"""
+        d = self.setup_dir()
+        self.apply("ok", d)
+        self.assertEqual(self.loads, 1)
+        r, f, _ = self.apply("ok", d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((f["state"], f["reloaded"]), ("ok", "no"))
+        self.assertEqual(self.loads, 1)
+        (d / "loaded.rules").write_text("# 被人清空了\n")
+        r, f, _ = self.apply("ok", d)
+        self.assertEqual((f["state"], f["reloaded"]), ("ok", "yes"))
+        self.assertEqual(self.loads, 2)
 
     def test_faults_end_failed(self):
         for scenario, why in (("load_fail", "规则没加载上"), ("partial", "不一致"), ("dup", "不一致"),
-                              ("tampered", "不一致"), ("no_anchor", "没挂"), ("disabled", "pf_没开")):
+                              ("tampered", "不一致"), ("no_anchor", "没挂"), ("disabled", "pf_没开"),
+                              ("early_pass", "主规则集里锚点前面有：pass_out_quick_all"),
+                              ("sibling_pass", "com.apple/250.ApplicationFirewall_里有：pass_out_quick"),
+                              ("nested_pass", "com.apple/250.ApplicationFirewall/x_里有：pass_in_quick"),
+                              ("sibling_fail", "读不出_com.apple/250.ApplicationFirewall_的规则"),
+                              ("anchors_fail", "读不出_com.apple_下的锚点"),
+                              ("odd_anchor", "认不出_com.apple_下的锚点名"),
+                              ("uid_bad", "uid")):
             r, f, _ = self.apply(scenario)
             self.assertEqual(r.returncode, 1, scenario)
             self.assertEqual(f["state"], "failed", scenario)
             self.assertIn(why, f["reason"], scenario)
             self.assertNotIn("users", f, scenario)    # 失败时不声称管上了谁
+            if scenario not in ("load_fail", "partial", "dup", "tampered", "disabled"):
+                self.assertEqual(self.loads, 0, scenario)   # 前面的核对不过，根本不加载
+
+    def test_unsafe_dir_writes_nothing(self):
+        """L3 第 3 轮 P2-05：状态目录不是只有 root 能改的，连状态文件都不写。"""
+        r, f, _ = self.apply("dir_bad")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(f, {})
+        self.assertEqual(self.loads, 0)
 
 
 def load_verify():
@@ -448,7 +668,7 @@ class Verify(unittest.TestCase):
         self.assertEqual(j("dt-secretary", self.t("127.0.0.1", 3350), "refused", "open"), "符合")
         self.assertEqual(j("dt-worker", self.t("127.0.0.1", 3350), "open", "open"), "符合")
         self.assertEqual(j("dt-worker", self.t("open.feishu.cn", 443), "open", "open"), "没挡住")   # 公网直连
-        self.assertEqual(j("dt-worker", self.t("223.5.5.5", 53, "dns"), "answer", "answer"), "没挡住")
+        self.assertEqual(j("dt-worker", self.t("223.5.5.5", 53, "dns"), "answer:5353", "answer:5354"), "没挡住")
         self.assertEqual(j("dt-worker", self.t("223.5.5.5", 53, "dns"), "timeout", "timeout"), "没法判断")
         self.assertEqual(j("dt-worker", self.t("api.github.com", 443, "proxy"), "200", "200"), "符合")
         self.assertEqual(j("dt-worker", self.t("api.github.com", 443, "proxy"), "refused", "200"), "该通不通")
@@ -467,28 +687,116 @@ class Verify(unittest.TestCase):
         self.assertRegex(got[0], r"^open:\d+$")   # 带本地端口
         self.assertEqual(got[1], "refused")
 
-    def test_probe_repeat_records_local_port(self):
-        """诊断模式：每个目标连 n 次，连上的记下本地端口（root 拿它去 pf 连接表里找）。"""
+    def test_judge_optional_skip(self):
+        """本机没有 IPv6 公网时 root 也连不上 IPv6 公网 DNS：记「跳过」，不算测试不完整；别的连不上照样「没法判断」。"""
+        t = {**self.t("2400:3200::1", 53, "dns"), "optional": True}
+        self.assertEqual(self.v.judge("dt-worker", t, "error:65", "error:65"), "跳过")
+        self.assertEqual(self.v.judge("dt-worker", t, "answer:5000", "answer:5001"), "没挡住")
+
+    def test_parse_result_rejects_incomplete(self):
+        """L3 第 3 轮 P2-06：账号那边退出码不是 0、读不懂、条数不对，都算没跑完（不会报「都挡住了」）。"""
+        ok = self.v.parse_result(0, b'["refused", "timeout"]', b"", 2)
+        self.assertEqual(ok, ["refused", "timeout"])
+        for code, out, n in ((1, b"[]", 0), (0, b"not json", 1), (0, b'["refused"]', 2), (0, b'{"a": 1}', 1)):
+            with self.assertRaises(RuntimeError):
+                self.v.parse_result(code, out, b"boom", n)
+
+    def test_own_targets_tcp_udp(self):
+        """root 自己的靶子：TCP、UDP 都连得上（UDP 回声），布防后收到的连接记下来源，给了 on_hit 就当场抓现场。"""
+        seen = []
+        own = self.v.Targets(["127.0.0.1", "::1"], on_hit=lambda kind, port: seen.append((kind, port)) or {"pf": 1})
+        self.addCleanup(own.close)
+        specs = own.specs()
+        self.assertEqual(sorted((t["kind"], t["host"]) for t in specs),
+                         [("tcp", "127.0.0.1"), ("tcp", "::1"), ("udp", "127.0.0.1"), ("udp", "::1")])
+        ts = self.v.own_targets(own)
+        self.assertIn(("udp", "::ffff:127.0.0.1"), {(t["kind"], t["host"]) for t in ts})   # IPv4 映射地址也试 UDP
+        got = self.v.probe(specs)          # 映射地址测试隔离（#212）当成外连拦下，真机上由 root 对照覆盖
+        self.assertTrue(all(self.v.reached(g) for g in got), got)
+        self.assertEqual(own.hits, [])                 # 没布防：root 对照不算
+        own.armed = True
+        got = self.v.probe(specs[:2])
+        self.assertTrue(all(self.v.reached(g) for g in got), got)
+        self.assertEqual(len(own.hits), 2)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual({h["pf"]["pf"] for h in own.hits}, {1})
+
+    def test_probe_stress_counts_and_holds(self):
+        """压力模式账号那一半：每个靶子都记尝试次数和各种结果；连上了先拿着连接，记下本地端口。"""
+        self.v.HOLD = 0.05
         srv = socket.socket()
         srv.bind(("127.0.0.1", 0))
-        srv.listen(8)
+        srv.listen(64)
         self.addCleanup(srv.close)
-        rows = self.v.probe_repeat([self.t("127.0.0.1", srv.getsockname()[1])], 3)[0]
-        self.assertEqual([r["r"] for r in rows], ["open"] * 3)
-        self.assertTrue(all(isinstance(r["lport"], int) for r in rows))
-        self.assertIn('"$@"', PF.read_text())   # verify repeat <次数> 传得进去
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        cport = closed.getsockname()[1]
+        closed.close()
+        rows = self.v.probe_stress([self.t("127.0.0.1", srv.getsockname()[1]), self.t("127.0.0.1", cport)], 0.3)
+        self.assertGreater(rows[0]["n"], 0)
+        self.assertEqual(rows[0]["got"].get("open"), rows[0]["n"])
+        self.assertTrue(all(isinstance(o["lport"], int) for o in rows[0]["opens"]))
+        self.assertEqual(rows[1]["got"], {"refused": rows[1]["n"]})
+        self.assertEqual(rows[1]["opens"], [])
+
+    def test_judge_stress(self):
+        """账号没跑完、某个靶子一次都没试到，都算不完整；连上的每一次都算漏过，并记离最近一次重新加载差几毫秒。"""
+        ts = [self.t("127.0.0.1", 1), self.t("::1", 2)]
+        ok = [{"n": 5, "got": {"refused": 5}, "opens": []}, {"n": 5, "got": {"refused": 5}, "opens": []}]
+        leaks, inc, _ = self.v.judge_stress(["dt-worker"], ts, {"dt-worker": ok}, [[10.0, 10.1]])
+        self.assertEqual((leaks, inc), ([], []))
+        leaks, inc, _ = self.v.judge_stress(["dt-worker", "dt-secretary"], ts,
+                                            {"dt-worker": ok, "dt-secretary": RuntimeError("退出码 1")}, [])
+        self.assertEqual(leaks, [])
+        self.assertIn("dt-secretary 没跑完", inc[0])
+        zero = [ok[0], {"n": 0, "got": {}, "opens": []}]
+        _, inc, _ = self.v.judge_stress(["dt-worker"], ts, {"dt-worker": zero}, [])
+        self.assertIn("一次都没试到", inc[0])
+        hit = [{"n": 5, "got": {"refused": 4, "open": 1}, "opens": [{"at": 10.35, "lport": 5555}]}, ok[1]]
+        leaks, _, _ = self.v.judge_stress(["dt-worker"], ts, {"dt-worker": hit}, [[10.0, 10.1], [11.0, 11.1]])
+        self.assertEqual(len(leaks), 1)
+        self.assertEqual((leaks[0]["user"], leaks[0]["lport"], leaks[0]["ms_from_reload"]), ("dt-worker", 5555, 250))
+        self.assertEqual(self.v.nearest_reload(10.05, [[10.0, 10.1]]), 0)   # 正在重新加载
+        self.assertIsNone(self.v.nearest_reload(10.0, []))
 
     def test_targets_cover_every_path(self):
         self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 8086), ("*", 5433), ("::1", 7000)}
         self.v.local_addrs = lambda: ["192.168.1.16", "10.8.0.2", "2409::1"]
-        ts = self.v.targets()
-        kinds = {(t["what"], t["host"], t["port"]) for t in ts}
-        for need in (("本机回环 IPv4", "127.0.0.1", 8086), ("本机回环 IPv4", "127.0.0.1", 3350),
-                     ("IPv4 映射地址", "::ffff:127.0.0.1", 8086), ("本机回环 IPv6", "::1", 7000),
-                     ("本机网卡地址", "10.8.0.2", 5433), ("本机网卡地址", "2409::1", 5433),
-                     ("公网直连", "open.feishu.cn", 443), ("公网 DNS", "223.5.5.5", 53)):
+
+        class Own:
+            def specs(self):
+                return [{"kind": k, "what": "x", "host": h, "port": 40000, "own": True}
+                        for h in ("127.0.0.1", "::1", "192.168.1.16", "2409::1") for k in ("tcp", "udp")]
+        ts = self.v.targets(Own())
+        kinds = {(t["kind"], t["what"], t["host"], t["port"]) for t in ts}
+        for need in (("tcp", "本机回环 IPv4", "127.0.0.1", 8086), ("tcp", "本机回环 IPv4", "127.0.0.1", 3350),
+                     ("tcp", "IPv4 映射地址", "::ffff:127.0.0.1", 8086), ("tcp", "本机回环 IPv6", "::1", 7000),
+                     ("tcp", "本机网卡地址", "10.8.0.2", 5433), ("tcp", "本机网卡地址", "2409::1", 5433),
+                     ("tcp", "公网直连", "open.feishu.cn", 443), ("dns", "公网 DNS", "223.5.5.5", 53),
+                     ("dns", "公网 DNS", "2400:3200::1", 53)):
             self.assertIn(need, kinds)
+        hosts = {(t["kind"], t["host"]) for t in ts if t.get("own")}
+        for need in (("udp", "::1"), ("udp", "2409::1"), ("udp", "192.168.1.16"), ("udp", "::ffff:127.0.0.1"),
+                     ("tcp", "::ffff:127.0.0.1")):
+            self.assertIn(need, hosts)                 # UDP、IPv6、本机网卡地址（含 utun）都有 root 自己的靶子
         self.assertIn("proxy", {t["kind"] for t in ts})
+
+    def test_stress_targets_only_blocked(self):
+        """压力模式只连该挡的靶子（准连的端口不在里面）。"""
+        self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 5178), ("*", 5000)}
+        self.v.local_addrs = lambda: ["192.168.1.16"]
+
+        class Own:
+            def specs(self):
+                return [{"kind": "tcp", "what": "x", "host": "127.0.0.1", "port": 40000, "own": True}]
+        ts = self.v.stress_targets(Own(), ["dt-worker", "dt-secretary"])
+        ports = {(t["host"], t["port"]) for t in ts}
+        self.assertNotIn(("127.0.0.1", 8090), ports)
+        self.assertIn(("127.0.0.1", 5178), ports)
+        self.assertIn(("127.0.0.1", 5000), ports)
+        self.assertIn(("223.5.5.5", 443), ports)
+        self.assertTrue(all(not self.v.should_reach(u, t) for t in ts for u in ("dt-worker", "dt-secretary")))
+        self.assertIn('verify stress', PF.read_text())
 
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()

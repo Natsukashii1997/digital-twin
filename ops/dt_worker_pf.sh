@@ -5,22 +5,28 @@
 #   dt-worker     中台 3350、过滤代理 8090
 #   dt-secretary  只读窗口 3352、秘书窄接口 3353（0E-2 由 dt-gate 开）、过滤代理 8090；连不到中台 3350
 # dt-gate 是控制面，不在这里限制。
-# pf 只能按账号认 TCP / UDP，挡不住的两样记为剩余风险：系统解析器（mDNSResponder）代发的 DNS 查询，
-# 和 ICMP（ping）。经 IPv6 套接字连 ::ffff:127.0.0.1 这类 IPv4 映射地址，发出去的是 IPv4 包，照样按上面的规则判。
+# 承诺的范围（常浩 11-20 定，L3 第 3 轮 P1-02）：这两个账号的 TCP、UDP 只能经 8090 出去。pf 按账号认不出的两样
+# 接受为已知风险、不在承诺里：系统解析器（mDNSResponder）代发的 DNS 查询，和 ICMP（ping）——两条都只能带很少的数据，
+# 真要堵得全机禁用。经 IPv6 套接字连 ::ffff:127.0.0.1 这类 IPv4 映射地址，发出去的是 IPv4 包，照样按上面的规则判。
+# 规则没在生效（状态不是 state=ok、或超过 10 分钟没刷新）时，工人的启动脚本拒绝开工（常浩 11-20 定，L3 第 3 轮 P1-03）。
 #
 # 用法（主账号终端，要输管理员密码）：
 #   sudo bash ops/dt_worker_pf.sh install     装上：规则 + 开机和每 5 分钟自动重新加载
 #   sudo bash ops/dt_worker_pf.sh uninstall   拆掉
 #   sudo bash ops/dt_worker_pf.sh status      看规则有没有在生效
 #   sudo bash ops/dt_worker_pf.sh verify      真机越权测试：以各账号身份去连，证明真挡住了（ops/dt_pf_verify.py）
-#   sudo bash ops/dt_worker_pf.sh verify repeat 30   诊断：每类目标连 30 次，看有没有偶发漏过
+#   sudo bash ops/dt_worker_pf.sh verify stress 600  诊断：两个账号连续 600 秒不停去连，同时反复强制重新加载规则，
+#                                                   看重新加载那一刻会不会漏过（漏过时当场抓 pf 的现场）
 #   bash ops/dt_worker_pf.sh rules dt-worker [dt-secretary]   只打印规则，不用 sudo（测试用）
 # apply 由开机任务调用，不用手动运行；每次按本机现有账号重新生成规则，dt-secretary 建好后 5 分钟内自动管上。
+# 实际加载的规则和应有的一模一样时不重新加载（L3 第 3 轮 P1-02：11-19 两次偶发漏过都在重新加载附近，平时不再重载）。
 #
 # 不改 /etc/pf.conf：规则挂在系统自带的 com.apple/* 锚点下面（com.apple/dt-worker，名字沿用 0A）。
-# 每次加载先把状态文件写成 state=applying，加载后逐条回读核对（实际加载的规则必须和规则文件解析出来的一模一样、
-# 主规则集里真的挂着 com.apple/* 锚点、每个账号的 uid 只对应这一个账号），全部对上才写 state=ok；
-# 中途任何一步出错都写 state=failed 和原因（所有人可读）。每日巡检据此判断门卫规则是不是还在、秘书账号有没有管上。
+# 每次先把状态文件写成 state=applying，再逐项核对：每个账号的 uid 大于 0、只对应这一个账号；主规则集里真的挂着
+# com.apple/* 锚点、锚点前面只有 scrub 类规则，com.apple 下别的锚点里没有 quick 放行（否则数据包轮不到门卫规则）；
+# 实际加载的规则和规则文件解析出来的一模一样。全部对上才写 state=ok，中途任何一步出错都写 state=failed 和原因（所有人可读）。
+# 工人的启动脚本、每日巡检都据此判断门卫规则是不是在生效。
+# 写任何文件之前先核对路径：从 / 起每一级都只有 root 能改（ops/dt_root_guard.sh，和账号初始化共用）。
 set -Eeuo pipefail   # -E：函数里出错也触发 ERR，apply 中途任何一步失败都落到 state=failed
 
 WORKER=dt-worker
@@ -30,8 +36,10 @@ DIR="/Library/Application Support/DigitalTwin"
 RULES="$DIR/pf-dt-worker.rules"
 SELF="$DIR/dt_worker_pf.sh"
 STATUS="$DIR/pf-dt-worker.status"
+GUARD="$DIR/dt_root_guard.sh"
 LABEL=cn.digital-twin.pf-dt-worker
 PLIST="/Library/LaunchDaemons/$LABEL.plist"
+HERE=$(cd "$(dirname "$0")" && pwd)
 
 # 每个账号准连的本机端口；其余一律拒绝
 ports_for() {
@@ -67,6 +75,10 @@ if [ "${1:-}" = rules ]; then
 fi
 
 [ "$(id -u)" = 0 ] || { echo "要用 sudo 运行：sudo bash $0 ${1:-install}"; exit 1; }
+cd /
+# 核对函数：从仓库运行时用旁边那份，开机任务用装在 $DIR 里的那份（和本脚本同一目录）
+# shellcheck source=dt_root_guard.sh
+. "$HERE/dt_root_guard.sh" || { echo "找不到 $HERE/dt_root_guard.sh"; exit 1; }
 
 write_rules() {
   local IFS=,
@@ -96,42 +108,78 @@ pf_enabled() { /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && ec
 # 主规则集里挂着 com.apple/* 锚点：没挂，锚点里的规则一条都不生效
 anchor_hooked() { /sbin/pfctl -s rules 2>/dev/null | grep -qx 'anchor "com.apple/\*" all'; }
 
-# 一个 uid 只对应一个账号（pf 按 uid 认人，两个账号共用 uid 就分不开）
-uid_unique() {
-  local uid
-  uid=$(id -u "$1") || return 1
-  [ "$(dscl . -list /Users UniqueID | awk -v id="$uid" '$2 == id' | wc -l | tr -d ' ')" = 1 ]
+# 数据包轮得到门卫规则（L3 第 3 轮 P1-03）：主规则集里 com.apple/* 锚点前面只能是 scrub 类；com.apple 下别的锚点
+# （名字排在 dt-worker 前面的先判）和它们的子锚点里不能有 quick 放行——有的话，命中它的包在进门卫规则之前就放行了。
+# 查不出来一律不过。不过时把挡路的那条规则打印出来（进状态文件的原因）。
+order_ok() {
+  local main before
+  main=$(/sbin/pfctl -s rules 2>/dev/null) || { echo "读不出主规则集"; return 1; }
+  before=$(printf '%s\n' "$main" | sed '/^anchor "com.apple\/\*" all$/,$d')
+  before=$(printf '%s\n' "$before" | grep -v '^scrub' | grep . | head -1 || true)
+  [ -z "$before" ] || { echo "主规则集里锚点前面有：$before"; return 1; }
+  no_quick_pass com.apple 0
+}
+
+no_quick_pass() {
+  local subs sub rules hit
+  [ "$2" -lt 5 ] || { echo "$1 下的锚点层数太多，查不完"; return 1; }
+  subs=$(/sbin/pfctl -a "$1" -s Anchors 2>/dev/null) || { echo "读不出 $1 下的锚点"; return 1; }
+  for sub in $subs; do
+    case $sub in "$1"/?*) ;; *) echo "认不出 $1 下的锚点名：$sub"; return 1 ;; esac   # pfctl 打印的是完整路径
+    [ "$sub" = "$ANCHOR" ] && continue
+    rules=$(/sbin/pfctl -a "$sub" -s rules 2>/dev/null) || { echo "读不出 $sub 的规则"; return 1; }
+    hit=$(printf '%s\n' "$rules" | grep -E '^pass .*[[:space:]]quick([[:space:]]|$)' | head -1 || true)
+    [ -z "$hit" ] || { echo "$sub 里有：$hit"; return 1; }
+    no_quick_pass "$sub" $(( $2 + 1 )) || return 1
+  done
 }
 
 apply() {
+  # 状态文件、规则文件都写在 $DIR 里：先确认从 / 起每一级只有 root 能改，不然连状态都不写（写了也不可信）
+  root_path "$DIR" || { echo "$DIR 不是只有 root 能改的目录，不动手"; exit 1; }
   write_status "state=applying"
   trap 'fail "第 $LINENO 行出错"' ERR
   users=$(present_users) || fail "没有 $WORKER 这个账号"
-  for u in ${users//,/ }; do uid_unique "$u" || fail "$u 的 uid 不唯一"; done
+  for u in ${users//,/ }; do uid_ok "$u" || fail "$u 的 uid 是 0、不唯一，或目录服务查不清"; done
   write_rules "$users"
   # 系统默认 pf.conf 里有 com.apple/* 锚点；被人换掉了就按系统默认的重新加载一次
   anchor_hooked || /sbin/pfctl -q -f /etc/pf.conf 2>/dev/null || true
   anchor_hooked || fail "主规则集没挂 com.apple/* 锚点"
-  /sbin/pfctl -q -a "$ANCHOR" -f "$RULES" || fail "规则没加载上（pf 保留了旧规则）"
+  why=$(order_ok) || fail "有规则排在门卫规则前面放行：$why"
+  # 实际加载的规则必须和规则文件解析出来的一模一样（同一个 pfctl 打印，按 uid 展开）；一样就不重新加载
+  expected=$(/sbin/pfctl -nvf "$RULES" 2>/dev/null)
+  [ -n "$expected" ] || fail "规则文件解析不出来"
+  loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
+  reloaded=no
+  if [ "$loaded" != "$expected" ]; then
+    /sbin/pfctl -q -a "$ANCHOR" -f "$RULES" || fail "规则没加载上（pf 保留了旧规则）"
+    reloaded=yes
+    loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
+  fi
   [ "$(pf_enabled)" = yes ] || /sbin/pfctl -q -E 2>/dev/null || true
   [ "$(pf_enabled)" = yes ] || fail "pf 没开"
-  # 逐条核对：实际加载的规则必须和规则文件解析出来的一模一样（同一个 pfctl 打印，按 uid 展开）
-  expected=$(/sbin/pfctl -nvf "$RULES" 2>/dev/null)
-  loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null)
-  [ -n "$expected" ] && [ "$loaded" = "$expected" ] || {
+  [ "$loaded" = "$expected" ] || {
     diff <(echo "$expected") <(echo "$loaded") | head -20 >&2 || true
     fail "加载上的规则和应有的不一致"
   }
   trap - ERR
-  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users"
+  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded"
 }
 
 case "${1:-install}" in
   install)
-    mkdir -p "$DIR"
-    chown root:wheel "$DIR"
-    chmod 755 "$DIR"
-    install -o root -g wheel -m 755 "$0" "$SELF"
+    # 先核对再动手（L3 第 3 轮 P2-05）：DIR 的上一级、DIR 本身（已有的话）、LaunchDaemons 从 / 起每一级都只有 root 能改
+    root_path "$(dirname "$DIR")" || { echo "[停下] $(dirname "$DIR") 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    root_path "$(dirname "$PLIST")" || { echo "[停下] $(dirname "$PLIST") 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    if [ -e "$DIR" ] || [ -L "$DIR" ]; then
+      root_dir "$DIR" || { echo "[停下] $DIR 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    else
+      mkdir -m 755 "$DIR"
+      chown root:wheel "$DIR"
+      root_dir "$DIR" || { echo "[停下] 新建的 $DIR 不对，请人工查看"; exit 1; }
+    fi
+    install -o root -g wheel -m 755 "$HERE/$(basename "$0")" "$SELF"   # 上面 cd / 了，不能用相对的 $0
+    install -o root -g wheel -m 644 "$HERE/dt_root_guard.sh" "$GUARD"
     cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -169,16 +217,15 @@ EOF
     /sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null
     ;;
   verify)
-    # 真机越权测试：以各账号身份逐项去连，证明数据包真被挡住（L3 P1-02）；要在仓库里运行（要用旁边的 dt_pf_verify.py）
-    here=$(cd "$(dirname "$0")" && pwd)
-    [ -f "$here/dt_pf_verify.py" ] || { echo "找不到 $here/dt_pf_verify.py：请在仓库里运行 sudo bash ops/dt_worker_pf.sh verify"; exit 1; }
+    # 真机越权测试：以各账号身份逐项去连，证明数据包真被挡住（L3 P1-02）；要用旁边的 dt_pf_verify.py
+    [ -f "$HERE/dt_pf_verify.py" ] || { echo "找不到 $HERE/dt_pf_verify.py：请在仓库里运行 sudo bash ops/dt_worker_pf.sh verify"; exit 1; }
     shift
-    /usr/bin/python3 -I "$here/dt_pf_verify.py" "$@"   # verify repeat <次数>：诊断偶发漏过
+    /usr/bin/python3 -I "$HERE/dt_pf_verify.py" "$@"   # verify stress <秒数>：诊断重新加载时会不会漏过
     ;;
   uninstall)
     launchctl bootout system "$PLIST" 2>/dev/null || true
     /sbin/pfctl -q -a "$ANCHOR" -F rules 2>/dev/null || true
-    rm -f "$PLIST" "$RULES" "$SELF" "$STATUS"
+    rm -f "$PLIST" "$RULES" "$SELF" "$GUARD" "$STATUS"
     echo "门卫规则已拆掉（pf 本身保持开启，没有别的规则时不影响上网）。"
     ;;
   *)

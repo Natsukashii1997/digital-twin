@@ -8,8 +8,9 @@
 #   sudo bash ops/dt_accounts_setup.sh remove-probe   拆掉探针（结果文件保留）
 #
 # 做的事（可重复跑）：
-#   1. 核对：账号存在、是标准账号（不在 admin 组）、没有 sudo 权限、不是自动登录账号、远程登录 / 屏幕共享开着时
-#      不在允许名单里（这几项不过就停下）；登录界面已隐藏、不能解锁文件保险箱、远程管理（ARD）没开只提示，不替你改
+#   1. 核对：账号存在、uid 大于 0 且只对应这一个账号、是标准账号（不在 admin 组）、没有 sudo 权限、不是自动登录账号、
+#      远程登录 / 屏幕共享 / 远程管理（ARD）开着时它没有权限（这几项不过就停下）；登录界面已隐藏、不能解锁文件保险箱只提示，
+#      不替你改。目录服务、dseditgroup、ps 查不清的一律当「不过」（L3 第 3 轮 P1-01、P2-02）
 #   2. 家目录必须正好是 /Users/<账号>，改成 700（系统默认 750，同组 staff 的其他账号能列出里面有什么）
 #   3. 以账号自己的身份（ops/dt_account_init_user.sh）：登录 shell 的 umask 设成 077，放测试凭据 ~/.dt/probe.secret
 #      （600，随机数，不是真凭据；0E-2 起真凭据也这样存成只有账号能读的文件，常浩 11-19 定）；它的 SHA-256 由 root 记下
@@ -18,7 +19,9 @@
 #      开机、安装时各跑一次，之后每 10 分钟一次（开机后第一份另存 boot-<开机时间>.txt）；结果写到 /Users/Shared/dt-accounts/probe/<账号>/result.txt（所有人可读，不含凭据）。
 #      每次安装给探针一个新的随机编号，结果里带上它、最后一行是 done=1、探针进程退出码为 0，才算这次的结果；
 #      读到的测试凭据要和 root 记下的 SHA-256 一致才算「读得到」。
-#      结果文件由账号自己写，账号能伪造它：所以安装时先核对账号下没有别的进程在跑（现在这两个账号什么都不跑）。
+#      结果文件由账号自己写，账号能伪造它：安装时粗查一遍账号下有没有系统自带之外的程序在跑（现在这两个账号什么都不跑）。
+#      这只是粗查，不算严格证明（同一个系统程序也能被拿来跑别的脚本）；探针只用来诊断，不当作授权或身份凭证（L3 P2-01）。
+# root 写任何文件之前先核对路径：从 / 起每一级都只有 root 能改（ops/dt_root_guard.sh，和门卫规则共用，L3 P2-05）。
 # 不建账号、不改密码、不装中台和猛鬼兽（0E-2、0E-5 再加）、不碰 dt-worker。
 set -euo pipefail
 
@@ -34,19 +37,29 @@ MARK="# umask（数字分身 ADR-015 0E-1）"
 cd /
 
 [ "$(id -u)" = 0 ] || { echo "要用 sudo 运行：sudo bash $0 ${1:-install}"; exit 1; }
+# shellcheck source=dt_root_guard.sh
+. "$HERE/dt_root_guard.sh" || { echo "找不到 $HERE/dt_root_guard.sh"; exit 1; }
 
 label() { echo "cn.digital-twin.probe.$1"; }
 plist() { echo "/Library/LaunchDaemons/$(label "$1").plist"; }
 
-# 核对一个账号；硬问题（不存在、是管理员）返回 1，软问题只打印提示
+# 核对一个账号；硬问题返回 1，软问题只打印提示。uid 不过就直接停：后面的「以账号身份」都靠它不是 root
 check_account() {
-  local u=$1 bad=0
+  local u=$1 bad=0 m
   if ! id "$u" >/dev/null 2>&1; then
     echo "  [停下] 没有 $u 这个账号：请在「系统设置 → 用户与群组」建成「标准」账号"
     return 1
   fi
-  if dseditgroup -o checkmember -m "$u" admin >/dev/null 2>&1; then
+  if ! uid_ok "$u"; then
+    echo "  [停下] $u 的 uid 是 0、和别的账号重复，或目录服务查不清（dscl . -list /Users UniqueID 查看）"
+    return 1
+  fi
+  is_member "$u" admin && m=0 || m=$?
+  if [ "$m" = 0 ]; then
     echo "  [停下] $u 是管理员：请在「系统设置 → 用户与群组」改成「标准」"
+    bad=1
+  elif [ "$m" != 1 ]; then
+    echo "  [停下] 查不清 $u 是不是管理员（dseditgroup -o checkmember -m $u admin）"
     bad=1
   fi
   if [ "$(dscl . -read "/Users/$u" IsHidden 2>/dev/null | awk '{print $2}')" = 1 ]; then
@@ -72,32 +85,74 @@ check_account() {
   fi
   remote_access "$u" com.openssh.sshd com.apple.access_ssh "远程登录" || bad=1
   remote_access "$u" com.apple.screensharing com.apple.access_screensharing "屏幕共享" || bad=1
-  if pgrep -qx ARDAgent; then
-    echo "  [提示] 远程管理（ARD）开着；请在「系统设置 → 通用 → 共享 → 远程管理」确认只允许常浩"
-  fi
+  ard_access "$u" || bad=1
   return $bad
+}
+
+# 远程管理（ARD）：没开就行；开着时这个账号不能有权限——「所有本地用户」没勾、账号记录上没有 naprivs 权限、
+# 不在 ARD 的几个授权组里（L3 第 3 轮 P2-02：开着时不再只提示）。哪一项查不清都停下。
+ard_access() {
+  local u=$1 rc all privs groups g m
+  pgrep -qx ARDAgent && rc=0 || rc=$?
+  if [ "$rc" = 1 ]; then echo "  远程管理：没开"; return 0; fi
+  [ "$rc" = 0 ] || { echo "  [停下] 查不清远程管理开没开（pgrep 出错）"; return 1; }
+  all=$(defaults read /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers 2>/dev/null || echo 0)
+  if [ "$all" != 0 ]; then
+    echo "  [停下] 远程管理开着，允许所有本地用户：请在「系统设置 → 通用 → 共享 → 远程管理」改成「仅这些用户」且不含 $u"
+    return 1
+  fi
+  privs=$(dscl . -read "/Users/$u" naprivs 2>&1) || true
+  case $privs in
+    "No such key: naprivs"*|"naprivs: 0") ;;
+    *) echo "  [停下] 远程管理开着，$u 有远程管理权限或查不清（${privs%%$'\n'*}）"; return 1 ;;
+  esac
+  groups=$(dscl . -list /Groups 2>/dev/null) || { echo "  [停下] 读不出本机的组，查不清远程管理权限"; return 1; }
+  for g in com.apple.local.ard_admin com.apple.local.ard_interact com.apple.local.ard_manage com.apple.local.ard_reports; do
+    printf '%s\n' "$groups" | grep -qx "$g" || continue
+    is_member "$u" "$g" && m=0 || m=$?
+    [ "$m" = 1 ] || { echo "  [停下] 远程管理开着，$u 在 $g 里或查不清"; return 1; }
+  done
+  echo "  远程管理：开着，$u 没有权限"
 }
 
 # 远程登录 / 屏幕共享：服务没开就行；开着时，系统的允许名单（com.apple.access_*）要存在且不含这个账号。
 # 允许名单不存在 = 「所有用户」都能登录。
+# 名单里有没有它要分清「不是成员」和「查不清」，查不清当成能登录（L3 第 3 轮 P2-02）。
 remote_access() {
-  local u=$1 job=$2 group=$3 name=$4
+  local u=$1 job=$2 group=$3 name=$4 m=2
   if ! launchctl print "system/$job" >/dev/null 2>&1; then
     echo "  ${name}：没开"
-  elif dscl . -read "/Groups/$group" >/dev/null 2>&1 && ! dseditgroup -o checkmember -m "$u" "$group" >/dev/null 2>&1; then
+    return 0
+  fi
+  if dscl . -read "/Groups/$group" >/dev/null 2>&1; then
+    is_member "$u" "$group" && m=0 || m=$?
+  fi
+  if [ "$m" = 1 ]; then
     echo "  ${name}：开着，$u 不在允许名单里"
   else
-    echo "  [停下] ${name}开着，$u 能登录：请在「系统设置 → 通用 → 共享 → ${name}」改成「仅这些用户」且不含 $u"
+    echo "  [停下] ${name}开着，$u 能登录或查不清：请在「系统设置 → 通用 → 共享 → ${name}」改成「仅这些用户」且不含 $u"
     return 1
   fi
 }
 
-# 账号下有没有别的进程在跑（探针结果由账号自己写，有别的进程就可能被改）。
+# 账号下有没有别的进程在跑（探针结果由账号自己写，有别的进程就可能被改）；粗查，不是严格证明。
 # macOS 会给每个账号起几个自带的后台进程（distnoted、lsd、mdbulkimport 等），它们在系统完整性保护（SIP）的
 # /System、/usr（/usr/local 除外）、/bin、/sbin 里，账号改不了，不算；只数这些目录之外的程序。
+# 但 shell、python、perl 这类解释器虽然在系统目录里，也能跑账号自己的脚本：照样算（L3 第 3 轮 P2-01 附带）。
+# ps 出错（不是「这个账号没有进程」）就停下，不当成没有进程（L3 第 3 轮 P2-02）。
 no_processes() {
-  local others
-  others=$(ps -U "$1" -o comm= | grep -Ev '^/(System|bin|sbin)/|^/usr/(bin|sbin|libexec|lib)/' || true)
+  local out err rc others
+  err=$(mktemp)
+  out=$(ps -U "$1" -o comm= 2>"$err") && rc=0 || rc=$?
+  if [ "$rc" != 0 ] && [ -s "$err" ]; then
+    echo "  [停下] 查不清 ${1} 下有没有进程在跑：$(head -1 "$err")"
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
+  others=$(printf '%s\n' "$out" | grep . |
+    grep -Ev '^/(System|bin|sbin)/|^/usr/(bin|sbin|libexec|lib)/' ; printf '%s\n' "$out" |
+    grep -E '^/(bin|usr/bin)/(ba|z|k|c|tc|da)?sh$|^/usr/bin/(python|perl|ruby|osascript|env|nohup|screen|tmux|swift|node|php|tclsh|expect)' || true)
   [ -z "$others" ] && return 0
   echo "  [停下] ${1} 下有系统以外的进程在跑；探针结果可能被改，请先停掉："
   echo "$others" | sed 's/^/    /'
@@ -112,29 +167,20 @@ no_link() {
   done
 }
 
-# 一个目录「只有 root 能改里面的条目」：属 root、不是链接、同组和其他人不能写、没有放行权限的 ACL
-# （macOS 的 ACL 能在权限位之外单独给某个账号加 add_file、delete_child 等权限，有就一律不认，L3 P2-05）。
-# 这样的目录里，账号换不掉任何一项，root 按路径操作其中的条目才安全。
-root_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $(( 0$(stat -f %Lp "$1") & 022 )) = 0 ] &&
-    ! ls -led "$1" | sed 1d | grep -q ' allow '
-}
-
-# /Users/Shared 谁都能往里建东西，靠粘滞位保证别人删不掉、换不掉 root 建的目录：属 root、不是链接、有粘滞位、没有放行 ACL
-sticky_dir() {
-  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %u "$1")" = 0 ] && [ $(( 0$(stat -f %p "$1") & 01000 )) != 0 ] &&
-    ! ls -led "$1" | sed 1d | grep -q ' allow '
-}
+# root_dir、root_path、sticky_dir、uid_ok、is_member 在 ops/dt_root_guard.sh（和门卫规则共用）
 
 # 家目录本身由 root 收紧（它的上一级 /Users 只有 root 能改，账号换不掉这个目录项）；
 # 家目录里面的东西一律以账号自己的身份写（ops/dt_account_init_user.sh 经标准输入交给它），
 # root 不按路径碰账号能改的任何文件：账号就算同时在偷换链接、硬链接、目录，能改坏的也只有它本来就能改的东西（L3 P1-01）。
 harden() {
   local u=$1 home
-  home=$(dscl . -read "/Users/$u" NFSHomeDirectory | awk '{print $2}')
+  home=$(dscl . -read "/Users/$u" NFSHomeDirectory | awk '{print $2}') || { echo "  [停下] 读不出 $u 的家目录"; return 1; }
   # 只认 /Users/<账号> 这一个写法：不认 ..、多一层、结尾斜杠（L3 P1-01）
   [ "$home" = "/Users/$u" ] || { echo "  [停下] $u 的家目录不是 /Users/${u}：$home"; return 1; }
-  root_dir /Users || { echo "  [停下] /Users 不是只有 root 能改的目录"; return 1; }
+  # 动手前再核一次 uid（check_account 核过；这里紧挨着 chown、sudo -u，防中间被改，L3 第 3 轮 P1-01）
+  uid_ok "$u" || { echo "  [停下] $u 的 uid 是 0、不唯一，或目录服务查不清"; return 1; }
+  # 上一级 /Users 连同 / 都只有 root 能改，账号换不掉这个目录项（L3 第 3 轮 P2-05）
+  root_path /Users || { echo "  [停下] /Users（或 /）不是只有 root 能改的目录"; return 1; }
   [ -d "$home" ] && no_link "$home" || { echo "  [停下] $u 的家目录 $home 不存在或不是普通目录"; return 1; }
   chown "$u:staff" "$home"
   chmod 700 "$home"
@@ -144,10 +190,13 @@ harden() {
   echo "$out" | grep -v '^secret_sha256='
   sum=$(echo "$out" | sed -n 's/^secret_sha256=\([0-9a-f]\{64\}\)$/\1/p')
   [ -n "$sum" ] || { echo "  [停下] 没拿到测试凭据的 SHA-256"; return 1; }
-  # root 自己的目录里记下应有的 SHA-256，探针读到的要和它一致
+  # root 自己的目录里记下应有的 SHA-256，探针读到的要和它一致；目录已有的话先核对再写（L3 第 3 轮 P2-05）
+  if [ -e "$DIR/probe" ] || [ -L "$DIR/probe" ]; then
+    root_dir "$DIR/probe" || { echo "  [停下] $DIR/probe 不是只有 root 能改的目录"; return 1; }
+  fi
   install -d -o root -g wheel -m 700 "$DIR/probe"
-  echo "$sum" > "$DIR/probe/$u.sha256"
-  chmod 600 "$DIR/probe/$u.sha256"
+  root_dir "$DIR/probe" || { echo "  [停下] $DIR/probe 不是只有 root 能改的目录"; return 1; }
+  ( umask 077; echo "$sum" > "$DIR/probe/$u.sha256.tmp" ) && mv -f "$DIR/probe/$u.sha256.tmp" "$DIR/probe/$u.sha256"
 }
 
 write_plist() {
@@ -222,8 +271,15 @@ show_result() {
 case "${1:-install}" in
   install)
     [ -f "$PROBE_SRC" ] && [ -f "$INIT_USER" ] || { echo "找不到 $PROBE_SRC 或 $INIT_USER"; exit 1; }
-    mkdir -p "$DIR"; chown root:wheel "$DIR"; chmod 755 "$DIR"
-    root_dir "$DIR" || { echo "[停下] $DIR 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    # 先核对再动手（L3 第 3 轮 P2-05）：$DIR 的上一级、LaunchDaemons 从 / 起每一级只有 root 能改；$DIR 已有就核它本身
+    root_path "$(dirname "$DIR")" || { echo "[停下] $(dirname "$DIR") 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    root_path /Library/LaunchDaemons || { echo "[停下] /Library/LaunchDaemons 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    if [ -e "$DIR" ] || [ -L "$DIR" ]; then
+      root_dir "$DIR" || { echo "[停下] $DIR 不是只有 root 能改的目录，请人工查看"; exit 1; }
+    else
+      mkdir -m 755 "$DIR"; chown root:wheel "$DIR"
+      root_dir "$DIR" || { echo "[停下] 新建的 $DIR 不对，请人工查看"; exit 1; }
+    fi
     stop=0
     for u in $ACCOUNTS; do
       echo "== $u"
@@ -239,6 +295,9 @@ case "${1:-install}" in
     mkdir "$SHARED" 2>/dev/null || true
     root_dir "$SHARED" || { echo "[停下] $SHARED 不是 root 的普通目录或别人能写，请人工查看"; exit 1; }
     chmod 755 "$SHARED"
+    if [ -e "$SHARED/probe" ] || [ -L "$SHARED/probe" ]; then
+      root_dir "$SHARED/probe" || { echo "[停下] $SHARED/probe 不是 root 的普通目录"; exit 1; }
+    fi
     install -d -o root -g wheel -m 755 "$SHARED/probe"
     root_dir "$SHARED/probe" || { echo "[停下] $SHARED/probe 不是 root 的普通目录"; exit 1; }
     for u in $ACCOUNTS; do

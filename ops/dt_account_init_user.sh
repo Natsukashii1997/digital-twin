@@ -8,6 +8,8 @@ set -euo pipefail
 
 home=$1
 mark=$2
+# 兜底：万一账号的 uid 被改成 0，这里就成了 root 在改账号目录（L3 第 3 轮 P1-01），不做
+[ "$(id -u)" != 0 ] || { echo "  [停下] 以 root 身份运行，不做"; exit 1; }
 umask 077
 cd "$home"
 
