@@ -429,6 +429,20 @@ class Mismatch(Base):
             self.assertEqual([x["id"] for x in led[kind]], [x["id"] for x in first[kind]], kind)
             self.assertTrue(all(x["carried"] and x["since"] == "2026-11-20T16:00:00+08:00" for x in led[kind]), kind)
 
+    def test_missing_main_branch_is_a_gap_not_a_project_without_current(self):
+        """名册写的主分支在本机和远端都找不到（分支改过名、读到的名册是旧的）：算没取到、沿用上一份，不当成这个项目没有 CURRENT。"""
+        p = self.project("dt", CURRENT)
+        self.roster(p)
+        first = self.build(Hub())
+        self.assertTrue(first["rows"])
+        self.roster({**p, "main": "改名前的分支"})
+        led = self.build(Hub(), prev=first, now=NOW + dt.timedelta(hours=1))
+        self.assertNotIn("dt", led["coverage"]["mainline"]["none"])
+        self.assertIn("改名前的分支", led["coverage"]["mainline"]["failed"]["dt"])
+        self.assertEqual([r["id"] for r in led["rows"]], [r["id"] for r in first["rows"]])
+        self.assertTrue(all(r["carried"] for r in led["rows"]))
+        self.assertIn("主线清单·dt：找不到主分支", "\n".join(ol.gaps(led)))
+
     def test_lookup_failure_is_reported_not_silently_clean(self):
         self.roster(self.project("dt", CURRENT))
         led = self.build(Hub(down={"o/dt"}))
