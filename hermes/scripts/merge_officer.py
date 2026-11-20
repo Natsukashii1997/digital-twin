@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
-"""影子合并官（#61，《工程流程》第 8 节第 4 条）：只读，只给建议，不合并、不推送、不改 PR。
+"""合并官（#61 起影子运行；#257、ADR-016 起按策略合并）：判定 PR，本身只读，不合并、不推送、不改 PR；合并在 merge_act.py。
 
 对名册（projects.json）里活跃仓库的 open PR，按带版本号的 merge_rules.json 给出「建议合并 / 退回 / 问常浩」，
-记进 agreement.csv；PR 有了真实结局（常浩合并或关闭）后自动标出是否一致，按风险档（L0–L3）算一致率。
+记进 agreement.csv；PR 有了真实结局（合并或关闭）后自动标出是否一致，按风险档（L0–L3）算一致率。
+「问常浩」就是例外：L3（敏感路径）、改定方向文档（direction_docs）、带 ask_labels 的标签。
 判定思路取自 orca/merge_gate.py（在 claude/37-* 分支）：绑定完整 HEAD/base、敏感路径交给人、有硬性问题一律退回
 （不能靠「交给人」绕过）；风险档按 docs/DT-ORC/ARCHITECTURE.md 4.2，路径只能上调风险。
 
 一致怎么算：
   - 只比对同一个 HEAD：判定后 PR 又有新提交，旧判定标「取代」，不计入；新 HEAD 另判一次。
   - 建议合并 ↔ 合并、退回 ↔ 关闭 为一致；反过来为不一致。「问常浩」本来就交给人，标「不计」。
-  - 历史回填（backfill）事后才判，看不到当时的检查和冲突状态，单列一致率，不计入放权门槛。
-放权门槛（同类 20 次、一致率 ≥90%）只报告达标与否，不自动放权；放权要常浩批准、写成策略记录。
+  - 历史回填（backfill）事后才判，看不到当时的检查和冲突状态，单列一致率。
+  - 按策略合并的（owner 列「策略合并」）是合并官自己促成的结局，不计入一致率。
+影子门槛（同类 20 次、一致率 ≥90%）常浩 2026-11-20 废止（ADR-016）；一致率照旧统计，只作观察。
+
+scan 每一轮（定时任务这样跑）：
+  1. 判定新的「PR × 版本」，给已关闭的 PR 补结局；
+  2. 策略没生效（merge_policy.active 为否）：act.repos 里的仓库每个新判定发一张卡片，等常浩点（#67，和原来一样）；
+     策略生效：只给例外（问常浩）发卡片，其余交给 merge_act.auto_scan 按策略合并（交出过、机械检查全过才合）；
+  3. 策略生效时，发现覆盖仓库的 PR 已经合并、账本里却没有合并执行器的记录，记一条 bypass（没经合并执行器）。
 
 用法：
-  merge_officer.py [scan] [--verbose]    判定新的 open PR，并给已关闭的 PR 补上结局（不带子命令就是 scan，定时任务这样跑；成功不输出）；
-                                         merge_rules.json 的 act.repos 里的仓库，每个新判定发一张飞书卡片（#67，执行在 merge_act.py）
+  merge_officer.py [scan] [--verbose]    见上（不带子命令就是 scan；没有要常浩知道的事就不输出）
   merge_officer.py backfill              回填名册仓库的历史 PR（只做一次；已记过的不重复）
-  merge_officer.py report [--json]       按风险档报告一致率和是否达标
+  merge_officer.py report [--json]       按风险档报告一致率
   merge_officer.py replay --rules 新.json  用记下的 PR 状态按新旧两版规则重判，给出一致率前后对比（只读）
 
 环境变量：DT_ROSTER 名册；DT_MERGE_RULES 规则文件（默认同目录 merge_rules.json）；DT_SHADOW_DIR 记录目录；
-DT_GH 换 gh（自测用）；DT_NOW（ISO 时间）指定现在，自测用。
+DT_MERGE_DIR 策略记录和合并账本目录（merge_policy.py）；DT_GH 换 gh（自测用）；DT_NOW（ISO 时间）指定现在，自测用；
+DT_NO_CARDS 只判定和记录，不发卡片、不按策略合并（自测用）。
 """
 import argparse
 import csv
@@ -48,6 +56,7 @@ TIMEOUT = 60
 
 MERGE, RETURN, ASK = "建议合并", "退回", "问常浩"
 MERGED, CLOSED = "合并", "关闭"
+POLICY_OWNER = "策略合并"          # agreement.csv 的 owner 列：merge_act 按策略合并的（#257）
 TIERS = ("L0", "L1", "L2", "L3")
 FIELDS = ["evaluated_at", "source", "repo", "pr", "title", "head_sha", "base_sha", "rules_version",
           "tier", "suggestion", "reasons", "outcome", "outcome_at", "outcome_head", "agree", "owner", "owner_at"]
@@ -87,7 +96,7 @@ def gh_json(args, what):
 
 def load_rules(path=None):
     rules = json.loads(Path(path or RULES).read_text(encoding="utf-8"))
-    for k in ("version", "sensitive", "l0_paths", "rule_docs", "l1_max_files", "return_when", "threshold"):
+    for k in ("version", "sensitive", "l0_paths", "rule_docs", "l1_max_files", "return_when"):
         if k not in rules:
             raise ValueError(f"规则文件缺少 {k}")
     return rules
@@ -123,18 +132,43 @@ def tier_of(repo, paths, rules):
     return "L1" if len(paths) <= rules["l1_max_files"] else "L2"
 
 
-def evaluate(f, rules):
-    """返回 (风险档, 建议, 理由列表)；不改动入参。有退回理由时一律退回。"""
-    ret, ask = [], []
-    rw = rules["return_when"]
+def exception_reasons(f, rules):
+    """例外（仍然问常浩，不按策略合并）的理由；空列表就是不属于例外。
+    L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签。"""
+    paths = f.get("paths") or []
+    ask = []
+    if tier_of(f["repo"], paths, rules) == "L3":
+        name = f["repo"].split("/")[-1]
+        sens = rules["sensitive"] + rules.get("repo_sensitive", {}).get(name, [])
+        ask.append("改动敏感路径：" + "、".join([p for p in paths if _any(sens, p)][:5]))
+    docs = [p for p in paths if _any(rules.get("direction_docs") or [], p)]
+    if docs:
+        ask.append("改动定方向文档：" + "、".join(docs[:5]))
+    labels = sorted(set(f.get("labels") or []) & set(rules.get("ask_labels") or []))
+    if labels:
+        ask.append("标签 " + "、".join(labels))
+    return ask
+
+
+def malformed(f):
+    """PR 状态本身不对（缺完整 SHA、没有改动文件、路径不合法）：判退回；按策略合并时这几条一律不合。"""
+    out = []
     if not (SHA.match(f.get("head_sha") or "") and SHA.match(f.get("base_sha") or "")):
-        ret.append("缺少完整 40 位 HEAD/base SHA")
+        out.append("缺少完整 40 位 HEAD/base SHA")
     paths = f.get("paths") or []
     if not paths:
-        ret.append("没有改动文件")
+        out.append("没有改动文件")
     bad = [p for p in paths if not p or p.startswith("/") or ".." in p.split("/")]
     if bad:
-        ret.append("改动路径不合法：" + "、".join(bad[:3]))
+        out.append("改动路径不合法：" + "、".join(bad[:3]))
+    return out
+
+
+def evaluate(f, rules):
+    """返回 (风险档, 建议, 理由列表)；不改动入参。有退回理由时一律退回。"""
+    ret = malformed(f)
+    rw = rules["return_when"]
+    paths = f.get("paths") or []
     tier = tier_of(f["repo"], paths, rules)
     if rw.get("draft") and f.get("draft"):
         ret.append("还是草稿")
@@ -145,13 +179,7 @@ def evaluate(f, rules):
         ret.append(f"检查没过（{len(failing)} 项）")
     if rw.get("missing_closes") and not f.get("closes"):
         ret.append("正文没有 Closes #号")
-    if tier == "L3":
-        name = f["repo"].split("/")[-1]
-        sens = rules["sensitive"] + rules.get("repo_sensitive", {}).get(name, [])
-        ask.append("改动敏感路径：" + "、".join([p for p in paths if _any(sens, p)][:5]))
-    labels = sorted(set(f.get("labels") or []) & set(rules.get("ask_labels") or []))
-    if labels:
-        ask.append("标签 " + "、".join(labels))
+    ask = exception_reasons(f, rules)
     if ret:
         return tier, RETURN, ret + ask
     if ask:
@@ -170,8 +198,10 @@ def judge(suggestion, head, outcome, outcome_head):
     return "是" if (suggestion == MERGE) == (outcome == MERGED) else "否"
 
 
-def rates(rows, threshold):
-    """rows 里每条要有 source、tier、agree。按档算 live 与 backfill 的一致率和是否达标。"""
+def rates(rows):
+    """rows 里每条要有 source、tier、agree。按档算 live 与 backfill 的一致率（只作观察，ADR-016 起不再有放权门槛）。
+    按策略合并的行（owner=策略合并）不算：那个结局是合并官自己促成的。"""
+    rows = [r for r in rows if r.get("owner") != POLICY_OWNER]
     out = {}
     for t in TIERS:
         d = {"tier": t}
@@ -184,8 +214,6 @@ def rates(rows, threshold):
                       "ask": sum(1 for r in rs if r["suggestion"] == ASK),
                       "pending": sum(1 for r in rs if not r["agree"]),
                       "superseded": sum(1 for r in rs if r["agree"] == "取代")}
-        lv = d["live"]
-        d["qualified"] = lv["n"] >= threshold["min_samples"] and lv["rate"] is not None and lv["rate"] >= threshold["min_rate"]
         out[t] = d
     return out
 
@@ -258,10 +286,21 @@ def settle(row, end):
 # ---------- 命令 ----------
 
 def cmd_scan(verbose=False):
+    if os.environ.get("DT_NO_CARDS"):
+        return scan(verbose, act=False)
+    import merge_policy                      # 和 merge_act auto 用同一把锁：两边都要改 agreement.csv，也免得同一个 PR 被合两次
+    try:
+        with merge_policy.locked():
+            return scan(verbose, act=True)
+    except merge_policy.Rejected:
+        return 0                             # 另一个按策略合并正在跑，这一轮让给它，下一轮再巡视
+
+
+def scan(verbose, act):
     rules = load_rules()
     rows = read_rows()
     seen = {(r["repo"], r["pr"], r["head_sha"]) for r in rows}
-    at, errors, added, facts = now(), [], [], []
+    at, errors, added, facts, open_now, settled, listed = now(), [], [], [], [], [], set()
     for repo in active_repos():
         try:
             prs = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json", PR_FIELDS],
@@ -269,8 +308,10 @@ def cmd_scan(verbose=False):
         except GhError as e:
             errors.append(str(e))
             continue
+        listed.add(repo)
         for pr in prs:
             f = facts_of(repo, pr)
+            open_now.append(f)
             if (repo, str(f["pr"]), f["head_sha"]) in seen:
                 continue
             row = new_row(f, rules, "live", at)
@@ -297,20 +338,30 @@ def cmd_scan(verbose=False):
                 except GhError as e:
                     errors.append(str(e))
                     continue
-            settle(r, end)
+            if settle(r, end):
+                settled.append(r)
     append_facts(facts)
     write_rows(rows)
-    if added and not os.environ.get("DT_NO_CARDS"):         # act.repos 里的仓库发卡片，等常浩在飞书决定（#67）
+    said = []
+    if act:
         import merge_act
-        by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in facts}
-        errors += merge_act.send_cards(added, by_key)
+        import merge_policy
+        on = merge_policy.active(rules)[0]
+        cards = [r for r in added if not on or r["suggestion"] == ASK]     # 策略生效时只有例外发卡片（#257）
+        if cards:
+            by_key = {(f["repo"], str(f["pr"]), f["head_sha"]): f for f in facts}
+            errors += merge_act.send_cards(cards, by_key)
+        if on:
+            said = merge_act.auto_scan(rules, open_now, settled, listed)
     if verbose:
         for r in added:
             print(f"{r['repo']}#{r['pr']} {r['tier']} {r['suggestion']}  {r['title'][:40]}"
                   + (f"（{r['reasons']}）" if r["reasons"] else ""))
         print(f"新判定 {len(added)} 条，记录在 {LEDGER}")
+    for line in said:                        # 要常浩知道的：结果不明、被上限拦下（合成功的进日报，不在这里说）
+        print(line)
     for e in errors:
-        print(f"影子合并官：{e}")
+        print(f"合并官：{e}")
     return 1 if errors else 0
 
 
@@ -342,7 +393,7 @@ def cmd_backfill():
     write_rows(rows)
     print(f"回填 {n} 条历史 PR，记录在 {LEDGER}")
     for e in errors:
-        print(f"影子合并官：{e}")
+        print(f"合并官：{e}")
     return 1 if errors else 0
 
 
@@ -350,30 +401,31 @@ def _pct(x):
     return "—" if x is None else f"{x * 100:.0f}%"
 
 
-def format_report(rs, rules, total):
-    th = rules["threshold"]
-    lines = [f"影子合并官一致率（规则 v{rules['version']}；门槛：同类 {th['min_samples']} 次、一致率 ≥{th['min_rate'] * 100:.0f}%；只报告，不自动放权）",
-             "", "| 档 | 计入 | 一致 | 一致率 | 其中退回且一致 | 达标 | 问常浩 | 待结局 | 被新提交取代 | 回填（不计入门槛） |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+def format_report(rs, rules, total, policy=0):
+    lines = [f"合并官一致率（规则 v{rules['version']}；只作观察：影子门槛 2026-11-20 废止，放不放权看策略记录 merge_policy.py status）",
+             "", "| 档 | 计入 | 一致 | 一致率 | 其中退回且一致 | 问常浩 | 待结局 | 被新提交取代 | 回填 |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for t in TIERS:
         d = rs[t]
         lv, bf = d["live"], d["backfill"]
         lines.append(f"| {t} | {lv['n']} | {lv['agree']} | {_pct(lv['rate'])} | {lv['return_agree']} | "
-                     f"{'达标' if d['qualified'] else '未达标'} | {lv['ask']} | {lv['pending']} | {lv['superseded']} | "
+                     f"{lv['ask']} | {lv['pending']} | {lv['superseded']} | "
                      f"{bf['agree']}/{bf['n']}（{_pct(bf['rate'])}） |")
     lines += ["", "「其中退回且一致」很少时，一致率主要来自「建议合并 ↔ 合并」；PR 绝大多数会被合并，这时高一致率不说明会拦。",
-              f"共 {total} 条判定；记录：{LEDGER}"]
+              f"共 {total} 条判定" + (f"（其中按策略合并 {policy} 条，不计入）" if policy else "") + f"；记录：{LEDGER}"]
     return "\n".join(lines)
 
 
 def cmd_report(as_json=False):
     rules = load_rules()
     rows = read_rows()
-    rs = rates(rows, rules["threshold"])
+    rs = rates(rows)
+    policy = sum(1 for r in rows if r.get("owner") == POLICY_OWNER)
     if as_json:
-        print(json.dumps({"rules_version": rules["version"], "tiers": rs, "total": len(rows)}, ensure_ascii=False, indent=2))
+        print(json.dumps({"rules_version": rules["version"], "tiers": rs, "total": len(rows), "policy": policy},
+                         ensure_ascii=False, indent=2))
     else:
-        print(format_report(rs, rules, len(rows)))
+        print(format_report(rs, rules, len(rows), policy))
     return 0
 
 
@@ -382,7 +434,7 @@ def replay(rows, facts, old, new):
     before, after, changed = [], [], []
     for r in rows:
         f = facts.get((r["repo"], r["pr"], r["head_sha"]))
-        if f is None:
+        if f is None or r.get("owner") == POLICY_OWNER:
             continue
         pair = []
         for rules, bucket in ((old, before), (new, after)):
@@ -393,20 +445,18 @@ def replay(rows, facts, old, new):
         if pair[0][:2] != pair[1][:2]:
             changed.append({"repo": r["repo"], "pr": r["pr"], "outcome": r["outcome"] or "待结局",
                             "before": pair[0][:2], "after": pair[1][:2], "why": pair[1][2]})
-    return rates(before, old["threshold"]), rates(after, new["threshold"]), changed
+    return rates(before), rates(after), changed
 
 
 def cmd_replay(new_path):
     old, new = load_rules(), load_rules(new_path)
     b, a, changed = replay(read_rows(), read_facts(), old, new)
     print(f"回放：规则 v{old['version']} → v{new['version']}（同一批 PR 状态重判）\n")
-    print("| 档 | 实时 前 | 实时 后 | 达标 前 → 后 | 回填 前 | 回填 后 |")
-    print("|---|---|---|---|---|---|")
+    print("| 档 | 实时 前 | 实时 后 | 回填 前 | 回填 后 |")
+    print("|---|---|---|---|---|")
     for t in TIERS:
         fmt = lambda d: f"{d['agree']}/{d['n']}（{_pct(d['rate'])}）"
-        print(f"| {t} | {fmt(b[t]['live'])} | {fmt(a[t]['live'])} | "
-              f"{'达标' if b[t]['qualified'] else '未达标'} → {'达标' if a[t]['qualified'] else '未达标'} | "
-              f"{fmt(b[t]['backfill'])} | {fmt(a[t]['backfill'])} |")
+        print(f"| {t} | {fmt(b[t]['live'])} | {fmt(a[t]['live'])} | {fmt(b[t]['backfill'])} | {fmt(a[t]['backfill'])} |")
     print(f"\n结论变了 {len(changed)} 条" + ("：" if changed else "。"))
     for c in changed[:30]:
         print(f"- {c['repo']}#{c['pr']}（{c['outcome']}）：{c['before'][0]} {c['before'][1]} → {c['after'][0]} {c['after'][1]}"
@@ -415,7 +465,7 @@ def cmd_replay(new_path):
 
 
 def main(argv=None):
-    a = argparse.ArgumentParser(description="影子合并官：只读，只给建议")
+    a = argparse.ArgumentParser(description="合并官：判定 PR；策略生效时交给 merge_act 按策略合并")
     a.add_argument("--verbose", action="store_true")
     sub = a.add_subparsers(dest="cmd")
     s = sub.add_parser("scan")
@@ -428,7 +478,7 @@ def main(argv=None):
     a = a.parse_args(argv)
     try:
         if a.cmd in (None, "scan"):   # 定时任务每 30 分钟一跑：先等网络（P9），等不到第一次说原因，6 小时内不重复报
-            netwait.guard("merge-officer", ("github", "feishu"), "影子合并官这一轮", quiet_hours=6)
+            netwait.guard("merge-officer", ("github", "feishu"), "合并官这一轮", quiet_hours=6)
             return cmd_scan(a.verbose)
         if a.cmd == "backfill":
             return cmd_backfill()
@@ -436,7 +486,7 @@ def main(argv=None):
             return cmd_report(a.json)
         return cmd_replay(a.rules)
     except (OSError, ValueError, KeyError) as e:
-        print(f"影子合并官没跑成：{type(e).__name__}：{e}")
+        print(f"合并官没跑成：{type(e).__name__}：{e}")
         return 1
 
 

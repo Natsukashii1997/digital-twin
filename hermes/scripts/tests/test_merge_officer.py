@@ -1,4 +1,4 @@
-"""影子合并官（#61）自测：判定、一致率、HEAD 绑定、回放；命令行用假 gh，不联网、不碰真实记录，并核对只调了只读的 gh 命令。"""
+"""合并官（#61；例外判定 #257）自测：判定、例外、一致率、HEAD 绑定、回放；命令行用假 gh，不联网、不碰真实记录，并核对只调了只读的 gh 命令。"""
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import csv
 import json
@@ -96,6 +96,28 @@ class Evaluate(unittest.TestCase):
     def test_needs_info_label_asks(self):
         self.assertEqual(mo.evaluate(facts(["docs/a.md"], labels=["needs-info"]), RULES)[1], mo.ASK)
 
+    def test_direction_docs_ask_owner(self):
+        """#257：改定方向文档的 PR 仍然问常浩，风险档不因此上调。"""
+        for path in ("PRD.md", "docs/DT-ORC/ARCHITECTURE.md", "docs/DT-ORC/adr/ADR-016.md", "docs/DECIDED.md",
+                     "global/claude/CLAUDE.md", "global/codex/AGENTS.md", "工程流程.md", "docs/常设授权清单.md"):
+            tier, sug, why = mo.evaluate(facts([path, "src/a.py"]), RULES)
+            self.assertEqual((tier, sug), ("L1", mo.ASK), path)
+            self.assertIn(path, why[0])
+        for path in ("AGENTS.md", "CLAUDE.md", "docs/LESSONS.md", "CURRENT.md", "docs/adr-notes.md", "myglobal/claude/x.md"):
+            self.assertEqual(mo.evaluate(facts([path]), RULES)[1], mo.MERGE, path)     # 项目级约定、状态、普通文档不算
+
+    def test_exception_reasons_are_exactly_the_ask_cases(self):
+        self.assertEqual(mo.exception_reasons(facts(["docs/a.md"]), RULES), [])
+        self.assertEqual(mo.exception_reasons(facts(["docs/a.md"], closes=False, draft=True), RULES), [])   # 退回理由不是例外
+        why = mo.exception_reasons(facts(["ops/x.sh", "PRD.md"], labels=["needs-info"]), RULES)
+        self.assertEqual([w.split("：")[0].split(" ")[0] for w in why], ["改动敏感路径", "改动定方向文档", "标签"])
+        old = {k: v for k, v in RULES.items() if k != "direction_docs"}                  # 旧规则文件没有这一项：不报错
+        self.assertEqual(mo.exception_reasons(facts(["PRD.md"]), old), [])
+
+    def test_malformed(self):
+        self.assertEqual(mo.malformed(facts(["docs/a.md"])), [])
+        self.assertEqual(len(mo.malformed(facts([], head_sha="abc"))), 2)
+
     def test_does_not_mutate_input(self):
         f = facts(["docs/a.md"])
         snap = json.dumps(f, sort_keys=True)
@@ -122,21 +144,27 @@ class Agreement(unittest.TestCase):
         return [{"tier": tier, "source": source, "suggestion": sug, "agree": "是"}] * yes + \
                [{"tier": tier, "source": source, "suggestion": sug, "agree": "否"}] * no
 
-    def test_threshold_boundary(self):
-        th = RULES["threshold"]
-        self.assertTrue(mo.rates(self.rows(18, 2), th)["L0"]["qualified"])       # 20 次、90%
-        self.assertFalse(mo.rates(self.rows(17, 3), th)["L0"]["qualified"])      # 85%
-        self.assertFalse(mo.rates(self.rows(19, 0), th)["L0"]["qualified"])      # 不到 20 次
+    def test_no_threshold_any_more(self):
+        """影子门槛 2026-11-20 废止（ADR-016）：规则文件里没有 threshold，一致率只统计、不判达标。"""
+        self.assertNotIn("threshold", RULES)
+        r = mo.rates(self.rows(18, 2))["L0"]
+        self.assertNotIn("qualified", r)
+        self.assertEqual((r["live"]["n"], r["live"]["rate"]), (20, 0.9))
+
+    def test_policy_merges_not_counted(self):
+        """按策略合并的结局是合并官自己促成的，不计入一致率。"""
+        rows = self.rows(3, 1) + [{"tier": "L0", "source": "live", "suggestion": mo.MERGE, "agree": "是", "owner": mo.POLICY_OWNER}] * 5
+        self.assertEqual(mo.rates(rows)["L0"]["live"]["n"], 4)
 
     def test_backfill_and_ask_not_counted(self):
         rows = self.rows(30, 0, source="backfill") + [{"tier": "L0", "source": "live", "suggestion": mo.ASK, "agree": "不计"}] * 25
-        r = mo.rates(rows, RULES["threshold"])["L0"]
-        self.assertEqual((r["live"]["n"], r["live"]["ask"], r["qualified"]), (0, 25, False))
+        r = mo.rates(rows)["L0"]
+        self.assertEqual((r["live"]["n"], r["live"]["ask"]), (0, 25))
         self.assertEqual((r["backfill"]["n"], r["backfill"]["rate"]), (30, 1.0))
 
     def test_return_agree_counted_separately(self):
         rows = self.rows(3, 0) + self.rows(2, 0, sug=mo.RETURN)
-        self.assertEqual(mo.rates(rows, RULES["threshold"])["L0"]["live"]["return_agree"], 2)
+        self.assertEqual(mo.rates(rows)["L0"]["live"]["return_agree"], 2)
 
 
 class Replay(unittest.TestCase):
@@ -148,7 +176,7 @@ class Replay(unittest.TestCase):
                 {"repo": "o/app", "pr": "3", "head_sha": A, "source": "live", "outcome": mo.MERGED, "outcome_head": A}]
         fx = {("o/app", "1", A): f1, ("o/app", "2", A): f2}          # 第 3 条没记状态，跳过
         new = json.loads(json.dumps(RULES))
-        new["version"] = "2"
+        new["version"] = "3"
         new["return_when"]["missing_closes"] = False
         before, after, changed = mo.replay(rows, fx, RULES, new)
         self.assertEqual((before["L0"]["live"]["agree"], before["L0"]["live"]["n"]), (1, 2))
@@ -179,7 +207,8 @@ class Cli(unittest.TestCase):
 
     def run_cli(self, *args):
         env = {**os.environ, "FAKE_DIR": str(self.fake), "DT_GH": str(self.fake / "gh"), "DT_ROSTER": str(self.roster),
-               "DT_SHADOW_DIR": str(self.shadow), "DT_NOW": "2026-11-07T10:00:00+08:00"}
+               "DT_SHADOW_DIR": str(self.shadow), "DT_MERGE_DIR": str(self.tmp / "merge"),
+               "DT_NOW": "2026-11-07T10:00:00+08:00"}
         return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
 
     def ledger(self):
@@ -195,7 +224,7 @@ class Cli(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)       # 成功不输出
         rows = self.ledger()
         self.assertEqual([(x["pr"], x["tier"], x["suggestion"], x["rules_version"]) for x in rows],
-                         [("1", "L0", mo.MERGE, "1"), ("2", "L3", mo.ASK, "1")])
+                         [("1", "L0", mo.MERGE, "2"), ("2", "L3", mo.ASK, "2")])
         self.assertEqual(self.run_cli("scan").returncode, 0)
         self.assertEqual(len(self.ledger()), 2)                               # 同一个 HEAD 不重复判
         self.prs({"o/app": [pr(1, B), pr(2, A, paths=("ops/x.sh",))]})       # PR 1 又推了提交
@@ -247,20 +276,20 @@ class Cli(unittest.TestCase):
         self.assertIn("回填 0 条", self.run_cli("backfill").stdout)
         rep = self.run_cli("report", "--json")
         d = json.loads(rep.stdout)["tiers"]["L0"]
-        self.assertEqual((d["live"]["n"], d["backfill"]["n"], d["qualified"]), (0, 2, False))
+        self.assertEqual((d["live"]["n"], d["backfill"]["n"]), (0, 2))
         self.assertIn("| L0 | 0 |", self.run_cli("report").stdout)
 
     def test_replay_cli(self):
         self.prs({"o/app": [pr(1, A, state="MERGED", body="")]})
         self.run_cli("backfill")
         new = json.loads((HERE.parent / "merge_rules.json").read_text(encoding="utf-8"))
-        new["version"] = "2"
+        new["version"] = "3"
         new["return_when"]["missing_closes"] = False
-        p = self.tmp / "v2.json"
+        p = self.tmp / "v3.json"
         p.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
         r = self.run_cli("replay", "--rules", str(p))
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("v1 → v2", r.stdout)
+        self.assertIn("v2 → v3", r.stdout)
         self.assertIn("0/1（0%） | 1/1（100%）", r.stdout)
         self.assertIn("o/app#1（合并）：L0 退回 → L0 建议合并", r.stdout)
         self.assertEqual(len(self.ledger()), 1)                              # 回放只读，不改记录

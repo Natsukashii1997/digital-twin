@@ -19,6 +19,7 @@ ACT = HERE.parent / "merge_act.py"
 # FAKE_DIR/fail.json 模拟网络或 GitHub 报错：{种类: {"n": 次数, "msg": 报错}}，每次调用用掉一次。
 #   view：任何 pr view；view_merged：合并之后的 pr view；merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
 #   comment：留言。
+# pr revert（#257）：在 prs.json 里新开一个撤回 PR（号 = 原号 + 100），打印它的网址；FAKE_DIR/revert_fail 存在就失败。
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -67,6 +68,13 @@ if args[:2] == ["pr", "merge"]:
     sys.exit(0)
 if args[:2] == ["pr", "comment"]:
     sys.exit(0)
+if args[:2] == ["pr", "revert"]:
+    if (root / "revert_fail").exists():
+        die("GraphQL: Something went wrong (revertPullRequest)")
+    n = str(int(args[2]) + 100)
+    mine[n] = dict(pr, number=int(n), title="Revert " + pr["title"], state="OPEN", headRefOid="e" * 40, mergeCommit=None)
+    (root / "prs.json").write_text(json.dumps(prs))
+    print("https://github.com/" + repo + "/pull/" + n); sys.exit(0)
 sys.stderr.write("fake gh: 不该调用 " + " ".join(args) + "\n"); sys.exit(2)
 '''
 FAKE_LARK = r'''#!/usr/bin/env python3
@@ -87,7 +95,9 @@ def sh(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-class MergeAct(unittest.TestCase):
+class Fixture:
+    """真 git 的临时仓库 + 假 gh / lark-cli；test_merge_auto.py 也用（#257）。"""
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="dt-act-"))
         t = self.tmp
@@ -158,7 +168,8 @@ class MergeAct(unittest.TestCase):
     def cli(self, script, *args, env=None):
         e = {**os.environ, "FAKE_DIR": str(self.fake), "DT_GH": str(self.fake / "gh"), "DT_LARK_CLI": str(self.fake / "lark-cli"),
              "DT_ROSTER": str(self.roster), "DT_SHADOW_DIR": str(self.shadow), "DT_MERGE_RULES": str(self.rules),
-             "DT_MERGE_RUNS": str(self.tmp / "runs"), "FEISHU_HOME_CHANNEL": "oc_test0001", "DT_NOW": "2026-11-07T10:00:00+08:00",
+             "DT_MERGE_RUNS": str(self.tmp / "runs"), "DT_MERGE_DIR": str(self.tmp / "merge"),
+             "FEISHU_HOME_CHANNEL": "oc_test0001", "DT_NOW": "2026-11-07T10:00:00+08:00",
              "DT_HERMES_ENV": str(self.tmp / "no.env"), "DT_GH_RETRY_WAITS": "0,0", **(env or {})}
         return subprocess.run([sys.executable, "-B", str(script), *args], capture_output=True, text=True, env=e, timeout=120)
 
@@ -179,6 +190,8 @@ class MergeAct(unittest.TestCase):
     def ref(self):
         return f"app#5@{self.head[:7]}"
 
+
+class MergeAct(Fixture, unittest.TestCase):
     # ---------- 卡片 ----------
 
     def test_scan_sends_one_card_per_covered_pr_head(self):
