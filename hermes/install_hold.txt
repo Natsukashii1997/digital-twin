@@ -1,5 +1,7 @@
 # 按计划先不装的源文件（工程自检 ops/self_check.py 读 main 上这份，#236）。
 # 一行一个仓库路径，# 后面写为什么不装、什么时候装。没装不报；装了但和 main 不同照报。
+# 安装位置按计划停在某一版旧的，路径后写「 @<安装副本的 git blob 号，40 位>」（git hash-object 安装副本取得）：
+# 安装副本是钉住这版或已是 main 版都不报，变成第三种照报（#251）。
 # 装上以后把它从这里删掉（AGENTS.md 里对应脚本的「未安装」也一起改）。
 
 hermes/scripts/autoloop_answer.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
@@ -9,10 +11,13 @@ hermes/scripts/autoloop_grants.py  # 秘书代批 / 执行底座（#195），各
 hermes/scripts/autoloop_publish.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/autoloop_readonly.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/button_probe.py  # 按钮实测探针（#195 0B-3），只在实测时手动跑
-hermes/scripts/gatekeeper.py  # 门卫机器人（ADR-015 0E-3a），装在 dt-gate、不进 ~/.hermes/scripts；绑定、切换在 0E-3c
+hermes/scripts/custody.py @648658c0e795e1a6043abb4f85686051f84904e5  # 托管开关（#131）；main 版开启托管要 custody_ledger（11-15 定暂不装），单独装开启会被拒；随秘书代批 #195 上线再装
 hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_ledger.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_report.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
+hermes/scripts/gatekeeper.py  # 门卫机器人（ADR-015 0E-3a），装在 dt-gate、不进 ~/.hermes/scripts；绑定、切换在 0E-3c
 hermes/scripts/secretary.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_gate.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_ledger.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
+hermes/scripts/secretary_patrol.py  # 秘书侧巡视（#195 0B-4c，#225），未签代批清单、未生效
+hermes/scripts/twin_state.py @23a598654b0aa9c77ca70968638ab15eb224a118  # 状态底座；main 版打开库就把 v3 迁到 v6（加托管、秘书账本表），迁了旧脚本不能再开；随秘书代批 #195 上线再装
