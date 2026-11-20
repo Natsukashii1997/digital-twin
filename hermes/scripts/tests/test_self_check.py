@@ -29,15 +29,13 @@ SOURCES = {
     "hermes/scripts/tests/fixture.json": None,
     "hermes/scripts/assets/banner.png": "hermes/scripts/assets/banner.png",
     "hermes/scripts/tests/test_a.py": None,
-    "hermes/skills/workshop/SKILL.md": "hermes/skills/autonomous-ai-agents/workshop/SKILL.md",
-    "hermes/skills/workshop/references/r.md": "hermes/skills/autonomous-ai-agents/workshop/references/r.md",
+    "hermes/skills/workshop/SKILL.md": None,   # 技能以安装副本为准，不比对（常浩 2026-11-20「全部放开，hermes自己改了就算」）
+    "hermes/skills/workshop/references/r.md": None,
     "hermes/prompts/p.md": "hermes/prompts/p.md",
     "hermes/scripts/memdaily_job.py": "hermes/profiles/agumon/scripts/memdaily_job.py",   # 亚古兽的（#182）
     "hermes/prompts/memdaily_report.md": "hermes/profiles/agumon/prompts/memdaily_report.md",
     "hermes/scripts/sidebar_reports.py": "hermes/profiles/agumon/scripts/sidebar_reports.py",   # 亚古兽的销售侧边栏汇报
-    "hermes/skills/sales-sidebar/SKILL.md": "hermes/profiles/agumon/skills/productivity/sales-sidebar/SKILL.md",
-    "hermes/skills/sales-sidebar/references/feedback.md":
-        "hermes/profiles/agumon/skills/productivity/sales-sidebar/references/feedback.md",
+    "hermes/skills/sales-sidebar/SKILL.md": None,   # 亚古兽的技能同样不比对
     "ops/health_check.py": "bin/health_check.py",
     "ops/check_repos.py": "bin/check_repos.py",
     "ops/self_check.py": "hermes/scripts/self_check.py",
@@ -223,16 +221,21 @@ class ScriptTest(unittest.TestCase):
         self.assertIn("托管策略失效：托管策略 v3 已于", self.run_script())
 
     def test_missing_installed_files_listed_by_path(self):
-        for dst in ("hermes/skills/autonomous-ai-agents/workshop/references/r.md", "bin/health_check.py",
-                    "hermes/scripts/self_check.py"):
+        for dst in ("hermes/prompts/p.md", "bin/health_check.py", "hermes/scripts/self_check.py"):
             (self.home / dst).unlink()
         out = self.run_script()
         self.assertEqual(out.splitlines()[:3], ["🔧 工程自检", "", "🔁 安装副本不一致：3 项和仓库 main 对不上"])
         self.assertIn("- ~/bin/health_check.py 缺失（源：ops/health_check.py）", out)
-        self.assertIn("- ~/hermes/skills/autonomous-ai-agents/workshop/references/r.md 缺失"
-                      "（源：hermes/skills/workshop/references/r.md）", out)
+        self.assertIn("- ~/hermes/prompts/p.md 缺失（源：hermes/prompts/p.md）", out)
         self.assertIn("- ~/hermes/scripts/self_check.py 缺失（源：ops/self_check.py）", out)
         self.assertNotIn("多出", out)
+
+    def test_skills_not_compared(self):
+        """常浩 2026-11-20「全部放开，hermes自己改了就算」：猛鬼兽、亚古兽可自改技能，以安装副本为准；内容不同、缺失都不报。"""
+        self.write(self.home / "hermes/skills/autonomous-ai-agents/workshop/SKILL.md", "猛鬼兽自己改过\n")
+        self.write(self.home / "hermes/profiles/agumon/skills/productivity/sales-sidebar/SKILL.md", "亚古兽自己改过\n")
+        self.assertEqual(self.run_script(), "")
+        self.assertNotIn("workshop", self.run_script())
 
     def test_script_assets_checked(self):
         (self.home / "hermes/scripts/assets/banner.png").unlink()
@@ -437,7 +440,7 @@ class MonthlyGateTest(unittest.TestCase):
         self.assertEqual(out.split("\n\n"), [
             "🔧 工程自检",
             "\n".join(["🔁 安装副本不一致：12 项和仓库 main 对不上", *[f"- 漂移{i}" for i in range(10)],
-                       "- ……另有 2 项", "处理：从仓库 main 复制到安装位置；技能、提示词改了要重启网关。"]),
+                       "- ……另有 2 项", "处理：从仓库 main 复制到安装位置；提示词改了要重启网关。"]),
             "🌟 Github·Tidings 自检\n- 虚构问题",
             "🧹 沙盒提醒（每月 1 号）\n- 扫不了 ~/Documents/Codex（Operation not permitted）",
             "📦 仓库自检提醒（每月 1 号）\n- a：不是私有仓库\n",
