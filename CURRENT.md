@@ -13,6 +13,7 @@
 - **收回仓库**：groupdigest-act 第 6 节「常浩质疑报告内容」和 `references/report-content-audit.md`；workshop 三处（登记上游仓库前先查三件事、车间栏照 `D new` 实际值填、换车间先 `D clean` 再重开）。**7b 丢弃**：workshop 第 3 条「前一条回复说过派给谁、他同意就算点名」那句，用仓库版覆盖后已不在安装副本里。
 - **登记先不装**：twin_state.py、custody.py 写进 `hermes/install_hold.txt` 并钉住当前安装的旧版（`@<blob 号>`）；**自检行为变化**：写了 @ 的行，安装副本是钉住那版或 main 版都不报，第三种照报（新测试覆盖）。顺手补登记 #225 漏的 secretary_patrol.py。
 - **验证**：本分支全量 hermes 1609 + orca 48 通过、CI 通过。干净环境自检用 origin/main 克隆当替身跑：原 7 项和 secretary_patrol 全部不报（替身通过，`evidence/251-drift/selfcheck-after-standin.txt`）。
+- **技能放开（PR #254 已合并 `a30fc99`，已安装）**：常浩 11-20「全部放开，hermes自己改了就算」——猛鬼兽、亚古兽可以自己改技能，以安装副本为准；工程自检不再比对技能（脚本、提示词照比）；Claude / Codex 改技能前先收回安装副本的自改；DECIDED 已登记。亚古兽 14:16 自改的两份已原样收回仓库。装了 `ops/self_check.py`、thinking-mainline / evidence-check 两份 SKILL.md（装前核对亚古兽没再改），16:32 重启亚古兽网关，16:33:41 飞书重连。全量 hermes 1610 + orca 48 通过、CI 通过。替身自检（origin/main 克隆）**无输出**（`evidence/skills-selfedit/selfcheck-after-standin.txt`）；下面第 ② 处随之不再是问题。
 - **没达到「自检无输出」，两处**：① 主目录 main 拉不齐——主目录有别的会话没提交的 `projects.json`（新增「Hermes 本体（本地补丁）」名册条目），与 main 新提交冲突，`pull --ff-only` 失败，按约定没 stash；自检读主目录本地 main（还在 `d350369`），真实默认跑出 25 项（`selfcheck-after-real.txt`），要那处改动提交或另行处理后才对得上。② 亚古兽 11-20 14:16 自改了 thinking-mainline/SKILL.md 和 evidence-check/references/product-readiness.md（AGENTS 写明两份不许亚古兽自己改），收不收待常浩定。
 
 ## #249 常驻任务先等环境就绪（复盘 P9，2026-11-20，Claude；PR #250 已合并 3c6d7a9，已安装）
