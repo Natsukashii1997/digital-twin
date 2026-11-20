@@ -7,10 +7,15 @@ DigitalTwin/openloop/（ledger.json 当前账本、history/<日期>.json 每天�
 唯一会动到别处的是扫描前对名册各项目跑一次 `git fetch origin <主分支>`（只更新远端跟踪引用，不动工作区和本地分支）：
 本机主目录常落后远端，不拉就会拿旧的 CURRENT 和 GitHub 的现状比，报出假的「对不上」；--no-fetch 关掉。
 
-来源（5a-1）：
+来源（5a-1、5a-2；都只收名册里的个人项目）：
   GitHub     名册活跃仓库里开着的 PR，现查（gh api graphql）；不用合并官的 facts.jsonl（停更，且只记第一次看到的样子）
   主线清单   各项目 CURRENT「主线」节里的 ✅▶⏳❓⏸📌✖；✅ ✖ 不进账本，⏸ 📌 只计数（parked），解析不了的记 unparsed；
              同名的主线只认最上面一节（下面的是它以前的样子），标题写「旧主线」的不收，两种都列在 coverage 里
+  桌面会话   最后一次答复写着「当前状态：〔…〕」的 Claude 桌面会话：复用拍板清单脚本（my-skills 的 decision_inbox.py）的
+             scan()、sift()，按原样调用、不改它；会话在哪个项目、记着哪些 PR，另从会话元数据里读
+  驿窗送审   每一次送 ChatGPT 审查的接力：只读驿窗的 handoffs.json（字段以驿窗 handoffs.rs 为准，它改结构这里要跟着改）
+同一件事并成一行（规格第 7 节）：主线项、会话、接力里明文写的 PR 号，正好指到一个开着的 PR 就并到那个 PR；接力还并到发起它的会话。
+并到一起后状态取最需要人的，其余来源记在 links。提到不止一个开着的 PR 的不并，只在两边的 links 里互相记一笔（related）。
 
 一行的字段照规格第 4 节：id、what、state、owner、evidence、next、check_at、blocked、done_when、links、since；
 另带 source、project、evidence_at、stalled（到 check_at 证据没变）。owner 只照来源写的填，判不出来写「未知」。
@@ -21,6 +26,7 @@ DigitalTwin/openloop/（ledger.json 当前账本、history/<日期>.json 每天�
 """
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -51,7 +57,18 @@ WAIT = {
     "draft": 1440,          # 草稿 PR：按「一直在做没进展」
     "ci_running": 120,      # 检查一直没跑完：按 CI 类
     "conflict": 240,        # 和主分支有冲突没人变基：按返修类
+    "session_bg": 120,      # 会话没下文：〔后台进行中〕没写预计时间的（规格第 6 节）
+    "reply_not_returned": 30,   # 回信没送回会话（规格第 6 节）
+    "relay_wait": 120,      # 送出去等 ChatGPT 回信：规格没写，按「会话没下文」
+    "relay_failed": 30,     # 送审没送成：规格没写，按「回信没送回会话」
 }
+SESSION_DAYS = 14                       # 只看最近这么多天动过的会话（和拍板清单脚本的默认一样）
+RELAY_DAYS = dt.timedelta(days=7)       # 已结束的接力只往回看这么久
+PRIMARY = ("pr", "session", "relay", "mainline")   # 并成一行时，行的编号和名字用哪个来源的
+RECENT_WINS = ("等外部", "在做")         # 并在一起的几条状态相同时：这两种取最近有动静的那条，其余取最先到点的
+# 会话自己写的预计时间：「约 40 分钟」「再等 2 小时」「大约半小时」。「已跑了约 30 分钟」说的是过去，不算
+ETA = re.compile(r"(?<![了已过大])(?:约|大约|大概|预计|再等?|再过)\s*(半|\d+(?:\.\d+)?)\s*(分钟|个?小时)")
+VERDICT = {"pass": "通过", "revise": "需修改"}
 STALE_LEDGER = dt.timedelta(hours=24)   # show：账本这么久没更新就在最上面说一句
 PR_PAGE, PR_PAGES = 50, 4               # 每个仓库最多取 200 个开着的 PR，到了上限在 coverage 里标出来
 FILES_MAX = 100                         # 文件列表只取前 100 个：取不全就不判 L0
@@ -229,10 +246,19 @@ def tier_of(repo, node, rules):
     return merge_officer.tier_of(repo, paths, rules)
 
 
-def pr_row(repo, node, rules, reviews=()):
+def is_current(record, head, pushed):
+    """这条审查记录审的是不是 PR 现在的头提交。驿窗记了受审提交就比提交号；没记就看回信之后有没有新提交。"""
+    if "current" in record:
+        return record["current"]
+    if record.get("head"):
+        return bool(head) and (head.startswith(record["head"]) or record["head"].startswith(head))
+    return not (pushed and record["at"] and record["at"] < pushed)
+
+
+def pr_row(repo, node, rules, reviews=(), known=True):
     """一个开着的 PR 现在是哪种状态（规格第 5 节 GitHub 一列）。几种情况同时成立时取最需要人的那种。
     顺序就是谁更需要人：检查失败、有冲突、审查要求修改（卡住）先于草稿和检查在跑（在做），草稿但检查红了也算卡住。
-    reviews：别的来源给的审查记录（5a-2 的驿窗送审），和 GitHub 上的审查一起按时间排，最新一条有结论的算数。"""
+    reviews：驿窗送审给的记录（有结论的回信，或还在等回信的 flying），和 GitHub 上的审查一起按时间排，最新一条算数。"""
     name = repo.split("/")[-1]
     commit = ((((node.get("commits") or {}).get("nodes")) or [{}])[-1] or {}).get("commit") or {}
     pushed = parse_ts(commit.get("committedDate")) or parse_ts(node.get("updatedAt"))
@@ -240,8 +266,9 @@ def pr_row(repo, node, rules, reviews=()):
     who = writer if writer != UNKNOWN else "开这个 PR 的会话"
     checks = checks_of(commit)
     ci = "检查全过" if checks["has"] else "仓库没有 CI"
-    verdicts = sorted(list(reviews) + github_reviews(node), key=lambda r: iso(r["at"]) or "")
-    last = verdicts[-1] if verdicts else None
+    records = sorted(list(reviews) + github_reviews(node), key=lambda r: iso(r["at"]) or "")
+    last = records[-1] if records else None
+    fresh = bool(last) and is_current(last, node.get("headRefOid") or "", pushed)
     base = dict(id_=f"pr:{name}#{node['number']}", source="pr", project=name, what=node.get("title") or "",
                 done_when="PR 合并或关闭", url=node.get("url"))
     if checks["failing"]:
@@ -255,24 +282,30 @@ def pr_row(repo, node, rules, reviews=()):
     if node.get("mergeable") == "CONFLICTING":
         return make(state="卡住", owner=writer, at=pushed, evidence="最近一次提交；和主分支有冲突",
                     next_=f"{who}变基解决冲突", wait="conflict", blocked="和主分支有冲突", **base)
-    if last and last["verdict"] == "revise" and last["current"]:
+    if last and last["verdict"] == "revise" and fresh:
         return make(state="卡住", owner=writer, at=last["at"], evidence=f"{last['by']}要求修改，之后没有新提交",
                     next_=f"{who}返修后重新送审", wait="rework", blocked=f"审查要求修改（{last['by']}）", **base)
+    if last and last.get("flying"):
+        return make(state="等外部", owner="ChatGPT", at=last["at"], evidence=f"已送审（{last['by']}），对方在看",
+                    next_=f"等 {last['label']}回信", wait="relay_wait", **base)
     if checks["pending"]:
         return make(state="在做", owner=writer, at=pushed, evidence="最近一次提交，检查还在跑：" + "、".join(checks["pending"]),
                     next_="等检查跑完", wait="ci_running", **base)
     tier = tier_of(repo, node, rules)
-    if (last and last["verdict"] == "pass" and last["current"]) or tier == "L0":
-        why = f"{last['by']}通过" if last and last["verdict"] == "pass" and last["current"] else "只改文档（L0，不用审）"
+    passed = bool(last) and last["verdict"] == "pass" and fresh
+    if passed or tier == "L0":
+        why = f"{last['by']}通过" if passed else "只改文档（L0，不用审）"
         at = max((t for t in (pushed, last["at"] if last else None) if t), default=None)
         return make(state="等你", owner=OWNER, at=at, evidence=f"{why}，{ci}", next_="常浩决定合并",
                     check_at=next_slip(at) if at else None, **base)
-    stale = f"；上一次审的是旧版本（{last['by']}）" if last else "，没有审查或送审记录"
+    stale = f"；上一次审的是旧版本（{last['by']}）" if last else "，没有审查或送审记录" if known else "，GitHub 上没有审查，驿窗的送审记录这次没读到"
     return make(state="待验证", owner=UNKNOWN, at=pushed, evidence=f"最近一次提交，{ci}{stale}",
                 next_="送审或请人审", wait="unreviewed", **base)
 
 
-def github_source(projects, hub, rules):
+def github_source(projects, hub, rules, reviews=None, known=True):
+    """reviews：{PR 的编号: [驿窗送审记录]}；known：送审记录这次读到了没有。"""
+    reviews = reviews or {}
     rows, cover = [], {"ok": [], "failed": {}, "no_repo": [], "capped": []}
     for p in projects:
         repo, name = p.get("github"), key_of(p)
@@ -290,7 +323,7 @@ def github_source(projects, hub, rules):
         cover["ok"].append(name)
         if capped:
             cover["capped"].append(name)
-        rows += [pr_row(repo, n, rules) for n in nodes]
+        rows += [pr_row(repo, n, rules, reviews.get(f"pr:{name}#{n['number']}", ()), known) for n in nodes]
     return rows, cover
 
 
@@ -394,7 +427,8 @@ def mainline_rows(name, section, times, seen):
         at = times.get(it["line"])
         tail = clip(text[len(label):].lstrip("：:，,。 "), 120)
         asked = text.split("❓", 1)[1].strip() if "❓" in text else None   # 「▶ …，❓ 等常浩合并」：项里另写了等常浩的事
-        base = dict(id_=id_, source="mainline", project=name, what=label, done_when="主线项标 ✅", line=it["line"])
+        base = dict(id_=id_, source="mainline", project=name, what=label, done_when="主线项标 ✅", line=it["line"],
+                    _refs=sorted({f"pr:{name}#{n}" for n in NUM.findall(text)}))
         if mark == "❓" or asked is not None:
             ask = clip(asked if asked is not None else (tail or label), 120)
             rows.append(make(state="等你", owner=OWNER, at=at, evidence="CURRENT 这一项最近一次改动", next_=f"常浩定：{ask}",
@@ -485,6 +519,314 @@ def mainline_source(projects, fetch):
     return rows, parked, unparsed, candidates, cover
 
 
+# ---------- Claude 桌面会话 ----------
+
+def inbox_module():
+    """拍板清单脚本，按文件加载（它在 my-skills 仓库里，不在本仓库）。"""
+    path = Path(os.environ.get("DT_DECISION_INBOX",
+                               "~/Documents/ChatGPT/个人/work/my-skills/skills/decision-inbox/scripts/decision_inbox.py")).expanduser()
+    if not path.exists():
+        raise Fail(f"找不到拍板清单脚本 {path}")
+    try:
+        spec = importlib.util.spec_from_file_location("decision_inbox", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:   # 别的仓库的脚本，加载出什么错都只让这一个来源取不到
+        raise Fail(f"拍板清单脚本加载不了（{type(e).__name__}：{e}）")
+
+
+def read_metas(meta_dir):
+    """桌面应用的会话元数据：{会话号: 元数据}。scan() 给的行里没有工作目录和 PR 所在的仓库，这里补读。"""
+    out = {}
+    for path in Path(meta_dir).glob("**/local_*.json"):
+        try:
+            m = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict) and m.get("sessionId"):
+            out[m["sessionId"]] = m
+    return out
+
+
+def project_at(projects, cwd):
+    """这个工作目录属于名册里的哪个项目（项目目录本身，或它下面的 worktree）；都不是返回 None。"""
+    if not cwd:
+        return None
+    best = None
+    for p in projects:
+        root = str(root_of(p)).rstrip("/")
+        if (cwd == root or cwd.startswith(root + "/")) and (best is None or len(root) > len(str(root_of(best)))):
+            best = p
+    return best
+
+
+def session_row(row, name, meta):
+    """拍板清单脚本给的一个会话 → 账本的一行（规格第 5 节「会话的状态词」一列）；状态词不归账本管的返回 None。"""
+    word, at = row.get("word"), parse_ts(row.get("statusAt"))
+    said = f"会话最后一次答复〔{word}〕：{clip(row.get('status'), 80)}"
+    step = clip(row.get("next"), 200) or "来源没写下一步"
+    refs = sorted({f"pr:{(x.get('repo') or '').split('/')[-1] or name}#{x.get('prNumber')}"
+                   for x in meta.get("prs") or [] if isinstance(x, dict) and x.get("prNumber")})
+    base = dict(id_=f"session:{row['id']}", source="session", project=name, what=row.get("title") or "（无标题）",
+                done_when="会话写出〔已结束〕", _refs=refs)
+    if word == "后台进行中":
+        eta = ETA.search(f"{row.get('status') or ''} {row.get('next') or ''}")
+        amount = 0.5 if eta and eta.group(1) == "半" else float(eta.group(1)) if eta else 0
+        due = at + dt.timedelta(minutes=amount * (1 if eta.group(2) == "分钟" else 60)) if eta and at else None
+        return make(state="在做", owner=f"会话「{clip(row.get('title') or '无标题', 30)}」", at=at, evidence=said, next_=step,
+                    wait="session_bg", check_at=due, **base)
+    if row.get("replyUnanswered"):   # sift() 的标记：常浩回过话，过了两小时会话还没出新状态
+        own = [r for r in row.get("userAfter") or [] if not r.get("peer")]
+        replied = parse_ts(own[-1].get("at")) if own else at
+        return make(state="卡住", owner=UNKNOWN, at=replied, evidence="常浩回过话，会话之后没有新状态", next_="打开这个会话看一眼，或把那句话重发给它",
+                    check_at=replied, blocked="常浩回过话，会话 2 小时没出新状态（多半没接到）", **base)
+    if word == "受阻":
+        return make(state="卡住", owner=UNKNOWN, at=at, evidence=said, next_=step, check_at=next_slip(at) if at else None,
+                    blocked=clip(row.get("status"), 120) or "会话写了〔受阻〕，没写原因", **base)
+    if word in ("等你决定", "等你操作"):
+        done = "（它的 PR 都已合并或关闭，这条可能已经过期）" if row.get("prDone") else ""
+        return make(state="等你", owner=OWNER, at=at, evidence=said + done, next_=step, check_at=next_slip(at) if at else None, **base)
+    return None
+
+
+def session_source(projects, now):
+    """（行，覆盖情况，{命令行会话号: 账本里的会话行编号}）。"""
+    try:
+        di = inbox_module()
+    except Fail as e:
+        return [], {"failed": str(e)}, {}
+    meta_dir = os.environ.get("DT_OPENLOOP_META_DIR") or di.META_DIR
+    scanned, skipped = di.scan(meta_dir, os.environ.get("DT_OPENLOOP_LOGS_DIR") or di.PROJECTS_DIR, SESSION_DAYS, now.timestamp())
+    inbox = os.environ.get("DT_OPENLOOP_INBOX_DIR") or di.INBOX_DIR
+    waiting, dropped = di.sift(scanned, di.load_ignored(inbox), di.listed_before(inbox)[1], now.timestamp())
+    metas = read_metas(meta_dir)
+    rows, cli, outside, bad = [], {}, 0, 0
+    for r in waiting + [x for x in scanned if x.get("word") == "后台进行中"]:
+        try:
+            meta = metas.get(r["id"]) or {}
+            p = project_at(projects, meta.get("originCwd") or meta.get("cwd"))
+            got = session_row(r, key_of(p), meta) if p else None
+        except Exception:   # 这一个会话的数据不是预想的样子：跳过它，记个数
+            bad += 1
+            continue
+        if not p:
+            outside += 1
+        elif got:
+            rows.append(got)
+            for k in ("cliSessionId", "lastAssistantCliSessionId"):
+                if meta.get(k):
+                    cli[meta[k]] = got["id"]
+    known = set(di.WAITING) | {"后台进行中", "已结束"}
+    return rows, {"scanned": len(scanned), "rows": len(rows), "not_personal": outside, "bad": bad, "skipped": skipped, "dropped": dropped,
+                  "other_words": sum(1 for x in scanned if x.get("word") not in known)}, cli
+
+
+# ---------- 驿窗送审 ----------
+
+def handoffs_path():
+    return Path(os.environ.get("DT_POSTPANE_HANDOFFS",
+                               "~/Library/Application Support/app.postpane.mac/chatgpt/handoffs.json")).expanduser()
+
+
+def at_ms(ms):
+    return dt.datetime.fromtimestamp(ms / 1000, TZ).replace(microsecond=0) if ms else None
+
+
+def relay_facts(h):
+    """一条接力走到哪了。回信算送回了：之后有一步 back 且会话那边开始处理（旧记录没有 delivery 也算），
+    或驿窗在后台替会话跑了（wake），或会话又交了一轮（work）。"""
+    steps = [s for s in h.get("steps") or [] if isinstance(s, dict)]
+
+    def last(kind, rows=steps):
+        return next((s for s in reversed(rows) if s.get("kind") == kind), None)
+    ask, reply = last("ask"), last("reply")
+    replied = reply is not None and (ask is None or steps.index(reply) > steps.index(ask))
+    after = steps[steps.index(reply) + 1:] if replied else []
+    back = last("back", after)
+    got = any((s.get("kind") == "back" and s.get("delivery") in (None, "started")) or s.get("kind") in ("wake", "work") for s in after)
+    why = ""
+    if replied and not got:
+        delivery = (back or {}).get("delivery")
+        why = {"waiting": "留给会话了，会话还没接走", "taken": "插件接走了，会话还没开始处理", "expired": "留了一小时没被接走",
+               "refused": "会话那边拒收", "cancelled": "被取消"}.get(delivery) or clip((last("fail", after) or {}).get("text"), 80)
+    # 第几轮照驿窗自己的算法（gate.rs 的 counted）：常浩上次发话之后算数的回信数，没重新起算时加上前面接力带过来的
+    start = min(int(h.get("roundsFrom") or 0), len(steps))
+    chain = steps[start:]
+    done = (0 if start else int(h.get("carried") or 0)) + sum(
+        1 for i, x in enumerate(chain) if x.get("kind") == "reply" and not (i and chain[i - 1].get("kind") == "format"))
+    n = max(done if replied else done + 1, 1)
+    mending = replied and bool(after) and after[-1].get("kind") == "format"   # 驿窗请 ChatGPT 只补最后几行结论，还在等
+    return {"mending": after[-1] if mending else None, "ask": ask, "reply": reply, "replied": replied, "got": got, "back": back, "why": why, "stop": last("stop"),
+            "end": last("end"), "verdict": (reply or {}).get("verdict") if replied else None,
+            "label": f"{h['risk']} 第 {n} 轮" if h.get("risk") else f"第 {n} 轮"}
+
+
+def relay_row(h, name, f, superseded, now):
+    """（行或 None，没收的原因）。规格第 5 节「驿窗接力」一列：送出对方在看 → 等外部；回信没送回会话、送审失败 → 卡住。"""
+    live = h.get("status") in ("opening", "open")
+    updated = at_ms(h.get("updatedAt"))
+    said = VERDICT.get(f["verdict"], "没写结论")
+    base = dict(id_=f"relay:{h['id']}", source="relay", project=name, what=h.get("title") or "送审", done_when="回信送回会话、接力结束")
+    if not live and superseded:
+        return None, None
+    row = relay_state(h, f, live, updated, said, base)
+    if row and not live and parse_ts(row["evidence_at"]) and now - parse_ts(row["evidence_at"]) > RELAY_DAYS:
+        return None, "too_old"           # 按回信、失败的那一刻算，不按驿窗后来自动收尾的时间
+    return row, None
+
+
+def relay_state(h, f, live, updated, said, base):
+    if h.get("status") == "failed":
+        return make(state="卡住", owner=UNKNOWN, at=at_ms(h.get("phaseAt")) or updated, evidence="送审没送成",
+                    next_="重新送审，或告诉发起的会话没送成", wait="relay_failed", blocked=f"送审失败：{h.get('error') or '原因没写'}", **base)
+    if live and f["mending"] and not h.get("halt"):
+        return make(state="等外部", owner="ChatGPT", at=at_ms(f["mending"].get("at")), evidence="回信没写结论，驿窗已请 ChatGPT 补上，对方在看",
+                    next_=f"等 {f['label']}补上结论", wait="relay_wait", **base)
+    if f["replied"] and not f["got"]:
+        if not live and not (f["end"] or {}).get("auto"):
+            return None            # 常浩自己结束的接力：他看过了
+        return make(state="卡住", owner=UNKNOWN, at=at_ms(f["reply"].get("at")),
+                    evidence=f"ChatGPT 已回信（{said}），没送回会话" + ("" if live else "，接力已自动结束"),
+                    next_=f"把「{said}」的回信转给发起的会话（在驿窗里转回，或直接告诉它结论）", wait="reply_not_returned",
+                    blocked="回信没送回会话" + (f"：{f['why']}" if f["why"] else ""), **base)
+    if not live:
+        return None
+    if h.get("halt"):
+        return make(state="卡住", owner=UNKNOWN, at=at_ms((f["stop"] or {}).get("at")) or updated, evidence="驿窗自动往返停下",
+                    next_="常浩或发起的会话接手（驿窗已把这条接力交还给人）", wait="reply_not_returned", blocked=clip(h["halt"], 120), **base)
+    if not f["replied"]:
+        return make(state="等外部", owner="ChatGPT", at=at_ms((f["ask"] or {}).get("at")) or at_ms(h.get("phaseAt")),
+                    evidence="已送 ChatGPT 审查，对方在看", next_=f"等 {f['label']}回信", wait="relay_wait", **base)
+    if f["verdict"] == "pass":
+        return None                # 通过、回信也送回了：送审这件事完了
+    return make(state="在做", owner=UNKNOWN, at=at_ms((f["back"] or f["reply"]).get("at")), evidence=f"回信（{said}）已送回会话",
+                next_="发起的会话返修后交回", wait="rework", **base)
+
+
+def relay_source(projects, now, sessions):
+    """（行，覆盖情况，{PR 的编号: [审查记录]}）。sessions：{命令行会话号: 账本里的会话行编号}。"""
+    path = handoffs_path()
+    if not path.exists():
+        return [], {"missing": True}, {}
+    try:
+        items = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(items, list):
+            raise ValueError("不是列表")
+        items = [h for h in items if isinstance(h, dict) and h.get("id")]
+    except (OSError, ValueError) as e:
+        return [], {"failed": f"读不了 {path.name}（{e}）"}, {}
+    repos = {(p.get("github") or "").lower(): p for p in projects if p.get("github")}
+    rows, reviews, cover = [], {}, {"read": len(items), "rows": 0, "not_personal": 0, "too_old": 0, "bad": 0}
+    for h in items:
+        try:
+            relay_item(h, items, projects, repos, sessions, now, rows, reviews, cover)
+        except Exception:   # 这一条接力的字段不是预想的样子（驿窗改了结构）：跳过它，记个数
+            cover["bad"] += 1
+    cover["rows"] = len(rows)
+    return rows, cover, reviews
+
+
+def relay_item(h, items, projects, repos, sessions, now, rows, reviews, cover):
+    """一条接力 → 可能的一行、可能的一条审查记录；直接改 rows、reviews、cover。"""
+    repo, _, number = str(h.get("pr") or "").partition("#")
+    named = repos.get(repo.lower()) if number.isdigit() else None
+    p = named or project_at(projects, h.get("cwd"))
+    if not p:
+        cover["not_personal"] += 1
+        return
+    name, f = key_of(p), relay_facts(h)
+    pr_id = f"pr:{name}#{number}" if named else None
+    newer = [o for o in items if o is not h and (o.get("createdAt") or 0) > (h.get("createdAt") or 0)
+             and (o.get("claudeSession") == h.get("claudeSession") or (h.get("pr") and o.get("pr") == h.get("pr")))]
+    row, why = relay_row(h, name, f, bool(newer), now)
+    if why:
+        cover[why] += 1
+    if row:
+        row["_refs"] = [pr_id] if pr_id else []
+        row["_session"] = sessions.get(h.get("claudeSession"))
+        rows.append(row)
+    if pr_id and f["verdict"] in VERDICT:
+        reviews.setdefault(pr_id, []).append({"verdict": f["verdict"], "at": at_ms(f["reply"].get("at")), "by": f"驿窗 {f['label']}", "head": h.get("head")})
+    elif pr_id and row and row["state"] == "等外部":
+        reviews.setdefault(pr_id, []).append({"verdict": None, "flying": True, "at": parse_ts(row["evidence_at"]), "by": f"驿窗 {f['label']}", "label": f["label"]})
+
+
+# ---------- 同一件事并成一行 ----------
+
+def merge(rows, since, now):
+    """规格第 7 节。只靠明文：refs 里正好一个开着的 PR 就并过去，session_ref 指到的会话也并；不止一个 PR 的不并、互相记一笔。
+    一行里最多一个 PR：要并的两边各带着不同的 PR（会话记着 #2，它发起的接力写的是 #1），就不并，互相记一笔。
+    并成一行后，各部分自己原来的样子留在 parts 里：下次哪个来源取不到，按 parts 把它那部分带回来。"""
+    for r in rows:
+        if "_refs" in r:
+            r["refs"] = r.pop("_refs")
+        if "_session" in r:
+            r["session_ref"] = r.pop("_session")
+        if not r.get("carried"):
+            r["since"] = since.get(r["id"]) or iso(now)
+    by_id = {r["id"]: r for r in rows}
+    parent = {i: i for i in by_id}
+    pr_of = {i: i if r["source"] == "pr" else None for i, r in by_id.items()}   # 每一组里的那个 PR
+    related = []
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def join(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb and pr_of[ra] and pr_of[rb]:
+            related.append((a, b))
+            return
+        parent[ra] = rb
+        pr_of[rb] = pr_of[rb] or pr_of[ra]
+    for r in rows:
+        prs = [i for i in r.get("refs") or [] if i in by_id and i != r["id"]]
+        if len(prs) == 1:
+            join(r["id"], prs[0])
+        related += [(r["id"], i) for i in prs if len(prs) > 1]
+        if r.get("session_ref") in by_id:
+            join(r["id"], r["session_ref"])
+    groups = {}
+    for r in rows:
+        groups.setdefault(find(r["id"]), []).append(r)
+
+    def need(m):
+        check = parse_ts(m.get("check_at"))
+        ts = check.timestamp() if check else None
+        return (STATES.index(m["state"]), ts is None, (-ts if m["state"] in RECENT_WINS else ts) if ts else 0, PRIMARY.index(m["source"]), m["id"])
+    out, home = [], {}
+    for members in groups.values():
+        members.sort(key=lambda m: (PRIMARY.index(m["source"]), m["id"]))
+        lead, main = min(members, key=need), members[0]
+        row = {**lead, **{k: main.get(k) for k in ("id", "what", "source", "project", "done_when", "refs", "session_ref")}}
+        if len(members) > 1:
+            row.pop("url", None)
+            row.pop("line", None)
+            if main.get("url"):
+                row["url"] = main["url"]
+            row["since"] = min(m["since"] for m in members)
+            row["parts"] = [dict(m) for m in members]
+            row["links"] = [{k: m[k] for k in ("id", "state", "what", "since", "next", "blocked")} for m in members[1:]]
+            same = [m["blocked"] for m in sorted(members, key=need) if m["state"] == lead["state"] and m["blocked"]]
+            row["blocked"] = "；".join(dict.fromkeys(same))   # 同样最需要人的几条各自卡在哪都写上，先到点的在前
+            if any(m.get("carried") for m in members):
+                row.update(carried=True, carried_from=min(m["carried_from"] for m in members if m.get("carried")))
+            else:
+                row.pop("carried", None)
+        for m in members:
+            home[m["id"]] = row
+        out.append(row)
+    for a, b in related:
+        for here, there in ((a, b), (b, a)):
+            if home[here] is not home[there] and all(x["id"] != there for x in home[here]["links"]):
+                home[here]["links"].append({"id": there, "state": by_id[there]["state"], "what": by_id[there]["what"], "related": True})
+    return out
+
+
 # ---------- 记录和事实对不上 ----------
 
 def lookup(hub, repo, numbers):
@@ -559,21 +901,54 @@ def read_ledger(folder=None):
 
 
 def carry(prev, kind, failed, source=None):
-    """这次没取到的项目，把上一份账本里它的东西原样带过来（标 carried、记下原来是哪次取的），不当成事情没了。
-    kind：rows / parked / mismatches；failed：{项目: 原因}；source：只带这一类来源的行。"""
-    return [{**x, "carried": True, "carried_from": x.get("carried_from") or (prev or {}).get("generated_at")}
-            for x in (prev or {}).get(kind, []) if x.get("project") in failed and (source is None or x.get("source") == source)]
+    """这次没取到的，把上一份账本里它的东西原样带过来（标 carried、记下原来是哪次取的），不当成事情没了。
+    kind：rows / parked / mismatches；failed：{项目: 原因}，或 True（整个来源这次取不到）；source：只带这一类来源的行。
+    上一份里并成一行的，按各部分自己原来的样子（parts）带，带过来之后照常重新并行。"""
+    if not failed:
+        return []
+    out = []
+    for x in (prev or {}).get(kind, []):
+        for m in (x.get("parts") or [x]) if kind == "rows" else [x]:
+            if (failed is True or m.get("project") in failed) and (source is None or m.get("source") == source):
+                kept = {k: v for k, v in m.items() if k != "parts"}
+                if kind == "rows":
+                    kept["links"] = []
+                out.append({**kept, "carried": True, "carried_from": m.get("carried_from") or prev.get("generated_at")})
+    return out
+
+
+def guarded(source, *args):
+    """会话、驿窗送审读的是别的项目的文件：里面出什么没料到的错，都只让这一个来源取不到，不拖垮整本账。"""
+    try:
+        return source(*args)
+    except Exception as e:
+        return [], {"failed": f"出错（{type(e).__name__}：{e}）"}, {}
 
 
 def build(now, projects, hub, rules, prev=None, fetch=True):
-    prs, gh_cover = github_source(projects, hub, rules)
+    prev = prev or {}
+    sessions, s_cover, cli = guarded(session_source, projects, now)
+    relays, r_cover, reviews = guarded(relay_source, projects, now, cli)
+    known = not r_cover.get("failed")
+    if not known and "reviews" in prev:   # 送审记录这次没读到：PR 的状态照上一份记下的送审记录判，不说成「没有记录」
+        reviews, known = {k: [{**r, "at": parse_ts(r.get("at"))} for r in v] for k, v in prev["reviews"].items()}, True
+    prs, gh_cover = github_source(projects, hub, rules, reviews, known)
+    open_prs_now, checked = {r["id"] for r in prs}, tuple(f"pr:{name}#" for name in gh_cover["ok"])
+    done = [r for r in relays if any(ref.startswith(checked) and ref not in open_prs_now for ref in r["_refs"])] if checked else []
+    relays = [r for r in relays if r not in done]
+    if "rows" in r_cover:
+        r_cover.update(rows=len(relays), pr_done=len(done))   # 它审的 PR 已经合并或关了：送审这件事不再算没完
     lines, parked, unparsed, candidates, ml_cover = mainline_source(projects, fetch)
     mismatches, unchecked = mismatches_of(candidates, hub)
-    rows = prs + carry(prev, "rows", gh_cover["failed"], "pr") + lines + carry(prev, "rows", ml_cover["failed"], "mainline")
     parked += carry(prev, "parked", ml_cover["failed"])
     mismatches += carry(prev, "mismatches", {**ml_cover["failed"], **unchecked})
-    since = {x["id"]: x.get("since") for kind in ("rows", "parked", "mismatches") for x in (prev or {}).get(kind, [])}
-    for x in rows + parked + mismatches:
+    old_sessions, old_relays = carry(prev, "rows", bool(s_cover.get("failed")), "session"), carry(prev, "rows", bool(r_cover.get("failed")), "relay")
+    s_cover["carried"], r_cover["carried"] = len(old_sessions), len(old_relays)
+    since = {x["id"]: x.get("since") for kind in ("rows", "parked", "mismatches") for x in prev.get(kind, [])}
+    since.update({x["id"]: x["since"] for r in prev.get("rows", []) for x in (r.get("parts") or []) + (r.get("links") or []) if x.get("since")})
+    rows = merge(prs + carry(prev, "rows", gh_cover["failed"], "pr") + sessions + old_sessions + relays + old_relays
+                 + lines + carry(prev, "rows", ml_cover["failed"], "mainline"), since, now)
+    for x in parked + mismatches:
         x["since"] = since.get(x["id"]) or iso(now)
     for r in rows:
         check = parse_ts(r.get("check_at"))
@@ -581,12 +956,14 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
     rows.sort(key=lambda r: (STATES.index(r["state"]), not r["stalled"], r.get("check_at") or "9", r["id"]))
     counts = {s: sum(1 for r in rows if r["state"] == s) for s in STATES}
     counts.update({"停了": sum(1 for r in rows if r["stalled"]), "只计数": len(parked), "对不上": len(mismatches), "未解析": len(unparsed),
+                   "会话没写状态行": (s_cover.get("skipped") or {}).get("没写状态行", 0),
                    "沿用": sum(1 for x in rows + parked + mismatches if x.get("carried"))})
     return {
         "version": VERSION, "generated_at": iso(now), "counts": counts, "rows": rows, "parked": parked,
         "mismatches": mismatches, "unparsed": unparsed,
-        "coverage": {"projects": len(projects), "github": gh_cover, "mainline": ml_cover, "mismatch_unchecked": unchecked,
-                     "rules": None if rules else "合并规则读不了，没判 L0（不用审）"},
+        "reviews": {k: [{**r, "at": iso(r["at"])} for r in v] for k, v in reviews.items()},
+        "coverage": {"projects": len(projects), "github": gh_cover, "mainline": ml_cover, "sessions": s_cover, "relays": r_cover,
+                     "mismatch_unchecked": unchecked, "rules": None if rules else "合并规则读不了，没判 L0（不用审）"},
     }
 
 
@@ -636,6 +1013,12 @@ def gaps(ledger):
         if name in (cov["mainline"].get("failed") or {}):   # 整个没读到的上面已经说了，这里不再说「读的是本机已有的版本」
             continue
         out.append(f"拉取·{name}：{why}（CURRENT 读的是本机已有的版本，可能旧）")
+    for src, label in (("sessions", "会话"), ("relays", "驿窗送审")):
+        if (cov.get(src) or {}).get("failed"):
+            kept = cov[src].get("carried")
+            out.append(f"{label}：{cov[src]['failed']}（" + (f"沿用上一份账本里的 {kept} 条" if kept else "上一份账本里也没有，这一类这次是空的") + "）")
+        elif (cov.get(src) or {}).get("bad"):
+            out.append(f"{label}：有 {cov[src]['bad']} 条的数据不是预想的样子，跳过了")
     for name, why in (cov.get("mismatch_unchecked") or {}).items():
         out.append(f"对不上·{name}：{why}（这个项目的「待合并」没核全，沿用上一份里它的）")
     if cov.get("rules"):
@@ -661,6 +1044,12 @@ def render(ledger, now=None):
                        + (f"｜卡在：{r['blocked']}" if r["blocked"] else "")
                        + (f"｜下次看：{stamp(parse_ts(r['check_at']))}" if r["check_at"] else "｜下次看：不催")
                        + f"｜进账本：{stamp(parse_ts(r['since']))}")
+            together = [f"{x['id']}（{x['state']}" + (f"，下一步：{x['next']}" if x["state"] in STATES[:2] and x.get("next") else "") + "）"
+                        for x in r["links"] if not x.get("related")]
+            nearby = [x["id"] for x in r["links"] if x.get("related")]
+            if together or nearby:
+                out.append("      " + "｜".join(([f"并在这一行：{'、'.join(together)}"] if together else [])
+                                              + ([f"相关、没并：{'、'.join(nearby)}"] if nearby else [])))
     if ledger["mismatches"]:
         out.append(f"\n【记录和事实对不上】{len(ledger['mismatches'])}")
         for m in ledger["mismatches"]:
@@ -674,6 +1063,9 @@ def render(ledger, now=None):
         out.append(f"\n【只计数，不催】{marks}")
         for x in ledger["parked"]:
             out.append(f"  {x['mark']} {x['project']}｜{x['what']}")
+    quiet = ledger["counts"].get("会话没写状态行")
+    if quiet:
+        out.append(f"\n【会话没写状态行】{quiet} 个：最后一次答复没有「当前状态：〔…〕」，判不了状态，只计数")
     old = ledger["coverage"]["mainline"].get("old") or []
     if old:
         out.append("\n【没收的旧主线】" + "；".join(f"{o['project']}「{o['title']}」（{o.get('why', '旧主线')}）" for o in old))
