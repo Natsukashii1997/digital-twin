@@ -291,9 +291,23 @@ def run_as(user, ts, mode="probe", n=None, popen=False):
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd="/")
         p.stdin.write(src)
         p.stdin.close()
+        p.stdin = None   # 脚本已经写完：communicate() 不能再碰这个管道，3.9 会去 flush 已关闭的管道而报错（11-20 真机）
         return p
     r = subprocess.run(cmd, input=src, capture_output=True, timeout=1800, cwd="/")
     return parse_result(r.returncode, r.stdout, r.stderr, len(ts))
+
+
+def collect(procs, n, timeout):
+    """等各账号的进程跑完、收结果；没跑完的（出错、超时、结果不对）记下原因并结束它。"""
+    outs = {}
+    for u, p in procs.items():
+        try:
+            out, err = p.communicate(timeout=timeout)
+            outs[u] = parse_result(p.returncode, out, err, n)
+        except Exception as e:
+            p.kill()
+            outs[u] = e
+    return outs
 
 
 def parse_result(code, out, err, n):
@@ -479,14 +493,7 @@ def stress(seconds, interval=1.0):
             rel = Reloader(interval)
             rel.start()
             procs = {u: run_as(u, ts, "probe-stress", seconds, popen=True) for u in users}
-            outs = {}
-            for u, p in procs.items():
-                try:
-                    out, err = p.communicate(timeout=seconds + 600)
-                    outs[u] = parse_result(p.returncode, out, err, len(ts))
-                except Exception as e:
-                    p.kill()
-                    outs[u] = e
+            outs = collect(procs, len(ts), seconds + 600)
             rel.stop.set()
             rel.join(10)
             own.armed = False

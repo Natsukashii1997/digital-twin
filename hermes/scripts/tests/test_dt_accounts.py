@@ -739,6 +739,29 @@ class Verify(unittest.TestCase):
         self.assertEqual(rows[1]["got"], {"refused": rows[1]["n"]})
         self.assertEqual(rows[1]["opens"], [])
 
+    def test_stress_collects_both_accounts(self):
+        """压力模式起账号进程、收结果这一段，用系统自带的 3.9 真起子进程走一遍（只去掉 sudo）。
+        11-20 真机：先写完脚本关掉输入管道，communicate() 又去 flush 它，两个账号都报「flush of closed file」、立刻被结束。"""
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        cport = closed.getsockname()[1]
+        closed.close()
+        ts = [self.t("127.0.0.1", cport)]
+        real = subprocess.Popen
+
+        def no_sudo(cmd, *a, **kw):
+            self.assertEqual(cmd[:4], ["sudo", "-u", cmd[2], "-H"])
+            return real(cmd[4:], *a, **kw)
+        self.v.subprocess.Popen = no_sudo
+        self.addCleanup(setattr, self.v.subprocess, "Popen", real)
+        procs = {u: self.v.run_as(u, ts, "probe-stress", 1, popen=True) for u in ("dt-worker", "dt-secretary")}
+        outs = self.v.collect(procs, len(ts), 60)
+        for u in procs:
+            self.assertIsInstance(outs[u], list, outs[u])
+            got = outs[u][0]["got"]   # 每秒上万次连关掉的端口，偶尔有一次 error:22，不影响这里要核的
+            self.assertGreater(got.get("refused", 0), 0, got)
+            self.assertEqual(outs[u][0]["opens"], [])
+
     def test_judge_stress(self):
         """账号没跑完、某个靶子一次都没试到，都算不完整；连上的每一次都算漏过，并记离最近一次重新加载差几毫秒。"""
         ts = [self.t("127.0.0.1", 1), self.t("::1", 2)]
