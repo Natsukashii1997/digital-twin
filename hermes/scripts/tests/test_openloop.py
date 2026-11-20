@@ -498,5 +498,366 @@ class RealGhPath(Base):
         self.assertIn("dt", led["coverage"]["github"]["failed"])
 
 
+# ====================== 5a-2：桌面会话、驿窗送审、并行 ======================
+
+def ms(s):
+    return int(ol.parse_ts(s).timestamp() * 1000)
+
+
+def step(kind, at, **kw):
+    return {"at": ms(at), "kind": kind, **kw}
+
+
+def handoff(id_="h1", status="open", phase="working", steps=(), pr_=None, cwd=None, session="cli-1", risk="L3", head=HEAD,
+            halt=None, error=None, rounds=1, title="送审｜改点东西"):
+    """驿窗 handoffs.json 里的一条接力（字段名照 handoffs.rs 的 camelCase）。"""
+    steps = list(steps)
+    last = steps[-1]["at"] if steps else ms("2026-11-20T14:00:00+08:00")
+    h = {"id": id_, "title": title, "claudeSession": session, "cwd": cwd, "chatgptConversation": "c", "status": status,
+         "createdAt": steps[0]["at"] if steps else last, "updatedAt": last, "rounds": rounds, "phase": phase, "phaseAt": last,
+         "steps": steps, "attempt": 0, "auto": True}
+    for k, v in (("pr", pr_), ("risk", risk), ("head", head), ("halt", halt), ("error", error)):
+        if v is not None:
+            h[k] = v
+    return h
+
+
+WORK, ASK = step("work", "2026-11-20T14:10:00+08:00"), step("ask", "2026-11-20T14:10:00+08:00")
+REVISE = step("reply", "2026-11-20T14:40:00+08:00", verdict="revise")
+PASS = step("reply", "2026-11-20T14:40:00+08:00", verdict="pass")
+BACK = step("back", "2026-11-20T14:40:00+08:00", delivery="started", auto=True)
+
+
+def session_row(tag, word="等你决定", title="某个会话", status="要选一版。", next_="回复「选甲」。", at="2026-11-20T06:00:00.000Z", **flags):
+    """decision_inbox.scan() 返回的一行（字段照它的写法）；flags 是 sift() 补的标记。"""
+    sid = f"local_{tag * 8}-0000-4000-8000-000000000001"
+    return {"id": sid, "id8": tag * 8, "title": title, "project": "x", "word": word, "status": status, "next": next_,
+            "statusAt": at, "stoppedDays": 0.1, "busy": False, "userAfter": [], "prs": [], "parent": "", "children": [], **flags}
+
+
+class FakeInbox:
+    """拍板清单脚本的替身：scan 给全部带状态行的会话，sift 只留等常浩的（drop 里的 id8 当作被筛掉）。"""
+    WAITING = ("等你决定", "等你操作", "受阻")
+    META_DIR = PROJECTS_DIR = INBOX_DIR = "/不存在"
+
+    def __init__(self, rows, drop=(), skipped=None):
+        self.rows, self.drop = rows, set(drop)
+        self.skipped = skipped or {"已归档": 2, "太久没动": 3, "找不到记录": 0, "没写状态行": 4, "坏行": 0}
+
+    def scan(self, meta_dir, projects_dir, days, now, only=None):
+        return [dict(r) for r in self.rows], dict(self.skipped)
+
+    def load_ignored(self, inbox_dir):
+        return {}
+
+    def listed_before(self, inbox_dir):
+        return None, set()
+
+    def sift(self, rows, ignored, before, now=None):
+        kept = [r for r in rows if r["word"] in self.WAITING and r["id8"] not in self.drop]
+        for r in kept:
+            for k in ("replyUnanswered", "prDone", "peerAfter", "listedBefore"):
+                r.setdefault(k, False)
+        return kept, {"已交给下游会话": len(self.drop), "你已回复、还在做": 0, "在忽略名单里": 0}
+
+
+class Sources(Base):
+    """会话和接力要用的夹具：名册一个项目 dt（o/dt），会话元数据目录、handoffs.json 都在临时目录。"""
+
+    def setUp(self):
+        super().setUp()
+        self.p = self.project("dt")
+        self.roster(self.p)
+        self.meta = self.root / "meta"
+        self.meta.mkdir()
+        self.handoffs = self.root / "handoffs.json"
+        env = mock.patch.dict(os.environ, {"DT_OPENLOOP_META_DIR": str(self.meta), "DT_POSTPANE_HANDOFFS": str(self.handoffs)})
+        env.start()
+        self.addCleanup(env.stop)
+        self.inbox(FakeInbox([]))
+
+    def inbox(self, fake):
+        p = mock.patch.object(ol, "inbox_module", return_value=fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def meta_of(self, row, cwd=None, prs=(), cli=None, origin=None):
+        m = {"sessionId": row["id"], "title": row["title"], "cwd": cwd or self.p["path"], "originCwd": origin or cwd or self.p["path"],
+             "cliSessionId": cli or f"cli-{row['id8'][0]}", "prs": [{"prNumber": n, "repo": repo, "state": "OPEN"} for repo, n in prs]}
+        (self.meta / f"{row['id']}.json").write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+
+    def relays(self, *items):
+        self.handoffs.write_text(json.dumps(list(items), ensure_ascii=False), encoding="utf-8")
+
+    def rows(self, hub=None, prev=None, now=NOW):
+        led = self.build(hub or Hub(), prev=prev, now=now)
+        return {r["id"]: r for r in led["rows"]}, led
+
+
+class Sessions(Sources):
+    def test_waiting_session_waits_for_owner_until_next_slip(self):
+        a = session_row("a", "等你操作", "周报｜卡片样式", "PR #12 等你批准。", "回复「合并」。")
+        self.meta_of(a)
+        self.inbox(FakeInbox([a]))
+        rows, led = self.rows()
+        r = rows[f"session:{a['id']}"]
+        self.assertEqual((r["state"], r["owner"], r["what"], r["next"], r["project"]), ("等你", "常浩", "周报｜卡片样式", "回复「合并」。", "dt"))
+        self.assertEqual(r["evidence"], "11-20 14:00 会话最后一次答复〔等你操作〕：PR #12 等你批准。")
+        self.assertEqual((r["check_at"], r["stalled"]), ("2026-11-20T21:00:00+08:00", False))
+        self.assertEqual(led["coverage"]["sessions"]["rows"], 1)
+
+    def test_blocked_session_is_stuck(self):
+        a = session_row("a", "受阻", status="缺 sudo 权限。", next_="常浩跑一下 sudo 那条命令。")
+        self.meta_of(a)
+        self.inbox(FakeInbox([a]))
+        r = self.rows()[0][f"session:{a['id']}"]
+        self.assertEqual((r["state"], r["owner"], r["blocked"], r["next"]), ("卡住", "未知", "缺 sudo 权限。", "常浩跑一下 sudo 那条命令。"))
+
+    def test_background_session_uses_its_own_estimate_or_two_hours(self):
+        a = session_row("a", "后台进行中", "全量测试", "全量测试在跑，约 40 分钟后出结果。")
+        b = session_row("b", "后台进行中", "安装", "后台会话在装。", at="2026-11-20T05:00:00.000Z")
+        for x in (a, b):
+            self.meta_of(x)
+        self.inbox(FakeInbox([a, b]))
+        rows, _ = self.rows()
+        ra, rb = rows[f"session:{a['id']}"], rows[f"session:{b['id']}"]
+        self.assertEqual((ra["state"], ra["owner"], ra["check_at"], ra["stalled"]), ("在做", "会话「全量测试」", "2026-11-20T14:40:00+08:00", True))
+        self.assertEqual((rb["check_at"], rb["stalled"]), ("2026-11-20T15:00:00+08:00", True))   # 13:00 + 2 小时，16:00 已过
+
+    def test_reply_nobody_picked_up_is_stuck(self):
+        a = session_row("a", replyUnanswered=True, userAfter=[{"at": "2026-11-20T05:30:00.000Z", "text": "选甲", "peer": False}])
+        self.meta_of(a)
+        self.inbox(FakeInbox([a]))
+        r = self.rows()[0][f"session:{a['id']}"]
+        self.assertEqual((r["state"], r["owner"]), ("卡住", "未知"))
+        self.assertIn("常浩回过话", r["blocked"])
+        self.assertEqual(r["evidence"], "11-20 13:30 常浩回过话，会话之后没有新状态")
+
+    def test_only_roster_projects_and_worktrees_count(self):
+        a, b, c = session_row("a"), session_row("b"), session_row("c", "已结束")
+        self.meta_of(a, cwd=str(self.root / "scratch-workspaces" / "x"))
+        self.meta_of(b, cwd=self.p["path"] + "/.claude/worktrees/273-x", origin=self.p["path"])
+        self.meta_of(c)
+        self.inbox(FakeInbox([a, b, c], drop=()))
+        rows, led = self.rows()
+        self.assertEqual(sorted(rows), [f"session:{b['id']}"])
+        cov = led["coverage"]["sessions"]
+        self.assertEqual((cov["not_personal"], cov["rows"], cov["skipped"]["没写状态行"], cov["dropped"]["已交给下游会话"]), (1, 1, 4, 0))
+
+    def test_missing_script_is_reported_and_previous_rows_are_kept(self):
+        a = session_row("a")
+        self.meta_of(a)
+        self.inbox(FakeInbox([a]))
+        _, first = self.rows()
+        with mock.patch.object(ol, "inbox_module", side_effect=ol.Fail("找不到拍板清单脚本")):
+            rows, led = self.rows(prev=first, now=NOW + dt.timedelta(minutes=5))
+        self.assertTrue(rows[f"session:{a['id']}"]["carried"])
+        self.assertEqual(led["coverage"]["sessions"]["failed"], "找不到拍板清单脚本")
+        self.assertIn("会话：找不到拍板清单脚本", "\n".join(ol.gaps(led)))
+
+
+REAL_INBOX = _isolation.REAL_HOME / "Documents/ChatGPT/个人/work/my-skills/skills/decision-inbox/scripts/decision_inbox.py"
+
+
+@unittest.skipUnless(REAL_INBOX.exists(), "本机没有拍板清单脚本（CI 上没有 my-skills），跳过对真脚本的核对")
+class RealInbox(Base):
+    """对着真的拍板清单脚本跑一遍：它的 scan / sift 返回的字段变了，这里先红。"""
+
+    def test_real_scan_and_sift_feed_the_ledger(self):
+        p = self.project("dt")
+        self.roster(p)
+        meta, logs = self.root / "meta", self.root / "projects" / "-x"
+        meta.mkdir()
+        logs.mkdir(parents=True)
+
+        def session(tag, text, at, extra=()):
+            sid, cli = f"local_{tag * 8}-0000-4000-8000-000000000001", f"cli-{tag}"
+            (meta / f"{sid}.json").write_text(json.dumps({"sessionId": sid, "title": f"会话{tag}", "cwd": p["path"], "cliSessionId": cli,
+                                                           "isArchived": False, "prs": []}), encoding="utf-8")
+            lines = [{"type": "assistant", "timestamp": at, "message": {"content": [{"type": "text", "text": text}]}}, *extra]
+            (logs / f"{cli}.jsonl").write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in lines), encoding="utf-8")
+            return f"session:{sid}"
+        wait = session("a", "做完了。\n\n**当前状态**：〔等你决定〕要选一版。\n**下一步**：回复「选甲」。", "2026-11-20T06:00:00.000Z")
+        busy = session("b", "**当前状态**：〔后台进行中〕测试在跑，约 30 分钟。\n**下一步**：等结果。", "2026-11-20T07:00:00.000Z")
+        session("c", "**当前状态**：〔已结束〕都好了。\n**下一步**：本任务已结束。", "2026-11-20T07:00:00.000Z")
+        env = {"DT_DECISION_INBOX": str(REAL_INBOX), "DT_OPENLOOP_META_DIR": str(meta), "DT_OPENLOOP_LOGS_DIR": str(self.root / "projects"),
+               "DT_OPENLOOP_INBOX_DIR": str(self.root / "inbox"), "DT_POSTPANE_HANDOFFS": str(self.root / "没有.json")}
+        with mock.patch.dict(os.environ, env):
+            led = self.build(Hub())
+        rows = {r["id"]: r for r in led["rows"]}
+        self.assertEqual(sorted(rows), sorted([wait, busy]))
+        self.assertEqual((rows[wait]["state"], rows[wait]["next"]), ("等你", "回复「选甲」。"))
+        self.assertEqual((rows[busy]["state"], rows[busy]["check_at"]), ("在做", "2026-11-20T15:30:00+08:00"))
+
+
+class Relays(Sources):
+    def h(self, id_="h1", **kw):
+        """接力默认在项目目录里发起、没记 PR；要并到 PR 的用例自己写 pr_。"""
+        kw.setdefault("cwd", self.p["path"])
+        return handoff(id_, **kw)
+
+    def relay_row(self, *items, hub=None):
+        self.relays(*items)
+        rows, led = self.rows(hub)
+        return rows.get(f"relay:{items[0]['id']}"), rows, led
+
+    def test_sent_and_waiting_is_external(self):
+        r, _, _ = self.relay_row(self.h(steps=[WORK, ASK], rounds=2))
+        self.assertEqual((r["state"], r["owner"], r["next"], r["project"]), ("等外部", "ChatGPT", "等 L3 第 2 轮回信", "dt"))
+        self.assertEqual(r["evidence"], "11-20 14:10 已送 ChatGPT 审查，对方在看")
+        self.assertEqual(r["check_at"], "2026-11-20T16:10:00+08:00")
+
+    def test_reply_not_returned_is_stuck_after_thirty_minutes(self):
+        expired = step("back", "2026-11-20T14:40:00+08:00", delivery="expired")
+        for steps, phase in (([WORK, ASK, REVISE], "replied"), ([WORK, ASK, REVISE, expired], "replied"),
+                             ([WORK, ASK, REVISE, step("back", "2026-11-20T14:41:00+08:00", delivery="waiting")], "returned")):
+            r, _, _ = self.relay_row(self.h(steps=steps, phase=phase))
+            self.assertEqual((r["state"], r["check_at"], r["stalled"]), ("卡住", "2026-11-20T15:10:00+08:00", True), steps[-1])
+            self.assertIn("回信没送回会话", r["blocked"])
+            self.assertIn("需修改", r["next"])
+
+    def test_failed_handoff_is_stuck(self):
+        r, _, _ = self.relay_row(self.h(status="failed", phase="failed", error="ChatGPT 插件没能完成：timeout",
+                                        steps=[WORK, step("fail", "2026-11-20T14:11:00+08:00")]))
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "送审失败：ChatGPT 插件没能完成：timeout"))
+
+    def test_halt_hands_it_back_and_counts_as_stuck(self):
+        stop = step("stop", "2026-11-20T15:10:00+08:00", auto=True)
+        r, _, _ = self.relay_row(self.h(steps=[WORK, ASK, stop], halt="ChatGPT 30 分钟没回信，自动往返停下，交还常浩"))
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "ChatGPT 30 分钟没回信，自动往返停下，交还常浩"))
+        self.assertEqual(r["evidence"], "11-20 15:10 驿窗自动往返停下")
+
+    def test_returned_revise_makes_the_pr_stuck_and_merges_into_it(self):
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        relay, rows, _ = self.relay_row(self.h(steps=[WORK, ASK, REVISE, BACK], pr_="O/dt#1"), hub=hub)
+        self.assertIsNone(relay)                                   # 并进 PR 那一行了
+        r = rows["pr:dt#1"]
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "审查要求修改（驿窗 L3 第 1 轮）"))
+        self.assertEqual(r["check_at"], "2026-11-20T18:40:00+08:00")
+        self.assertEqual([(x["id"], x["state"]) for x in r["links"]], [("relay:h1", "在做")])
+
+    def test_review_of_an_older_head_leaves_the_pr_unverified(self):
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        _, rows, _ = self.relay_row(self.h(steps=[WORK, ASK, REVISE, BACK], head=OLD, pr_="O/dt#1"), hub=hub)
+        self.assertEqual(rows["pr:dt#1"]["state"], "待验证")
+        self.assertIn("上一次审的是旧版本（驿窗 L3 第 1 轮）", rows["pr:dt#1"]["evidence"])
+
+    def test_closed_pass_on_head_means_reviewed(self):
+        end = step("end", "2026-11-20T14:41:00+08:00", auto=True)
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        relay, rows, _ = self.relay_row(self.h(status="closed", phase="ended", steps=[WORK, ASK, PASS, BACK, end], pr_="O/dt#1"), hub=hub)
+        self.assertIsNone(relay)
+        self.assertEqual((rows["pr:dt#1"]["state"], rows["pr:dt#1"]["links"]), ("等你", []))
+        self.assertIn("驿窗 L3 第 1 轮通过", rows["pr:dt#1"]["evidence"])
+
+    def test_review_in_flight_makes_the_pr_external(self):
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        _, rows, _ = self.relay_row(self.h(steps=[WORK, ASK], pr_="O/dt#1"), hub=hub)
+        r = rows["pr:dt#1"]
+        self.assertEqual((r["state"], r["owner"], r["next"]), ("等外部", "ChatGPT", "等 L3 第 1 轮回信"))
+
+    def test_closed_handoffs_only_count_when_the_reply_never_got_back(self):
+        auto_end = step("end", "2026-11-20T14:41:00+08:00", auto=True, text="结论：通过，回信没能转回 Claude，请告诉它审查结论，自动结束接力")
+        by_person = step("end", "2026-11-20T14:41:00+08:00")
+        lost = handoff("h1", status="closed", phase="ended", steps=[WORK, ASK, PASS, step("fail", "2026-11-20T14:40:00+08:00"), auto_end], pr_=None, cwd=self.p["path"])
+        r, _, _ = self.relay_row(lost)
+        self.assertEqual(r["state"], "卡住")
+        self.assertIn("通过", r["next"])
+        self.assertIsNone(self.relay_row(handoff("h1", status="closed", phase="ended", steps=[WORK, ASK, PASS, by_person], pr_=None, cwd=self.p["path"]))[0])
+        newer = handoff("h2", status="closed", phase="ended", steps=[step("work", "2026-11-20T15:00:00+08:00"), step("ask", "2026-11-20T15:00:00+08:00"),
+                        step("reply", "2026-11-20T15:20:00+08:00", verdict="pass"), step("back", "2026-11-20T15:20:00+08:00", delivery="started"),
+                        step("end", "2026-11-20T15:20:00+08:00", auto=True)], pr_=None, cwd=self.p["path"])
+        self.assertIsNone(self.relay_row(lost, newer)[0])            # 同一个会话后来又送了一次：旧的不算
+        old = handoff("h1", status="closed", phase="ended", pr_=None, cwd=self.p["path"], steps=[
+            step("work", "2026-11-10T10:00:00+08:00"), step("ask", "2026-11-10T10:00:00+08:00"),
+            step("reply", "2026-11-10T10:30:00+08:00", verdict="pass"), step("end", "2026-11-18T23:04:00+08:00", auto=True)])
+        r, _, led = self.relay_row(old)
+        self.assertIsNone(r)                                         # 回信是 10 天前的；驿窗两天前才自动收尾也不算新
+        self.assertEqual(led["coverage"]["relays"]["too_old"], 1)
+
+    def test_relay_of_a_pr_that_is_no_longer_open_is_done(self):
+        lost = self.h(steps=[WORK, ASK, REVISE], phase="replied", pr_="O/dt#9")
+        r, _, led = self.relay_row(lost, hub=Hub(prs={"o/dt": [pr(1, checks=[run("test")])]}))
+        self.assertIsNone(r)
+        self.assertEqual((led["coverage"]["relays"]["pr_done"], led["coverage"]["relays"]["rows"]), (1, 0))
+        r, _, led = self.relay_row(lost, hub=Hub(down={"o/dt"}))     # GitHub 没取到：不知道 PR 还开不开，照收
+        self.assertEqual(r["state"], "卡住")
+
+    def test_only_roster_projects_count(self):
+        r, _, led = self.relay_row(handoff(steps=[WORK, ASK], pr_="someone/else#3", cwd="/Users/x/scratch"))
+        self.assertIsNone(r)
+        self.assertEqual(led["coverage"]["relays"]["not_personal"], 1)
+
+    def test_missing_or_broken_file(self):
+        _, led = self.rows()
+        self.assertEqual(led["coverage"]["relays"]["missing"], True)
+        self.assertNotIn("驿窗送审", "\n".join(ol.gaps(led)))        # 没装驿窗不算出错
+        self.relays(self.h(steps=[WORK, ASK]))
+        _, first = self.rows()
+        self.handoffs.write_text("{坏的", encoding="utf-8")
+        rows, led = self.rows(prev=first)
+        self.assertTrue(rows["relay:h1"]["carried"])
+        self.assertIn("驿窗送审：", "\n".join(ol.gaps(led)))
+
+
+class Merge(Sources):
+    def test_mainline_item_naming_one_open_pr_joins_it(self):
+        text = "## 主线：底座（#188）｜完成 0/2\n- ❓ 0D 恢复门：PR #1 等常浩看\n- ▶ 批 2：PR #1、#2 都在做\n"
+        commit_current(Path(self.p["path"]), text, "2026-11-20 09:00:00 +0800")
+        hub = Hub(prs={"o/dt": [pr(1, "恢复门", checks=[run("test")]), pr(2, "派活", draft=True, checks=[run("test")])]})
+        rows, led = self.rows(hub)
+        self.assertEqual(sorted(rows), ["mainline:dt/#188/批2", "pr:dt#1", "pr:dt#2"])
+        one = rows["pr:dt#1"]
+        self.assertEqual((one["state"], one["owner"], one["what"]), ("等你", "常浩", "恢复门"))   # PR 是待验证，主线项是等你：取更需要人的
+        self.assertEqual(one["next"], "常浩定：PR #1 等常浩看")
+        self.assertEqual([(x["id"], x["state"]) for x in one["links"]], [("mainline:dt/#188/0D恢复门", "等你"), ("mainline:dt/#188/批2", "在做")])
+        self.assertTrue(one["links"][1]["related"])                 # 提到两个 PR 的那一项没并进来，只是互相记一笔
+        self.assertEqual([(x["id"], x.get("related")) for x in rows["mainline:dt/#188/批2"]["links"]], [("pr:dt#1", True), ("pr:dt#2", True)])
+        self.assertEqual(led["counts"]["等你"], 1)
+
+    def test_session_relay_mainline_and_pr_become_one_row(self):
+        text = "## 主线：底座（#188）｜完成 0/1\n- ▶ 0D 恢复门：PR #1 在审\n"
+        commit_current(Path(self.p["path"]), text, "2026-11-20 09:00:00 +0800")
+        a = session_row("a", "后台进行中", "0D 恢复门", "送审中，约 30 分钟。")
+        self.meta_of(a, prs=[("o/dt", 1)], cli="cli-1")
+        self.inbox(FakeInbox([a]))
+        self.relays(handoff(steps=[WORK, ASK, REVISE], pr_="O/dt#1"))        # 回信没送回会话
+        rows, led = self.rows(Hub(prs={"o/dt": [pr(1, "恢复门", checks=[run("test")])]}))
+        self.assertEqual(list(rows), ["pr:dt#1"])
+        r = rows["pr:dt#1"]
+        self.assertEqual(r["state"], "卡住")
+        self.assertEqual(r["blocked"], "回信没送回会话；审查要求修改（驿窗 L3 第 1 轮）")   # 两条都是卡住：都写上，先到点的在前
+        self.assertEqual(r["check_at"], "2026-11-20T15:10:00+08:00")
+        relay = next(x for x in r["links"] if x["id"] == "relay:h1")
+        self.assertIn("需修改", relay["next"])                                # 并进来的那条自己的下一步还查得到
+        self.assertIn("relay:h1（卡住，下一步：把「需修改」的回信转给发起的会话", ol.render(led, now=NOW))
+        self.assertEqual(sorted(x["id"] for x in r["links"]), ["mainline:dt/#188/0D恢复门", "relay:h1", f"session:{a['id']}"])
+        self.assertEqual(len(led["rows"]), 1)
+
+    def test_relay_without_pr_joins_its_session(self):
+        a = session_row("a", "等你决定", "思维评审")
+        self.meta_of(a, cli="cli-9")
+        self.inbox(FakeInbox([a]))
+        self.relays(handoff(steps=[WORK, ASK], pr_=None, cwd=self.p["path"], session="cli-9", risk=None))
+        rows, _ = self.rows()
+        self.assertEqual(list(rows), [f"session:{a['id']}"])
+        self.assertEqual([x["id"] for x in rows[f"session:{a['id']}"]["links"]], ["relay:h1"])
+        self.assertEqual(rows[f"session:{a['id']}"]["state"], "等你")
+
+    def test_since_is_the_earliest_of_the_merged_parts(self):
+        hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
+        _, first = self.rows(hub)                                   # 16:00：只有 PR
+        self.assertEqual([r["id"] for r in first["rows"]], ["pr:dt#1"])
+        a = session_row("a", "等你操作", "0D")
+        self.meta_of(a, prs=[("o/dt", 1)])
+        self.inbox(FakeInbox([a]))                                   # 17:00：记着这个 PR 的会话才出现
+        rows, second = self.rows(hub, prev=first, now=NOW + dt.timedelta(hours=1))
+        self.assertEqual(list(rows), ["pr:dt#1"])
+        self.assertEqual(rows["pr:dt#1"]["since"], "2026-11-20T16:00:00+08:00")              # 整行按最早进账本的那部分算
+        self.assertEqual(rows["pr:dt#1"]["links"][0]["since"], "2026-11-20T17:00:00+08:00")  # 会话自己是 17:00 才进来的
+        rows, _ = self.rows(hub, prev=second, now=NOW + dt.timedelta(hours=2))
+        self.assertEqual(rows["pr:dt#1"]["links"][0]["since"], "2026-11-20T17:00:00+08:00")  # 并进去的部分下次还记得自己的时间
+
+
 if __name__ == "__main__":
     unittest.main()
