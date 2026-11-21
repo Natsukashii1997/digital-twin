@@ -24,7 +24,7 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
      （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩 secretary_gate settle 定）——
      例外（常浩 11-20 选甲）：② 重派 / ③ 返修只差网关补发派单事件的不挡（补发要过闸，挡了就是死循环；中台按 id 去重，
      补发不会多派）；
-  5. 结算开闸：先持凭证库写锁（重判秘书只差网关补发，冻结、撤销进不来）、再持出口账本写锁，再看一遍——对账期间又出现结果不明、还有已开始没记结果的受保护动作（出口账本 executing、
+  5. 结算开闸：先持凭证库写锁、再持出口账本写锁，两把都拿到后重判秘书只差网关补发（冻结、撤销进不来），再看一遍——对账期间又出现结果不明、还有已开始没记结果的受保护动作（出口账本 executing、
      本人回答 inflight、秘书代批 executing，第 5 步在凭证库锁里重判只差网关补发的秘书 ② / ③ 除外，L3 第 5 轮 P1-08）就不开。
      都过了才记下纪元和报告。仍冻结的范围（结果不明、核不清）
      各自继续拒绝，别的照常放行。
@@ -266,6 +266,7 @@ def hold(point_id, snapshot, hub_commit, max_card):
 
 SECRETARY_STALE = dt.timedelta(seconds=120)   # 同 secretary_gate.STALE
 EXPIRY_MARGIN = dt.timedelta(seconds=60)      # 凭证再过这么久就到期的续接事件，不算「只差网关补发」（续审第 2 轮 P1-08）
+RO_TIMEOUT = 3                                # 卡片库、状态库只读最多等几秒：第 5 步持着出口账本写锁读，读不了就不开闸（续审第 2 轮预审 P2）
 
 
 def in_flight_writes():
@@ -303,7 +304,7 @@ def _owner_inflight():
     if not f.exists():
         return []
     try:
-        con = sqlite3.connect(f"file:{f}?mode=ro", uri=True, timeout=10)
+        con = sqlite3.connect(f"file:{f}?mode=ro", uri=True, timeout=RO_TIMEOUT)
         try:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claims'").fetchone():
                 return []
@@ -335,7 +336,7 @@ def _secretary_sending(fresh_only=True):
     if not p.exists():
         return []
     try:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=10)
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=RO_TIMEOUT)
         try:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secretary_decisions'").fetchone():
                 return []
@@ -440,7 +441,7 @@ def _secretary(waits=None, gcon=None):
     if not p.exists():
         return None, "还没有状态库，跳过"
     try:
-        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=10)
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=RO_TIMEOUT)
         try:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secretary_decisions'").fetchone():
                 return None, "还没有秘书账本，跳过"
@@ -473,7 +474,8 @@ def _waits_on_gateway(r, gcon=None):
     的代次已失效（冻结、撤销、过期）的补发不了，也不算（第 4 轮）。找不到、对不上、已作废或已送达的照常挡闸，
     由秘书对账结掉（核不清的由常浩 secretary_gate settle 定）。刚领走在发的（sent=2、领走不到 60 秒，同 G.STALE）还不是
     「只差补发」，是一次正在进行的发送：照常挡闸，等它出结果或过了 60 秒再算（续审第 1 轮）。凭证有效期按「此刻 + 60 秒」
-    判（EXPIRY_MARGIN）：快到期的不靠「开闸后补发」放过——判完到开闸提交之间、开闸后网关领取之前，时间都还在走（续审第 2 轮）。"""
+    判（EXPIRY_MARGIN）：判完到开闸提交之间时间还在走，快到期的不靠「开闸后补发」放过（续审第 2 轮）。开闸之后才到期的
+    不在这里管：那时事件补发不了，秘书对账按 sent 结掉（② 没领走记没做成，其余记核不清等常浩 settle），闸不会因此重新关上。"""
     did, status, action, task_id, outcome, target = r
     if action not in ("redispatch", "reject") or status not in ("executing", "unknown") or not G.db_path().exists():
         return False
