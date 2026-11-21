@@ -22,6 +22,7 @@ UDP 的规则不分端口（一律挡），所以用 root 自己的 UDP 回声�
 判定前先核对：root 自己的靶子 root 都连得上、每个账号都跑完、结果条数对、每个靶子都试到过、重新加载没出错、测试后规则仍完好；
 有一项不满足就是退出码 2，不会报「都挡住了」。
 """
+import errno
 import json
 import os
 import socket
@@ -46,6 +47,14 @@ ON_OPEN = None      # 压力模式里账号这边一连上就调它（往标准�
 GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dt_root_guard.sh")
 ECHO = b"dt-verify"
 DNS_Q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x06feishu\x02cn\x00" + b"\x00\x01\x00\x01"
+
+
+RELOAD_TIMEOUT = 10  # 一次强制重新加载超过这么久没完，算出错（L3 第 4 轮 P2-06）
+SERVE_SECONDS = 600  # 入站测试里账号开着监听的上限（root 连完就结束它；提前自己退了算测试不完整）
+
+
+class Incomplete(Exception):
+    """测试本身做不完整（枚举本机监听、网卡出错等）：退出码 2，不会当成「全部符合」（L3 第 4 轮 P2-08）。"""
 
 
 def reached(got):
@@ -160,6 +169,7 @@ class Targets:
 
     def __init__(self, addrs, on_hit=None):
         self.socks, self.hits, self.armed, self.on_hit = [], [], False, on_hit
+        self.bind_errors, self.vanished = [], []   # 开不了靶子的地址：地址已经不在本机（vanished）只记下，别的错算测试不完整
         self.stop = threading.Event()
         self.lock = threading.Lock()
         for a in addrs:
@@ -169,8 +179,11 @@ class Targets:
                     s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
                 try:
                     s.bind((a, 0))
-                except OSError:          # 地址刚消失（网卡切换）：这个地址不开靶子，报告里少一项
+                except OSError as e:
                     s.close()
+                    # 只有「这个地址不在本机了」（网卡刚切换）才跳过，记进报告；别的错不知道为什么开不了，算不完整
+                    (self.vanished if e.errno == errno.EADDRNOTAVAIL else self.bind_errors).append(
+                        {"kind": kind, "host": a, "error": f"{e.errno}:{e.strerror}"})
                     continue
                 if kind == "tcp":
                     s.listen(128)
@@ -221,6 +234,8 @@ class Targets:
 def listening():
     """本机正在监听的 TCP（地址, 端口），地址 * 表示所有网卡。"""
     r = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "n"], capture_output=True, text=True)
+    if r.returncode != 0:   # 出错时不知道漏了哪些监听，不能当成「本机没有监听」（L3 第 4 轮 P2-08）
+        raise Incomplete(f"lsof 列不出本机监听（退出码 {r.returncode}）：{r.stderr.strip()[:200]}")
     socks = set()
     for line in r.stdout.splitlines():
         if not line.startswith("n"):
@@ -234,6 +249,8 @@ def listening():
 def local_addrs():
     """本机各网卡上的非回环地址（局域网、utun 等），IPv6 链路本地地址带不了网卡名，跳过。"""
     r = subprocess.run(["ifconfig"], capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise Incomplete(f"ifconfig 列不出本机地址（退出码 {r.returncode}）：{r.stderr.strip()[:200]}")
     addrs = []
     for line in r.stdout.splitlines():
         parts = line.split()
@@ -295,9 +312,9 @@ def targets(own):
             [{"kind": "proxy", "what": "经过滤代理 8090 上网", "host": "api.github.com", "port": 443}])
 
 
-def run_as(user, ts, mode="probe", n=None, popen=False):
+def run_as(user, ts, mode="probe", n=None, popen=False, extra=None):
     src = open(__file__, "rb").read()
-    extra = [str(n)] if n else []
+    extra = ([str(n)] if n else []) + (extra or [])
     # 在 /（所有人可进）里起进程，不受当前目录权限影响
     cmd = ["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", mode, json.dumps(ts)] + extra
     if popen:
@@ -451,6 +468,158 @@ def control_problems(report, ts, ctrl):
     return 0
 
 
+# ---------- 入站（L3 第 4 轮 P1-05）：账号开监听，别人连不上 ----------
+
+def serve_listen(hosts, ports, seconds):
+    """以账号身份跑的那一半：在每个地址上开 TCP、UDP 监听（端口 0），另在 127.0.0.1 上试着占 ports 里的端口（冒充另一个账号
+    准连的服务），第一行打印开了哪些（JSON），之后谁连进来就往标准错误报一行「HIT 协议 地址 端口」，最多 seconds 秒。"""
+    socks, out = [], []
+    plan = [(k, h, 0) for h in hosts for k in ("tcp", "udp")] + [(k, "127.0.0.1", p) for p in ports for k in ("tcp", "udp")]
+    for kind, host, port in plan:
+        s = socket.socket(family(host), socket.SOCK_STREAM if kind == "tcp" else socket.SOCK_DGRAM)
+        if family(host) == socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        try:
+            s.bind((host, port))
+        except OSError as e:
+            s.close()
+            out.append({"kind": kind, "host": host, "port": port, "error": f"{e.errno}"})
+            continue
+        if kind == "tcp":
+            s.listen(16)
+        s.setblocking(False)
+        socks.append((kind, host, s))
+        out.append({"kind": kind, "host": host, "port": s.getsockname()[1], "takeover": bool(port)})
+    print(json.dumps(out), flush=True)
+    end = time.time() + seconds
+    import select
+    while time.time() < end and socks:
+        ready, _, _ = select.select([s for *_, s in socks], [], [], 0.2)
+        for kind, host, s in socks:
+            if s not in ready:
+                continue
+            try:
+                if kind == "tcp":
+                    c, _ = s.accept()
+                    c.close()
+                else:
+                    data, peer = s.recvfrom(512)
+                    s.sendto(data, peer)
+            except OSError:
+                continue
+            sys.stderr.write(f"HIT {kind} {host} {s.getsockname()[1]}\n")
+            sys.stderr.flush()
+    return 0
+
+
+def inbound_targets(listeners):
+    return [{"kind": l["kind"], "what": "账号自己开的监听" + ("（占另一个账号准连的端口）" if l.get("takeover") else ""),
+             "host": l["host"], "port": l["port"], "takeover": l.get("takeover", False)}
+            for l in listeners if "error" not in l]
+
+
+def inbound_judge(server, ts, probers, hits):
+    """probers：{连的人: 结果列表}。受管账号开的监听谁都不该连上、也不该收到任何东西；dt-gate 开的 root 必须连得上
+    （对照：证明这套办法本身连得通）。返回（0 / 1 / 2, 明细）。"""
+    rows, worst = [], 0
+    for who, got in probers.items():
+        if not isinstance(got, list) or len(got) != len(ts):
+            rows.append({"by": who, "error": str(got)[:300]})
+            worst = max(worst, 2)
+            continue
+        for t, g in zip(ts, got):
+            if g == "没试":
+                continue
+            if server in CONTROL_ACCOUNTS:
+                v = "对照" if reached(g) else "对照连不上"
+            else:
+                v = "没挡住" if reached(g) else "符合"
+            rows.append({**t, "by": who, "got": g, "verdict": v})
+            if v == "没挡住":
+                worst = 1
+            elif v == "对照连不上":
+                worst = max(worst, 2)
+    if server not in CONTROL_ACCOUNTS and hits:
+        worst = 1
+    return worst, rows
+
+
+def inbound():
+    """L3 第 4 轮 P1-05：两个受管账号不能对外提供服务。每个账号各开一组监听（各本机地址上的 TCP、UDP，另试占另一个受管账号
+    准连的端口），root、dt-gate 去连，被占端口再由另一个受管账号去连（它准连这些端口，正是冒充的场景）：全都要连不上、
+    监听那边一次也没收到；dt-gate 开的监听 root 要连得上（对照）。返回（0 / 1 / 2, 记录）。"""
+    hosts = own_addrs()
+    managed = [u for u in ALLOWED if account_exists(u)]
+    report, worst = {}, 0
+    if not account_exists("dt-gate"):
+        print("== 入站：没有 dt-gate 账号，没有对照，测试不完整")
+        return 2, {"error": "没有对照账号"}
+    for server in managed + ["dt-gate"]:
+        others = [u for u in managed if u != server]
+        ports = sorted(set().union(*(ALLOWED[u] for u in others)) - ALLOWED.get(server, set())) if server in ALLOWED else []
+        p = run_as(server, hosts, "serve", SERVE_SECONDS, popen=True, extra=[json.dumps(ports)])
+        hits, errs = [], []
+
+        def drain(p=p, hits=hits, errs=errs):
+            for raw in p.stderr:
+                line = raw.decode(errors="replace").rstrip("\n")
+                (hits if line.startswith("HIT ") else errs).append(line)
+        th = threading.Thread(target=drain, daemon=True)
+        th.start()
+        try:
+            first = p.stdout.readline()
+            listeners = json.loads(first) if first.strip() else None
+        except ValueError:
+            listeners = None
+        if not isinstance(listeners, list):
+            p.kill()
+            p.wait()
+            th.join(5)
+            print(f"== 入站 {server}：监听没开起来：{' '.join(errs[-3:])[:300]}")
+            report[server] = {"error": "监听没开起来"}
+            worst = max(worst, 2)
+            continue
+        ts = inbound_targets(listeners)
+        failed = [l for l in listeners if "error" in l and not l["port"]]
+        probers = {"root": probe(ts)}
+        try:
+            probers["dt-gate"] = run_as("dt-gate", ts) if server != "dt-gate" else None
+        except Exception as e:
+            probers["dt-gate"] = e
+        if probers["dt-gate"] is None:
+            del probers["dt-gate"]
+        take = [t for t in ts if t["takeover"]]
+        for u in others:
+            try:
+                got = run_as(u, take) if take else []
+            except Exception as e:
+                got = e
+            if isinstance(got, list):   # 只连被占的端口：结果按全部靶子对齐，没连的记「没试」
+                it = iter(got)
+                got = [next(it) if t["takeover"] else "没试" for t in ts]
+            probers[u] = got
+        time.sleep(0.5)                  # 最后一个包到了再收
+        early = p.poll() is not None     # 监听提前没了：后面的「连不上」可能只是没人在听，不能算挡住
+        p.kill()
+        p.wait()
+        th.join(5)
+        w, rows = inbound_judge(server, ts, probers, hits)
+        if failed or early:               # 端口 0 都开不了（这个地址没测到），或监听中途退了
+            print(f"== 入站 {server}：测试不完整：" + ("监听中途退了；" if early else "") + (f"有地址开不了监听：{failed[:3]}" if failed else ""))
+            w = max(w, 2) if w != 1 else 1
+        report[server] = {"listeners": listeners, "rows": rows, "hits": hits}
+        print(f"== 入站：{server} 开的监听" + ("（对照）" if server == "dt-gate" else ""))
+        for r in rows:
+            if "error" in r:
+                print(f"  [没跑完] {r['by']}：{r['error']}")
+            else:
+                print(f"  [{r['verdict']}] {r['by']} → {r['kind']} {r['host']}:{r['port']}{'（占端口）' if r['takeover'] else ''} → {r['got']}")
+        if hits and server != "dt-gate":
+            print(f"  [没挡住] {server} 的监听收到了 {len(hits)} 次：{hits[:3]}")
+        worst = 1 if 1 in (worst, w) else max(worst, w)
+    return worst, report
+
+
 def verify():
     own = Targets(own_addrs())
     try:
@@ -489,6 +658,15 @@ def verify():
                     worst = 2
             report["accounts"][u] = rows
         worst = max(worst, control_problems(report, ts, ctrl)) if worst != 1 else 1
+        report.update(own_bind_errors=own.bind_errors, own_vanished=own.vanished)
+        if own.bind_errors:
+            print("== 测试不完整：有地址开不了 root 自己的靶子：" +
+                  "、".join(f"{b['kind']} {b['host']}（{b['error']}）" for b in own.bind_errors[:5]))
+            worst = worst or 2
+        if own.vanished:
+            print("== 这些地址测试时已不在本机，没开靶子：" + "、".join(b["host"] for b in own.vanished[:5]))
+        w, report["inbound"] = inbound()
+        worst = 1 if 1 in (worst, w) else max(worst, w)
         report["hits_on_own_targets"] = own.hits
     finally:
         own.close()
@@ -499,19 +677,44 @@ def verify():
 
 
 class Reloader(threading.Thread):
-    """每 interval 秒强制重新加载一次门卫规则（同一份规则文件），记下每次的起止时间。"""
+    """每 interval 秒强制重新加载一次门卫规则（同一份规则文件），记下每次的起止时间。
+    每次加载有超时，线程里的任何异常都记下（L3 第 4 轮 P2-06：原来卡住或中途异常退出，只要成功过一次就不报）。"""
 
-    def __init__(self, interval):
+    def __init__(self, interval, cmd=None):
         super().__init__(daemon=True)
-        self.interval, self.times, self.errors = interval, [], 0
+        self.interval, self.times, self.errors, self.problems = interval, [], 0, []
+        self.cmd = cmd or ["/sbin/pfctl", "-q", "-a", ANCHOR, "-f", RULES]
         self.stop = threading.Event()
 
     def run(self):
-        while not self.stop.wait(self.interval):
-            a = time.time()
-            r = subprocess.run(["/sbin/pfctl", "-q", "-a", ANCHOR, "-f", RULES], capture_output=True)
-            self.times.append([a, time.time()])
-            self.errors += r.returncode != 0
+        try:
+            while not self.stop.wait(self.interval):
+                a = time.time()
+                try:
+                    ok = subprocess.run(self.cmd, capture_output=True, timeout=RELOAD_TIMEOUT).returncode == 0
+                except subprocess.TimeoutExpired:
+                    ok = False
+                    self.problems.append(f"有一次重新加载超过 {RELOAD_TIMEOUT} 秒没完")
+                self.times.append([a, time.time()])
+                self.errors += not ok
+        except Exception as e:
+            self.problems.append(f"重新加载线程出错退出：{e!r}"[:300])
+
+
+def reload_coverage(rel, start, end):
+    """重新加载要从头到尾覆盖整段测试（L3 第 4 轮 P2-06）：线程已停下、没出过错、开头和结尾附近都有、中间没有长空档。
+    返回问题清单（空 = 覆盖完整）。"""
+    gap = max(5.0, 5 * rel.interval)
+    bad = list(rel.problems)
+    if rel.is_alive():
+        bad.append("重新加载线程测试结束后没停下")
+    if rel.errors:
+        bad.append(f"重新加载出错 {rel.errors} 次")
+    marks = [start] + [a for a, _ in rel.times] + [end]
+    worst = max(b - a for a, b in zip(marks, marks[1:]))
+    if not rel.times or worst > gap:
+        bad.append(f"重新加载 {len(rel.times)} 次，最长空档 {worst:.1f} 秒（应不超过 {gap:g} 秒），没覆盖整段测试")
+    return bad
 
 
 def nearest_reload(at, times):
@@ -587,7 +790,11 @@ def stress(seconds, interval=1.0):
         report["targets"] = ts
         report["skipped"] = [{**t, "root": c} for t, c in zip(cands, ctrl) if not reached(c)]
         others, clash = control_targets(ts, own)
-        if [t for t in report["skipped"] if t.get("own")]:
+        report.update(own_bind_errors=own.bind_errors, own_vanished=own.vanished)
+        if own.bind_errors:
+            incomplete.append("有地址开不了 root 自己的靶子（" +
+                              "、".join(f"{b['kind']} {b['host']}" for b in own.bind_errors[:3]) + "）")
+        elif [t for t in report["skipped"] if t.get("own")]:
             incomplete.append("root 自己的靶子 root 连不上")
         elif clash:
             incomplete.append("对照组要连的目标里混进了 root 自己靶子的端口（" +
@@ -601,6 +808,7 @@ def stress(seconds, interval=1.0):
             own.armed = True
             rel = Reloader(interval)
             rel.start()
+            started = time.time()
             procs = {u: run_as(u, ts, "probe-stress", seconds, popen=True) for u in users}
             procs["dt-gate"] = run_as("dt-gate", others, "probe-stress", seconds, popen=True)
             root_rows = {}
@@ -610,10 +818,11 @@ def stress(seconds, interval=1.0):
             counts["dt-gate"] = len(others)
             outs = collect(procs, counts, seconds + 600, on_open)
             root_th.join(seconds + 600)
+            ended = time.time()
             rel.stop.set()
-            rel.join(10)
+            rel.join(RELOAD_TIMEOUT + 5)
             own.armed = False
-            report["reloads"] = {"count": len(rel.times), "errors": rel.errors}
+            report["reloads"] = {"count": len(rel.times), "errors": rel.errors, "problems": rel.problems}
             report["anchor_after"] = pfctl("-a", ANCHOR, "-vsr")
             gate = outs.pop("dt-gate")
             leaks, incomplete, report["accounts"] = judge_stress(users, ts, outs, rel.times)
@@ -623,8 +832,7 @@ def stress(seconds, interval=1.0):
                 h["ms_from_reload"] = nearest_reload(h["at"], rel.times)
             for x in live:
                 x["ms_from_reload"] = nearest_reload(x["at"], rel.times)
-            if rel.errors or not rel.times:
-                incomplete.append(f"强制重新加载 {len(rel.times)} 次，出错 {rel.errors} 次")
+            incomplete += reload_coverage(rel, started, ended)
             if not rules_intact():
                 incomplete.append("测试后加载上的规则和规则文件不一致")
     finally:
@@ -670,12 +878,18 @@ def main():
         ON_OPEN = lambda kind, lport: (sys.stderr.write(f"OPEN {kind} {lport}\n"), sys.stderr.flush())
         print(json.dumps(probe_stress(json.loads(sys.argv[2]), float(sys.argv[3]))))
         return 0
+    if len(sys.argv) >= 5 and sys.argv[1] == "serve":
+        return serve_listen(json.loads(sys.argv[2]), json.loads(sys.argv[4]), float(sys.argv[3]))
     if os.geteuid() != 0:
         print("要用 sudo 运行：sudo bash ops/dt_worker_pf.sh verify")
         return 1
-    if len(sys.argv) >= 2 and sys.argv[1] == "stress":
-        return stress(int(sys.argv[2]) if len(sys.argv) >= 3 else 600)
-    return verify()
+    try:
+        if len(sys.argv) >= 2 and sys.argv[1] == "stress":
+            return stress(int(sys.argv[2]) if len(sys.argv) >= 3 else 600)
+        return verify()
+    except Incomplete as e:
+        print(f"测试不完整：{e}")
+        return 2
 
 
 if __name__ == "__main__":

@@ -27,8 +27,11 @@
 # 不改 /etc/pf.conf：规则挂在系统自带的 com.apple/* 锚点下面（com.apple/dt-worker，名字沿用 0A）。
 # 每次逐项核对：目录服务查得清账号（查不清就重试约一分钟，仍不清就不动规则、写 failed——不当成账号不存在）；
 # 每个账号的 uid 大于 0、只对应这一个账号；主规则集里真的挂着 com.apple/* 锚点、锚点前面只有 scrub 类规则，
-# com.apple 下别的锚点里没有出站的 quick 放行，没有网卡被 pf 跳过（set skip），没有带 pass 的地址转换规则
-# （否则数据包轮不到门卫规则）；实际加载的规则和规则文件解析出来的一模一样。要重新加载时先把状态写成 state=applying。
+# com.apple 下别的锚点里没有 quick 放行（出站、入站都算），门卫自己的锚点里没有地址转换规则和子锚点，没有网卡被 pf 跳过
+# （set skip），没有带 pass 的地址转换规则（否则数据包轮不到门卫规则）；实际加载的规则和规则文件解析出来的一模一样。
+# 要重新加载、或 pf 被关过要重新打开时，先把状态写成 state=applying，再结束两个账号的全部进程并确认清干净了。
+# 保证的是「最近一次核对（每 5 分钟一次，工人只认 10 分钟内的）时规则在生效」，不是开工那一刻实时查的：
+# 工人账号读不了 pf，关掉 pf 要 root 权限，root 被攻破不在这道门防的范围里（L3 第 4 轮 P1-03）。
 # 全部对上才写 state=ok，中途任何一步出错都写 state=failed 和原因（所有人可读）。状态里记本次开机时间 boot=。
 # 工人的启动脚本、每日巡检都据此判断门卫规则是不是在生效。
 # 写任何文件之前先核对路径：从 / 起每一级都只有 root 能改（ops/dt_root_guard.sh，和账号初始化共用）。
@@ -111,11 +114,19 @@ write_status() {
   mv -f "$STATUS.tmp" "$STATUS"
 }
 
+# 判定不在生效：先写 failed（工人看到就不再开工），再结束两个受管账号的全部进程。清进程不依赖状态写没写成
+# （L3 第 4 轮 P1-03：原来 set -e 下状态写失败，后面的清进程就跳过了）；没清干净的，原因补进状态。
 fail() {
+  local why=$1 left
   trap - ERR
-  write_status "state=failed enabled=$(pf_enabled) reason=${1// /_}"
-  kill_accounts
-  cat "$STATUS"
+  set +e
+  write_status "state=failed enabled=$(pf_enabled) reason=${why// /_}"
+  left=$(kill_accounts)
+  if [ -n "$left" ]; then
+    why="${why}；${left}"
+    write_status "state=failed enabled=$(pf_enabled) reason=${why// /_}"
+  fi
+  cat "$STATUS" 2>/dev/null
   exit 1
 }
 
@@ -123,13 +134,31 @@ fail() {
 boot_sec() { /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p'; }
 
 # 结束两个受管账号的全部进程（审查第 4 轮 P2-4、P2-5）：规则换过后，旧规则下建好的连接还挂在 pf 的连接状态表里、
-# 不再过新规则；门卫判定不在生效时，正在跑的 CLI 也不能接着联网。账号不在、没有进程（pkill 返回 1）都不算错。
+# 不再过新规则；门卫判定不在生效时，正在跑的 CLI 也不能接着联网。
+# 发了信号还要回查清干净没有（L3 第 4 轮 P1-03）：pgrep 返回 1（没有进程）才算清了，最多等约 5 秒；还有剩的、
+# pgrep 出错（查不清）都打印原因、返回 1。账号确实不在（目录服务说清了）就不用清；目录服务查不清不当成不在。
+# 结果靠打印和返回码；在命令替换里调时先关 ERR 陷阱。
 kill_accounts() {
-  local u
+  local u names rc i bad=""
   for u in "$WORKER" "$SECRETARY"; do
-    id "$u" >/dev/null 2>&1 || continue
-    /usr/bin/pkill -KILL -u "$u" 2>/dev/null || true
+    if ! id "$u" >/dev/null 2>&1; then
+      names=$(user_list) || { bad="${bad}；查不清 $u 在不在，没法确认它的进程清了"; continue; }
+      printf '%s\n' "$names" | awk '{print $1}' | grep -qx "$u" || continue
+    fi
+    rc=0
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      /usr/bin/pkill -KILL -u "$u" 2>/dev/null || true
+      /usr/bin/pgrep -u "$u" >/dev/null 2>&1 && rc=0 || rc=$?
+      [ "$rc" = 0 ] || break
+      sleep 0.5
+    done
+    case $rc in
+      1) ;;
+      0) bad="${bad}；$u 的进程结束不掉" ;;
+      *) bad="${bad}；查不清 $u 还有没有进程（pgrep 返回 ${rc}）" ;;
+    esac
   done
+  [ -z "$bad" ] || { echo "${bad#；}"; return 1; }
 }
 
 pf_enabled() { /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && echo yes || echo no; }
@@ -138,7 +167,9 @@ pf_enabled() { /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && ec
 anchor_hooked() { /sbin/pfctl -s rules 2>/dev/null | grep -qx 'anchor "com.apple/\*" all'; }
 
 # 数据包轮得到门卫规则（L3 第 3 轮 P1-03）：主规则集里 com.apple/* 锚点前面只能是 scrub 类；com.apple 下别的锚点
-# （名字排在 dt-worker 前面的先判）和它们的子锚点里不能有 quick 放行——有的话，命中它的包在进门卫规则之前就放行了。
+# （名字排在 dt-worker 前面的先判）和它们的子锚点里不能有 quick 放行，出站、入站都算——有的话，命中它的包在进门卫规则之前
+# 就放行了（L3 第 4 轮 P1-05：入站放行会让两个账号照样对外提供服务，绕过门卫的入站拒绝）。门卫自己的锚点里，过滤规则由
+# apply 逐条比对，地址转换规则和子锚点一条都不该有（L3 第 4 轮 P1-06：nat / rdr pass 命中的包不过过滤规则）。
 # 查不出来一律不过。不过时把挡路的那条规则打印出来（进状态文件的原因）。
 order_ok() {
   local main before ifs nat hit
@@ -164,11 +195,17 @@ no_quick_pass() {
   subs=$(/sbin/pfctl -a "$1" -s Anchors 2>/dev/null) || { echo "读不出 $1 下的锚点"; return 1; }
   for sub in $subs; do
     case $sub in "$1"/?*) ;; *) echo "认不出 $1 下的锚点名：$sub"; return 1 ;; esac   # pfctl 打印的是完整路径
-    [ "$sub" = "$ANCHOR" ] && continue
+    if [ "$sub" = "$ANCHOR" ]; then
+      rules=$(/sbin/pfctl -a "$sub" -s nat 2>/dev/null) || { echo "读不出 $sub 的地址转换规则"; return 1; }
+      hit=$(printf '%s\n' "$rules" | grep . | head -1 || true)
+      [ -z "$hit" ] || { echo "$sub 的地址转换里有：$hit"; return 1; }
+      rules=$(/sbin/pfctl -a "$sub" -s Anchors 2>/dev/null) || { echo "读不出 $sub 下的锚点"; return 1; }
+      hit=$(printf '%s\n' "$rules" | grep . | head -1 | sed 's/^[[:space:]]*//' || true)
+      [ -z "$hit" ] || { echo "$sub 下有子锚点：$hit"; return 1; }
+      continue
+    fi
     rules=$(/sbin/pfctl -a "$sub" -s rules 2>/dev/null) || { echo "读不出 $sub 的规则"; return 1; }
-    # 只有入站的 quick 放行绕不过门卫的出站拒绝，不算（隔空投送等会加；审查第 4 轮 P3-5）
-    hit=$(printf '%s\n' "$rules" | grep -E '^pass[[:space:]]' | grep -vE '^pass in[[:space:]]' \
-          | grep -E '[[:space:]]quick([[:space:]]|$)' | head -1 || true)
+    hit=$(printf '%s\n' "$rules" | grep -E '^pass[[:space:]]' | grep -E '[[:space:]]quick([[:space:]]|$)' | head -1 || true)
     [ -z "$hit" ] || { echo "$sub 里有：$hit"; return 1; }
     rules=$(/sbin/pfctl -a "$sub" -s nat 2>/dev/null) || { echo "读不出 $sub 的地址转换规则"; return 1; }
     hit=$(printf '%s\n' "$rules" | grep -E '(^|[[:space:]])pass([[:space:]]|$)' | head -1 || true)
@@ -201,23 +238,31 @@ apply() {
   # 实际加载的规则必须和规则文件解析出来的一模一样（同一个 pfctl 打印，按 uid 展开）；一样就不重新加载
   expected=$(/sbin/pfctl -nvf "$RULES" 2>/dev/null)
   [ -n "$expected" ] || fail "规则文件解析不出来"
+  # pf 被关过（L3 第 4 轮 P1-03）：关着的这段时间两个账号随便联网，重新打开前先写「进行中」、结束它们的全部进程
+  reenabled=no
+  if [ "$(pf_enabled)" != yes ]; then
+    write_status "state=applying"
+    left=$(trap - ERR; kill_accounts) || fail "pf 没开，重新打开前没清掉受管账号的进程：$left"
+    /sbin/pfctl -q -E 2>/dev/null || true
+    reenabled=yes
+  fi
+  [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
   reloaded=no
   if [ "$loaded" != "$expected" ]; then
     write_status "state=applying"           # 只在真要重新加载时写：平时每 5 分钟一次的核对不让工人撞上「进行中」（审查第 4 轮 P2-1）
     /sbin/pfctl -q -a "$ANCHOR" -f "$RULES" || fail "规则没加载上（pf 保留了旧规则）"
     reloaded=yes
-    kill_accounts                           # 旧规则下建好的连接不过新规则
+    left=$(trap - ERR; kill_accounts) || fail "重新加载后没清掉受管账号的进程：$left"   # 旧规则下建好的连接不过新规则
     loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
   fi
-  [ "$(pf_enabled)" = yes ] || /sbin/pfctl -q -E 2>/dev/null || true
   [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   [ "$loaded" = "$expected" ] || {
     diff <(echo "$expected") <(echo "$loaded") | head -20 >&2 || true
     fail "加载上的规则和应有的不一致"
   }
   trap - ERR
-  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded"
+  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded reenabled=$reenabled"
 }
 
 case "${1:-install}" in

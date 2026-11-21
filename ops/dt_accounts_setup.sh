@@ -107,11 +107,18 @@ ard_access() {
   pgrep -qx ARDAgent && rc=0 || rc=$?
   if [ "$rc" = 1 ]; then echo "  远程管理：没开"; return 0; fi
   [ "$rc" = 0 ] || { echo "  [停下] 查不清远程管理开没开（pgrep 出错）"; return 1; }
-  all=$(defaults read /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers 2>/dev/null || echo 0)
-  if [ "$all" != 0 ]; then
-    echo "  [停下] 远程管理开着，允许所有本地用户：请在「系统设置 → 通用 → 共享 → 远程管理」改成「仅这些用户」且不含 $u"
-    return 1
-  fi
+  # 只认读出来明确是 0（「仅这些用户」）；读不出、没有这一项、读出别的值都是查不清，停下（L3 第 4 轮 P2-02：
+  # 原来读失败一律当成 0）。远程管理开着时这一项系统总会写上，没有它不当成安全的默认值。
+  all=$(defaults read /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers 2>&1) || all="读不出：$all"
+  case $all in
+    0) ;;
+    1)
+      echo "  [停下] 远程管理开着，允许所有本地用户：请在「系统设置 → 通用 → 共享 → 远程管理」改成「仅这些用户」且不含 $u"
+      return 1 ;;
+    *)
+      echo "  [停下] 远程管理开着，查不清是不是允许所有本地用户（${all%%$'\n'*}）"
+      return 1 ;;
+  esac
   privs=$(dscl . -read "/Users/$u" naprivs 2>&1) || true
   case $privs in
     "No such key: naprivs"*|"naprivs: 0") ;;
@@ -158,8 +165,9 @@ no_processes() {
   local out err rc others
   err=$(mktemp)
   out=$(ps -U "$1" -o comm= 2>"$err") && rc=0 || rc=$?
-  if [ "$rc" != 0 ] && [ -s "$err" ]; then
-    echo "  [停下] 查不清 ${1} 下有没有进程在跑：$(head -1 "$err")"
+  # 只有退出码 1、没有输出也没有报错才是「没有进程」；别的非 0 一律查不清（L3 第 4 轮 P2-02）
+  if [ "$rc" != 0 ] && { [ "$rc" != 1 ] || [ -s "$err" ] || [ -n "$out" ]; }; then
+    echo "  [停下] 查不清 ${1} 下有没有进程在跑（ps 返回 ${rc}）：$(head -1 "$err")"
     rm -f "$err"
     return 1
   fi

@@ -4,7 +4,10 @@
 探针用环境变量把路径指到临时目录，以当前账号跑一次；root 脚本里的函数抽出来、把系统命令换成桩再测。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
+import contextlib
 import importlib.util
+import io
+import errno
 import json
 import os
 import re
@@ -12,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -429,9 +433,9 @@ class AccountGuards(unittest.TestCase):
         self.assertNotEqual(run(503, "'other 503'"), 0)                              # 对应的是别的账号
         self.assertNotEqual(run("x", "'dt-gate 503'"), 0)
 
-    def ard(self, pgrep_rc, all_users="0", privs="No such key: naprivs", groups=("staff",), member=False):
+    def ard(self, pgrep_rc, all_users="0", privs="No such key: naprivs", groups=("staff",), member=False, defaults_rc=0):
         stubs = (f'pgrep() {{ return {pgrep_rc}; }}\n'
-                 f'defaults() {{ echo {all_users}; }}\n'
+                 f'defaults() {{ echo "{all_users}"; return {defaults_rc}; }}\n'
                  f'dscl() {{ case "$2" in -read) echo "{privs}";; -list) printf "%s\\n" {" ".join(groups)};; esac; }}\n'
                  f'dseditgroup() {{ {self.MEMBER[member]}; }}\n')
         return self.bash(stubs, func(SETUP, "ard_access") + "\nard_access dt-gate")
@@ -442,6 +446,12 @@ class AccountGuards(unittest.TestCase):
         self.assertNotEqual(self.ard(2).returncode, 0)                                # pgrep 出错
         self.assertEqual(self.ard(0).returncode, 0)                                   # 开着，没给它权限
         self.assertNotEqual(self.ard(0, all_users="1").returncode, 0)                 # 允许所有本地用户
+        # L3 第 4 轮 P2-02：读不出、没有这一项、读出别的值，都是查不清（原来一律当成 0 放过）
+        r = self.ard(0, all_users="The domain/default pair does not exist", defaults_rc=1)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("查不清", r.stdout)
+        self.assertNotEqual(self.ard(0, all_users="0", defaults_rc=1).returncode, 0)   # 退出码不是 0 时输出不算数
+        self.assertNotEqual(self.ard(0, all_users="garbage").returncode, 0)
         self.assertNotEqual(self.ard(0, privs="naprivs: -1073741569").returncode, 0)  # 账号上有权限
         self.assertNotEqual(self.ard(0, privs="DS Error: -14009").returncode, 0)      # 查不清
         g = ("staff", "com.apple.local.ard_admin")
@@ -449,8 +459,10 @@ class AccountGuards(unittest.TestCase):
         self.assertNotEqual(self.ard(0, groups=g, member=True).returncode, 0)
         self.assertNotEqual(self.ard(0, groups=g, member=None).returncode, 0)
 
-    def no_proc(self, procs=None, err=None):
-        if err:
+    def no_proc(self, procs=None, err=None, rc=None):
+        if rc is not None:
+            stub = f"ps() {{ return {rc}; }}\n"
+        elif err:
             stub = f"ps() {{ echo '{err}' >&2; return 1; }}\n"
         elif procs is None:
             stub = "ps() { return 1; }\n"                                            # 这个账号没有进程
@@ -473,6 +485,11 @@ class AccountGuards(unittest.TestCase):
         r = self.no_proc(err="ps: something broke")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("查不清", r.stdout)
+        # L3 第 4 轮 P2-02：没输出、没报错但退出码不是 1（异常退出），不能当成没有进程
+        for rc in (2, 70, 137):
+            r = self.no_proc(rc=rc)
+            self.assertNotEqual(r.returncode, 0, rc)
+            self.assertIn("查不清", r.stdout)
 
     def test_checks_present(self):
         s = code(SETUP)
@@ -556,8 +573,10 @@ class PfApply(unittest.TestCase):
     FAKE = r"""#!/bin/bash
 S=$FAKE_DIR; sc=$SCENARIO
 case "$*" in
-  "-s info") [ "$sc" = disabled ] && echo "Status: Disabled" || echo "Status: Enabled" ;;
-  "-q -E") [ "$sc" = disabled ] && exit 1; exit 0 ;;
+  "-s info") if [ "$sc" = disabled ] || { [ "$sc" = reenable ] && [ ! -e "$S/enabled" ]; }; then echo "Status: Disabled"
+             else echo "Status: Enabled"; fi ;;
+  "-q -E") [ "$sc" = disabled ] && exit 1
+           cp "$STATUS_PATH" "$S/status_at_enable"; cp "$S/kills" "$S/kills_at_enable" 2>/dev/null; : > "$S/enabled"; exit 0 ;;
   "-s rules")
     case $sc in
       no_anchor) ;;
@@ -569,6 +588,8 @@ case "$*" in
             [ "$sc" = nat_pass ] && echo 'nat pass on en0 from 192.168.2.0/24 to any -> (en0)'
             [ "$sc" = other_nat_anchor ] && echo 'nat-anchor "vpn/*" all'; exit 0 ;;
   "-a com.apple/250.ApplicationFirewall -s nat") [ "$sc" = sibling_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
+  "-a com.apple/dt-worker -s nat") [ "$sc" = own_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
+  "-a com.apple/dt-worker -s Anchors") [ "$sc" = own_sub_anchor ] && echo "  com.apple/dt-worker/x"; exit 0 ;;
   "-a "*" -s nat") exit 0 ;;
   "-a com.apple -s Anchors") [ "$sc" = anchors_fail ] && exit 1
                              echo "  com.apple/250.ApplicationFirewall"; echo "  com.apple/dt-worker"
@@ -617,6 +638,15 @@ echo "$*" >> "$FAKE_DIR/kills"
 exit 1
 """
 
+    # L3 第 4 轮 P1-03：发了信号要回查。kill_stuck：工人的进程一直在；pgrep_err：pgrep 出错（查不清）
+    PGREP = """#!/bin/bash
+case "$SCENARIO:$2" in
+  kill_stuck:dt-worker) exit 0 ;;
+  pgrep_err:*) exit 3 ;;
+esac
+exit 1
+"""
+
     def setup_dir(self):
         d = Path(tempfile.mkdtemp())
         self.addCleanup(subprocess.run, ["rm", "-rf", str(d)])
@@ -630,6 +660,12 @@ exit 1
         pk.write_text(self.PKILL)
         pk.chmod(0o755)
         script = script.replace("/usr/bin/pkill", str(pk))
+        pg = d / "pgrep"
+        pg.write_text(self.PGREP)
+        pg.chmod(0o755)
+        script = script.replace("/usr/bin/pgrep", str(pg)).replace("      sleep 0.5\n", "      sleep 0\n")
+        # 账号在不在只按桩 user_list 判（本机可能真有 dt-worker，id 查得到会让场景不受控）
+        script = script.replace('if ! id "$u" >/dev/null 2>&1; then', "if true; then")
         script = script.replace("DS_TRIES=12", "DS_TRIES=3").replace("    sleep 5 ", "    sleep 0 ")
         script = re.sub(r'^\[ "\$\(id -u\)" = 0 \].*$', "", script, flags=re.M)
         (d / "pf.sh").write_text(script)
@@ -687,6 +723,11 @@ exit 1
                               ("sibling_pass", "com.apple/250.ApplicationFirewall_里有：pass_out_quick"),
                               ("nested_pass", "com.apple/250.ApplicationFirewall/x_里有：pass_out_quick"),
                               ("sibling_pass_both", "com.apple/250.ApplicationFirewall_里有：pass_quick"),
+                              ("sibling_pass_in", "com.apple/250.ApplicationFirewall_里有：pass_in_quick"),
+                              ("own_nat_pass", "com.apple/dt-worker_的地址转换里有：rdr_pass"),
+                              ("own_sub_anchor", "com.apple/dt-worker_下有子锚点：com.apple/dt-worker/x"),
+                              ("kill_stuck", "dt-worker_的进程结束不掉"),
+                              ("pgrep_err", "查不清_dt-worker_还有没有进程（pgrep_返回_3）"),
                               ("skip_iface", "有网卡被_pf_跳过：lo0_(skip)"),
                               ("nat_pass", "主规则集的地址转换里有：nat_pass"),
                               ("other_nat_anchor", "主规则集的地址转换里有：nat-anchor_\"vpn/*\""),
@@ -704,10 +745,14 @@ exit 1
             status = (Path(self.last_dir) / "pf-dt-worker.status").read_text()
             self.assertEqual(len(status.splitlines()), 1, status)   # 状态只有一行：原因里没混进子 shell 里陷阱写的东西
             self.assertNotIn("行出错", status, scenario)
-            if scenario not in ("load_fail", "partial", "dup", "tampered", "disabled"):
+            if scenario not in ("load_fail", "partial", "dup", "tampered", "kill_stuck", "pgrep_err"):
                 self.assertEqual(self.loads, 0, scenario)   # 前面的核对不过，根本不加载
-            # 判定不在生效：两个账号正在跑的进程一律结束（审查第 4 轮 P2-5）
-            self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * (1 + (scenario in ("partial", "dup", "tampered", "disabled"))), scenario)
+            # 判定不在生效：两个账号正在跑的进程一律结束（审查第 4 轮 P2-5）；目录服务查不清时不知道账号在不在，只报不清
+            if scenario == "ds_fail":
+                self.assertEqual(self.kills, [], scenario)
+                self.assertIn("查不清_dt-worker_在不在", f["reason"])
+            elif scenario not in ("kill_stuck", "pgrep_err"):
+                self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * (1 + (scenario in ("partial", "dup", "tampered", "disabled"))), scenario)
 
     def test_directory_unclear_keeps_rules(self):
         """审查第 4 轮 P1-1：目录服务一时查不清，不能当成「没有秘书」把秘书从规则里删掉；短暂查不清时重试后照常。"""
@@ -724,10 +769,29 @@ exit 1
         r, f, _ = self.apply("no_secretary", d)      # 目录服务说清了没有秘书：才不管它
         self.assertEqual((f["state"], f["users"]), ("ok", "dt-worker"))
 
-    def test_inbound_only_quick_pass_allowed(self):
-        """审查第 4 轮 P3-5：别的锚点里只放行入站（隔空投送等）绕不过门卫的出站拒绝，不算挡路。"""
-        r, f, _ = self.apply("sibling_pass_in")
-        self.assertEqual(f["state"], "ok", r.stdout + r.stderr)
+    def test_kill_checked_and_independent_of_status(self):
+        """L3 第 4 轮 P1-03：结束进程后回查，还有剩就是 failed（原来 pkill 的结果一律忽略，测试里 pkill 返回 1 也照样 ok）；
+        状态文件写不成时照样结束进程（原来 set -e 下写状态失败，后面的清进程就跳过了）。"""
+        r, f, _ = self.apply("kill_stuck")
+        self.assertEqual((r.returncode, f["state"]), (1, "failed"))
+        self.assertEqual(self.kills.count("-KILL -u dt-worker"), 20)   # 重新加载后 10 次、判 failed 后又 10 次
+        d = self.setup_dir()
+        script = (d / "pf.sh").read_text().replace('> "$STATUS.tmp"', '> "$DIR/no-such-dir/x"', 1)
+        (d / "pf.sh").write_text(script)
+        r, f, _ = self.apply("no_anchor", d)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
+
+    def test_reenable_writes_applying_and_kills_first(self):
+        """L3 第 4 轮 P1-03：pf 被关过、规则没变，原来直接重新打开就写 ok；现在打开前先写「进行中」、结束两个账号的进程。"""
+        d = self.setup_dir()
+        self.apply("ok", d)
+        (d / "kills").unlink()
+        r, f, _ = self.apply("reenable", d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((f["state"], f["reloaded"], f["reenabled"]), ("ok", "no", "yes"))
+        self.assertIn("state=applying", (d / "status_at_enable").read_text())
+        self.assertEqual((d / "kills_at_enable").read_text().split("\n")[:2], ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
 
     def test_unsafe_dir_writes_nothing(self):
         """L3 第 3 轮 P2-05：状态目录不是只有 root 能改的，连状态文件都不写。"""
@@ -987,6 +1051,105 @@ class Verify(unittest.TestCase):
         bad = [{"kind": "tcp", "what": "本机回环 IPv6", "host": "::1", "port": 60363}, {"kind": "tcp", "host": "x", "port": 443}]
         others, clash = self.v.control_targets(bad, Own())
         self.assertEqual(([t["port"] for t in others], [t["port"] for t in clash]), ([443], [60363]))
+
+    def test_enumeration_failure_is_incomplete(self):
+        """L3 第 4 轮 P2-08：lsof、ifconfig 出错不能当成「本机没有监听 / 没有网卡地址」接着测，算测试不完整。"""
+        real = self.v.subprocess.run
+        self.addCleanup(setattr, self.v.subprocess, "run", real)
+        for cmd in ("lsof", "ifconfig"):
+            self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 1, "", "boom")
+            with self.assertRaises(self.v.Incomplete, msg=cmd):
+                self.v.listening() if cmd == "lsof" else self.v.local_addrs()
+        self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 0, "", "")
+        with self.assertRaises(self.v.Incomplete):
+            self.v.local_addrs()                 # 连回环都没列出来：输出不对
+        self.assertIn("except Incomplete", VERIFY.read_text())   # main 里接住，退出码 2（不会当成 1「漏过」或 0）
+
+    def test_bind_errors_recorded(self):
+        """L3 第 4 轮 P2-08：开不了靶子的地址不再静默跳过。地址不在本机（EADDRNOTAVAIL）记下跳过，别的错算测试不完整。"""
+        own = self.v.Targets(["127.0.0.1", "192.0.2.1"])   # 192.0.2.1 是文档保留地址，本机没有
+        self.addCleanup(own.close)
+        self.assertEqual(own.bind_errors, [])
+        self.assertEqual({b["host"] for b in own.vanished}, {"192.0.2.1"})
+        real = self.v.socket.socket
+
+        class Denied(real):
+            def bind(self, addr):
+                raise OSError(errno.EACCES, "denied")
+        self.v.socket.socket = Denied
+        self.addCleanup(setattr, self.v.socket, "socket", real)
+        own2 = self.v.Targets(["127.0.0.1"])
+        self.addCleanup(own2.close)
+        self.assertEqual(len(own2.bind_errors), 2)
+        self.assertEqual(own2.specs(), [])
+
+    def test_reload_coverage(self):
+        """L3 第 4 轮 P2-06：重新加载线程卡住、中途异常退出、出错、没覆盖到整段测试，都报出来（原来成功过一次就不报）。"""
+        def run(cmd, secs=0.6, interval=0.05):
+            rel = self.v.Reloader(interval, cmd)
+            start = time.time()
+            rel.start()
+            time.sleep(secs)
+            end = time.time()
+            rel.stop.set()
+            rel.join(5)
+            return self.v.reload_coverage(rel, start, end)
+        self.assertEqual(run(["/usr/bin/true"]), [])
+        self.assertTrue(any("出错" in b for b in run(["/usr/bin/false"])))
+        self.assertTrue(any("出错退出" in b for b in run(["/no/such/pfctl"])))
+        self.v.RELOAD_TIMEOUT = 0.1
+        self.assertTrue(any("没完" in b for b in run(["/bin/sleep", "1"])))
+        rel = self.v.Reloader(1.0, ["/usr/bin/true"])
+        rel.times = [[100.0, 100.1]]               # 只在开头加载过一次，之后没动静
+        self.assertTrue(any("空档" in b for b in self.v.reload_coverage(rel, 99.0, 200.0)))
+        self.assertTrue(any("空档" in b for b in self.v.reload_coverage(self.v.Reloader(1.0), 0.0, 1.0)))   # 一次都没有
+        self.assertIn("reload_coverage(rel, started, ended)", VERIFY.read_text())
+
+    def test_inbound_judge(self):
+        ts = [{"kind": "tcp", "host": "127.0.0.1", "port": 1, "takeover": False},
+              {"kind": "udp", "host": "::1", "port": 2, "takeover": False}]
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused", "refused"]}, [])[0], 0)
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["open:5", "refused"]}, [])[0], 1)
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused", "refused"]}, ["HIT tcp x 1"])[0], 1)
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused"]}, [])[0], 2)          # 条数不对
+        self.assertEqual(self.v.inbound_judge("dt-gate", ts, {"root": ["open:5", "answer:6"]}, [])[0], 0)
+        self.assertEqual(self.v.inbound_judge("dt-gate", ts, {"root": ["open:5", "timeout"]}, [])[0], 2)   # 对照连不上
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"dt-secretary": ["没试", "refused"]}, [])[1][0]["port"], 2)
+
+    def test_inbound_runs_end_to_end(self):
+        """入站测试整段用 3.9 真起子进程走一遍（去掉 sudo，本机没有门卫规则）：每个账号的监听都开起来、root / dt-gate / 另一个
+        账号都去连了、监听那边记到了连进来的——没有门卫时应判「没挡住」，dt-gate 的对照连得上。"""
+        free = []
+        for _ in range(2):
+            x = socket.socket()
+            x.bind(("127.0.0.1", 0))
+            free.append(x.getsockname()[1])
+            x.close()
+        self.v.ALLOWED = {"dt-worker": {free[0]}, "dt-secretary": {free[1]}}
+        self.v.account_exists = lambda u: True
+        self.v.own_addrs = lambda: ["127.0.0.1", "::1"]
+        real_popen, real_run = subprocess.Popen, subprocess.run
+
+        def strip(cmd):   # subprocess.run 内部也走 Popen：只去掉 run_as 加的 sudo 前缀
+            return cmd[4:] if cmd[:2] == ["sudo", "-u"] else cmd
+        self.v.subprocess.Popen = lambda cmd, *a, **kw: real_popen(strip(cmd), *a, **kw)
+        self.v.subprocess.run = lambda cmd, *a, **kw: real_run(strip(cmd), *a, **kw)
+        self.addCleanup(setattr, self.v.subprocess, "Popen", real_popen)
+        self.addCleanup(setattr, self.v.subprocess, "run", real_run)
+        with contextlib.redirect_stdout(io.StringIO()):
+            worst, report = self.v.inbound()
+        self.assertEqual(worst, 1, report)
+        for server in ("dt-worker", "dt-secretary", "dt-gate"):
+            rows = report[server]["rows"]
+            self.assertTrue(rows, server)
+            self.assertTrue(all("error" not in r for r in rows), rows)
+            self.assertTrue(report[server]["hits"], server)
+        w = report["dt-worker"]["rows"]
+        self.assertEqual({r["by"] for r in w}, {"root", "dt-gate", "dt-secretary"})
+        # 秘书只连被工人占住的端口（秘书准连的 free[1]），那正是冒充场景
+        self.assertEqual({(r["host"], r["port"]) for r in w if r["by"] == "dt-secretary"}, {("127.0.0.1", free[1])})
+        self.assertTrue(all(r["verdict"] == "没挡住" for r in w))
+        self.assertTrue(all(r["verdict"] == "对照" for r in report["dt-gate"]["rows"]))
 
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()
