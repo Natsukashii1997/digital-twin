@@ -1,0 +1,119 @@
+# Multica 隔离执行器与出口代理（源文件；安装副本在 ~/Documents/Codex/Multica-local/runtime.compose.yml）
+# #172（从 #135 拆出）：执行器只接内部网络 agent-net（internal，没有出口），
+# 只能到 backend 和 egress-proxy；出网一律经 egress-proxy 的白名单，代理的上游只有宿主 8086。
+# 网段与虚拟机防火墙（ops/multica-egress/colima-provision.sh）一一对应，改一处要同步另一处。
+# 执行器和出口代理放在 profile agent 里、restart: "no"：Multica-local 的 control.sh start（up -d）和虚拟机重启都不会拉起它们，
+# 只能经 ops/multica-egress/agent-up.sh 先核对防火墙再拉起（fail-closed，#172 返修）。
+services:
+  isolated-agent:
+    image: multica-local-agent:0.8.1-claude-2.1.319-codex-0.166.0
+    build:
+      context: ./runtime
+      args:
+        # 只在构建镜像时用，构建容器不在 agent-net 上
+        HTTPS_PROXY: http://192.168.5.2:8086
+        HTTP_PROXY: http://192.168.5.2:8086
+    profiles: ["agent"]
+    user: "1000:1000"
+    hostname: multica-isolated
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=268435456,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 2560m
+    cpus: 1.0
+    volumes:
+      - agent_home:/home/node
+    networks:
+      - agent-net
+    depends_on:
+      - egress-proxy
+    environment:
+      MULTICA_SERVER_URL: http://backend:8080
+      MULTICA_APP_URL: http://localhost:43100
+      MULTICA_DAEMON_MAX_CONCURRENT_TASKS: "1"
+      MULTICA_WORKSPACES_ROOT: /home/node/multica_workspaces
+      MULTICA_GC_ENABLED: "false"
+      DO_NOT_TRACK: "1"
+      GIT_AUTHOR_NAME: "Multica agent (dt-sandbox)"
+      GIT_AUTHOR_EMAIL: "multica-agent@dt-sandbox.invalid"
+      GIT_COMMITTER_NAME: "Multica agent (dt-sandbox)"
+      GIT_COMMITTER_EMAIL: "multica-agent@dt-sandbox.invalid"
+      HTTPS_PROXY: http://egress-proxy:3128
+      HTTP_PROXY: http://egress-proxy:3128
+      https_proxy: http://egress-proxy:3128
+      http_proxy: http://egress-proxy:3128
+      NO_PROXY: backend,localhost,127.0.0.1
+      no_proxy: backend,localhost,127.0.0.1
+    command: ["multica", "daemon", "start", "--foreground", "--no-auto-update", "--no-auto-reload", "--device-name", "Multica 本地隔离执行器", "--runtime-name", "隔离执行器"]
+    restart: "no"
+
+  # 白名单出口代理：只接受 CONNECT 到 allowed_domains.txt 里域名的 443，上游只经宿主 8086
+  egress-proxy:
+    image: dt-egress-proxy:squid-3
+    profiles: ["agent"]
+    build:
+      context: ./egress
+      args:
+        HTTPS_PROXY: http://192.168.5.2:8086
+        HTTP_PROXY: http://192.168.5.2:8086
+    hostname: egress-proxy
+    init: true
+    read_only: true
+    tmpfs:
+      - /run/squid:rw,nosuid,nodev,size=8m,uid=13,gid=13,mode=0750
+      - /var/spool/squid:rw,nosuid,nodev,size=8m,uid=13,gid=13,mode=0750
+      - /var/log/squid:rw,nosuid,nodev,size=8m,uid=13,gid=13,mode=0750
+      - /tmp:rw,nosuid,nodev,size=8m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    networks:
+      agent-net:
+        ipv4_address: 172.30.0.3
+      egress-net:
+        ipv4_address: 172.31.0.3
+    restart: "no"
+
+  # backend 同时接默认网络（postgres、frontend 在那里）和 agent-net（给执行器，固定 .2，防火墙只放行执行器到它的 8080）
+  backend:
+    environment:
+      # VCS 连接接口会按调用方给的 URL 发请求，agent 令牌（等同工作区 owner）能触发；本机不用，关掉（#172 返修）
+      MULTICA_VCS_INTEGRATION_ENABLED: "false"
+    networks:
+      default: {}
+      agent-net:
+        ipv4_address: 172.30.0.2
+
+networks:
+  # compose 默认网络固定网段，虚拟机防火墙按它只许 backend、frontend、postgres 网段内互通，宿主和外网一律拒绝
+  default:
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+  agent-net:
+    internal: true
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          # 动态地址只从后半段分，前半段留给固定地址（backend .2、代理 .3），重启时不会被执行器抢走
+          ip_range: 172.30.0.128/25
+  egress-net:
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
+          ip_range: 172.31.0.128/25
+
+volumes:
+  agent_home:

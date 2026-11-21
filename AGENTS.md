@@ -102,6 +102,7 @@ ops/
   dt_worker_egress.py  工人账号的过滤代理（#190，常浩 11-17 同意装，D 档）：dt-worker 唯一的上网出口 127.0.0.1:8090，只接 CONNECT 到 443，目标解析出非公网地址就拒绝，放行的转给加速器代理 8086；普通 HTTP 一律拒绝；以主账号身份常驻（launchd cn.digital-twin.egress，配置副本 cn.digital-twin.egress.plist），安装在 ~/Library/Application Support/DigitalTwin/bin/；日志 evidence/egress/；剩余风险：DNS 重绑定且加速器直连时挡不住
   dt_worker_pf.sh      工人账号的门卫规则（#190）：pf 规则挂在 com.apple/dt-worker 锚点，dt-worker 只准连本机 3350（中台）和 8090（过滤代理），本机其他端口、局域网一律拒绝；常浩用 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install` 装，开机和每 5 分钟由 LaunchDaemon cn.digital-twin.pf-dt-worker 重新加载并写状态文件 /Library/Application Support/DigitalTwin/pf-dt-worker.status；health_check.py 每天查过滤代理拦不拦本机、门卫状态文件新不新
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
+  multica-egress/      Multica 隔离执行器出网（#172）：执行器只接内部网络，出网只经 squid 白名单代理（上游只许宿主 8086），Colima 虚拟机防火墙与停 dnsmasq；源文件，安装副本在 ~/Documents/Codex/Multica-local/ 和 ~/.colima/multica/colima.yaml，执行器和出口代理不自动启动，只能经其中的 agent-up.sh 先核对（verify.py）再拉起；安装、回滚、白名单维护见其中 README；加白名单域名要常浩同意
 ```
 
 ## AI 接入
