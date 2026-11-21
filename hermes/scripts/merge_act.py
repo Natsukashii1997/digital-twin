@@ -46,9 +46,11 @@
 环境变量同 merge_officer.py，另有 DT_GH_RETRY_WAITS（只读调用网络瞬断时每次重试前等几秒，逗号分隔，默认 3,5）、
 DT_MERGE_REQ_TIMEOUT（按策略合并、开撤回 PR 的请求最多活几秒，默认 60）、DT_PGREP / DT_PS（查进程表用的 pgrep、ps，自测用）。
 
-托管合并（#136）只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
+托管合并（#136）和秘书代合并④只能调 run_custody_merge（#132）：在函数里从本机钥匙串取合并执行器的专用令牌（常浩账号下只对沙盒仓库，
 内容、拉取请求读写），放进最小环境（固定 github.com、空的 gh 配置目录、不继承宿主 GH_* / GITHUB_*）；取不到就停，
-不退回常浩本人的 gh 登录；走 REST 合并接口，以接口返回的本次合并提交为成功证据；返回 merged / failed / unsure，unsure 只做只读对账、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
+不退回常浩本人的 gh 登录；调用方要经 merge_lock() 持合并锁（和按策略合并、巡视、卡片合并同一把 auto.lock），从合并前检查持到
+记完自己的账（0B-4d）；走 GitHub 异步合并接口（merge-async），只有新建成功的请求（202）算本次请求、按请求号查结果；
+返回 merged / failed / unsure，unsure 只做只读对账（poll_custody_merge 按本次请求号查）、不重发。卡片合并（B 档）走 run_owner_merge，用本机 gh 登录。
 托管合并被常浩推翻（#133）后，run_custody_revert 用同一个凭据开 revert PR，只开不合；本机 git 配置隔离，凭据只经 gh 的 git-credential 取。
 """
 import argparse
@@ -64,6 +66,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -520,7 +523,8 @@ def live_requests(grep, *needles):
 
 
 def _merge_verdict(res, reply, detail, after, head):
-    """REST 合并接口（PUT pulls/{n}/merge，sha 绑定 HEAD）的结果判定，托管合并和按策略合并共用：
+    """REST 合并接口（PUT pulls/{n}/merge，sha 绑定 HEAD）的结果判定，按策略合并用（托管合并 / 秘书代合并 0B-4d 起改走异步接口，
+    判定在 run_custody_merge 里；按策略合并改不改异步接口另在 #285 评估）：
     merged  接口回执说本次合上了并给了合并提交号，回读已合并、HEAD 对得上、合并提交号一致；
     failed  请求没发出去，或 GitHub 明确拒绝且回读 PR 仍开着；GitHub 回了 4xx 状态码（「(HTTP 4xx)」）而回读失败的
             也算：服务端已经答复不处理这次请求，回读读不到改变不了这一点（不然限流时回读跟着失败，PR 会一直挂成结果不明）；
@@ -558,33 +562,159 @@ def _json_dict(text):
     return d if isinstance(d, dict) else None
 
 
+MERGE_POLL_WAITS = (1, 2, 3, 5, 8, 10, 15, 15)   # 异步合并发出后查结果前各等几秒（合计约 1 分钟）；测试改成 ()
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_LOCAL = threading.local()                      # 这个线程是不是经 merge_lock 持着合并锁（审查 0B-4d P2-05：按线程，不按进程）
+
+
+@contextlib.contextmanager
+def merge_lock(wait=0):
+    """托管合并、秘书代合并④持合并锁的唯一入口（审查 0B-4d P1-01）：就是 merge_policy 的合并锁 auto.lock，和按策略合并、
+    合并官巡视、卡片合并同一把，所以几条合并路线同时只有一个在合。调用方从合并前检查一直持到把结果记进自己的账本，
+    run_custody_merge 只在本线程经这里持着锁时才动手。等不到抛 Stop（调用方按「还不能办」处理）。
+    锁只管串行；结果不明的合并靠各自的账本冻结（进程退出锁就释放，不能拿锁当冻结）。"""
+    if getattr(_LOCAL, "held", False):
+        raise Stop("合并锁已经在这个线程里持着了，不能再进一次", "在电脑上交给 Claude 会话看")
+    lock = MP.locked(wait)
+    try:
+        lock.__enter__()
+    except MP.Rejected:
+        raise Stop("合并官正在巡视，或另一个合并正在跑", "过一会再试")
+    _LOCAL.held = True
+    try:
+        yield
+    finally:
+        _LOCAL.held = False
+        lock.__exit__(None, None, None)
+
+
+def merge_lock_held():
+    return bool(getattr(_LOCAL, "held", False))
+
+
+def _async_reply(text):
+    """异步合并接口的回应（GitHub 文档 PUT/GET pulls/{n}/merge-async）：status + details{uuid, expected_head_sha, merge_method,
+    merge_action, bypass_rules, sha, message}。认不出的字段记 None；不是对象就全是 None。"""
+    d = _json_dict(text or "") or {}
+    det = d.get("details") if isinstance(d.get("details"), dict) else {}
+    hexsha = lambda v: v if isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) else None   # noqa: E731
+    return {"status": d.get("status") if d.get("status") in ("pending", "merged", "enqueued", "failed") else None,
+            "uuid": det.get("uuid") if isinstance(det.get("uuid"), str) and UUID.match(det["uuid"]) else None,
+            "sha": hexsha(det.get("sha")), "expected_head_sha": hexsha(det.get("expected_head_sha")),
+            "merge_method": det.get("merge_method") if isinstance(det.get("merge_method"), str) else None,
+            "merge_action": det.get("merge_action") if isinstance(det.get("merge_action"), str) else None,
+            "bypass_rules": det.get("bypass_rules") if isinstance(det.get("bypass_rules"), bool) else None,
+            "message": str(det.get("message") or "")[:200]}
+
+
+def _poll(repo, pr, uuid, env):
+    """只读查一次异步合并请求：返回 _async_reply 的字典，另加 gone（404：请求号不存在或已过 24 小时保留期）和 read（读到了没有）。"""
+    try:
+        r = subprocess.run([mo.GH, "api", f"repos/{repo}/pulls/{pr}/merge-async/{uuid}"], capture_output=True, text=True,
+                           timeout=mo.TIMEOUT, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return {"status": None, "read": False, "gone": False}
+    if r.returncode != 0:
+        err = (r.stderr or "") + (r.stdout or "")
+        gone = bool(re.search(r"\b404\b|not found", err, re.I)) and not NET_ERR.search(err)
+        return {"status": None, "read": False, "gone": gone}
+    return {**_async_reply(r.stdout), "read": True, "gone": False}
+
+
+def poll_custody_merge(repo, pr, uuid):
+    """对账用（secretary_gate.merge_verdict）：用合并执行器的凭据只读查一次本次创建的异步合并请求，从不重发。
+    返回 {"status": merged|failed|pending|enqueued|gone|unread, "sha", "message"}；取不到凭据抛 Stop。"""
+    if not UUID.match(str(uuid)):
+        return {"status": "unread", "sha": None, "message": "请求号格式不对"}
+    token = custody_token(repo)
+    with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg:
+        got = _poll(repo, pr, uuid, custody_env(token, cfg))
+    status = "gone" if got.get("gone") else (got.get("status") or "unread")
+    return {"status": status, "sha": got.get("sha"), "message": str(got.get("message") or "").replace(token, "***")}
+
+
 def run_custody_merge(card):
-    """托管合并（#136 调用）：凭据在函数里强制取，调用方选不了身份；取不到就停，不发任何写命令、不退回本机 gh 登录。
-    走 REST 合并接口（PUT pulls/{n}/merge，sha 绑定 HEAD），以接口返回的「本次已合并 + 合并提交号」为成功证据——
-    gh pr merge 对已经被别人合上的 PR 也返回 0，不能当本次合并的证据。写和回读用同一个受控环境。status：
-    merged（接口说本次合上了、回读已合并、HEAD 对得上、合并提交号一致）；
-    failed（GitHub 明确拒绝且回读仍开着；合并请求自己收到「(HTTP 4xx)」而回读失败或不是对象，也算——服务端已答复不处理
-    这次请求，#260-P2-16；或 gh 没起来、请求没发出去）；
-    unsure（其余一切：超时、网络中断、没归类的报错、已被别人合上、HEAD 对不上、没有状态码时的回读失败或不是对象）——
-    只做只读对账，不重发合并。判定见 _merge_verdict，和按策略合并共用。"""
+    """托管合并（#136 调用）/ 秘书代合并④：凭据在函数里强制取，调用方选不了身份；取不到就停，不发任何写命令、不退回本机 gh 登录。
+    调用方必须在本线程经 merge_lock() 持着合并锁（没持就停，钥匙串都不读；审查 0B-4d P1-01）。
+    走 GitHub 异步合并接口（0B-4d 审查 P1-03：同步接口超时后拿不到「请求已终止」的证据）：PUT pulls/{n}/merge-async
+    （sha 绑定 HEAD、merge_action=direct_merge 不进合并队列、bypass_rules=false 不绕过规则——主分支规则在 GitHub 真正执行合并时判）。
+    只有成功创建的新请求（命令成功、status=pending、带请求号，即 202）才算「本次请求」（request），按请求号查结果（约 1 分钟）；
+    409（已有别的请求在排）记 existing_request（带它的合并选项，不认领、不按它查）；200 已合上 / 已在合并队列（enqueued）都不是本次的。
+    写、查和回读用同一个受控环境。status：
+    merged（本次请求合上了、回读已合并、HEAD 和合并提交号对得上、合进的是 main）；
+    failed（本次请求明确失败、或 GitHub 回了 409 以外的 4xx（没网络错误），且回读仍开着或读不到；或 gh 没起来、请求没发出去）；
+    unsure（其余一切：超时、网络中断、没归类的报错、409、200 已合上或已入队、查结果时还在 pending、已被别人合上、HEAD 对不上、
+    合进的不是 main、回读失败）——只做只读对账（只拿本次请求号查），不重发合并。"""
+    if not merge_lock_held():
+        raise Stop("调用方没持合并锁（merge_lock），不合并", "在电脑上交给 Claude 会话看")
     token = custody_token(card["repo"])
-    out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"], "merge_commit": None}
-    cmd = [mo.GH, "api", "-X", "PUT", f"repos/{card['repo']}/pulls/{card['pr']}/merge",
-           "-f", "merge_method=squash", "-f", f"sha={card['head']}"]
+    out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"], "merge_commit": None,
+           "request": None, "existing_request": None, "submission": None, "reply_sha": None}
+    cmd = [mo.GH, "api", "-X", "PUT", f"repos/{card['repo']}/pulls/{card['pr']}/merge-async",
+           "-f", "merge_method=squash", "-f", "merge_action=direct_merge", "-F", "bypass_rules=false",
+           "-f", f"sha={card['head']}"]
     with tempfile.TemporaryDirectory(prefix="dt-custody-gh-") as cfg:
         env = custody_env(token, cfg)
         res = _gh_write(cmd, env, token)
+        reply = _async_reply(res["stdout"])
+        own = bool(res["launched"] and res["returncode"] == 0 and reply["status"] == "pending" and reply["uuid"])
+        conflict = bool(res["returncode"] not in (None, 0) and re.search(r"\(HTTP 409\)|\b409\b", res["detail"]))
+        if own:
+            out["request"] = reply["uuid"]
+            for wait in MERGE_POLL_WAITS:
+                time.sleep(wait)
+                got = _poll(card["repo"], card["pr"], reply["uuid"], env)
+                if got.get("read") and got.get("status") and got["status"] != "pending":
+                    reply = {**got, "uuid": reply["uuid"]}
+                    break
+        elif conflict:                                   # 别人的请求：只记下它的样子，不认领（审查 0B-4d P1-05）
+            out["existing_request"] = {k: reply.get(k) for k in ("uuid", "expected_head_sha", "merge_method", "merge_action",
+                                                                 "bypass_rules")}
         try:
             r = subprocess.run([mo.GH, "pr", "view", str(card["pr"]), "--repo", card["repo"], "--json",
-                                "state,mergeCommit,headRefOid"], capture_output=True, text=True, timeout=mo.TIMEOUT, env=env)
+                                "state,mergeCommit,headRefOid,baseRefName"], capture_output=True, text=True,
+                               timeout=mo.TIMEOUT, env=env)
             after = _json_dict(r.stdout) if r.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
             after = None
-    reply = _json_dict(res.pop("stdout")) or {}
+    res.pop("stdout")
     detail = res.pop("detail")
     out.update(res)
-    out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid") if res["launched"] else None
-    out["status"] = _merge_verdict(res, reply, detail, after, card["head"])
+    out["async_status"] = reply["status"] if (own or not conflict) else None
+    first = _async_reply(None) if conflict or own else reply                   # 200 的回应（已合上 / 已入队）
+    if reply.get("message"):
+        out["why"] = (out["why"] + "；" if out["why"] else "") + reply["message"].replace(token, "***")
+    if not res["launched"]:
+        out["status"], out["submission"] = "failed", "not_sent"   # 合并请求没发出去，确定没合
+        return out
+    state = (after or {}).get("state")
+    out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
+    refused = (res["returncode"] not in (None, 0) and not conflict and HTTP_4XX.search(detail) and not NET_ERR.search(detail))
+    # 这次 PUT 落到了哪一种（审查 0B-4d 第 3 轮 P1-03）：own 202 新建的本次请求；existing 409 别人的请求；already_merged / enqueued
+    # 200 早已合上 / 已在合并队列（reply_sha 留 200 回应里的合并提交号）；rejected 409 以外的 4xx；unknown 没拿到回应或认不出
+    # （超时、断网、没归类的报错、回应不是这几种）——不知道 GitHub 回的是 202、409 还是 200，对账不能拿它推断没合。
+    if own:
+        out["submission"] = "own"
+    elif conflict:
+        out["submission"] = "existing"
+    elif res["returncode"] == 0 and first["status"] == "merged" and not first["uuid"]:
+        out["submission"], out["reply_sha"] = "already_merged", first["sha"]
+    elif res["returncode"] == 0 and first["status"] == "enqueued":
+        out["submission"] = "enqueued"
+    elif refused:
+        out["submission"] = "rejected"
+    else:
+        out["submission"] = "unknown"
+    if own and reply["status"] == "merged" and reply.get("sha") and state == "MERGED" and after.get("headRefOid") == card["head"] \
+            and out["merge_commit"] == reply["sha"] and after.get("baseRefName") == "main":
+        out["status"] = "merged"
+    elif (refused or (own and reply["status"] == "failed")) and (after is None or (state == "OPEN"
+                                                                                  and after.get("headRefOid") == card["head"])):
+        out["status"] = "failed"                      # GitHub 没接这次请求 / 本次请求明确失败，PR 也没合：确定没合
+    else:
+        out["status"] = "unsure"
+        if state == "MERGED" and after.get("baseRefName") != "main":
+            out["why"] = f"合进的不是 main（是 {after.get('baseRefName')}）"
     return out
 
 

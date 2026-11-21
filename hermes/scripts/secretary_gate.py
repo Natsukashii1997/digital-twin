@@ -6,11 +6,11 @@
 第 2 小批（下一个 PR）才有秘书侧巡视、等待计时、① 的模型判断、②③ 出提议；本批不装常驻服务、不签钥匙、不发飞书。
 
 提议（不可信输入，JSON，最多 16 KB；以后 dt-secretary 经窄接口调 submit）：
-  {"schema": 1, "category": "ask" | "redispatch" | "reject",
+  {"schema": 1, "category": "ask" | "redispatch" | "reject" | "merge",
    "card": 卡片号, "card_version": 卡片版本,          ← ask、redispatch（② 的卡片是中台放弃时发的通知卡）
    "choice": 第几项（从 1 数）,                       ← 只 ask；送中台时换成中台的下标 choice - 1；弃权、出错时可以是 null
-   "task": 任务号, "pr": PR 号, "head": 40 位提交,     ← 只 reject
-   "text": {"context", "question", "summary", "basis"}  写给常浩的白话（规则同 secretary_ledger：ask 按「回复」，②③ 按「合并」）
+   "task": 任务号, "pr": PR 号, "head": 40 位提交,     ← reject、merge
+   "text": {"context", "question", "summary", "basis"}  写给常浩的白话（规则同 secretary_ledger：ask 按「回复」，②③④ 按「合并」）
    "run": {"session": Hermes 会话号},                 ← 只 ask：这次模型判断的运行记录（见下）
    "error": 判断出错 / 超时的说明或 null, "abstain": {"reason": 交常浩代号, "note": 说明} 或 null}
   控制面**只信选项号和白话**，其余一律从可信来源重取：卡片、轮次、事件从中台库（只读打开，同 autoloop_publish 的读法）；
@@ -49,7 +49,23 @@
         unsure；每张任务最多 1 次由账本额度管；
   ③ 另核：受信发布记录里有这个 PR（task_id、PR 号、提交、代次都对上）、现在 PR 开着且头提交没变、有能绑定 PR 和受审提交的审查记录、
         机器账号留言开关开着 → 否则 unsure / gate。**审查记录现在没有可信来源**（见 review_record），③ 一律交常浩。
-  任务锁（审查 P1-03）：②③ 从前闸到续接事件发出，全程持着这张任务的受信发布锁（autoloop_publish.task_lock，和 publish 同一把）：
+  ④ 另核（0B-4d，规格第 3、7 节；本地能判的先判，执行器开关关着就不读 GitHub）：受信发布记录里有这个 PR（task_id、PR 号、提交、
+        代次都对上）；仓库在清单第 4 节白名单、签清单时记了触发条件指纹（triggers）；这个仓库没有结果不明 / 对账不清 / 卡在执行中
+        超过 2 分钟的合并（秘书账本、托管账本都算，frozen_repo）；有能绑定 PR 和受审提交、结论 PASS 的审查记录；合并执行器开关
+        （REAL_MERGE，0E-4 接机器账号凭据前关着）；合并前检查全部复用飞书卡片合并（merge_act.check_pr：开着、头提交没变、合进 main、
+        不是草稿、没冲突、不落后、CI 全过、CLEAN；碰敏感路径 → d_level），另要 merge_rules.json 的 revert_required_checks 给这个
+        仓库登记的测试项真的跑成功、改动文件数等于列出来的（gh 最多列 100 个），再照合并官 merge_officer.evaluate 判一次（needs-info
+        等「问常浩」、没写关联 → unsure；受信发布 PR 正文第一行是这张任务当前代次的任务单行才算关联）；主分支规则集要有 strict 必需检查
+        且包含登记的测试项（绑定登记的 CI）（require_strict：GitHub 执行合并时判，最后一次现读之后主分支有新提交就拒合，审查 P1-02）；同一仓库另一个
+        合并还在执行中 → not_ready（一次只合一个）；现读 main 上 .github 目录的指纹（trigger_fingerprint，目录对象号覆盖下面全部文件，
+        128 位）等于白名单记的 → 否则 gate / unsure。
+        合并锁（审查 P1-01）：④ 在任务锁之外再持合并锁（merge_act.merge_lock，就是 merge_policy 的 auto.lock，和按策略合并、
+        合并官巡视、卡片合并、托管合并同一把），从前闸到记完结果；拿不到 → not_ready；run_custody_merge 不在本线程持锁就不动手。
+        锁只管串行，结果不明靠账本冻结仓库（frozen_repo：秘书、托管、按策略合并三本账，认不出仓库的记录对所有仓库都挡）。
+        登记的测试项要绑定可信 CI 来源（merge_rules.json 的 required_check_apps，审查 P1-06）：规则集里的必需检查带同一个
+        integration_id，这个头提交上的同名检查全部由那个 App 建、跑完且成功，没有同名的旧式提交状态。
+        审查记录没有可信来源，④ 现在也一律交常浩；秘书巡视暂不出 ④ 的提议（同 ③，来源批 4 定）。
+  任务锁（审查 P1-03）：②③④ 从前闸到续接事件 / 合并发出，全程持着这张任务的受信发布锁（autoloop_publish.task_lock，和 publish 同一把）：
         持锁期间受信发布开不了，发布进行中秘书拿不到锁（→ unsure）；查活动轮次、查交接包、记账、获准、发续接事件都在锁里。
         同一事项的轮次由中台自己串行（kernel/decide.ts：同组同事项同时只认领一轮，新事件并进还在排队的那一轮），
         所以锁外中台新排的轮次只会排在后面，不会和新派的这一轮并跑。
@@ -66,12 +82,21 @@
   请求也带了，但打开要等「开着的卡会不会改版」专项复核属实、再由常浩单独点头（docs/DECIDED.md 11-20 第 3 条），不随本批打开；
   关着时 ① 不看提议内容、不等 30 分钟，只核卡片开着且版本一致、准入、派单绑定、诱导词，就交常浩（4c-2 秘书侧此时不调模型，只交卡片号和版本）；② autoloop_grants.resume_dispatch
   （redispatch）；③ 留言前再读一次 PR（开着、头提交还是受审的那个，否则没做成、不留言），机器账号在 PR 留言（REAL_COMMENT
-  关着时只认测试注入的假 gh）+ resume_dispatch（rework）。
+  关着时只认测试注入的假 gh）+ resume_dispatch（rework）；④ 合并前再现读一次（开关、合并前检查、触发条件指纹，不过记没做成、
+  不合并），交合并执行器（merge_act.run_custody_merge：凭据在执行器里取，GitHub 异步合并接口、绑定头提交、不绕过规则），
+  merged → done（记合并提交号，推翻时开撤销 PR 要用），failed → failed，其余 → unknown（冻结这个仓库后续代合并，记下请求号）；
+  获准前另现读这个仓库没有结果不明的合并。
   错误分类照 autoloop_answer：没发出去或 HTTP 400/401/403/404/409 → finish(failed)、claims 删掉、额度释放（409 = 卡片已不是获准时的
   那一版，原因照这个写）；其余 → finish(unknown)、
   claims 记 unknown、不重答。回读（中台库只读）看到 decided、by = 秘书、choice 一致 → finish(done)，outcome 记 ref 和
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
+  ④ 先不等待地拿这张任务的受信发布锁（送合并的进程从前闸到记结果一直持着；拿不到就跳过，不和还在调执行器的进程同时判），
+  按执行器记下的这次 PUT 落到哪一种（submission：own 202 本次请求 / already_merged 200 早已合上 / existing 409 别人的请求 /
+  enqueued 合并队列 / unknown 没拿到回应）分开判（merge_verdict）：本次请求先按请求号查（还在排就不动）；只有本次请求明确失败、
+  或本次请求且开着头提交变了才判 failed；200 早已合上的要回读提交号和回应一致、409 别人的请求要它的合并参数和本次授权一致，
+  才在合上时记 done（归属 unknown）；合并队列合上也对账不清；没拿到回应的不拿头提交变化、PR 关闭推断没合；拿不到请求已结束的
+  证据 → 过 2 分钟记 unreconciled 交常浩（审查第 2、3 轮 P1-03、P1-05、P1-08）；合上的不是这个头提交或不是 main → unreconciled。执行器说合上了但记不进「做成」，改按对账记做成、留下合并提交号。
   ① 停在 executing 超过 2 分钟、回读给不出结论的（中台库读不到，或卡片还开着）一律转 unreconciled：额度保留、冻结这张任务、
   交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
   换成旧快照，推断不可靠；① 现在整体关着，多冻结没有实际代价。frozen_task 也把超时的 executing 算进去，同任务第二张卡不能再获准。
@@ -83,15 +108,18 @@ lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自�
   secretary_gate.py reconcile [--card 卡片号]
   secretary_gate.py lease [--wait 秒]
   secretary_gate.py show                     只读
+  secretary_gate.py fingerprint --repo owner/仓库   只读：现在 main 上 .github 目录的触发条件指纹（填代批清单第 4 节第三列用）
 环境变量：DT_STATE_DB、DT_SECRETARY_*（同 secretary / secretary_ledger）、DT_CUSTODY_FILE、DT_AUTOLOOP_CARDS_DB、
 DT_AUTOLOOP_CHANNEL_KEY_DIR（secretary 通道钥匙 <目录>/secretary-channel.key）、AGENT_AUTOLOOP_HOME（中台目录）、DT_GRANTS_DB 等
-autoloop_grants 的变量、DT_PUBLISH_LOG / DT_PUBLISH_OUTBOX / DT_PUBLISH_MIRRORS（受信发布）、HERMES_HOME（① 的运行记录）。
+autoloop_grants 的变量、DT_PUBLISH_LOG / DT_PUBLISH_OUTBOX / DT_PUBLISH_MIRRORS（受信发布）、HERMES_HOME（① 的运行记录）、
+DT_GH / DT_MERGE_RULES（④ 的 GitHub 只读和合并规则，同 merge_officer）。
 不调用 AI。威胁模型同 custody：防模型自报、文本冒充、重放；同账号的恶意进程靠 ADR-015 的账号隔离挡，本脚本挡不住
 （包括改 Hermes 运行记录：现在和秘书同一账号；分账号后控制面只读秘书账号的运行记录，0E 配权限）。
 """
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -117,6 +145,9 @@ import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
 import custody as CU  # noqa: E402
 import custody_ledger as L  # noqa: E402
+import merge_act as MA  # noqa: E402
+import merge_officer as MO  # noqa: E402
+import merge_policy as MP  # noqa: E402
 import secretary as S  # noqa: E402
 import secretary_ledger as SL  # noqa: E402
 
@@ -132,8 +163,10 @@ STOP_KEY = re.compile(r"^run:([1-9]\d{0,11}):stopped$")   # 中台自己发的�
 ANSWERED = ("decided", "done")
 INDUCE = re.compile(r"常浩\s*(已经?|已)?\s*(同意|授权|批准|确认|点头)|已\s*(获|经)?\s*(得到)?\s*授权|秘书\s*(请|直接|可以|就)?\s*选|"
                     r"请\s*秘书|替\s*常浩\s*(选|定|答)|代\s*常浩|owner\s*(has\s*)?(approved|authori[sz]ed)", re.I)
-CATEGORIES = ("ask", "redispatch", "reject")
-KEYS = {"ask": {"card", "card_version", "choice"}, "redispatch": {"card", "card_version"}, "reject": {"task", "pr", "head"}}
+CATEGORIES = ("ask", "redispatch", "reject", "merge")
+KEYS = {"ask": {"card", "card_version", "choice"}, "redispatch": {"card", "card_version"}, "reject": {"task", "pr", "head"},
+        "merge": {"task", "pr", "head"}}
+PR_CATEGORIES = ("reject", "merge")             # 按 PR 找事项的两类（受信发布记录）
 COMMON_KEYS = {"schema", "category", "text", "error", "abstain"}
 TEXT_KEYS = ("context", "question", "summary", "basis")
 RUN_KEYS = ("category", "card", "card_version", "choice", "text", "abstain", "error")   # 模型输出只许有这些字段，提议逐项相同
@@ -149,7 +182,10 @@ REAL_ASK = False        # ① 真送达：整体关闭（PR #218 第 2 轮 P1-01
 TEST_ASK = False        # 测试在进程内打开 ① 的送达；不经环境变量
 REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
 TEST_GH = None          # 测试在进程内换成假 gh 的路径；不经环境变量
-REVIEW_SOURCE = None    # ③ 审查记录的可信来源（见 review_record）；现在没有，测试在进程内注入
+REVIEW_SOURCE = None    # ③④ 审查记录的可信来源（见 review_record）；现在没有，测试在进程内注入
+REAL_MERGE = False      # ④ 合并执行器：0E-4 接上机器账号凭据之前整体关闭（规格第 7 节：交 merge_act.run_custody_merge）
+TEST_MERGE = None       # 测试在进程内换成假执行器（card → {"status", "merge_commit", ...}，同 run_custody_merge）；不经环境变量
+WORKFLOWS = ".github/workflows"                 # ④ 触发条件：合并到 main 会跑的工作流文件
 
 
 class Refused(Exception):
@@ -380,7 +416,11 @@ def plain(text, limit):
 
 def handoff_text(category, snap, why):
     """交常浩的五项白话由控制面按可信数据生成（ADR-015 第 3.3 节第 4 条）；秘书写的字不进这里。"""
-    if category == "reject":
+    if category == "merge":
+        context = plain(f"合并 PR #{snap.get('pr')}（{snap.get('task')}）", 40)
+        question = "工人这个 PR 要不要合进主分支"
+        ask = "到 GitHub 上看这个 PR，要合就你自己合"
+    elif category == "reject":
         context = plain(f"退回 PR #{snap.get('pr')}（{snap.get('task')}）", 40)
         question = "审查没过的这个 PR 要不要退回、让工人返修一轮"
         ask = "看一下审查意见，决定退不退回，跟我说一声"
@@ -768,10 +808,10 @@ def locate(p):
             {"task": task, "generation": row["generation"]}
         return {"category": trusted, "claimed": cat, "card": card, "row": row, "task": task, "target": target,
                 "received": card_snapshot(card), "card_version": card["version"] if trusted == "ask" else None}
-    if cat == "reject":
+    if cat in PR_CATEGORIES:
         task, pr = p.get("task"), p.get("pr")
         if not (isinstance(task, str) and G.TASK_ID.match(task) and _pos_int(pr)):
-            raise Refused("退回 PR 的提议要写任务号和 PR 号")
+            raise Refused("退回 / 合并 PR 的提议要写任务号和 PR 号")
         rec = publish_record(task, pr)
         if not rec:
             raise Refused(f"受信发布记录里没有任务 {task} 的 PR #{pr}，不记账")
@@ -780,7 +820,7 @@ def locate(p):
             raise Refused(f"凭证库里没有任务 {task}，记不了账")
         snap = {"source": "受信发布记录", "task": task, "github": rec["github"], "pr": pr, "pr_url": rec.get("pr"),
                 "head": rec["head"], "branch": rec.get("branch"), "generation": rec.get("generation")}
-        return {"category": "reject", "claimed": cat, "row": row, "task": task, "rec": rec, "received": snap,
+        return {"category": cat, "claimed": cat, "row": row, "task": task, "rec": rec, "received": snap,
                 "target": {"task": task, "repo": rec["github"], "pr": pr, "head": rec["head"]}}
     raise Refused("提议里没有能查的卡片号或 PR")
 
@@ -898,6 +938,210 @@ def reject_gate(ctx, p):
     ctx["received"] = {**ctx["received"], "review": review}
 
 
+# ---------- ④ 代合并（0B-4d） ----------
+def merge_executor():
+    """④ 的合并执行器（规格第 7 节：交 merge_act.run_custody_merge，凭据在执行器里强制取，秘书选不了身份）。
+    0E-4 接上机器账号凭据、执行器搬进 dt-gate 之前整体关闭（REAL_MERGE），只认测试注入的假执行器。"""
+    if TEST_MERGE:
+        return TEST_MERGE
+    if REAL_MERGE:
+        return MA.run_custody_merge
+    raise SwitchOff("合并执行器的机器账号凭据还没接上（0E-4），秘书代合并整体关闭，这个合并交给你")
+
+
+def trigger_fingerprint(repo, ref="main"):
+    """合并到 main 会触发什么（规格第 3 节「合并前现读一次触发条件」）：只读 repo 在 ref 上根目录的列表，取 .github 这一项的
+    （类型、Git 对象号）——目录的对象号覆盖下面所有嵌套文件（工作流、复合 action、依赖更新配置……），任何一处变了指纹就变；
+    没有 .github 算空。SHA-256 前 32 位（128 位，审查 P2-02）写成 wf-…。仓库或分支读不到（含 HTTP 404）、输出不是目录列表都抛 MO.GhError，
+    不当成「没有工作流」（审查 P2-04）。管不到的：工作流调用的仓库里其他脚本、Webhook、GitHub App、Pages 这类仓库设置
+    （读设置要管理员权限），靠白名单第二列的人工说明和合并前检查（改动碰 .github/ 就是敏感路径）。"""
+    items = MO.gh_json(["api", f"repos/{repo}/contents/?ref={urllib.parse.quote(ref)}"], f"{repo} 读根目录")
+    if not isinstance(items, list) or not all(isinstance(i, dict) for i in items):
+        raise MO.GhError(f"{repo} 读根目录：输出不是目录列表")
+    rows = sorted(f"{i.get('type')}\t{i.get('path')}\t{i.get('sha')}" for i in items if i.get("path") == ".github")
+    return "wf-" + hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()[:32]
+
+
+def frozen_repo(st, repo, but=None, busy=False):
+    """这个仓库有没有结果不明 / 对账不清 / 卡在执行中超过 STALE 的代合并（规格第 7 节：合并结果不明冻结这个仓库所有后续代批合并）。
+    busy=True 时还没超时的执行中也算（同一仓库一次只合一个，审查 P2-03：两个合并并发时，前一个中途变成结果不明，后一个照样会合进去）。
+    秘书账本、托管账本和按策略合并账本（merge_policy.unsettled）的合并都算；读不了、对象认不出是哪个仓库（不是对象、缺 repo、
+    repo 不是完整仓库名）、按策略合并账本有读不懂的行或缺记录号的「要合」，都当挡路，
+    对所有仓库都挡（审查 P1-04）。返回挡路的决定号列表。"""
+    out = []
+    for table in ("secretary_decisions", "custody_decisions"):
+        try:
+            rows = st.conn.execute(f"SELECT id, status, updated_at, target FROM {table} WHERE action = 'merge' AND id != ? AND "
+                                   "status IN ('unknown','unreconciled','executing')", (but or "",)).fetchall()
+        except sqlite3.Error:
+            return [f"{table} 读不了"]
+        for did, status, at, target in rows:
+            try:
+                obj = json.loads(target or "")
+            except (ValueError, TypeError):
+                obj = None
+            got = obj.get("repo") if isinstance(obj, dict) else None
+            # 认不出是哪个仓库的（不是对象、没有 repo、repo 不是完整仓库名）一律当成同一个：对所有仓库都挡（审查 P1-04）
+            same = got == repo or not (isinstance(got, str) and re.fullmatch(S.REPO_FULL, got))
+            if same and (busy or status != "executing" or _age(at) >= STALE):
+                out.append(did)
+    try:                                                      # 按策略合并（#257）结果不明的也冻结这个仓库（同类）
+        recs, bad = MP.lines()
+        if bad:                                               # 坏行可能就是一条没结清的合并：对所有仓库都挡（审查第 3 轮 P1-07）
+            out.append(f"按策略合并账本有 {bad} 行读不懂")
+        if any(r.get("event") == "intent" and not r.get("id") for r in recs):   # merges() 会跳过这种行：同样当挡路
+            out.append("按策略合并账本有缺记录号的「要合」")
+        for m in MP.unsettled():
+            got = m.get("repo")
+            if got == repo or not (isinstance(got, str) and re.fullmatch(S.REPO_FULL, got)):
+                out.append(f"按策略合并 {m.get('id')}")
+    except Exception:                                         # 账本读不了、记录缺字段让 merge_policy 读崩了：都当挡路
+        out.append("按策略合并账本读不了")
+    return out
+
+
+def task_line(task, generation):
+    """受信发布开 PR 时正文第一行（autoloop_publish.publish）：PR 绑的是任务单，不是 issue，这一行就当它的「Closes」。
+    只认正文第一行整行等于「任务单：<单号>（第 <当前代次> 代）」（审查 P2-03：不认正文别处出现的前缀）。"""
+    return f"任务单：{task}（第 {generation} 代）"
+
+
+def linked(body, task, generation):
+    lines = str(body or "").split("\n", 1)
+    return lines[0].rstrip("\r").strip() == task_line(task, generation)
+
+
+def check_apps(rules, repo, names):
+    """每个登记的测试项必须写明可信 CI 的 GitHub App 号（merge_rules.json 的 required_check_apps[仓库][检查名]，审查 P1-06）。
+    没写全 → 交常浩（不知道哪个来源的检查才算真跑过）。"""
+    apps = ((rules.get("required_check_apps") or {}).get(repo) or {})
+    got = {n: apps.get(n) for n in names}
+    if not all(type(v) is int and v > 0 for v in got.values()):
+        raise Handoff("gate", "登记的测试项没写明是哪个 CI 跑的（可信来源），别处写进来的同名检查分不出来，秘书不代合并")
+    return got
+
+
+def require_check_sources(repo, head, apps):
+    """登记的测试项要来自登记的 CI（审查 P1-06）：GET commits/<头提交>/check-runs?check_name=<名>&filter=all 列出的同名检查
+    （含重跑的全部记录；total_count 和列出来的对不上就交常浩，第 3 轮 P2-07），每个都要是
+    登记的 App 建的（app.id），至少一个、全部跑完且 SUCCESS；同名的旧式提交状态（commits/<头提交>/status 里 context 同名）
+    一条都不许有——有写权限就能写状态，混在一起分不清。读不了也交常浩。"""
+    try:
+        legacy = MO.gh_json(["api", f"repos/{repo}/commits/{head}/status?per_page=100"], f"{repo} 读提交状态")
+        sts = legacy.get("statuses") if isinstance(legacy, dict) else None
+        if not isinstance(sts, list) or legacy.get("total_count") != len(sts):     # 一页没列全：判不了有没有同名的（第 3 轮 P2-07）
+            raise Handoff("gate", "提交状态一页列不全，判不了有没有同名的别的来源，交给你合")
+        contexts = {x.get("context") for x in sts if isinstance(x, dict)}
+        for name, app in apps.items():
+            got = MO.gh_json(["api", f"repos/{repo}/commits/{head}/check-runs?check_name={urllib.parse.quote(name)}"
+                                     "&filter=all&per_page=100"], f"{repo} 读检查 {name}")
+            runs = got.get("check_runs") if isinstance(got, dict) else None
+            if isinstance(runs, list) and got.get("total_count") != len(runs):        # 含重跑的全部记录，一页没列全
+                raise Handoff("gate", plain(f"测试项 {name} 的检查记录一页列不全，判不了是不是都来自登记的 CI", 100))
+            if not isinstance(runs, list) or not runs or name in contexts:
+                raise Handoff("gate", plain(f"测试项 {name} 没有、或有同名的别的来源，分不清是不是真跑过", 100))
+            for r in runs:
+                if not (isinstance(r, dict) and (r.get("app") or {}).get("id") == app and r.get("status") == "completed"
+                        and r.get("conclusion") == "success" and r.get("head_sha") == head):
+                    raise Handoff("gate", plain(f"测试项 {name} 有不是登记的 CI 建的、或没成功跑完的", 100))
+    except MO.GhError as e:
+        raise Handoff("gate", plain(f"读不了测试项的来源（{e}）", 100))
+
+
+def require_strict(repo, names, apps=None):
+    """主分支要有服务端规则挡住「检查之后、合并之前」主分支被改（审查 P1-02）：规则集（GET rules/branches/main，读权限就能看）里
+    有 required_status_checks，strict_required_status_checks_policy 为真（PR 必须基于最新主分支才能合），并且必需检查包含
+    merge_rules.json 给这个仓库登记的测试项，每项都绑定登记的 CI 来源（integration_id 等于 required_check_apps 里的 App 号，
+    审查 P1-06：没绑来源时谁写一个同名的成功状态都能过）。合并执行器发请求时 bypass_rules=false，GitHub 真正执行合并时按这些规则判：主分支
+    在最后一次现读之后有任何提交（含 .github 工作流），PR 就落后、合并被拒。只认规则集，经典分支保护读不到 strict（要管理员权限）。"""
+    try:
+        rules = MO.gh_json(["api", f"repos/{repo}/rules/branches/main?per_page=100"], f"{repo} 读主分支规则")
+    except MO.GhError as e:
+        raise Handoff("gate", plain(f"读不了主分支规则（{e}）", 100))
+    want = set(names)
+    for r in rules if isinstance(rules, list) else []:
+        par = r.get("parameters") if isinstance(r, dict) else None
+        if r.get("type") == "required_status_checks" and isinstance(par, dict) \
+                and par.get("strict_required_status_checks_policy") is True:
+            have = {(c.get("context"), c.get("integration_id")) for c in par.get("required_status_checks") or []
+                    if isinstance(c, dict)}
+            if all((n, (apps or {}).get(n)) in have for n in want):
+                return
+    raise Handoff("gate", "主分支没开「合并前必须基于最新主分支、登记的测试项必须由登记的 CI 跑过」的规则，合并时主分支变了 GitHub "
+                          "挡不住，交给你合")
+
+
+def pr_checks(repo, pr, head, task, generation):
+    """合并前检查，全部复用飞书卡片合并（B 档）那一套：merge_act.check_pr（开着、头提交没变、合进 main、不是草稿、没碰敏感路径、
+    没冲突、不落后、这个版本的 CI 全部通过、CLEAN），另外要求 merge_rules.json 的 revert_required_checks 里给这个仓库登记的测试检查
+    真的跑成功（merge_act.require_named_checks：CI 全是跳过也算「通过」，不能当没人在场时合并的证据）；改动文件数要等于列出来的
+    （gh 最多列 100 个）；最后照合并官 merge_officer.evaluate 判一次（标签 needs-info 等「问常浩」、没写关联 → 交常浩；受信发布开的
+    PR 正文第一行是这张任务当前代次的任务单行，算关联）；主分支要有 strict 必需检查规则（require_strict）。不过抛 Handoff。"""
+    card = {"repo": repo, "pr": pr, "head": head}
+    try:
+        rules = MO.load_rules()
+        names = (rules.get("revert_required_checks") or {}).get(repo)
+        if not names:
+            raise Handoff("gate", "这个仓库没登记必须真跑成功的测试项，CI 全是跳过也会算过，秘书不代合并")
+        apps = check_apps(rules, repo, names)
+        require_strict(repo, names, apps)
+        got = MA.check_pr(card, rules, "main", ci=True)
+        MA.require_named_checks(got, names)
+        require_check_sources(repo, head, apps)
+        total = MA.gh_read(["pr", "view", str(pr), "--repo", repo, "--json", "changedFiles"], f"{repo}#{pr} 取改动文件数")
+    except MA.Stop as e:
+        if "敏感路径" in e.why:                             # 风险档最高的改动：一律你来合（不代批 D 档）
+            raise Handoff("d_level", "这个 PR 改了敏感的文件，只能你自己合")
+        raise Handoff("gate", plain(f"合并前检查没过：{e.why}", 100))
+    except (OSError, ValueError) as e:
+        raise Handoff("gate", f"合并规则读不了（{type(e).__name__}），秘书不代合并")
+    if not (isinstance(total, dict) and type(total.get("changedFiles")) is int
+            and total["changedFiles"] == len(got.get("files") or [])):      # gh 最多列 100 个文件：列不全就判不了敏感路径（审查 P2-05）
+        raise Handoff("gate", "这个 PR 改的文件太多，列不全，判不了有没有碰敏感文件，交给你合")
+    facts = MO.facts_of(repo, got)                           # 合并官自己的判定（审查 P1-02：标签 needs-info 等「问常浩」也要听）
+    facts["closes"] = facts["closes"] or linked(got.get("body"), task, generation)
+    tier, verdict, why = MO.evaluate(facts, rules)
+    if verdict != MO.MERGE:
+        raise Handoff("d_level" if tier == "L3" else "unsure", plain(f"合并官的建议不是合并：{'；'.join(why)}", 100))
+    return {"state": got.get("state"), "head": got.get("headRefOid"), "merge_state": got.get("mergeStateStatus"),
+            "checks": sorted(str(c.get("name") or c.get("context")) for c in got.get("statusCheckRollup") or [])}
+
+
+def merge_gate(ctx, p, st_status, st):
+    """④ 前闸（规格第 3 节）：PR 由受信发布出口开出、记着这张任务和当前代次；仓库在清单白名单、签清单时记了触发条件指纹；
+    这个仓库没有结果不明的合并；审查通过且绑定同一个头提交；执行器开关；合并前检查（pr_checks）；现读的触发条件和白名单记的一样。
+    本地能判的先判，开关关着就不读 GitHub。"""
+    rec = ctx["rec"]
+    repo = rec["github"]
+    if p.get("head") != rec["head"]:
+        raise Handoff("unsure", "提议里的提交和受信发布开出的不一致")
+    if rec.get("generation") != ctx["row"]["generation"]:
+        raise Handoff("unsure", "这个 PR 是这张任务以前的代次开出的，合不合由你定")
+    pol = st_status["policy"] or {}
+    if repo not in (pol.get("whitelist") or {}):
+        raise Handoff("gate", "这个仓库不在代批清单的合并白名单里")
+    want = (pol.get("triggers") or {}).get(repo)
+    if not want:
+        raise Handoff("gate", "签代批清单时没记这个仓库合并后会触发什么（触发条件指纹），秘书不代合并")
+    if frozen_repo(st, repo):
+        raise Handoff("gate", "这个仓库有一次合并结果还不明，对账清楚之前不再代合并")
+    if frozen_repo(st, repo, busy=True):
+        raise NotReady("这个仓库另一个合并正在进行，同一仓库一次只合一个，过一会再交")
+    review = review_record(repo, p["pr"], rec["head"])
+    if not (isinstance(review, dict) and review.get("verdict") == "PASS" and review.get("head") == rec["head"]
+            and review.get("pr") == p["pr"] and review.get("repo") == repo):
+        raise Handoff("unsure", "找不到能绑定这个 PR 和受审版本、结论是通过的审查记录，合不合由你定")
+    merge_executor()                                         # 开关关着就到此为止（SwitchOff → 交常浩），不读 GitHub
+    checks = pr_checks(repo, p["pr"], rec["head"], ctx["task"], rec["generation"])
+    try:
+        now_fp = trigger_fingerprint(repo)
+    except MO.GhError as e:
+        raise Handoff("gate", plain(f"读不了合并后会触发的工作流（{e}）", 100))
+    if now_fp != want:
+        raise Handoff("gate", "合并到主分支会触发的工作流和签清单时不一样了，交给你看")
+    ctx["received"] = {**ctx["received"], "review": review, "checks": checks, "trigger": now_fp}
+
+
 def front_gates(p, ctx, st_status, t, st):
     """前闸，按顺序；不过抛 Handoff / Refused / NotReady。"""
     cat = ctx["category"]
@@ -943,6 +1187,8 @@ def front_gates(p, ctx, st_status, t, st):
     if cat == "reject":
         reject_gate(ctx, p)
         gh_cmd()                                             # 留言开关关着就到此为止（SwitchOff → 交常浩，见 submit）
+    if cat == "merge":
+        merge_gate(ctx, p, st_status, st)
     if cat == "ask":
         ask_switch()                                         # 送达开关关着就到此为止（SwitchOff → 交常浩）
 
@@ -962,6 +1208,23 @@ def task_locked(task_id):
         yield
     finally:
         lock.__exit__(None, None, None)
+
+@contextlib.contextmanager
+def merge_locked():
+    """合并锁（merge_act.merge_lock，就是 merge_policy 的 auto.lock：按策略合并、合并官巡视、卡片合并、托管合并都用它，不等待；
+    审查 P1-01）：④ 从前闸到记完结果全程持着，任何别的合并同时都动不了；拿不到 → 还不能办。"""
+    try:
+        lock = MA.merge_lock(0)
+        lock.__enter__()
+    except MA.Stop:
+        raise NotReady("另一个合并正在进行（巡视、按策略合并、托管或秘书），一次只合一个，过一会再交")
+    except OSError:
+        raise Handoff("gate", "查不了合并锁")
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
+
 
 def _yield(st, d, con, card_id, choice, note, now):
     SL.void(st, d["id"], note, now=now)
@@ -989,6 +1252,8 @@ def approve(st, d, ctx, now):
             why = "获准前现读：秘书已经不准入"
         if not why and frozen_task(st, ctx["task"], but=d["id"]):
             why = "获准前现读：这件事有一次代批结果还不明"
+        if not why and ctx["category"] == "merge" and frozen_repo(st, ctx["rec"]["github"], but=d["id"], busy=True):
+            why = "获准前现读：这个仓库有一次合并结果还不明，或另一个合并正在进行"     # cards.db 写锁里判：同仓库获准串行
         if not why and ctx["category"] == "redispatch":
             live = hub_runs(ctx["task"], ctx["row"]["rule"], ("queued", "claimed", "unknown"))
             if live is None or live or unpublished_package(ctx["task"]):
@@ -1144,6 +1409,49 @@ def deliver_reject(st, d, ctx, now):
     return _resume(st, d, "rework", f"秘书代批 {d['id']}：审查没过，退回返修", now, partial=True)
 
 
+def deliver_merge(st, d, ctx, now):
+    """④ 送达：合并前再现读一次（开关、合并前检查、触发条件指纹），过了交合并执行器（凭据在执行器里取）。
+    执行器的结论：merged → done（记合并提交号，推翻时开撤销 PR 要用）；failed（GitHub 明确拒绝且仍开着、请求没发出去）→ failed；
+    unsure → unknown（冻结这个仓库后续代合并，reconcile 只读对账、从不重发；执行器给的异步合并请求号记进 outcome.executor.request，
+    对账按它查）。读执行器之前出的错都确定没合。整个过程持着这个仓库的合并锁（submit 取的，执行器里不再重取）。"""
+    rec, pr, head = ctx["rec"], ctx["target"]["pr"], ctx["target"]["head"]
+    repo = rec["github"]
+    try:
+        run = merge_executor()
+        pr_checks(repo, pr, head, d["task_id"], rec["generation"])
+        if trigger_fingerprint(repo) != ctx["received"]["trigger"]:
+            raise Handoff("gate", "合并前现读：会触发的工作流变了")
+    except (Handoff, SwitchOff, MO.GhError) as e:
+        why = getattr(e, "why", None) or str(e)
+        SL.finish(st, d["id"], "failed", {"note": f"合并前现读没过，没合并：{why}"[:200]}, now=now)
+        return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"合并前现读没过，没合并：{why}"}
+    try:
+        res = run({"repo": repo, "pr": pr, "head": head})
+    except MA.Stop as e:                                     # 取不到凭据：一个写请求都没发
+        SL.finish(st, d["id"], "failed", {"note": f"合并执行器没动手：{e.why}"[:200]}, now=now)
+        return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"合并执行器没动手：{e.why}"}
+    except Exception as e:                                   # 可能已经发出：按结果不明处理
+        SL.finish(st, d["id"], "unknown", {"error": type(e).__name__}, now=now)
+        return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "合并结果不明，这个仓库的代合并先停，等对账"}
+    status = res.get("status") if isinstance(res, dict) else None
+    sha = str(res.get("merge_commit") or "") if isinstance(res, dict) else ""
+    facts = {k: res.get(k) for k in ("identity", "returncode", "timed_out", "launched", "why", "request", "async_status",
+                                     "existing_request", "submission", "reply_sha")} \
+        if isinstance(res, dict) else {}
+    if status == "merged" and L.SHA.match(sha):
+        try:
+            SL.finish(st, d["id"], "done", {"merge_commit": sha, "executor": facts}, now=now)
+        except L.LedgerError:                                # 合上了却记不进「做成」：按对账留下合并提交号，不让它变成没合（审查 P0-01）
+            SL.reconcile(st, d["id"], "done", {"checked": "合并执行器返回本次已合并并回读核实", "pr_state": "MERGED",
+                                               "merge_commit": sha}, now=now)
+        return {"ok": True, "result": "done", "decision": d["id"], "msg": f"已替你合并 {repo}#{pr}（{sha[:7]}），回读核实"}
+    if status == "failed":
+        SL.finish(st, d["id"], "failed", {"executor": facts}, now=now)
+        return {"ok": False, "result": "failed", "decision": d["id"], "msg": f"GitHub 没有合并：{facts.get('why') or '明确拒绝'}"}
+    SL.finish(st, d["id"], "unknown", {"executor": facts, "merge_commit_seen": sha or None}, now=now)
+    return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "合并结果不明，这个仓库的代合并先停，等对账（不重发）"}
+
+
 # ---------- 入口 ----------
 def submit(proposal, now=None):
     """处理一个提议。now 只给测试用（固定时间）；不给就各处现取。返回结果字典（头注释）。"""
@@ -1160,8 +1468,10 @@ def submit(proposal, now=None):
     try:
         with SL.open_store(now) as st, contextlib.ExitStack() as held:
             try:
-                if ctx["category"] in ("redispatch", "reject"):     # 从前闸到续接发出全程持锁（审查 P1-03）
+                if ctx["category"] in ("redispatch", "reject", "merge"):   # 从前闸到续接 / 合并发出全程持锁（审查 P1-03）
                     held.enter_context(task_locked(ctx["task"]))
+                if ctx["category"] == "merge":                       # 所有合并路线共用一把锁，持到记完结果（审查 P1-01）
+                    held.enter_context(merge_locked())
                 void_orphans(st, ctx["task"], now)
                 front_gates(proposal, ctx, st_status, t, st)
             except Handoff as h:
@@ -1169,7 +1479,7 @@ def submit(proposal, now=None):
             except SwitchOff as e:
                 return record_handoff(st, ctx, "gate", str(e)[:100], now)
             except Refused as e:
-                if ctx["category"] == "reject":              # ③ 留言开关关着：交常浩
+                if ctx["category"] in PR_CATEGORIES:         # ③④ 查 PR 出错、开关关着：交常浩
                     return record_handoff(st, ctx, "gate", str(e)[:100], now)
                 return {"ok": False, "result": "refused", "msg": str(e)}
             except NotReady as e:
@@ -1178,10 +1488,10 @@ def submit(proposal, now=None):
             if cat == "ask":
                 ctx["hub_choice"] = proposal["choice"] - 1
             reply = {"choice": proposal["choice"]} if cat == "ask" else {"redispatch": True} if cat == "redispatch" else \
-                {"reject": True, "comment": True, "rework": True}
+                {"merge": True, "head": ctx["target"]["head"]} if cat == "merge" else {"reject": True, "comment": True, "rework": True}
             try:
                 d = SL.issue(st, session_id=ctx["session"], project=ctx["project"], action=cat, target=ctx["target"],
-                             revocability="correctable", expires_at=t + DECISION_TTL, received=ctx["received"], reply=reply,
+                             revocability="revertible" if cat == "merge" else "correctable", expires_at=t + DECISION_TTL, received=ctx["received"], reply=reply,
                              card_version=ctx.get("card_version"), now=now,
                              **{k: proposal["text"].get(k, "") for k in TEXT_KEYS})
             except L.LedgerError as e:
@@ -1195,6 +1505,8 @@ def submit(proposal, now=None):
                 return deliver_ask(st, d, ctx, now)
             if cat == "redispatch":
                 return _resume(st, d, "redispatch", f"秘书代批 {d['id']}：中台放弃后重派一次", now)
+            if cat == "merge":
+                return deliver_merge(st, d, ctx, now)
             return deliver_reject(st, d, ctx, now)
     except L.LedgerError as e:
         return {"ok": False, "result": "refused", "msg": f"账本记不了：{e}"}
@@ -1219,6 +1531,11 @@ def reconcile(card=None, now=None):
             d = SL.get(st, did)
             if d["status"] == "executing" and _age(d["updated_at"]) < STALE:
                 continue                                     # 可能正在送
+            if d["action"] == "merge":                       # 不和正在合并的进程同时判（审查 P0-01：它可能还在调执行器）
+                got = _merge_settle(st, d, now)
+                if got:
+                    notes.append((did, got))
+                continue
             got = _verdict(st, d)
             if not got and d["action"] == "ask" and d["status"] == "executing":   # ① 卡住又核不出：一律说不清（第 3 轮 P1-04 / P1-05）
                 got = ("unreconciled", {"checked": "卡在送达中超过 2 分钟，中台库读不到这张卡，核不清是否已送出"})
@@ -1250,6 +1567,8 @@ def _verdict(st, d):
         if c.get("state") in ANSWERED + ("closed",):
             return "failed", {"checked": checked, "found": False}
         return "unreconciled", {"checked": checked + "（还开着：请求可能晚到，不重答）"}
+    if d["action"] == "merge":
+        return merge_verdict(d)
     kind = {"redispatch": "redispatch", "reject": "rework"}[d["action"]]
     key = d["outcome"].get("event_key")
     began = st.conn.execute("SELECT at FROM events WHERE object_type = ? AND object_id = ? AND kind = ? ORDER BY id LIMIT 1",
@@ -1269,6 +1588,102 @@ def _verdict(st, d):
     if e["sent"] == -1:
         return "failed", {"checked": checked + "（作废未发）", "found": False}
     return None if e["sent"] in (0, 2) else ("unreconciled", {"checked": checked})
+
+
+def _merge_settle(st, d, now):
+    """④ 对账要持这张任务的受信发布锁（不等待）：submit 从前闸到合并发出、记结果一直持着它，拿得到就说明送合并的进程已经结束
+    （或死了：flock 随进程释放），这时回读才不会和还在调执行器的进程打架。拿不到 → 跳过，下一轮再对。返回结论或 None。"""
+    try:
+        with P.task_lock(d["task_id"]):
+            d = SL.get(st, d["id"])                          # 锁里现读：可能刚被送合并的进程记了结果
+            if d["status"] not in ("executing", "unknown", "unreconciled"):
+                return None
+            got = merge_verdict(d)
+            if not got or (got[0] == "unreconciled" and d["status"] == "unreconciled"):
+                return None
+            SL.reconcile(st, d["id"], got[0], got[1], now=now)
+            return got[0]
+    except (P.Rejected, OSError):
+        return None
+
+
+EXPECTED = {"merge_method": "squash", "merge_action": "direct_merge", "bypass_rules": False}   # 本次授权的合并方式
+
+
+def merge_verdict(d):
+    """④ 只读对账（规格第 7 节：以合并接口返回的提交为证据，结果不明只读对账、不重发）。按执行器记下的这次 PUT 落到哪一种
+    （outcome.executor.submission，第 3 轮 P1-03）分开判：
+      own（202 新建的本次请求，带 request）：先按请求号查（merge_act.poll_custody_merge），还在排或查不了 → 不动；
+        明确失败 → failed；开着且头提交变了 → failed（文档：执行前 PR 有新推送，本次带 sha 的请求就取消）；
+        合上了、头提交对得上、合进 main、提交号和请求给的一致 → done（execution_attribution=request）。
+      already_merged（200，PUT 时 PR 早已合上，reply_sha 是回应里的合并提交号）：回读合上、提交号一致、头提交和 main 对得上
+        → done（归属 unknown）；其余（开着、关了、提交号不一致）→ 立刻对账不清。
+      existing（409 别人的请求）：它的 expected_head_sha / merge_method / merge_action / bypass_rules 要和本次授权一致
+        （本次头提交、squash、direct_merge、不绕过规则），合上了且对得上才 done（归属 unknown）；参数缺一项或不一致，合上了也
+        对账不清（第 3 轮 P1-08）。
+      enqueued（200，已在合并队列）：一期不收合并队列，合上了也对账不清。
+      unknown / 没记（超时、断网、进程中途没了）：不知道 GitHub 回的是 202、409 还是 200，**头提交变了、PR 关了都不当没合的证据**；
+        合上了且对得上 → done（归属 unknown）。
+    共同：合上的不是这次的版本 / 不是 main → 对账不清；拿不到请求已经结束的证据 → 过 2 分钟记对账不清、交常浩，不推断没合。读不了 → None。"""
+    t = d["target"]
+    ex = (d.get("outcome") or {}).get("executor")
+    ex = ex if isinstance(ex, dict) else {}
+    kind = ex.get("submission") if ex.get("submission") in ("own", "already_merged", "existing", "enqueued") else "unknown"
+    uuid = ex.get("request") if kind == "own" else None
+    polled = None
+    if uuid:
+        try:
+            polled = MA.poll_custody_merge(t["repo"], t["pr"], uuid)
+        except MA.Stop:
+            return None                                      # 凭据取不到：查不了，仓库继续冻结
+        if polled.get("status") in ("pending", "unread"):
+            return None
+    try:
+        got = MO.gh_json(["pr", "view", str(t["pr"]), "--repo", t["repo"], "--json", "state,mergeCommit,headRefOid,baseRefName"],
+                         f"{t['repo']}#{t['pr']} 对账")
+    except MO.GhError:
+        return None
+    if not isinstance(got, dict):
+        return None
+    state, head, base = got.get("state"), got.get("headRefOid"), got.get("baseRefName")
+    sha = str((got.get("mergeCommit") or {}).get("oid") or "")
+    req = polled.get("status") if polled else None
+    what = {"own": f"本次合并请求 {str(uuid)[:8]}…：{req}" if polled else "本次合并请求",
+            "already_merged": "发请求时 PR 已经合上", "existing": "别人的合并请求（409）", "enqueued": "已在合并队列",
+            "unknown": "没拿到合并请求的回应"}[kind]
+    checked = f"GitHub {t['repo']}#{t['pr']}：{state}，合进 {base}，头提交 {str(head)[:12]}，合并提交 {sha[:12] or '无'}；{what}"
+    unclear = lambda why: ("unreconciled", {"checked": f"{checked}（{why}）"})   # noqa: E731
+    if state not in ("OPEN", "CLOSED", "MERGED"):
+        return None
+    if state == "MERGED":
+        if not (head == t["head"] and base == "main" and L.SHA.match(sha)):
+            return unclear("合上的不是这次要合的版本或不是 main，核不清")
+        if kind == "own" and req == "merged" and polled.get("sha") != sha:
+            return unclear("本次合并请求给的提交号和合上的对不上，核不清")
+        if kind == "already_merged" and ex.get("reply_sha") != sha:
+            return unclear("回应里的合并提交号和合上的对不上，核不清")
+        if kind == "existing":
+            other = ex.get("existing_request") if isinstance(ex.get("existing_request"), dict) else {}
+            if other.get("expected_head_sha") != t["head"] or not all(type(other.get(k)) is type(v) and other.get(k) == v
+                                                                       for k, v in EXPECTED.items()):
+                return unclear("别人的合并请求和这次授权的合并方式不一致（版本、合并方式或绕过规则），合上了也不算这次代批")
+        if kind == "enqueued":
+            return unclear("经合并队列合上的，一期不收合并队列，核不清")
+        return "done", {"checked": checked, "pr_state": "MERGED", "merge_commit": sha,
+                        "execution_attribution": "request" if req == "merged" else "unknown"}
+    if req == "merged":
+        return unclear("本次合并请求说合上了，PR 却没合，核不清")
+    if kind == "already_merged":
+        return unclear("发请求时 GitHub 说 PR 已经合上，现在回读却没合，核不清")
+    if req == "failed":
+        return "failed", {"checked": checked + f"（本次合并请求明确失败：{polled.get('message') or '没写原因'}）", "pr_state": state}
+    if kind == "own" and state == "OPEN" and head != t["head"]:
+        return "failed", {"checked": checked + "（头提交变了，本次绑定原头提交的合并请求执行前就被取消）", "pr_state": "OPEN"}
+    if req == "enqueued":
+        return unclear("本次合并请求进了合并队列，核不清")
+    if _age(d["updated_at"]) >= STALE:
+        return unclear("拿不到合并请求已经结束的证据，不判没合，交给你")
+    return None
 
 
 def lease(wait=50):
@@ -1331,6 +1746,7 @@ def main(argv=None):
     sub.add_parser("reconcile").add_argument("--card", type=int)
     sub.add_parser("lease").add_argument("--wait", type=int, default=50)
     sub.add_parser("show")
+    sub.add_parser("fingerprint").add_argument("--repo", required=True)
     a = ap.parse_args(argv)
     try:
         if a.cmd == "submit":
@@ -1354,10 +1770,16 @@ def main(argv=None):
             done_line(bool(out is None or out["ok"]), "没有卡片" if out is None else (out.get("why") or f"领到卡片 {out['card']}"),
                       **(out or {}))
             return 0 if out is None or out["ok"] else 1
+        if a.cmd == "fingerprint":
+            if not re.fullmatch(S.REPO_FULL, a.repo):
+                done_line(False, "仓库要写完整的 owner/仓库")
+                return 1
+            done_line(True, f"{a.repo} main 上的触发条件指纹", fingerprint=trigger_fingerprint(a.repo))
+            return 0
         print(json.dumps(show(), ensure_ascii=False, indent=1))
         done_line(True, "只读")
         return 0
-    except (F.Fail, L.LedgerError, L.TS.StateError, sqlite3.Error) as e:
+    except (F.Fail, L.LedgerError, L.TS.StateError, sqlite3.Error, MO.GhError) as e:
         done_line(False, str(e), error=getattr(e, "code", type(e).__name__))
         return 1
 

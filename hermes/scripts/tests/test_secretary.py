@@ -38,7 +38,7 @@ CHAT = "oc_fixture_p2p_0001"
 D = dt.datetime(2026, 11, 18, tzinfo=TZ)        # 11-18 00:00（上海）
 REPO = "Natsukashii1997/dt-sandbox"
 ROSTER = {"dt-sandbox": REPO, "niuma-home": "Natsukashii1997/niuma-home"}
-WL = ((REPO, "只有 CI，没有部署、发布、外部通知"),)
+WL = ((REPO, "只有 CI，没有部署、发布、外部通知", "wf-0123456789abcdef0123456789abcdef"),)
 ISOLATE = ("DT_OWNER", "HERMES_SESSION", "DT_CUSTODY", "DT_SECRETARY", "DT_STATE_DB", "DT_ROSTER", "DT_NIGHT")
 
 
@@ -65,7 +65,7 @@ def fill(template, version=3, valid="签署日起 30 天；到期前 3 天日报
             out += [f"- 项目：{p}" for p in projects]
             continue
         if line.startswith("| 〔填，例：Natsukashii1997"):
-            out += [f"| {r} | {n} |" for r, n in whitelist]
+            out += [f"| {' | '.join(row)} |" + (" 不记 |" if len(row) == 2 else "") for row in whitelist]
             continue
         line = line.replace("〔填，例：10〕", day).replace("〔填，例：3〕", task).replace("〔填，例：2〕", merge_day)
         line = line.replace("〔填，例：2 小时〕", drain)
@@ -160,7 +160,8 @@ class PolicyTemplateTests(Base):
         self.assertEqual(fields, {"version": 3, "valid_days": 30,
                                   "categories": {"ask": True, "redispatch": True, "reject": True, "merge": True},
                                   "projects": ["dt-sandbox"], "limits": {"day": 10, "task": 3, "merge_day": 2, "redispatch": 1},
-                                  "whitelist": {REPO: "只有 CI，没有部署、发布、外部通知"}, "wait_minutes": 30, "drain_minutes": 120})
+                                  "whitelist": {REPO: "只有 CI，没有部署、发布、外部通知"},
+                                  "triggers": {REPO: "wf-0123456789abcdef0123456789abcdef"}, "wait_minutes": 30, "drain_minutes": 120})
 
     def test_template_itself_cannot_be_signed(self):
         sha = self.write_policy(self.template)
@@ -181,7 +182,7 @@ class PolicyTemplateTests(Base):
             "①": "| ① 提问卡 | 是 |", "②": "| ② 放弃后重派一次 | 是 |", "③": "| ③ 退回 PR | 是 |", "④": "| ④ 合并 PR | 是 |",
             "项目": "- 项目：dt-sandbox", "每天": "- 每天代批总数：10 次", "每张": "- 每张任务最多代批：3 次",
             "合并": "- 每天合并：2 个", "重派": "- 放弃后重派：每张任务 1 次（规格定的，只能是 1）",
-            "白名单": f"| {REPO} | 只有 CI，没有部署、发布、外部通知 |",
+            "白名单": f"| {REPO} | 只有 CI，没有部署、发布、外部通知 | wf-0123456789abcdef0123456789abcdef |",
             "等": "- 白天先等：30 分钟（从飞书成功送达起算；托管时段不等）",
             "排空": "- 排空截止：2 小时。到点没收完就冻结并立即报告常浩，常浩说「解除冻结」才结束。",
         }
@@ -203,7 +204,11 @@ class PolicyTemplateTests(Base):
             "重派 0": good.replace("每张任务 1 次", "每张任务 0 次"),
             "白名单行看不懂": good.replace(f"| {REPO} |", "| dt-sandbox |"),
             "白名单没写说明": good.replace(f"| {REPO} | 只有 CI，没有部署、发布、外部通知 |", f"| {REPO} |  |"),
-            "白名单没表头": good.replace("| 仓库 | 合并到 main 触发的工作流 / 外部动作 |\n|---|---|\n", ""),
+            "白名单没表头": good.replace("| 仓库 | 合并到 main 触发的工作流 / 外部动作 | 触发条件指纹 |\n|---|---|---|\n", ""),
+            "指纹乱写": good.replace("wf-0123456789abcdef0123456789abcdef", "wf-0123"),
+            "指纹旧的 16 位": good.replace("wf-0123456789abcdef0123456789abcdef", "wf-0123456789abcdef"),
+            "指纹大写": good.replace("wf-0123456789abcdef0123456789abcdef", "WF-0123456789ABCDEF"),
+            "三列表少一格": good.replace(" | wf-0123456789abcdef0123456789abcdef |", " |"),
             "等 0 分钟": good.replace("白天先等：30 分钟", "白天先等：0 分钟"),
             "等 241 分钟": good.replace("白天先等：30 分钟", "白天先等：241 分钟"),
             "等 31 分钟": good.replace("白天先等：30 分钟", "白天先等：31 分钟"),
@@ -216,6 +221,19 @@ class PolicyTemplateTests(Base):
             with self.subTest(name):
                 self.assertNotEqual(text, good)
                 self.assertTrue(self.errors_of(text), name)
+
+    def test_trigger_column_optional_and_two_column_table_still_signs(self):
+        """0B-4d：第三列「触发条件指纹」可填可不填；「不记」、留空都是没记（④ 对它交常浩）；原来的两列表照旧读得出、指纹 None。"""
+        for cell, want in (("wf-0123456789abcdef0123456789abcdef", "wf-0123456789abcdef0123456789abcdef"), ("不记", None), ("", None)):
+            with self.subTest(cell=cell):
+                fields, errors = S.parse_policy(fill(self.template, whitelist=((REPO, "只有 CI", cell),)))
+                self.assertEqual((errors, fields["triggers"]), ([], {REPO: want}))
+        two = fill(self.template).replace("| 仓库 | 合并到 main 触发的工作流 / 外部动作 | 触发条件指纹 |\n|---|---|---|\n",
+                                          "| 仓库 | 合并到 main 触发的工作流 / 外部动作 |\n|---|---|\n")
+        two = two.replace(" | wf-0123456789abcdef0123456789abcdef |", " |")
+        fields, errors = S.parse_policy(two)
+        self.assertEqual((errors, fields["whitelist"], fields["triggers"]),
+                         ([], {REPO: "只有 CI，没有部署、发布、外部通知"}, {REPO: None}))
 
     def test_merge_on_needs_whitelist_and_off_allows_empty(self):
         self.assertIn("④ 合并 PR 填了「是」，合并白名单至少要有一行", self.errors_of(fill(self.template, whitelist=())))
