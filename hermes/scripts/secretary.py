@@ -57,7 +57,8 @@ docs/代批清单-模板.md 填。字段位置固定、每项恰好一处、引�
   ## 3. 额度：每天代批总数 N 次、每张任务最多代批 N 次、每天合并 N 个（N 在 1–100）、放弃后重派：每张任务 1 次（只能是 1）；
           「每天」按 Asia/Shanghai 自然日；
   ## 4. 合并白名单：表「| owner/仓库 | 触发的工作流 / 外部动作 |」，④ 关时可以空表，④ 开时至少一行；仓库不重复，
-          每个都要是第 2 节某个项目签署时在名册里的完整仓库名（触发条件指纹 0B-4d 再加）；
+          每个都要是第 2 节某个项目签署时在名册里的完整仓库名；可加第三列「触发条件指纹」（0B-4d：wf-16 位十六进制，
+          secretary_gate.py fingerprint 现读 main 上 .github 目录算；写「不记」或留空就是没记，④ 对这个仓库一律交常浩；原来的两列表照旧能签）；
   ## 5. 等待与排空：「白天先等：30 分钟」（只能是 30：常浩 11-17 定，规格第 10 节；要改先改规格）、「排空截止：N 小时 / N 分钟」（大于 0、不超过 24 小时）。
   签署时：除模板里两行固定说明（EXEMPT_LINES，逐字相同才豁免）外不许有〔填…〕；文件版本 = 口令版本；版本比签过的都大；
   全文 SHA-256 前 12 位 = 口令；名册核对通过，并把项目 → 仓库的映射记进签署（signature.projects）。verify 每次重算：没签、撤销、
@@ -67,7 +68,7 @@ docs/代批清单-模板.md 填。字段位置固定、每项恰好一处、引�
 给 0B-4c 的接口：
   python 里 import secretary：read_status(now) 只读，返回 {"state", "error", "session", "policy", "admission", ...}；
   policy 有效时带清单解析出的字段：categories{ask, redispatch, reject, merge}、projects、repos{项目: 完整仓库名（签署时固定的）}、
-  limits{day, task, merge_day, redispatch}、whitelist{仓库: 说明}、wait_minutes、drain_minutes。
+  limits{day, task, merge_day, redispatch}、whitelist{仓库: 说明}、triggers{仓库: 触发条件指纹或 None}、wait_minutes、drain_minutes。
   admission = {"eligible", "reasons"}：状态能读、是 on、清单有效、会话开启时的清单就是现在这份有效清单才 eligible。
   下游不得只看 state=="on"，要看 admission；它只管开关这一层，凭证、绑定、额度各闸自己核；每次执行前现读，不缓存。
   记账、额度、排空证明在 secretary_ledger.py（复用 custody_ledger 的通用函数）。
@@ -167,22 +168,41 @@ def _section(sec, heads, title, errors):
     return found[0]
 
 
+TRIGGER = r"wf-[0-9a-f]{16}"   # 触发条件指纹（secretary_gate.trigger_fingerprint 算）
+NO_TRIGGER = "不记"             # 第三列写「不记」或留空：这个仓库没记指纹，④ 对它一律交常浩（0B-4d）
+
+
 def parse_whitelist(body, errors):
-    """第 4 节的表：表头「| 仓库 | … |」+ 分隔行，之后每行「| owner/仓库 | 说明 |」；可以没有数据行。返回 {仓库: 说明}。"""
+    """第 4 节的表：表头「| 仓库 | … |」+ 分隔行，之后每行一个仓库；可以没有数据行。返回 ({仓库: 说明}, {仓库: 指纹或 None})。
+    两种表头（0B-4d 加第三列，原来的两列表照旧能签、能用）：
+      两列「| 仓库 | 合并到 main 触发的工作流 / 外部动作 |」：每行「| owner/仓库 | 说明 |」，读法和原来逐字一样，指纹一律 None；
+      三列「| 仓库 | 合并到 main 触发的工作流 / 外部动作 | 触发条件指纹 |」：每行三格，第三格是 wf-16 位十六进制、「不记」或空。
+    没记指纹的仓库 ④ 一律交常浩（合并前要现读触发条件和签署时比，规格第 3 节）。"""
     rows = [ln.strip() for ln in body if ln.strip().startswith("|")]
     if len(rows) < 2 or not re.match(r"^\|\s*仓库\s*\|", rows[0]) or not re.fullmatch(r"\|(\s*:?-{3,}:?\s*\|)+", rows[1]):
-        errors.append("「## 4. 合并白名单」要有一张表，表头是「| 仓库 | 合并到 main 触发的工作流 / 外部动作 |」")
-        return None
-    out = {}
+        errors.append("「## 4. 合并白名单」要有一张表，表头是「| 仓库 | 合并到 main 触发的工作流 / 外部动作 | 触发条件指纹 |」")
+        return None, None
+    three = bool(re.fullmatch(r"\|[^|]*\|[^|]*\|\s*触发条件指纹\s*\|", rows[0]))
+    out, triggers = {}, {}
     for ln in rows[2:]:
-        m = re.fullmatch(rf"\|\s*({REPO_FULL})\s*\|\s*(.*?)\s*\|", ln)
+        if three:
+            m = re.fullmatch(rf"\|\s*({REPO_FULL})\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|", ln)
+            fp = m.group(3) if m else ""
+            if m and fp not in ("", NO_TRIGGER) and not re.fullmatch(TRIGGER, fp):
+                errors.append(f"合并白名单这一行的触发条件指纹看不懂（要写 wf-16 位十六进制，或「{NO_TRIGGER}」）：{ln}")
+                continue
+        else:
+            m = re.fullmatch(rf"\|\s*({REPO_FULL})\s*\|\s*(.*?)\s*\|", ln)
+            fp = ""
         if not m or not m.group(2):
-            errors.append(f"合并白名单这一行看不懂（要写「| owner/仓库 | 触发的工作流和外部动作 |」）：{ln}")
+            errors.append("合并白名单这一行看不懂（要写「| owner/仓库 | 触发的工作流和外部动作 |" + (" 触发条件指纹 |" if three else "")
+                          + f"」）：{ln}")
         elif m.group(1) in out:
             errors.append(f"合并白名单里 {m.group(1)} 写了不止一次")
         else:
             out[m.group(1)] = m.group(2)
-    return out
+            triggers[m.group(1)] = fp if re.fullmatch(TRIGGER, fp) else None
+    return out, triggers
 
 
 def parse_policy(text):
@@ -226,9 +246,9 @@ def parse_policy(text):
             limits[key] = n
     if len(limits) == len(LIMIT_LINES):
         out["limits"] = limits
-    wl = parse_whitelist(_section(sec, heads, "## 4. 合并白名单", errors), errors)
+    wl, triggers = parse_whitelist(_section(sec, heads, "## 4. 合并白名单", errors), errors)
     if wl is not None:
-        out["whitelist"] = wl
+        out["whitelist"], out["triggers"] = wl, triggers
         if cats.get("merge") and not wl:
             errors.append("④ 合并 PR 填了「是」，合并白名单至少要有一行")
     five = _section(sec, heads, "## 5. 等待与排空", errors)
@@ -304,7 +324,7 @@ def verify_policy(doc, now=None, path=None):
     return {"ok": True, "code": "valid", "path": base["path"], "version": sig["version"], "sha256": sha,
             "signed_at": sig["signed_at"], "expires_at": sig["expires_at"], "categories": fields["categories"],
             "projects": fields["projects"], "repos": dict(sig["projects"]), "limits": fields["limits"],
-            "whitelist": fields["whitelist"], "wait_minutes": fields["wait_minutes"], "drain_minutes": fields["drain_minutes"]}
+            "whitelist": fields["whitelist"], "triggers": fields["triggers"], "wait_minutes": fields["wait_minutes"], "drain_minutes": fields["drain_minutes"]}
 
 
 def require_policy(doc, now, path=None):

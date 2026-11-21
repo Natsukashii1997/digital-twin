@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import socket
+import signal
 import subprocess
 import sys
 import tempfile
@@ -49,7 +50,7 @@ class HubFixture(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="dt-hub-e2e-")
         self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
+        root = self.tmp_root = Path(tmp.name)
         self.home = root / "hub"
         self.home.mkdir()
         self.port = free_port()
@@ -81,6 +82,32 @@ class HubFixture(unittest.TestCase):
             self.up.wait(10)
         except subprocess.TimeoutExpired:
             self.up.kill()
+        self._reap_agents()
+
+    def _reap_agents(self, timeout=10):
+        """中台的 Agent 按设计跑在各自的进程组里（引擎 worker.ts：detached），中台停了它们还会往临时目录写输出和退出码，
+        和清理临时目录撞上就报「目录非空」（机器忙时偶发）。停中台后找出命令行里带这个临时目录的进程（Agent 外壳的参数里有
+        它的输出、退出码文件路径），整组先 TERM、快到时限再 KILL，等它们都退出再清理。"""
+        roots, deadline, me = {str(self.tmp_root), str(Path(self.tmp_root).resolve())}, time.time() + timeout, os.getpgrp()
+        while True:
+            try:
+                ps = subprocess.run(["ps", "-ax", "-o", "pid=,pgid=,command="], capture_output=True, text=True, timeout=10).stdout
+            except (OSError, subprocess.SubprocessError):
+                return
+            groups = set()
+            for line in ps.splitlines():
+                parts = line.split(None, 2)
+                if len(parts) == 3 and any(r in parts[2] for r in roots) and int(parts[1]) != me:
+                    groups.add(int(parts[1]))
+            if not groups or time.time() > deadline:
+                return
+            sig = signal.SIGKILL if time.time() > deadline - 3 else signal.SIGTERM
+            for g in groups:
+                try:
+                    os.killpg(g, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            time.sleep(0.2)
 
     def _wait_up(self):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -104,6 +131,30 @@ class HubFixture(unittest.TestCase):
         self.roster.write_text(json.dumps({"projects": [], "inventory": [
             {"path": f"github:{gh}", "category": "沙盒", "sandbox": True} for gh in sandboxes]}), encoding="utf-8")
 
+
+
+class ReapAgentsTests(unittest.TestCase):
+    """HubFixture 停中台后要等脱离的 Agent 进程组退出再清理（「目录非空」偶发，协调会话 11-21 转来）。不需要真中台。"""
+
+    def test_detached_writer_stopped_before_cleanup(self):
+        tmp = tempfile.TemporaryDirectory(prefix="dt-hub-reap-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        late = root / "late"
+        agent = subprocess.Popen(["/bin/sh", "-c", 'sleep 30; touch "$1"', "agent", str(late)], start_new_session=True)
+        self.addCleanup(lambda: agent.poll() is None and agent.kill())
+        holder = type("F", (), {"tmp_root": root})()
+        started = time.time()
+        HubFixture._reap_agents(holder, timeout=10)
+        self.assertIsNotNone(agent.wait(5))                              # 已经退出
+        self.assertLess(time.time() - started, 10)
+        self.assertFalse(late.exists())
+
+    def test_nothing_to_reap_returns_fast(self):
+        holder = type("F", (), {"tmp_root": Path(tempfile.gettempdir()) / "dt-hub-reap-no-such-dir"})()
+        started = time.time()
+        HubFixture._reap_agents(holder, timeout=10)
+        self.assertLess(time.time() - started, 5)
 
 
 @unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")

@@ -12,6 +12,9 @@
     认了就用 ctx.inject_message 往常浩私聊的会话注入一句话，让猛鬼兽按 pdaily-act 技能办；再在后台跑 `pdaily_act.py after`
     把卡片原地改成「已定」（注入没成，after 顺带在私聊说请引用卡片回一句）。注入要 Hermes 配置
     plugins.entries.merge-buttons.allow_gateway_injection: true（常浩点头才开）；没开时 inject_message 返回 False，照样记账。
+  - 秘书汇报卡（#195 批 0B-5）：{"secretary": "overturn"|"merge_revert", "ref": 决定号, "card": 令牌}、改选卡
+    {"secretary": "reselect", "ref": 决定号, "card": 令牌, "o": 选项号} → `secretary_report.py button <verb> <决定号> --chat <聊天号>
+    --operator <点击人> --card <令牌> [--option <选项号>]`（键要正好是这几个、令牌必带；点击人、令牌、选项由脚本核对）；
   - 按钮实测探针（#195 批 0B-3）：{"probe": "16 位十六进制"} → 不起脚本，只把网关给的会话信息（点击人、聊天、消息号的样子）
     追加到 evidence/button-probe/clicks.jsonl，由 `button_probe.py show` 和登记的测试卡对照。只记录，不触发任何动作。
 除日报按钮的注入外都不回复，是因为网关回复按钮点击会失败（拿回调 token 当消息号）；进度和结果由脚本直接发到私聊。
@@ -29,6 +32,7 @@ SCRIPT = Path(os.environ.get("DT_MERGE_ACT", "~/.hermes/scripts/merge_act.py")).
 ANSWER_SCRIPT = Path(os.environ.get("DT_AUTOLOOP_ANSWER", "~/.hermes/scripts/autoloop_answer.py")).expanduser()
 PDAILY_SCRIPT = Path(os.environ.get("DT_PDAILY_ACT", "~/.hermes/scripts/pdaily_act.py")).expanduser()
 CUSTODY_SCRIPT = Path(os.environ.get("DT_CUSTODY_REPORT", "~/.hermes/scripts/custody_report.py")).expanduser()
+SECRETARY_SCRIPT = Path(os.environ.get("DT_SECRETARY_REPORT", "~/.hermes/scripts/secretary_report.py")).expanduser()
 LOG = Path(os.environ.get("DT_SHADOW_DIR", "~/Library/Application Support/DigitalTwin/shadow")).expanduser() / "buttons.log"
 REF = re.compile(r"^[\w.-]+#\d+@[0-9a-f]{7,40}$")
 DECISION = re.compile(r"^d-\d{6}-[0-9a-f]{6}$")
@@ -146,6 +150,8 @@ def handle(raw_args):
         return probe(value) if set(value) == {"probe"} else None
     if isinstance(value, dict) and "pdaily" in value:
         return pdaily(value)
+    if isinstance(value, dict) and "secretary" in value:
+        return secretary(value)
     if isinstance(value, dict) and "autoloop" in value:       # 中台卡片只认 {"autoloop": 令牌, "o": 选项号[, "v": 版本号]}
         o, v = value.get("o"), value.get("v")
         if set(value) - {"v"} != {"autoloop", "o"} or not CARD.match(str(value["autoloop"])) or type(o) is not int \
@@ -159,6 +165,18 @@ def handle(raw_args):
         return None
     script, verb, ref, extra = picked
     return _spawn(script, ["button", verb, ref, "--chat", _chat_id(), *extra], f"{verb} {ref}")
+
+
+def secretary(value):
+    """秘书汇报卡的「推翻」、撤销卡的「合并撤销 PR」、改选卡（#195 0B-5）：键要正好对、令牌必带，后台交给 secretary_report.py。"""
+    verb, ref, card, o = value.get("secretary"), str(value.get("ref") or ""), str(value.get("card") or ""), value.get("o")
+    keys = {"secretary", "ref", "card"} | ({"o"} if verb == "reselect" else set())
+    if verb not in ("overturn", "merge_revert", "reselect") or set(value) != keys or not DECISION.match(ref) or not CARD.match(card) \
+            or (verb == "reselect" and (type(o) is not int or not 0 < o < 100)):
+        return None
+    opt = ["--option", str(o)] if verb == "reselect" else []
+    return _spawn(SECRETARY_SCRIPT, ["button", verb, ref, "--chat", _chat_id(), "--operator", _session("HERMES_SESSION_USER_ID"),
+                                     "--card", card, *opt], f"secretary {verb} {ref}")
 
 
 def _spawn(script, args, what):
@@ -176,4 +194,4 @@ def _spawn(script, args, what):
 def register(ctx):
     global _CTX
     _CTX = ctx
-    ctx.register_command("card", handler=handle, description="卡片按钮：PR 合并 / 退回（#78），托管推翻 / 合并 revert PR（#133），中台卡片、按钮实测探针（#195），日报拍板（#235）")
+    ctx.register_command("card", handler=handle, description="卡片按钮：PR 合并 / 退回（#78），托管推翻 / 合并 revert PR（#133），秘书推翻 / 改选（#195 0B-5），中台卡片、按钮实测探针（#195），日报拍板（#235）")

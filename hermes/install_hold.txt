@@ -22,4 +22,5 @@ hermes/scripts/secretary.py  # 秘书代批（#195 0B-4），未签代批清单�
 hermes/scripts/secretary_gate.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_ledger.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_patrol.py  # 秘书侧巡视（#195 0B-4c，#225），未签代批清单、未生效
+hermes/scripts/secretary_report.py  # 秘书汇报卡与推翻（#195 0B-5），未签代批清单、未生效
 hermes/scripts/twin_state.py @23a598654b0aa9c77ca70968638ab15eb224a118  # 状态底座；main 版打开库就把 v3 迁到 v6（加托管、秘书账本表），迁了旧脚本不能再开；随秘书代批 #195 上线再装
