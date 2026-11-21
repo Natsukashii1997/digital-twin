@@ -24,7 +24,9 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
      （常浩 11-19 定；秘书自己的对账 secretary_gate.reconcile 不改，核不清的由常浩 secretary_gate settle 定）——
      例外（常浩 11-20 选甲）：② 重派 / ③ 返修只差网关补发派单事件的不挡（补发要过闸，挡了就是死循环；中台按 id 去重，
      补发不会多派）；
-  5. 结算开闸：记下这次的纪元和报告。仍冻结的范围（结果不明、核不清）各自继续拒绝，别的照常放行。
+  5. 结算开闸：在出口账本写事务里再看一遍——对账期间又出现结果不明、还有已开始没记结果的受保护动作（出口账本 executing、
+     本人回答 inflight、秘书代批 executing，L3 第 5 轮 P1-08）就不开。都过了才记下纪元和报告。仍冻结的范围（结果不明、核不清）
+     各自继续拒绝，别的照常放行。
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
 
 **按「将来在 dt-gate 里运行」设计**（ADR-015）：闸的状态和出口账本在同一个库（运行账号的 DigitalTwin/autoloop/exits.db），
@@ -272,11 +274,9 @@ def in_flight_writes():
     out = []
     with E.db(write=False) as con:
         out += [f"出口 {r['key']}" for r in con.execute("SELECT key FROM exits WHERE state = 'executing'")]
+    out += [f"本人回答 卡片 {c}" for c in _owner_inflight()]
     try:
         import autoloop_feishu as F
-        if F.db_file().exists():
-            with F.db() as con:
-                out += [f"本人回答 卡片 {r[0]}" for r in con.execute("SELECT card_id FROM claims WHERE state = 'inflight'")]
         if F.bridge_busy():                      # 不看 cards.db 在不在：桥接 / 秘书领卡持锁时库可能还没建（L3 第 3 轮 P1-06）
             out.append("飞书桥接或秘书领卡正持桥接锁")
     except ImportError:
@@ -290,9 +290,41 @@ def in_flight_writes():
     return out
 
 
-def _secretary_sending():
-    """秘书账本里正在送的代批（executing，2 分钟内动过的；更早的是进程中途没了，由秘书对账处理，不算在途）。
-    库或表不在就是没有；读不了当作有（不做快照）。"""
+def _owner_inflight():
+    """本人回答还在发（claims inflight）的卡片号。只读打开卡片库（不建表、不要写锁：开闸前调用方正持出口账本写锁，
+    锁顺序是「卡片库 → 出口账本」，这里只读、不等卡片库的写锁）。库或表不在就是没有；读不了当作有。"""
+    try:
+        import autoloop_feishu as F
+    except ImportError:
+        return []
+    f = F.db_file()
+    if not f.exists():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{f}?mode=ro", uri=True, timeout=10)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'claims'").fetchone():
+                return []
+            return [str(r[0]) for r in con.execute("SELECT card_id FROM claims WHERE state = 'inflight'")]
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return [f"?（卡片库读不了：{type(e).__name__}）"]
+
+
+def _started(con):
+    """开闸前最后一关（L3 第 5 轮 P1-08，常浩 11-21 经飞书选甲）：已开始、还没记结果的受保护动作——出口账本 executing、
+    本人回答 inflight、秘书代批 executing（不论多久）。它们结果不明时先关闸再记，关闸那笔可能正等着出口账本这把写锁
+    （标记文件又没写成）；这时开闸，抢到锁的新入口就会先于关闸登记被放行。闸关着时新动作领不到资格，所以这里只是等手上
+    已开始的做完。在出口账本写事务里调用：这期间没有新的领资格。读不了一律算有（不开）。"""
+    return ([f"出口 {r[0]}" for r in con.execute("SELECT key FROM exits WHERE state = 'executing'")]
+            + [f"本人回答 卡片 {c}" for c in _owner_inflight()]
+            + [f"秘书代批 {d}" for d in _secretary_sending(fresh_only=False)])
+
+
+def _secretary_sending(fresh_only=True):
+    """秘书账本里正在送的代批（executing）。fresh_only 时只列 2 分钟内动过的（排空用：更早的是进程中途没了，由秘书对账
+    处理，不算在途）；开闸前那一关全列。库或表不在就是没有；读不了当作有。"""
     import twin_state as TS
     p = Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser()
     if not p.exists():
@@ -304,7 +336,7 @@ def _secretary_sending():
                 return []
             now = G.now_tz()
             return [r[0] for r in con.execute("SELECT id, updated_at FROM secretary_decisions WHERE status = 'executing'")
-                    if now - G.parse_iso(r[1]) < SECRETARY_STALE]
+                    if not fresh_only or now - G.parse_iso(r[1]) < SECRETARY_STALE]
         finally:
             con.close()
     except sqlite3.Error as e:
@@ -489,6 +521,9 @@ def reconcile(readers=None):
         now_dirty = (con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone() or [0])[0]
         if why is None and now_dirty != seen:
             why = "对账期间又出现结果不明，要再对一次"
+        busy = _started(con) if why is None else []
+        if busy:
+            why = f"还有 {len(busy)} 个受保护的动作已开始、没记结果（{'、'.join(busy[:5])}），等它们做完再开闸"
         if why is None and "?" in marks:
             why = "关闸标记目录读不了，不开闸"
         if why is None and set(E.read_markers()) - set(marks):

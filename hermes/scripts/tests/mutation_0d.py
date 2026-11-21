@@ -200,6 +200,16 @@ M = [
      "维护刚开始时压下的对账回话维护后补发", [FS + ".MaintenanceQuiet"]),
     ("autoloop_feishu.py", 'if held != "?"', 'if True', "读不了账本不写成维护中",
      [FS + ".MaintenanceQuiet.test_unreadable_gate_means_quiet"]),
+    # L3 第 5 轮 P1-08（常浩 11-21 经飞书选甲）：对账开闸前看已开始、没记结果的受保护动作
+    ("autoloop_recovery.py", "        if busy:\n            why = f\"还有", "        if False:\n            why = f\"还有",
+     "对账开闸前不看已开始的受保护动作", [RC + ".StartedBeforeOpen"]),
+    ("autoloop_recovery.py", '+ [f"本人回答 卡片 {c}" for c in _owner_inflight()]\n            + [f"秘书代批',
+     '+ []\n            + [f"秘书代批', "开闸前不看本人回答 inflight",
+     [RC + ".StartedBeforeOpen.test_owner_answer_in_flight_keeps_the_gate_closed"]),
+    ("autoloop_recovery.py", "_secretary_sending(fresh_only=False)", "_secretary_sending()",
+     "开闸前只看 2 分钟内动过的秘书代批", [RC + ".StartedBeforeOpen"]),
+    ("autoloop_recovery.py", 'return [f"?（卡片库读不了：{type(e).__name__}）"]', "return []",
+     "卡片库读不了当作没有在发的本人回答", [RC + ".StartedBeforeOpen"]),
 ]
 
 

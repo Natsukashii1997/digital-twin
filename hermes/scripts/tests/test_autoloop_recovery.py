@@ -233,6 +233,128 @@ class Markers(Base):
             E.close_gate("y 结果不明")
 
 
+class StartedBeforeOpen(Base):
+    """L3 第 5 轮 P1-08（常浩 11-21 经飞书选甲）：关闸标记写不进（目录可读不可写）、关闸那笔账又正等着对账手里的出口账本
+    写锁时，对账不能开闸——开了，抢到锁的新入口会先于关闸登记被放行。对账开闸前看有没有已开始、没记结果的受保护动作。"""
+
+    def started_exit(self, key="merge:o/r:1:h", scope="repo:o/r"):
+        epoch = R.ensure_open()
+        self.assertIsNone(E._begin(key, "merge", scope, {}, None, E.now_tz(), epoch))   # 本进程落盘 executing，进程活着
+        with E.db() as con:
+            E.mark_dirty(con, "先前别处的结果不明")                                       # 闸关着，等对账
+        return key
+
+    def test_close_stuck_behind_reconcile_cannot_be_overtaken(self):
+        """审查给的顺序：标记抛 PermissionError → 对账持最后的开闸事务 → close_gate 在这期间发起账本那笔（排队等锁）→
+        对账提交后立刻在别的范围抢 admit。不管之后谁先拿到锁，都不能放行新的受保护写。"""
+        import threading
+        import time
+        key = self.started_exit()
+        writing = threading.Event()
+        errors = []
+
+        def no_marker(reason):
+            writing.set()
+            raise PermissionError("标记目录只读")
+
+        def finish():
+            try:
+                E._finish(key, "unknown", note="发出去没拿到回音")                 # 先写标记（失败），再等账本写锁
+            except Exception as e:                                            # pragma: no cover - 失败时给断言看
+                errors.append(e)
+        t = threading.Thread(target=finish)
+        real = E.frozen_scopes
+
+        def in_final_tx(con):                                                 # 第 5 步：对账已持出口账本写锁
+            t.start()
+            self.assertTrue(writing.wait(5))
+            time.sleep(0.3)                                                   # 让 close_gate 走到 BEGIN IMMEDIATE 排队
+            return real(con)
+        with mock.patch.object(E, "write_marker", side_effect=no_marker), \
+                mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx):
+            rep = R.reconcile()
+            raced = []
+            try:                                                              # 对账一提交就在别的范围抢领资格
+                with E.db() as con:
+                    R.admit(con, rep["epoch"] or self.epoch)
+                    raced.append("放行了")
+            except E.Refused:
+                pass
+            t.join(10)
+        self.assertEqual(errors, [])
+        self.assertFalse(rep["open"])
+        self.assertIn(f"出口 {key}", rep["why"])
+        self.assertEqual(raced, [])
+        with E.db(write=False) as con:
+            self.assertEqual(con.execute("SELECT state FROM exits WHERE key = ?", (key,)).fetchone()[0], "unknown")
+        self.assertFalse(R.status()["open"])                                  # 关闸那笔记上了：仍关着
+        self.assertEqual(E.read_markers(), [])                                # 标记确实一个都没写成
+
+    def test_other_scope_waits_until_the_started_exit_finishes(self):
+        """确定性版本：结果出来之前（executing、标记没写成、账本那笔还没记上）对账不开、新入口进不来；做完就开。"""
+        key = self.started_exit()
+        rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIn("已开始、没记结果", rep["why"])
+        with self.assertRaises(E.Refused):
+            E.guard("merge", "merge:o/r2:1:h", "repo:o/r2", {}, dict)
+        E._finish(key, "done", {"ok": 1})
+        rep = R.reconcile()
+        self.assertTrue(rep["open"], rep["why"])
+
+    def test_owner_answer_in_flight_keeps_the_gate_closed(self):
+        import autoloop_feishu as F
+        R.ensure_open()
+        with F.db(write=True) as con:
+            con.execute("INSERT INTO feishu_cards (card_id, token, message_id, chat_id, kind, options, version, "
+                        "hub_delivered_at) VALUES (5, 'aaaaaaaaaaaaaaaa', 'om_5', 'oc_x', 'ask', 2, 1, 'x')")
+            con.execute("INSERT INTO claims (card_id, who, state, choice, at, attempt, version, pid) VALUES "
+                        "(5, 'owner', 'inflight', 0, ?, 'a1', 1, ?)", (F.now(), os.getpid()))
+        with E.db() as con:
+            E.mark_dirty(con, "先前别处的结果不明")
+        rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIn("本人回答 卡片 5", rep["why"])
+        with F.db(write=True) as con:
+            con.execute("UPDATE claims SET state = 'answered' WHERE card_id = 5")
+        self.assertTrue(R.reconcile()["open"])
+
+    def test_secretary_decision_started_after_its_check_still_counts(self):
+        """秘书那一路第 4 步就挡；第 5 步再看一次（不论多久没动），第 4 步之后才开始送的也算。"""
+        import sqlite3
+        R.ensure_open()
+        db = self.root / "twin-state.db"
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE secretary_decisions (id TEXT, status TEXT, updated_at TEXT)")
+            con.execute("INSERT INTO secretary_decisions VALUES ('sd-9', 'executing', ?)",
+                        (G.iso(G.now_tz() - dt.timedelta(minutes=10)),))
+        with E.db() as con:
+            E.mark_dirty(con, "先前别处的结果不明")
+        with mock.patch.dict(os.environ, {"DT_STATE_DB": str(db)}), \
+                mock.patch.object(R, "_secretary", return_value=(None, "第 4 步那时还没有")):
+            rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIn("秘书代批 sd-9", rep["why"])
+
+    def test_unreadable_card_db_keeps_the_gate_closed(self):
+        import autoloop_feishu as F
+        R.ensure_open()
+        with F.db(write=True):
+            pass
+        with E.db() as con:
+            E.mark_dirty(con, "先前别处的结果不明")
+        real = R.sqlite3.connect
+
+        def broken(target, *a, **kw):
+            if str(F.db_file()) in str(target):
+                raise R.sqlite3.OperationalError("unable to open database file")
+            return real(target, *a, **kw)
+        with mock.patch.object(R.sqlite3, "connect", side_effect=broken):
+            rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIn("卡片库读不了", rep["why"])
+
+
 class AdmissionRace(Base):
     """审查 P1-03：ensure_open() 只是先看一眼；它放行之后闸立刻被关（别的进程登记了结果不明、或开始维护），
     领写入资格的那个写事务里的 admit 必须拦住，外部动作一次也不做。"""
