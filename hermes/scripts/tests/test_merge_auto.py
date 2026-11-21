@@ -494,6 +494,28 @@ class Auto(Fixture, unittest.TestCase):
         (merge,) = self.merges_called()
         self.assertIn(f"sha={new_head}", merge)
 
+    def test_rerunning_the_old_handoff_after_a_new_commit_never_merges_the_new_version(self):
+        """第 4 轮审查问：cmd_auto 当场核对把旧请求结成 not_merged 之后，同一次调用会接着登记、试合当前版本。
+        调用方把原来那条交出命令原样重跑，会不会把没人交出过的新版本合进去？不会：交出命令带着版本前缀，
+        auto_try 用它当 want，PR 现在不是这个版本就停下、不登记、不发请求。新版本要合，得有人交出新版本。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")                     # 旧版本 self.head 的请求结果不明
+        old = self.head
+        new_head = self.pr_commit(5, {"docs/a.md": "someone else pushed\n"})
+        self.update_pr(headRefOid=new_head)                          # 之后有人推了新提交
+        r = self.auto(f"app#5@{old[:7]}")                            # 原样重跑当初的交出命令
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("没合上", r.stdout)                             # 旧请求按远端依据（版本变了）结清
+        self.assertIn(f"不是交出的 {old[:7]}", r.stdout)
+        self.assertEqual((self.events(), self.merges_called(), self.handoffs(), self.state()),
+                         (["intent", "not_merged"], [], [], "OPEN"))
+        self.assertEqual(self.scan_at("2026-11-07T10:20:00+08:00"), "")           # 巡视也不合：没有新版本的交出登记
+        self.assertEqual(self.merges_called(), [])
+        r = self.auto(f"app#5@{new_head[:7]}")                       # 会话看过新版本、交出它：这才合
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (merge,) = self.merges_called()
+        self.assertIn(f"sha={new_head}", merge)
+
     def test_unsettled_is_never_resent_by_patrol(self):
         """#260-P1-01：交出登记还在、检查全过、上一次请求结果不明。巡视只读核对，不管过多久都不自己重发，也不放开重新交出。"""
         self.sign()
