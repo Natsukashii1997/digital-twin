@@ -6,7 +6,7 @@
 
 ## 一、取数
 
-1. `sr status`：拿上一期（早于今天）的 `read_from`（取数截止时间）和 `carry`（上一期所有 ✴️ 待解决、⬆️ 待上线，带原标题和原话）。今天已经出过一版（`today_sent` 不为空）也照样从 `read_from` 读起、重新整理全天，发送时脚本会原地改今天那条。
+1. `sr status`：拿上一期（早于今天）的 `read_from`（取数截止时间）和 `carry`（上一期所有 ✴️ 待解决、⬆️ 待上线，带原标题和原话）。上一期以**群里常浩实际发出的版本**为准（常浩可能自己改了再发群，11-19 他删了 ✴️ 微信支付截图、加了两条 ♐），脚本会去群里找那条、按它算 `carry` 并写回存档；`previous_source` 写明依据的是群里版本还是私聊存档。读群失败或读不懂时脚本报错，不要绕过它改用私聊存档，报给常浩（2026-11-20 常浩定）。今天已经出过一版（`today_sent` 不为空）也照样从 `read_from` 读起、重新整理全天，发送时脚本会原地改今天那条。
 2. 读群消息：`~/.hermes/profiles/agumon/bin/lark-cli im +chat-messages-list --as user --chat-id oc_32562463635b4b2ee03d1808c080d1b5 --start <read_from 转成 2026-11-18T18:41:00+08:00 这种写法> --order asc --page-all --format json`。周末也算。后续查原消息、下载截图也用同一个亚古兽入口，不走 PATH 上的裸 `lark-cli`；不同飞书应用返回的 `sender.id` 不同，不能混用。
 3. **群里从 `read_from` 到现在没有任何新消息**：不出这一期，最终回复只写一句「今天测试反馈群没有新反馈，本期不出。」，到此结束。
 4. 带截图的反馈，用同一入口、同一身份（`--as user`）的 `im +messages-resources-download --message-id <截图所在消息的 message_id> --file-key <该消息里的 img_v3_...> --type image` 下载后核对。图片单发、图文混排均以携带图片的消息为准，不用后续的文字说明或回复的 `message_id`；遇到 `File not in msg` 先核对这对 ID 是否来自同一条消息。

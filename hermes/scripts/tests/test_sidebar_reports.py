@@ -24,9 +24,9 @@ def fx(name):
 
 class FakeRun:
     """按命令回话，记下每次调用。"""
-    def __init__(self, members=None, content="📅<u>**{date} 需求反馈**</u>", mentions=None):
+    def __init__(self, members=None, content="📅<u>**{date} 需求反馈**</u>", mentions=None, group=None):
         self.calls, self.n = [], 0
-        self.members, self.content, self.mentions = members or [], content, mentions
+        self.members, self.content, self.mentions, self.group = members or [], content, mentions, group or []
 
     def __call__(self, *args, identity="user", tries=None, **kw):
         self.calls.append((args, identity))
@@ -38,6 +38,10 @@ class FakeRun:
             return {"messages": [{"content": self.content, "mentions": [{"id": i} for i in (self.mentions or [])]}]}
         if verb == "+chat-members-list":
             return {"users": [{"member_id": i} for i in self.members]}
+        if verb == "+chat-messages-list":
+            if isinstance(self.group, Exception):
+                raise self.group
+            return {"messages": self.group, "has_more": False}
         return {}
 
     def verbs(self):
@@ -202,7 +206,7 @@ class TestFeedbackSend(Base):
         run = FakeRun()
         with self.assertRaises(sr.Invalid):
             sr.fb_send(self.draft_file(d), run=run)
-        self.assertEqual(run.calls, [])
+        self.assertEqual(run.verbs(), ["+chat-messages-list"])   # 只读了群里上一期，没发也没改
 
     def test_readback_without_title_fails(self):
         with self.assertRaises(sr.md.Fail):
@@ -212,10 +216,11 @@ class TestFeedbackSend(Base):
     def test_status_lists_carry_and_read_from(self):
         import datetime as dt
         day = dt.date(2026, 11, 19)
-        self.assertIsNone(sr.fb_status(day)["previous"])
+        self.assertIsNone(sr.fb_status(day, run=FakeRun())["previous"])
         sr.save(sr.HOME / "feedback/2026-11-18.json", fx("feedback-2026-11-18.draft.json"))
-        st = sr.fb_status(day)
+        st = sr.fb_status(day, run=FakeRun())
         self.assertEqual((st["previous"], st["read_from"], st["today_sent"]), ("2026-11-18", "2026-11-18 18:41", None))
+        self.assertEqual(st["previous_source"], "私聊存档（群里没找到常浩发的这期）")
         self.assertEqual([c["type"] for c in st["carry"]], ["pending"] * 2 + ["planned"] * 4)
 
     def test_status_same_day_rerun_still_reads_from_previous_period(self):
@@ -224,7 +229,7 @@ class TestFeedbackSend(Base):
         sr.save(sr.HOME / "feedback/2026-11-18.json", fx("feedback-2026-11-18.draft.json"))
         sr.save(sr.HOME / "feedback/2026-11-19.json", {"date": "2026-11-19", "cutoff": "2026-11-19 11:00",
                                                          "items": [], "dm_message_id": "om_trial"})
-        st = sr.fb_status(dt.date(2026, 11, 19))
+        st = sr.fb_status(dt.date(2026, 11, 19), run=FakeRun())
         self.assertEqual((st["read_from"], st["today_sent"]), ("2026-11-18 18:41", "om_trial"))
 
 
@@ -260,6 +265,95 @@ class TestFeedbackGroup(Base):
             sr.fb_group("2026-11-18", run=run)
         with self.assertRaises(sr.Invalid):   # 发过群就不再改私聊稿
             sr.fb_send(self.draft_file(self.d), run=run)
+
+
+class TestPreviousFromGroup(Base):
+    """上一期以群里实际发出的版本为准（2026-11-20 常浩定）：11-19 他自己发群时删了 ✴️ 微信支付截图、加了两条 ♐，
+    亚古兽只看私聊存档，把删掉的又带了回来。"""
+    DM = {"date": "2026-11-19", "cutoff": "2026-11-19 18:28", "dm_message_id": "om_dm19", "items": [
+        {"type": "fixed", "quotes": [{"text": "修好了", "name": "马文豪", "open_id": "ou_6d7f17803af57ebd15fb31675134a516"}]},
+        {"type": "pending", "title": "上传微信支付截图后未识别出收款公司和支付方式（待补截图核查）",
+         "quotes": [{"text": "现在微信支付好，上传付款截图还是识别不出收款公司和支付方式对吧", "name": "陈芳",
+                     "open_id": "ou_ee415755a9d8164263f31631c985e434"}]}]}
+
+    def setUp(self):
+        super().setUp()
+        self.msg = fx("feedback-2026-11-19.group-msg.json")
+        sr.save(sr.HOME / "feedback/2026-11-19.json", self.DM)
+
+    def status(self, group):
+        import datetime as dt
+        return sr.fb_status(dt.date(2026, 11, 20), run=FakeRun(group=group))
+
+    def test_parse_real_1119_group_post(self):
+        items = sr.parse_group_post(self.msg)
+        self.assertEqual([i["type"] for i in items], ["fixed"] * 4 + ["launched"] * 3 + ["planned"] * 3)
+        self.assertNotIn("pending", [i["type"] for i in items])
+        edit = items[-1]
+        self.assertEqual(edit["title"], "侧边栏支持编辑学员信息（AI 从会话提取，人工辅助修改）")
+        self.assertEqual([(q["name"], q["open_id"]) for q in edit["quotes"]],
+                         [("吴家慧", "ou_92c89f4852f9fbc312771ab63c0a2ea9"), ("马文豪", "ou_6d7f17803af57ebd15fb31675134a516")])
+        self.assertEqual(items[6]["quotes"], [])          # 只有图片的 ♐
+        self.assertEqual(len(items[3]["quotes"]), 6)      # 同一项多条原话
+
+    def test_status_carries_from_group_version(self):
+        st = self.status([self.msg])
+        self.assertEqual([c["type"] for c in st["carry"]], ["planned"] * 3)
+        self.assertTrue(st["previous_group_sent"])
+        self.assertIn("群里", st["previous_source"])
+        arch = json.loads((sr.HOME / "feedback/2026-11-19.json").read_text(encoding="utf-8"))
+        self.assertEqual(arch["group_message_id"], self.msg["message_id"])
+        self.assertEqual(arch["dm_items"], self.DM["items"])      # 私聊原版留底
+        self.assertEqual([i["type"] for i in arch["items"]][-3:], ["planned"] * 3)
+        self.assertEqual(self.status([self.msg])["carry"], st["carry"])   # 再跑一次结果不变，私聊原版不被覆盖
+        arch2 = json.loads((sr.HOME / "feedback/2026-11-19.json").read_text(encoding="utf-8"))
+        self.assertEqual(arch2["dm_items"], self.DM["items"])
+
+    def test_send_checks_carry_against_group_version(self):
+        planned = [i for i in sr.parse_group_post(self.msg) if i["type"] == "planned"]
+        d = {"date": "2026-11-20", "cutoff": "2026-11-20 18:02", "items": [
+            {"type": "fixed", "quotes": [{"text": "x", "name": "韩丹", "open_id": "ou_2091f26b7e50f2d9b0fb7b9619d4eabd"}]},
+            {**planned[2], "type": "launched"}, planned[0], planned[1]]}
+        run = FakeRun(content="📅<u>**2026-11-20 需求反馈**</u>", group=[self.msg])
+        self.assertEqual(sr.fb_send(self.draft_file(d), run=run)["message_id"], "om_1")   # 没带微信支付也能过
+        bad = {**d, "items": d["items"][:-1]}
+        with self.assertRaises(sr.Invalid):                                        # 群里那版的待上线照样要带
+            sr.fb_send(self.draft_file(bad), run=FakeRun(group=[self.msg]))
+
+    def test_no_group_post_falls_back_to_private_archive(self):
+        st = self.status([])
+        self.assertEqual([c["type"] for c in st["carry"]], ["pending"])
+        self.assertFalse(st["previous_group_sent"])
+        self.assertIn("私聊存档", st["previous_source"])
+
+    def test_ignores_other_senders_and_other_dates(self):
+        other = {**self.msg, "sender": {**self.msg["sender"], "id": "ou_someone"}}
+        old = {**self.msg, "content": self.msg["content"].replace("2026-11-19 需求反馈", "2026-11-18 需求反馈")}
+        self.assertEqual([c["type"] for c in self.status([other, old])["carry"]], ["pending"])
+
+    def test_latest_group_post_wins(self):
+        first = {**self.msg, "message_id": "om_g1", "create_time": "2026-11-19 18:40",
+                 "content": self.msg["content"].split("\n⬆️")[0]}
+        st = self.status([first, self.msg])
+        self.assertEqual(len(st["carry"]), 3)
+
+    def test_group_read_failure_fails_closed(self):
+        with self.assertRaises(sr.md.Fail):
+            self.status(sr.md.Fail("im +chat-messages-list：网络断开"))
+
+    def test_unparsable_group_post_fails_closed(self):
+        with self.assertRaises(sr.md.Fail):
+            self.status([{**self.msg, "content": "📅<u>**2026-11-19 需求反馈**</u>\n随便写的"}])
+
+    def test_quote_mention_mismatch_fails_closed(self):
+        with self.assertRaises(sr.md.Fail):
+            self.status([{**self.msg, "mentions": self.msg["mentions"][:-1]}])
+
+    def test_known_group_message_id_is_reread(self):
+        """脚本自己发过群（存档有 group_message_id）也按群里现在的内容为准：常浩可能事后在飞书里改过。"""
+        sr.save(sr.HOME / "feedback/2026-11-19.json", {**self.DM, "group_message_id": self.msg["message_id"]})
+        st = self.status([self.msg])
+        self.assertEqual([c["type"] for c in st["carry"]], ["planned"] * 3)
 
 
 class TestProgress(Base):
