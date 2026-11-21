@@ -68,7 +68,8 @@ M = [
     ("autoloop_recovery.py", '    if r is None or r["state"] != "held":', '    if r is None:', "P1-06 作废的恢复点不能回滚", [RC + ".Maintenance"]),
     ("autoloop_recovery.py", '        if bad:\n            raise E.Refused(f"回滚后卡片号可能错位', '        if False:\n            raise E.Refused(f"回滚后卡片号可能错位',
      "P1-06 回滚后核卡片号", [RC + ".Maintenance"]),
-    ("autoloop_recovery.py", '    why = why or sec_bad\n', '', "秘书账本有结果不明不开闸",
+    ("autoloop_recovery.py", '"secretary": sec_bad or sec_note})\n    why = why or sec_bad\n',
+     '"secretary": sec_bad or sec_note})\n', "秘书账本有结果不明不开闸",
      [RC + ".Order.test_secretary_unknown_keeps_gate_closed", SG + ".RecoveryGateTests"]),
     # ---------- 接线 ----------
     ("autoloop_grants.py", '            with tx(path) as con, R.admission(epoch):', '            with tx(path) as con:',
@@ -98,10 +99,10 @@ M = [
     ("secretary_gate.py", '    try:\n        epoch = R.ensure_open()\n    except E.Refused as e:\n        return {"ok": False, "paused": str(e)}\n    card = F.hub("GET"',
      '    epoch = None\n    card = F.hub("GET"', "秘书领卡过闸", [SG + ".RecoveryGateTests"]),
     # ---------- 第 2 轮预审（Claude 子 agent）补的 ----------
-    ("autoloop_recovery.py", "    waiting = [r[0] for r in rows if _waits_on_gateway(r)]", "    waiting = []",
+    ("autoloop_recovery.py", "    waiting = [r[0] for r in rows if _waits_on_gateway(r, gcon)]", "    waiting = []",
      "P1-A 秘书 ② 只差网关补发不挡闸（否则死锁）", [SG + ".RedispatchTests.test_redispatch_unknown_does_not_deadlock_the_gate"]),
-    ("autoloop_recovery.py", 'return verdict == "ok" and e["sent"] in (0, 2) and not e["invalid"]',
-     'return verdict == "ok" and not e["invalid"]',
+    ("autoloop_recovery.py", 'return e["sent"] == 2 and G.now_tz() - G.parse_iso(e["claimed_at"]) >= G.STALE',
+     'return True',
      "P1-A 事件作废或已送达的照常挡闸", [SG + ".RedispatchTests.test_redispatch_without_a_gateway_event_still_blocks"]),
     ("secretary_gate.py", '        if d["status"] != "unreconciled":\n            raise Refused(f"只有', '        if False:\n            raise Refused(f"只有',
      "P1-A 秘书人工结算只认核不清", [SG + ".RecoveryGateTests.test_unreconciled_is_settled_by_owner_and_then_stops_blocking"]),
@@ -181,8 +182,7 @@ M = [
                               SG + ".RecoveryGateTests.test_locked_ledger_while_closing_still_keeps_the_gate_closed"]),
     ("autoloop_answer.py", "        except Exception as e:\n            failed = e\n", "        except Exception:\n            raise\n",
      "P1-08 本人回答关闸失败照样记 unknown", [FS + ".Answer.test_gate_close_failure_still_records_unknown"]),
-    ("autoloop_recovery.py", 'return verdict == "ok" and e["sent"] in (0, 2) and not e["invalid"]',
-     'return verdict == "ok" and e["sent"] in (0, 2)', "P1-09 凭证失效的事件不算只差补发",
+    ("autoloop_recovery.py", 'if verdict != "ok" or e["invalid"]:', 'if verdict != "ok":', "P1-09 凭证失效的事件不算只差补发",
      [SG + ".RedispatchTests.test_event_of_a_frozen_or_expired_grant_is_not_waiting_for_resend"]),
     ("secretary_gate.py", '    if e["sent"] in (0, 2) and e["invalid"]:', '    if False:',
      "P1-09 秘书对账不干等补发不了的事件", [SG + ".RedispatchTests"]),
@@ -215,6 +215,17 @@ M = [
      "开闸前只看 2 分钟内动过的秘书代批", [RC + ".StartedBeforeOpen"]),
     ("autoloop_recovery.py", 'return [f"?（卡片库读不了：{type(e).__name__}）"]', "return []",
      "卡片库读不了当作没有在发的本人回答", [RC + ".StartedBeforeOpen"]),
+    # 续审第 1 轮 P1-08（常浩 11-21 侧栏授权续审）
+    ("autoloop_answer.py", '            con.execute("COMMIT")                # 放出口账本写锁之前',
+     '            pass                                 # 放出口账本写锁之前', "本人回答 inflight 放锁之后才提交",
+     [RC + ".OwnerCommitVisibility"]),
+    ("autoloop_recovery.py", "        if gcon is not None:\n            waits = []\n            sec_bad, _ = _secretary(waits, gcon)",
+     "        if False:\n            waits = []\n            sec_bad, _ = _secretary(waits, gcon)", "开闸前不持凭证库锁重判只差补发（用第 4 步的旧名单）",
+     [SG + ".RedispatchTests.test_freeze_between_step4_and_open_keeps_the_gate_closed",
+      SG + ".RedispatchTests.test_grant_expiring_between_step4_and_open_keeps_the_gate_closed"]),
+    ("autoloop_recovery.py", 'return e["sent"] == 2 and G.now_tz() - G.parse_iso(e["claimed_at"]) >= G.STALE',
+     'return e["sent"] == 2', "刚领走在发的事件也算只差补发",
+     [SG + ".RedispatchTests.test_fresh_claim_is_a_send_in_progress_not_a_resend"]),
 ]
 
 

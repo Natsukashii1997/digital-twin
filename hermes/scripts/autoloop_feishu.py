@@ -148,7 +148,7 @@ def db(write=False):
         if write:
             con.execute("BEGIN IMMEDIATE")
         yield con
-        if write:
+        if write and con.in_transaction:          # 调用方可能已在 with 里提前提交（autoloop_answer.submit，续审第 1 轮 P1-08）
             con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:

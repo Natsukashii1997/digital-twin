@@ -290,6 +290,8 @@ def submit(card_id):
             if cur.rowcount != 1:
                 return None
             F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
+            con.execute("COMMIT")                # 放出口账本写锁之前先把 inflight 提交出去（续审第 1 轮 P1-08）：with 退出时
+            #   admission 先放锁、卡片库后提交，中间对账只读卡片库看到的还是 queued，会当成没有在发的本人回答而开闸
             attempt, choice, ref, version = r["attempt"], r["choice"], card["message_id"], r["version"]
     except E.Refused as e:                       # 关着：回答留在排队里
         with F.db() as con:

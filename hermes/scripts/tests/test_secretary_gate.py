@@ -929,6 +929,71 @@ class RedispatchTests(Base):
         self.assertEqual([x.get("sent") for x in sent], [True], sent)
         self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
 
+    def _stuck_redispatch_with_unsent_event(self):
+        """② 结果不明后决定停在 executing、续接事件已记账没领走（sent=0）：第 4 步会认它只差网关补发。"""
+        import sqlite3
+        with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1)), \
+                mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as c:
+            c.execute("UPDATE secretary_decisions SET status = 'executing' WHERE id = ?", (out["decision"],))
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = 0, claimed_at = NULL WHERE task_id = ? AND kind = 'redispatch'", (TASK,))
+        return out["decision"]
+
+    def _reconcile_with_change_between_step4_and_step5(self, change, clock):
+        """真恢复闸对账一次；第 4 步看完秘书账本之后、第 5 步之前做 change()。"""
+        real, done = R._secretary, []
+
+        def between(waits=None, gcon=None):
+            got = real(waits, gcon)
+            if gcon is None and not done:                       # 第 4 步（不持凭证库锁）
+                done.append(got)
+                change()
+            return got
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40), \
+                mock.patch.object(G, "now_tz", lambda: clock[0]), mock.patch.object(R, "_secretary", between):
+            rep = R.reconcile()
+        self.assertIsNone(done[0][0])                           # 第 4 步：只差补发、不挡
+        self.assertIn("网关补发", done[0][1])
+        return rep
+
+    def test_freeze_between_step4_and_open_keeps_the_gate_closed(self):
+        """续审第 1 轮 P1-08：第 4 步认定只差补发之后、开闸之前任务被冻结（sent=0 的事件作废成 -1）：第 5 步持凭证库锁
+        重新判，不再按第 4 步的名单放过它，闸关着。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+        rep = self._reconcile_with_change_between_step4_and_step5(lambda: G.freeze(TASK, "推翻", now=clock[0]), clock)
+        with G.tx() as con:
+            self.assertEqual([r[0] for r in con.execute("SELECT sent FROM hub_events WHERE task_id = ? AND kind = 'redispatch'",
+                                                        (TASK,))], [-1])
+        self.assertFalse(rep["open"])
+        self.assertIn(did, rep["why"])
+
+    def test_grant_expiring_between_step4_and_open_keeps_the_gate_closed(self):
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+
+        def expire():
+            clock[0] = T + dt.timedelta(hours=13)               # 凭证 12 小时有效
+        rep = self._reconcile_with_change_between_step4_and_step5(expire, clock)
+        self.assertFalse(rep["open"])
+        self.assertIn(did, rep["why"])
+
+    def test_fresh_claim_is_a_send_in_progress_not_a_resend(self):
+        """续审第 1 轮：sent=2 刚领走不到 60 秒是一次正在进行的发送，不算只差补发（挡闸）；过了 60 秒才算（不挡）。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE task_id = ? AND kind = 'redispatch'",
+                        (G.iso(T + dt.timedelta(minutes=2)), TASK))
+        with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=2, seconds=30)):
+            self.assertIn(did, R._secretary()[0])
+        with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=3, seconds=1)):
+            self.assertIsNone(R._secretary()[0])
+
     def test_event_of_a_frozen_or_expired_grant_is_not_waiting_for_resend(self):
         """L3 第 4 轮 P1-09 另一处：② 的续接事件已领走在发（sent=2、超过 60 秒）时任务被冻结——冻结只作废没领走的，
         这条补发不了：恢复闸不再当「只差补发」放行，秘书对账记核不清（发没发出去要核）；没领走的（sent=0）凭证过期了，
@@ -1151,8 +1216,8 @@ class RejectTests(Base):
         bad, _ = R._secretary()
         self.assertIn(out["decision"], bad)
 
-    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
-    def test_rework_waits_on_its_own_event_even_without_event_key(self):
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=3))   # 凭证按 T 建、2 小时有效；事件 T+1 分钟领走，
+    def test_rework_waits_on_its_own_event_even_without_event_key(self):   # 过了 60 秒才算只差补发（续审第 1 轮）
         """反过来：这次决定自己的续接事件（日志里带决定号）只差补发，哪怕结果里还没记上事件号（进程在记结果前没了），
         照样不挡闸；同一张单别的续接事件不影响。"""
         with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \

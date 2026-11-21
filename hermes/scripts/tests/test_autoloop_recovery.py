@@ -250,12 +250,37 @@ class StartedBeforeOpen(Base):
         import threading
         import time
         key = self.started_exit()
-        writing = threading.Event()
+        writing, entered, returned = threading.Event(), threading.Event(), threading.Event()
         errors = []
 
         def no_marker(reason):
             writing.set()
             raise PermissionError("标记目录只读")
+
+        real_connect = E.sqlite3.connect
+
+        class Watch:                                                          # 只盯线程那条连接的 BEGIN IMMEDIATE
+            def __init__(self, con):
+                object.__setattr__(self, "_c", con)
+
+            def __getattr__(self, k):
+                return getattr(self._c, k)
+
+            def __setattr__(self, k, v):
+                setattr(self._c, k, v)
+
+            def execute(self, sql, *a):
+                if sql == "BEGIN IMMEDIATE" and threading.current_thread() is t:
+                    entered.set()
+                    try:
+                        return self._c.execute(sql, *a)
+                    finally:
+                        returned.set()
+                return self._c.execute(sql, *a)
+
+        def connect(*a, **kw):
+            con = real_connect(*a, **kw)
+            return Watch(con) if threading.current_thread() is t else con
 
         def finish():
             try:
@@ -268,9 +293,12 @@ class StartedBeforeOpen(Base):
         def in_final_tx(con):                                                 # 第 5 步：对账已持出口账本写锁
             t.start()
             self.assertTrue(writing.wait(5))
-            time.sleep(0.3)                                                   # 让 close_gate 走到 BEGIN IMMEDIATE 排队
+            self.assertTrue(entered.wait(5))                                  # 关闸那笔已经在 BEGIN IMMEDIATE 上
+            time.sleep(0.3)
+            self.assertFalse(returned.is_set())                               # 还没拿到锁：确实排在对账后面等
             return real(con)
         with mock.patch.object(E, "write_marker", side_effect=no_marker), \
+                mock.patch.object(E.sqlite3, "connect", side_effect=connect), \
                 mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx):
             rep = R.reconcile()
             raced = []
@@ -281,6 +309,7 @@ class StartedBeforeOpen(Base):
             except E.Refused:
                 pass
             t.join(10)
+        self.assertTrue(returned.is_set())
         self.assertEqual(errors, [])
         self.assertFalse(rep["open"])
         self.assertIn(f"出口 {key}", rep["why"])
@@ -353,6 +382,44 @@ class StartedBeforeOpen(Base):
             rep = R.reconcile()
         self.assertFalse(rep["open"])
         self.assertIn("卡片库读不了", rep["why"])
+
+
+class OwnerCommitVisibility(Base):
+    """续审第 1 轮 P1-08：本人回答 submit 是「卡片库写事务 → 出口账本 admission」。with 退出时 admission 先放出口账本写锁、
+    卡片库后提交：中间对账只读卡片库，看到的还是 queued，会当成没有在发的本人回答而开闸。现在 inflight 在放锁之前提交。"""
+
+    def test_reconcile_right_after_admission_sees_the_owner_answer(self):
+        import autoloop_answer as A
+        import autoloop_feishu as F
+        with F.db(write=True) as con:
+            con.execute("INSERT INTO feishu_cards (card_id, token, message_id, chat_id, kind, options, version, "
+                        "hub_delivered_at) VALUES (5, 'aaaaaaaaaaaaaaaa', 'om_5', 'oc_x', 'ask', 2, 1, 'x')")
+            con.execute("INSERT INTO claims (card_id, who, state, choice, at, attempt, version) VALUES "
+                        "(5, 'owner', 'queued', 0, 'x', 'a1', 1)")
+        R.ensure_open()
+        real, seen = R.admission, {}
+
+        @contextlib.contextmanager
+        def admission(epoch=None):
+            with real(epoch) as con:
+                yield con
+            # 出口账本写锁已放，submit 还没走出卡片库的 with：这时别处出了结果不明、对账开始
+            with E.db() as c:
+                E.mark_dirty(c, "别处结果不明")
+            seen["inflight"] = R._owner_inflight()
+            seen["rep"] = R.reconcile()
+        with mock.patch.object(R, "admission", admission), \
+                mock.patch.object(F, "hub", side_effect=F.HubError("钥匙读不到", sent=False)), \
+                mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": "ou_o", "DT_OWNER_CHAT_ID": "oc_x"}):
+            A.submit(5)
+        self.assertEqual(seen["inflight"], ["5"])
+        self.assertFalse(seen["rep"]["open"])
+        self.assertIn("本人回答 卡片 5", seen["rep"]["why"])
+        with F.db() as con:                                       # 没交出去（能证明中台没受理）：放回、不再在途
+            self.assertNotEqual((con.execute("SELECT state FROM claims WHERE card_id = 5").fetchone() or ["无"])[0],
+                                "inflight")
+        rep = R.reconcile()                                       # 做完了：照常开闸
+        self.assertTrue(rep["open"], rep["why"])
 
 
 class AdmissionRace(Base):
