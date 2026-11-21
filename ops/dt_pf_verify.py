@@ -249,9 +249,10 @@ def own_addrs():
     return ["127.0.0.1", "::1"] + local_addrs()
 
 
-def system_targets(n_v4=6):
-    """本机已有的 TCP 监听：准连的端口（应该通）、监听在所有网卡（*）上的、再挑几个只在回环上的（应该挡）。"""
-    socks = listening()
+def system_targets(n_v4=6, own_ports=()):
+    """本机已有的 TCP 监听：准连的端口（应该通）、监听在所有网卡（*）上的、再挑几个只在回环上的（应该挡）。
+    own_ports 是 root 自己靶子的端口：靶子先开，lsof 也会列出它们，不能再当「本机已有监听」（11-21 stress 误报）。"""
+    socks = {(a, p) for a, p in listening() if p not in own_ports}
     v4_ports = sorted({p for a, p in socks if a in ("127.0.0.1", "*")})
     v6_ports = sorted({p for a, p in socks if a in ("::1", "*")})
     any_ports = sorted({p for a, p in socks if a == "*"})
@@ -285,8 +286,12 @@ def public_targets():
     return ts
 
 
+def own_tcp_ports(own):
+    return {t["port"] for t in own.specs() if t["kind"] == "tcp"}
+
+
 def targets(own):
-    return (system_targets() + own_targets(own) + public_targets() +
+    return (system_targets(own_ports=own_tcp_ports(own)) + own_targets(own) + public_targets() +
             [{"kind": "proxy", "what": "经过滤代理 8090 上网", "host": "api.github.com", "port": 443}])
 
 
@@ -525,7 +530,7 @@ def rules_intact():
 
 def stress_targets(own, users):
     """压力模式的靶子：root 自己的靶子（全部）、本机已有的两三个该挡的 TCP 监听、公网直连 TCP、一个公网 DNS。"""
-    sys_ts = [t for t in system_targets(2) if not any(should_reach(u, t) for u in users)]
+    sys_ts = [t for t in system_targets(2, own_tcp_ports(own)) if not any(should_reach(u, t) for u in users)]
     pub = [t for t in public_targets() if t["kind"] == "tcp" or t["host"] == "223.5.5.5"]
     return sys_ts + own_targets(own) + pub
 

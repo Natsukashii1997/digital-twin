@@ -962,6 +962,25 @@ class Verify(unittest.TestCase):
         self.assertTrue(all(not self.v.should_reach(u, t) for t in ts for u in ("dt-worker", "dt-secretary")))
         self.assertIn('verify stress', PF.read_text())
 
+    def test_own_listeners_not_listed_as_system(self):
+        """root 自己的靶子先开、后枚举本机监听，lsof 会把它们也列出来；不能再当「本机已有监听」进靶子，
+        否则压力模式的对照组（root、dt-gate）会去连它们、被记成漏过（11-21 stress 的 28 条误报：::1 上的 60363）。"""
+        self.v.listening = lambda: {("127.0.0.1", 5000), ("127.0.0.1", 60362), ("::1", 5000), ("::1", 60363),
+                                    ("192.168.1.16", 60366)}
+        self.v.local_addrs = lambda: ["192.168.1.16"]
+
+        class Own:
+            def specs(self):
+                return [{"kind": "tcp", "what": "x", "host": h, "port": p, "own": True}
+                        for h, p in (("127.0.0.1", 60362), ("::1", 60363), ("192.168.1.16", 60366))] + \
+                       [{"kind": "udp", "what": "x", "host": "::1", "port": 56916, "own": True}]
+        own_ports = {60362, 60363, 60366}
+        for ts in (self.v.targets(Own()), self.v.stress_targets(Own(), ["dt-worker", "dt-secretary"])):
+            others = [t for t in ts if not t.get("own")]     # 压力模式对照组连的就是这些
+            self.assertEqual([t for t in others if t["port"] in own_ports], [])
+            self.assertIn(("::1", 5000), {(t["host"], t["port"]) for t in others})
+            self.assertEqual(len([t for t in ts if t.get("own") and t["host"] == "::1" and t["kind"] == "tcp"]), 1)
+
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()
         self.assertIn('["sudo", "-u", user, "-H", "/usr/bin/python3", "-I", "-", mode, json.dumps(ts)]', src)
