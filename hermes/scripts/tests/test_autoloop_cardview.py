@@ -109,11 +109,43 @@ class Render(unittest.TestCase):
         c = V.render({**DONE, "result": "第一行\n第二行"}, bridge())
         els = c["body"]["elements"]
         self.assertNotIn("第一行", els[0]["content"])
-        self.assertIn({"tag": "markdown", "content": "第一行\n第二行"}, els)
+        self.assertIn({"tag": "div", "text": {"tag": "plain_text", "content": "第一行\n第二行"}}, els)   # 纯文本，换行保留
         c = V.render({**DECIDED, "choice": None, "answer": "多行\n回答"}, bridge())
         self.assertEqual(c["body"]["elements"][0]["content"], "**✅ 你选了「多行 回答」，已记下，等 Agent 接着做。**")
         c = V.render({**ASK, "options": ["统一\n写 uv", "保留 pip"]}, bridge())
         self.assertEqual(c["body"]["elements"][0]["content"], "**我建议：统一 写 uv**")
+
+    def test_closed_notice_shows_the_handling_note(self):
+        """普通通知卡：常浩点「已处理」时写的处理说明，中台 closeCard 存在 answer 里，要显示出来（L3 #256-P1-01）。"""
+        handled = {**NOTICE, "state": "closed", "options": [], "result": "已处理", "answer": "已联系对方，约定下周交付"}
+        els = V.render(handled, bridge())["body"]["elements"]
+        self.assertEqual(els[0]["content"], "**⏹ 已处理**")
+        self.assertIn({"tag": "div", "text": {"tag": "plain_text", "content": "处理说明：已联系对方，约定下周交付"}}, els)
+        for empty in (None, ""):                                       # 没写处理说明：不出空行
+            self.assertNotIn("处理说明", text(V.render({**handled, "answer": empty}, bridge())))
+
+    def test_plain_fields_cannot_turn_into_markdown(self):
+        """选项、回答、结果、规则名是纯文本：进大字和页脚的换成全角，单独成行的用纯文本组件；card.text 仍是 markdown（L3 #256-P2-01）。"""
+        evil = "[重新验证权限](https://example.invalid) <at id=all></at> **粗** <font color='red'>x</font>"
+        c = V.render({**ASK, "options": [evil, "保留 pip"], "rule": "r_[x](http://e)"}, bridge(), mark="尾号 <b>")
+        md_text = " ".join(e["content"] for e in c["body"]["elements"] if e["tag"] == "markdown" and e is not c["body"]["elements"][1])
+        for bad in ("[重新验证权限](", "<at", "**粗**", "<font color='red'>", "<b>", "[x]("):
+            self.assertNotIn(bad, md_text, bad)
+        self.assertIn("［重新验证权限］", c["body"]["elements"][0]["content"])
+        big = next(e for e in c["body"]["elements"] if e["tag"] == "button")
+        self.assertIn(evil, big["text"]["content"])                       # 按钮本来就是纯文本，原样显示
+        self.assertEqual(c["body"]["elements"][1], {"tag": "markdown", "content": ASK["text"]})   # 正文照旧是 markdown
+        for card in ({**CLOSED, "result": evil}, {**DONE, "result": evil}, {**DECIDED, "choice": None, "answer": evil},
+                     {**NOTICE, "state": "closed", "options": [], "result": evil, "answer": evil}):
+            els = V.render(card, bridge())["body"]["elements"]
+            for e in els:
+                if e["tag"] == "markdown":
+                    self.assertNotIn("[重新验证权限](", e["content"], card["state"])
+                    self.assertNotIn("<at", e["content"], card["state"])
+            plains = [e["text"]["content"] for e in els if e["tag"] == "div"]
+            if card["state"] in ("closed", "done") and card.get("kind") == "ask":
+                self.assertTrue(any(evil in p for p in plains), card["state"])   # 原因 / 总结原样进纯文本组件
+        self.assertEqual(V.esc("a\\b*_~`[]<>&\n下一行"), "a＼b＊＿～｀［］＜＞＆ 下一行")
 
     def test_closed_notice_shows_its_text_unfolded(self):
         """中台的只读通知（fyi）一建出来就是 closed、没有 result：正文直接摊开，不收进折叠面板（审查 P2-1）。"""

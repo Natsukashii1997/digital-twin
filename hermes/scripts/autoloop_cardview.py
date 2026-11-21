@@ -14,7 +14,9 @@ title、text、options、recommend、choice、answer、by、result、rule、crea
       样式是定稿的丙版「推荐优先」（常浩 2026-11-20 从三版里选定，登记在 docs/DECIDED.md）：开着时大字写建议、一个通栏大按钮
       「✅ 按推荐：…」，其余选项收在「不同意？其他选择」折叠面板里；没有推荐（或是通知卡）时所有选项平铺，不替常浩挑；
       结束后大字写结果（一行；Agent 的总结放在大字下面），原问题收进「当时问的是什么」折叠面板；通知卡（含中台一建出来
-      就关的只读通知）结束后正文直接摊开。
+      就关的只读通知）结束后正文直接摊开，常浩结案时写了处理说明（answer）就附「处理说明：…」。
+      只有 card.text 按 markdown 显示；选项、回答、结果、规则名是纯文本：单独成行的用纯文本组件，放进大字和页脚的
+      先把 markdown / HTML 有含义的字符换成全角（esc）。
       mark：页脚小字（如卡片令牌尾号，回读时认卡用）；
       secretary：秘书在 by 里的名字（同 autoloop_config.SECRETARY）；hint：开着时的「怎么回」提示，None 用默认。
   outcome(card, secretary="秘书") -> str | None   结束的卡写什么结果（开着的卡返回 None）
@@ -55,6 +57,17 @@ def one_line(text):
     return re.sub(r"\s*\n\s*", " ", str(text or "")).strip()
 
 
+# Markdown / HTML 有含义的字符 → 全角同形字（L3 第 1 轮 #256-P2-01）。选项、回答、结果、规则名是纯文本，
+# 要放进 markdown 组件（大字标题、灰色页脚）时先换掉：不会变成链接、@人、粗体或 <font> 标签，显示结果不依赖飞书认不认转义。
+_PLAIN = str.maketrans({"\\": "＼", "`": "｀", "*": "＊", "_": "＿", "~": "～", "[": "［", "]": "］",
+                        "<": "＜", ">": "＞", "&": "＆"})
+
+
+def esc(text):
+    """纯文本字段进 markdown 前：压成一行，再把有含义的字符换成全角。card.text 是 Agent 写的 markdown，不走这里。"""
+    return one_line(text).translate(_PLAIN)
+
+
 def who(card, secretary):
     return "秘书替你" if card.get("by") == secretary else "你"
 
@@ -62,14 +75,14 @@ def who(card, secretary):
 def outcome(card, secretary="秘书"):
     """结束的卡写什么（开着的卡 None），一句话、不带 Agent 的总结（总结由 render 放在大字下面）。
     closed 对提问卡就是「不用定了」：中台关卡时写了原因（Agent 自己解决了、后来跑成了…）。"""
-    state, pick = card.get("state"), one_line(chosen(card))
+    state, pick = card.get("state"), esc(chosen(card))
     picked = f"{who(card, secretary)}选了「{pick}」" if pick else f"{who(card, secretary)}定了"
     if state == "decided":
         return f"{picked}，已记下，等 Agent 接着做。"
     if state == "done":
         return f"{picked}，已办完。"
     if state == "closed":
-        reason = card.get("result") or ""
+        reason = esc(card.get("result"))
         if card.get("kind") == "ask":
             return f"不用你定了{('：' + reason) if reason else '。'}"
         return reason or "已结束。"
@@ -79,6 +92,11 @@ def outcome(card, secretary="秘书"):
 # ---------- 积木 ----------
 def md(text, **extra):
     return {"tag": "markdown", "content": text, **extra}
+
+
+def plain(text):
+    """纯文本组件：选项、结果、回答这类字段原样显示（换行保留），不当 markdown 解析。"""
+    return {"tag": "div", "text": {"tag": "plain_text", "content": str(text)}}
 
 
 def grey(text):
@@ -108,9 +126,9 @@ def panel(title, elements):
 def footer(card, mark, extra=""):
     bits = [f"卡片 #{card.get('id')} · 第 {card.get('version')} 版"]
     if card.get("rule"):
-        bits.append(f"来源 {card['rule']}")
+        bits.append(f"来源 {esc(card['rule'])}")
     if mark:
-        bits.append(mark)
+        bits.append(esc(mark))
     return grey("｜".join(bits) + (f"｜{extra}" if extra else ""))
 
 
@@ -137,7 +155,7 @@ def render(card, value_for, mark=None, secretary="秘书", hint=None):
     btns = buttons_open(card, value_for)
     explain = [md(card["text"])] if card.get("text") else []
     if btns and rec is not None and card.get("kind") == "ask":
-        els.append(md(f"**我建议：{one_line(opts[rec])}**", text_size="heading"))
+        els.append(md(f"**我建议：{esc(opts[rec])}**", text_size="heading"))
         els += explain
         i, label, value = btns[rec]
         els.append(button(f"✅ 按推荐：{label}", value, "primary_filled", width="fill", size="large"))
@@ -155,20 +173,22 @@ def render(card, value_for, mark=None, secretary="秘书", hint=None):
         result = card.get("result") or ""
         if card.get("kind") != "ask":              # 通知卡（含中台一建出来就关的只读通知）：正文直接摊开，不收起
             if result or not explain:
-                els.append(md(f"**{icon} {one_line(result) or '已结束。'}**", text_size="heading"))
+                els.append(md(f"**{icon} {esc(result) or '已结束。'}**", text_size="heading"))
             els += explain
+            if card.get("answer"):                 # 常浩结案时写的处理说明（中台 closeCard 存进 answer，#256-P1-01）
+                els.append(plain(f"处理说明：{card['answer']}"))
         else:
             followed = state in ("decided", "done") and rec is not None and card.get("choice") == rec
             dropped = state == "closed"                # 提问卡被关：不用常浩定了，下面写原因
-            headline = (f"已按推荐：{one_line(chosen(card))}" if followed else "这件事不用你定了" if dropped
+            headline = (f"已按推荐：{esc(chosen(card))}" if followed else "这件事不用你定了" if dropped
                         else outcome(card, secretary))
             els.append(md(f"**{icon} {headline}**", text_size="heading"))
             if followed:
                 els.append(md(outcome(card, secretary)))
             if dropped and result:
-                els.append(md(f"原因：{result}"))
-            elif state == "done" and result:           # Agent 这一轮的总结：普通字号，放在大字下面
-                els.append(md(result))
+                els.append(plain(f"原因：{result}"))
+            elif state == "done" and result:           # Agent 这一轮的总结：普通字号，放在大字下面，纯文本
+                els.append(plain(result))
             if explain:
                 els.append(panel("当时问的是什么 · 展开", explain))
         els.append(footer(card, mark))

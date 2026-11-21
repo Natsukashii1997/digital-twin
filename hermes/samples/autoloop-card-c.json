@@ -268,8 +268,11 @@
        "text_size": "heading"
       },
       {
-       "tag": "markdown",
-       "content": "原因：Agent 后来在 CONTRIBUTING.md 里查到仓库约定只用 uv，自己按约定写了"
+       "tag": "div",
+       "text": {
+        "tag": "plain_text",
+        "content": "原因：Agent 后来在 CONTRIBUTING.md 里查到仓库约定只用 uv，自己按约定写了"
+       }
       },
       {
        "tag": "collapsible_panel",
