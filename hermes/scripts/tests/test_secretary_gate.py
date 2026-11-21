@@ -669,6 +669,15 @@ class AskTests(Base):
         self.assertEqual(out["result"], "unknown")
 
 
+def real_gate(case):
+    """换回真的恢复闸（Base 里打桩放行）：纪元、锁定版本打桩，入口自己对账开闸。"""
+    epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+    for p in (mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT),
+              mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40)):
+        p.start()
+        case.addCleanup(p.stop)
+
+
 class RecoveryGateTests(Base):
     """批 0D（常浩 11-19「都按推荐」）：秘书的三条写入路径（① 回答、② 续派、③ 留言）和领卡都过恢复闸；
     获准（账本 begin）的同一把锁里再核开闸资格；秘书结果不明关闸，秘书账本里还有结果不明的就不开闸。"""
@@ -725,6 +734,38 @@ class RecoveryGateTests(Base):
         with self.assertRaisesRegex(SG.Refused, "核不清"):
             SG.settle(did, "done", "再看", ref="x", confirm=True)
         self.assertEqual(len(self.answers()), 1)                                 # 从不重答
+
+    def test_unknown_closes_the_gate_before_the_ledger_records_it(self):
+        """L3 第 3 轮 P1-08：结果不明先关闸、再记秘书账本；记账那一刻别的受保护写已经过不了闸。"""
+        real_gate(self)
+        R.ensure_open()
+        self.assertTrue(R.status()["open"])
+        tried, real_finish = [], SL.finish
+
+        def finish(st, decision_id, result, outcome=None, now=None):
+            if result == "unknown":
+                try:
+                    E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, dict)
+                    tried.append("passed")
+                except E.Refused as e:
+                    tried.append(str(e))
+            return real_finish(st, decision_id, result, outcome, now=now)
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        with mock.patch.object(SL, "finish", finish):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertEqual(len(tried), 1)
+        self.assertIn("恢复闸关着", tried[0])                                     # 被拒：闸已因这次结果不明关上
+        self.assertEqual(self.get(out["decision"])["status"], "unknown")
+
+    def test_ledger_failure_after_closing_keeps_the_gate_closed(self):
+        """P1-08：关闸之后记账失败：闸照样关着，交对账。"""
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        with mock.patch.object(SL, "finish", side_effect=L.LedgerError("库锁住了")):
+            out = self.submit()
+        self.assertEqual((out["result"], out["msg"]), ("refused", "账本记不了：库锁住了"))     # 记账失败照实报
+        with E.db(write=False) as con:
+            self.assertTrue(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0])
 
     def test_lease_waits_while_gate_closed(self):
         self.calls.clear()
@@ -1604,6 +1645,47 @@ class LateOwnerNoteTests(unittest.TestCase):
 
 
 class LeaseTests(Base):
+    def test_lease_hold_right_after_ensure_open_writes_nothing(self):
+        """L3 第 3 轮 P1-06 路径 B：入口看过闸、长轮询领卡期间开始维护（停写）：领到卡后锁里再核闸，本地不登记、不报送达。"""
+        real_gate(self)
+        card, got = {"id": 30, "version": 1, "ref": None, "state": "open"}, []
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            got.append((method, path.split("?")[0]))
+            if method == "GET":
+                R.hold("p1", self.root / "snap", "a" * 40, 7)
+                return {"card": dict(card)}
+            return {}
+        with mock.patch.object(F, "hub", hub):
+            out = SG.lease(wait=1)
+        self.assertIn("维护中", out["paused"])
+        self.assertEqual(got, [("GET", "/v1/cards/next")])                     # 没报送达、没报失败
+        with F.db() as con:
+            self.assertIsNone(con.execute("SELECT 1 FROM secretary_cards WHERE card_id = 30").fetchone())
+        self.assertEqual(R.in_flight_writes(), [])
+
+    def test_lease_writes_only_while_holding_the_bridge_lock(self):
+        """P1-06：领到卡之后的本地登记、报送达、本地确认都在桥接锁里，排空时看得见。"""
+        card, seen = {"id": 30, "version": 1, "ref": None, "state": "open"}, []
+        real_db = F.db
+
+        @contextlib.contextmanager
+        def db(write=False):
+            if write:
+                seen.append(("db", F.bridge_busy()))
+            with real_db(write) as con:
+                yield con
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            if method == "GET":
+                return {"card": dict(card)}
+            seen.append((path, F.bridge_busy(), R.in_flight_writes()))
+            return {}
+        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "db", db):
+            self.assertTrue(SG.lease(wait=1)["ok"])
+        self.assertEqual(seen, [("db", True), ("/v1/cards/30/delivered", True, ["飞书桥接或秘书领卡正持桥接锁"]), ("db", True)])
+        self.assertFalse(F.bridge_busy())
+
     def test_lease_registers_ref_and_reports_once_per_version(self):
         card = {"id": 30, "version": 1, "ref": None, "state": "open"}
         got = []

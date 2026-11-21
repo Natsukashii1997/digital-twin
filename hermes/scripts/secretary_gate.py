@@ -976,10 +976,14 @@ def task_locked(task_id):
 def finish(st, decision_id, result, outcome=None, now=None):
     """记秘书决定的结果；结果不明时同时关上恢复闸（批 0D，常浩 11-19「都按推荐」）：秘书账本里有结果不明、
     核不清的代批时，恢复闸对账不开闸，所有受保护的写都停下，直到秘书自己的对账（reconcile）把它结掉。"""
-    SL.finish(st, decision_id, result, outcome, now=now)
-    if result == "unknown":
-        with E.db() as con:
+    if result != "unknown":
+        SL.finish(st, decision_id, result, outcome, now=now)
+        return
+    try:                                         # 先关闸、再记结果不明（L3 第 3 轮 P1-08）：两步之间别的写入者过不了 admit；
+        with E.db() as con:                      # 关闸失败也照样记账（恢复闸对账看到秘书结果不明不开闸）
             E.mark_dirty(con, f"秘书代批 {decision_id} 结果不明")
+    finally:                                     # 记账失败：闸已关，决定停在 executing，2 分钟后秘书对账接手
+        SL.finish(st, decision_id, result, outcome, now=now)
 
 
 def _yield(st, d, con, card_id, choice, note, now):
@@ -1320,34 +1324,37 @@ def lease(wait=50):
     if not card:
         return None
     cid, why = card["id"], None
-    with F.db(write=True) as con:
-        r = secretary_card(con, cid)
-        if r:
-            if card.get("ref") and card["ref"] != r["ref"]:
-                why = "中台记的秘书 ref 和本地登记的对不上"
-            else:                                            # 新版本：旧版本的确认不代表新版本（审查 P1-02）
-                if card["version"] > r["version"]:
-                    con.execute("UPDATE secretary_cards SET version = ?, hub_delivered_at = NULL WHERE card_id = ?",
-                                (card["version"], cid))
-                ref = r["ref"]
-        elif card.get("ref"):
-            why = "中台说这张卡已经送达过秘书通道，本地却没有登记"
-        else:
-            ref = "sec-" + secrets.token_hex(8)
-            con.execute("INSERT INTO secretary_cards (card_id, version, ref, leased_at) VALUES (?, ?, ?, ?)",
-                        (cid, card["version"], ref, F.now()))
-    with F.bridge_lock():                                    # 往中台写：和桥接同一把锁，锁里再核闸（维护停写排空看得到，第 2 轮预审 P2-C）
+    # 领到之后整段（本地登记、报失败 / 报送达、本地确认）都在桥接锁里、先核闸（L3 第 3 轮 P1-06）：维护停写（hold）后
+    # 排空看桥接锁空着就说明秘书领卡也没有写在途。GET 是长轮询，和桥接 once 一样放在锁外、不持出口账本锁。
+    # 锁顺序：桥接锁 → cards.db / 出口账本（两者的持有者都不等桥接锁）。
+    with F.bridge_lock():
         try:
             F._still_open(epoch)
-        except F.Deferred as e:
+        except F.Deferred as e:                              # 领卡之后闸关了：什么都不写，中台过一会儿再给这张卡
             return {"card": cid, "ok": False, "paused": str(e)}
+        with F.db(write=True) as con:
+            r = secretary_card(con, cid)
+            if r:
+                if card.get("ref") and card["ref"] != r["ref"]:
+                    why = "中台记的秘书 ref 和本地登记的对不上"
+                else:                                        # 新版本：旧版本的确认不代表新版本（审查 P1-02）
+                    if card["version"] > r["version"]:
+                        con.execute("UPDATE secretary_cards SET version = ?, hub_delivered_at = NULL WHERE card_id = ?",
+                                    (card["version"], cid))
+                    ref = r["ref"]
+            elif card.get("ref"):
+                why = "中台说这张卡已经送达过秘书通道，本地却没有登记"
+            else:
+                ref = "sec-" + secrets.token_hex(8)
+                con.execute("INSERT INTO secretary_cards (card_id, version, ref, leased_at) VALUES (?, ?, ?, ?)",
+                            (cid, card["version"], ref, F.now()))
         if why:
             F.hub("POST", f"/v1/cards/{cid}/failed", {"version": card["version"], "error": why}, channel=CHANNEL)
             return {"card": cid, "ok": False, "why": why}
         F.hub("POST", f"/v1/cards/{cid}/delivered", {"version": card["version"], "ref": ref}, channel=CHANNEL)
-    with F.db(write=True) as con:                            # 只给报过的这一版记确认；其间又领到更新的版本就不记
-        con.execute("UPDATE secretary_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ? AND version = ?",
-                    (F.now(), cid, card["version"]))
+        with F.db(write=True) as con:                        # 只给报过的这一版记确认；其间又领到更新的版本就不记
+            con.execute("UPDATE secretary_cards SET hub_delivered_at = COALESCE(hub_delivered_at, ?) WHERE card_id = ? "
+                        "AND version = ?", (F.now(), cid, card["version"]))
     return {"card": cid, "ok": True, "ref": ref}
 
 

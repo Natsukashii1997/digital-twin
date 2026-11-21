@@ -258,7 +258,7 @@ SECRETARY_STALE = dt.timedelta(seconds=120)   # 同 secretary_gate.STALE
 
 
 def in_flight_writes():
-    """还在做的写：出口账本 executing、本人回答 inflight、飞书桥接正持锁处理卡片（改卡、报送达）、派单事件刚领走在发、
+    """还在做的写：出口账本 executing、本人回答 inflight、飞书桥接或秘书领卡正持桥接锁（发卡改卡、报送达、领卡登记）、派单事件刚领走在发、
     秘书代批在送。排空完才能做快照（第 2 轮预审 P2-C：桥接和秘书原来没列）。停写（hold）之后桥接每轮在锁里先看闸，
     所以「锁空着」就说明没有桥接写在途。派单事件只列刚领走（60 秒内）的：更早的那次 POST 已经结束（有超时），只是结果
     不明，开闸后按同一 id 补发；列进来停写期间又补发不了，排空永远完不成。"""
@@ -270,8 +270,8 @@ def in_flight_writes():
         if F.db_file().exists():
             with F.db() as con:
                 out += [f"本人回答 卡片 {r[0]}" for r in con.execute("SELECT card_id FROM claims WHERE state = 'inflight'")]
-            if F.bridge_busy():
-                out.append("飞书桥接正在处理一张卡")
+        if F.bridge_busy():                      # 不看 cards.db 在不在：桥接 / 秘书领卡持锁时库可能还没建（L3 第 3 轮 P1-06）
+            out.append("飞书桥接或秘书领卡正持桥接锁")
     except ImportError:
         pass
     if G.db_path().exists():

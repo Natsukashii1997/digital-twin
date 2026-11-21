@@ -238,8 +238,8 @@ class RecoveryGate(Base):
         self.assertFalse(F.bridge_busy())
         with F.bridge_lock():
             self.assertTrue(F.bridge_busy())
-            self.assertIn("飞书桥接正在处理一张卡", Rv.in_flight_writes())
-        self.assertNotIn("飞书桥接正在处理一张卡", Rv.in_flight_writes())
+            self.assertIn("飞书桥接或秘书领卡正持桥接锁", Rv.in_flight_writes())
+        self.assertNotIn("飞书桥接或秘书领卡正持桥接锁", Rv.in_flight_writes())
 
     def test_settled_send_without_message_id_is_deferred(self):
         """第 2 轮预审 P2-B2：出口账本记这张卡已发、却没有消息号（旧数据或人工结算没填）：不猜、不 KeyError，暂缓。"""

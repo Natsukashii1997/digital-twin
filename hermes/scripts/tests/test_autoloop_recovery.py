@@ -277,6 +277,29 @@ class Maintenance(Base):
         R.hold("p1", self.root / "snap", C1, 7)
         self.assertEqual(R.in_flight_writes(), ["出口 merge:o/r:1:h"])   # 排空前不许快照
 
+    def test_drain_sees_bridge_lock_before_cards_db_exists(self):
+        """L3 第 3 轮 P1-06 路径 A：桥接（或秘书领卡）已拿到桥接锁、cards.db 还没建时停写：排空照样看得见，放锁后才空。"""
+        import threading
+        import autoloop_feishu as F
+        self.assertFalse(F.db_file().exists())
+        got, go = threading.Event(), threading.Event()
+
+        def bridge():
+            with F.bridge_lock():
+                got.set()
+                go.wait(10)
+        th = threading.Thread(target=bridge)
+        th.start()
+        self.addCleanup(th.join, 10)
+        self.addCleanup(go.set)
+        self.assertTrue(got.wait(10))
+        R.hold("p1", self.root / "snap", C1, 7)
+        self.assertFalse(F.db_file().exists())
+        self.assertEqual(R.in_flight_writes(), ["飞书桥接或秘书领卡正持桥接锁"])   # 排空前不许快照
+        go.set()
+        th.join(10)
+        self.assertEqual(R.in_flight_writes(), [])
+
     def test_drain_counts_only_freshly_claimed_dispatch_events(self):
         """第 2 轮预审疑点：派单事件结果不明（领走超过 60 秒、那次 POST 早已结束）不算在途——停写期间补发不了，
         算进去排空就永远完不成；刚领走的才算。"""
