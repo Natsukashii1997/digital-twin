@@ -17,7 +17,7 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
   脚本路径写死（主账号能改的 python3、标准库、PYTHON* 变量都碰不到 dt-gate 进程）。main 对每个子命令都要求 -I -S -B，
   run 另要求代码属 root（0E-3c 安装）。代码里的检查是加固：作为主程序启动时，导入任何同目录脚本之前先核解释器、本目录
   每个条目和 sys.path；读密钥前再核一次，连同已加载的全部模块（每个进程核过一次即可：能改这些属性的只有 root 和本账号）。
-状态文件（P1-02）：门卫目录、gate.db、app.json 每次用前核路径信任（含 ACL）、不认链接；卡片库 cards.db 在 run、doctor 启动时核。
+状态文件（P1-02）：门卫目录、gate.db、app.json 每次用前核路径信任（含 ACL）、不认链接；卡片库 cards.db 在 run、doctor、show 用前核。
 
 收点击：lark-cli event consume card.action.trigger（飞书长连接，门卫主动连出去，本机不开端口；dt-gate 是控制面，
 门卫规则不限制它）。本机事件总线 ready 且飞书长连接 connected 才领中台卡片；断开、重连、lark-cli 报丢事件时暂停领卡
@@ -449,7 +449,7 @@ def bind_card(nonce, done=None, final=True):
 
 def unanswered_cards(chat):
     """登记在这个私聊、还没答完的中台卡：中台里还开着的（cards / recentCards 里 state=open），或本人回答还在排队、在途、
-    结果不明的。换绑前查（常浩 11-20 定甲，L3 第 2 轮 P2-04：有没答完的卡就不许换绑）。读不到中台就抛 Fail，不当成没有。"""
+    结果不明的。换绑前查（常浩 11-21 定甲，L3 第 2 轮 P2-04：有没答完的卡就不许换绑）。读不到中台就抛 Fail，不当成没有。"""
     import autoloop_readonly as R
     cards_trusted()
     with F.db() as con:
@@ -470,7 +470,7 @@ def rebind_blocked(chat):
     left = unanswered_cards(chat)
     if left:
         raise F.Fail(f"旧私聊还有没答完的中台卡（卡片 {', '.join(map(str, left))}）：先在旧私聊答完或在中台撤掉，再换绑"
-                     "（常浩 11-20 定：有没答完的卡就不许换绑）")
+                     "（常浩 11-21 定：有没答完的卡就不许换绑）")
 
 
 def bind_start(email=None, open_id=None, replace=False):
