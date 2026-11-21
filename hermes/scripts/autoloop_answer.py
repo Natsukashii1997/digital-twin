@@ -428,11 +428,16 @@ def answer(token, option, chat, operator, version=None):
 
 
 def tell(chat, text):
+    """私聊回话。持桥接锁发、锁里先看是否在维护停写：在维护就不发（L3 第 4 轮 P1-06，常浩 11-21 选甲；回答本身的结果
+    在卡片上、维护结束后提交时会再说）。调用方不能已持桥接锁。"""
     from tidings_weekly import SendError, send
-    try:
-        send(chat, "text", {"text": text}, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
-    except SendError:
-        pass                                     # 回话发不出不影响答卷结果；结果在卡片上会更新
+    with F.bridge_lock():
+        if F.maintenance():
+            return
+        try:
+            send(chat, "text", {"text": text}, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
+        except SendError:
+            pass                                 # 回话发不出不影响答卷结果；结果在卡片上会更新
 
 
 def main(argv=None):

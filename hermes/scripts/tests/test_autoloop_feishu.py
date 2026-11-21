@@ -5,6 +5,7 @@
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
 import json
+import io
 import os
 import sqlite3
 import sys
@@ -286,6 +287,76 @@ class RecoveryGate(Base):
         with self.assertRaisesRegex(F.Deferred, "结果不明"):
             self.register()
         self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"]]), 1)
+
+
+class MaintenanceQuiet(Base):
+    """L3 第 4 轮 P1-06（常浩 11-21 选甲）：维护停写时，给常浩的提醒（放弃送达、对账回话）也停，发的时候持桥接锁
+    （排空看得见）；手动入口 deliver / confirm 也过恢复闸；桥接常驻循环在维护期间什么都不跑。"""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+
+        def send(chat, kind, body, key):
+            self.sent.append((body["text"], Rv.in_flight_writes()))
+        p = mock.patch("tidings_weekly.send", send)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def hold(self):
+        Rv.hold("p1", Path(self.tmp.name) / "snap", "a" * 40, 0)
+
+    def test_alert_and_tell_are_quiet_during_maintenance_then_resume(self):
+        self.hold()
+        self.assertFalse(F.alert("k", "中台放弃送达了"))
+        A.tell(CHAT, "对账结果")
+        self.assertEqual(self.sent, [])
+        with F.db() as con:
+            self.assertIsNone(con.execute("SELECT 1 FROM alerts WHERE key = 'k'").fetchone())   # 本地提醒表也不写
+        Rv.release("p1", "retired")
+        self.assertTrue(F.alert("k", "中台放弃送达了"))
+        A.tell(CHAT, "对账结果")
+        self.assertEqual([s[0] for s in self.sent], ["中台放弃送达了", "对账结果"])
+
+    def test_alert_and_tell_send_inside_the_bridge_lock(self):
+        """发的那一刻排空看得见（持桥接锁）：维护在发之前开始就不发，在发之后开始就等它发完。"""
+        F.alert("k", "x")
+        A.tell(CHAT, "y")
+        self.assertEqual([s[1] for s in self.sent], [["飞书桥接或秘书领卡正持桥接锁"]] * 2)
+
+    def test_unreadable_gate_means_quiet(self):
+        with mock.patch.object(Rv, "gate_row", side_effect=sqlite3.OperationalError("坏了")):
+            self.assertEqual(F.maintenance(), "?")
+            self.assertFalse(F.alert("k", "x"))
+        self.assertEqual(self.sent, [])
+
+    def test_run_loop_does_nothing_during_maintenance(self):
+        class Stop(BaseException):
+            pass
+        self.hold()
+        with mock.patch.object(A, "reconcile") as rec, mock.patch.object(F, "check_given_up") as gu, \
+                mock.patch.object(F, "once") as once, mock.patch.object(F.time, "sleep", side_effect=Stop), \
+                contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(Stop):
+            F.run()
+        for m in (rec, gu, once):
+            m.assert_not_called()
+        self.assertIn("维护中", out.getvalue())
+
+    def test_deliver_and_confirm_check_the_gate(self):
+        closed = E.Refused("恢复闸关着：维护中（恢复点 p1）")
+        with mock.patch.object(Rv, "ensure_open", side_effect=closed), mock.patch.object(F, "hub") as hub:
+            with self.assertRaises(F.Deferred):
+                F.deliver(dict(CARD))
+            with self.assertRaises(F.Deferred):
+                F.confirm(7)
+        with mock.patch.object(Rv, "admit", side_effect=closed), mock.patch.object(F, "hub") as hub2:   # 看一眼开着、锁里关了
+            with self.assertRaises(F.Deferred):
+                F.deliver(dict(CARD))
+            with self.assertRaises(F.Deferred):
+                F.confirm(7)
+        hub.assert_not_called()
+        hub2.assert_not_called()
+        self.assertEqual(self.lark.sent(), [])
 
 
 class Answer(Base):
@@ -1388,6 +1459,58 @@ class FeishuEndToEnd(HubFixture):
         with mock.patch("autoloop_publish.hub_db", lambda: Path(self.home) / "none.db"):
             self.assertFalse(F.hub_readable())
             self.assertIsNone(F.given_up_cards())
+
+    def test_maintenance_during_long_poll_costs_one_try_and_the_card_comes_back(self):
+        """L3 第 4 轮 P1-06 证据：长轮询领到卡的同时开始维护（停写）——锁里再核闸，不发不报；真中台记这次尝试
+        （tries 1，1 分钟后再送，没放弃），维护结束、对完账后这张卡照常送到，飞书只发一次。"""
+        import autoloop_publish as P
+        C.install(confirm=True, target=self.home)
+        rules = json.loads(C.rules_file().read_text(encoding="utf-8"))
+        next(r for r in rules["rules"] if r["name"] == "试一下")["channels"] = ["feishu"]
+        C.rules_file().write_text(json.dumps(rules, ensure_ascii=False), encoding="utf-8")
+        self._wait_live(lambda live: next(r for r in live["rules"] if r["name"] == "试一下").get("channels") == ["feishu"])
+        C.issue_channel_key("feishu", True, str(self.home))
+        import subprocess
+        subprocess.run([CLI, "try"], env={**os.environ, "AGENT_AUTOLOOP_HOME": str(self.home)}, capture_output=True, timeout=60)
+        real_hub = F.hub
+
+        def hub_then_hold(method, path, *a, **kw):
+            out = real_hub(method, path, *a, **kw)
+            if method == "GET" and out.get("card"):
+                Rv.hold("p1", Path(self.home) / "snap", Rv.pinned(), 0)
+            return out
+
+        def delivery(cid):
+            con = P._hub()
+            try:
+                return con.execute("SELECT tries, not_before, given_up FROM deliveries WHERE card_id = ? AND channel = 'feishu'",
+                                   (cid,)).fetchone()
+            finally:
+                con.close()
+        with mock.patch.object(F, "hub", hub_then_hold):
+            for _ in range(60):
+                out = F.once(wait=1)
+                if out:
+                    break
+        self.assertEqual((out["ok"], out.get("deferred")), (False, True), out)
+        cid = out["card"]
+        self.assertEqual(self.lark.sent(), [])                                    # 没发飞书
+        with F.db() as con:
+            self.assertIsNone(con.execute("SELECT 1 FROM feishu_cards WHERE card_id = ?", (cid,)).fetchone())
+        tries, not_before, given_up = delivery(cid)
+        self.assertEqual((tries, given_up), (1, 0))                                # 用掉一次尝试，没放弃
+        self.assertIsNotNone(not_before)                                           # 中台 1 分钟后再送
+        self.assertEqual(Rv.in_flight_writes(), [])
+        Rv.release("p1", "retired")
+        deadline = time.time() + 120
+        while time.time() < deadline:                                              # 维护结束：对账开闸后照常领到、送到
+            got = F.once(wait=1)
+            if got and got.get("ok"):
+                break
+        else:
+            self.fail("维护结束后这张卡没再送来")
+        self.assertEqual((got["card"], got["ref"]), (cid, "om_e2e_1"))
+        self.assertEqual(len(self.lark.sent()), 1)
 
     def test_click_to_answer_round_trip(self):
         C.install(confirm=True, target=self.home)

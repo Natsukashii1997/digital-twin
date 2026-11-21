@@ -315,8 +315,16 @@ def send_card(chat, content, key):
 
 
 def deliver(card):
-    """发一张卡（ref 为空）或改那条消息（ref 不为空）；返回消息号。持桥接锁做（锁外的直接调用也串行、也核版本）。"""
+    """发一张卡（ref 为空）或改那条消息（ref 不为空）；返回消息号。持桥接锁做（锁外的直接调用也串行、也核版本）。
+    直接调用也过恢复闸（L3 第 4 轮 P1-06）：入口看一眼、锁里再核，关着抛 Deferred（暂缓，不是失败）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        epoch = R.ensure_open()
+    except E.Refused as e:
+        raise Deferred(str(e))
     with bridge_lock():
+        _still_open(epoch)
         return _deliver(card)
 
 
@@ -433,8 +441,26 @@ def given_up_cards():
     return [dict(r) for r in rows]
 
 
+def maintenance():
+    """维护停写（恢复闸 hold）中返回恢复点编号，否则 None；读不了出口账本当作在维护（宁可不发）。
+    维护期间给常浩的提醒也停（L3 第 4 轮 P1-06，常浩 11-21 选甲），维护结束后下一轮照常补上；平时闸关着照常提醒。"""
+    import autoloop_recovery as R
+    try:
+        return (R.gate_row() or {}).get("hold")
+    except Exception:
+        return "?"
+
+
 def alert(key, text, every=ALERT_EVERY):
-    """私聊提醒常浩；同一提醒键 every 秒内只提醒一次（every=None：只提醒一次）。发不出去不记，下次再试。返回是否发了。"""
+    """私聊提醒常浩；同一提醒键 every 秒内只提醒一次（every=None：只提醒一次）。发不出去不记，下次再试。返回是否发了。
+    持桥接锁做、锁里先看是否在维护（维护停写排空看得见它；在维护就不发不记，返回 False）。调用方不能已持桥接锁。"""
+    with bridge_lock():
+        if maintenance():
+            return False
+        return _alert(key, text, every)
+
+
+def _alert(key, text, every):
     with db() as con:
         r = con.execute("SELECT at FROM alerts WHERE key = ?", (key,)).fetchone()
     if r:
@@ -571,9 +597,9 @@ def _report_delivered(card_id):
 
 
 def confirm(card_id):
-    """持桥接锁报送达，放锁后再把送达前点的、排着队的本人回答提交掉（手动补报、测试用）。"""
-    with bridge_lock():
-        _report_delivered(card_id)
+    """报送达（过恢复闸，同 report_delivered；关着抛 Deferred，L3 第 4 轮 P1-06），放锁后再把送达前点的、排着队的本人回答
+    提交掉（手动补报、测试用）。"""
+    report_delivered(card_id)
     _flush(card_id)
 
 
@@ -587,6 +613,11 @@ def run():
     import autoloop_answer as A
     while True:
         try:
+            held = maintenance()
+            if held:                                   # 维护停写：对账回话、放弃提醒、领卡都停（P1-06），结束后照常补上
+                print(json.dumps({"at": now(), "ok": False, "paused": f"维护中（恢复点 {held}）"}, ensure_ascii=False), flush=True)
+                time.sleep(30)
+                continue
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
                 A.tell(A.identities()[1], text)
