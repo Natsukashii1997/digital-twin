@@ -1077,6 +1077,11 @@ class RejectTests(Base):
             con.execute("UPDATE secretary_decisions SET outcome = ? WHERE id = ?",
                         (json.dumps({"event_key": f"{TASK}:g1:rework:2"}), out["decision"]))
         self.assertIn(out["decision"], R._secretary()[0])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:
+            con.execute("UPDATE secretary_decisions SET outcome = '{}' WHERE id = ?", (out["decision"],))
+        with G.tx() as con:                                                     # 绑定的事件代次和日志记的对不上：挡闸
+            con.execute("UPDATE hub_events SET generation = 9 WHERE event_key = ?", (f"{TASK}:g1:rework:1",))
+        self.assertIn(out["decision"], R._secretary()[0])
 
     def test_comment_unknown_is_not_resent(self):
         bad = self.root / "badgh"

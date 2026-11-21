@@ -548,11 +548,17 @@ class ExitLedger(PublishBase):
         P.publish(self.tid)
         self.assertEqual((self.pushes(), self.row("push_branch")["state"]), (1, "done"))
 
-    def test_unknown_push_that_never_landed_is_retried_once(self):
+    def test_unknown_push_that_never_landed_waits_for_owner_then_retried_once(self):
+        """L3 第 3 轮 P1-10：结果不明、远端还是推之前的样子 → 核不清（分不清没推还是推了又被删），不自动重推；
+        常浩核过结算成没做成，才重推一次。"""
         with self.push_then("hung_up"), self.assertRaises(P.Rejected):
             P.publish(self.tid)
         self.assertEqual((self.pushes(), self.row("push_branch")["state"]), (0, "unknown"))
-        out = P.publish(self.tid)                          # 对账：远端没有这条分支 → 确定没推 → 重推一次
+        with self.assertRaises(P.Rejected):                # 对账：核不清，这张单冻结，不重推
+            P.publish(self.tid)
+        self.assertEqual((self.pushes(), self.row("push_branch")["state"]), (0, "unreconciled"))
+        E.settle(self.row("push_branch")["key"], "failed", "常浩核过：远端从没有过这条分支", confirm=True)
+        out = P.publish(self.tid)
         self.assertEqual((out["pushed"], self.pushes()), (True, 1))
         self.assertEqual(self.row("push_branch")["attempts"], 2)
 

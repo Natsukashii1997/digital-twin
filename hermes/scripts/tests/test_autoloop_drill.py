@@ -147,7 +147,7 @@ class PushBranch(Drill):
         self.assertEqual(self.push_count(), 1)
         self.assertTrue(self.gate_open())                    # 强杀留下的不明关过闸，领资格前已整体对账、重新开闸
 
-    def test_timeout_before_push_then_retry_once(self):
+    def test_timeout_before_push_waits_for_owner_then_retry_once(self):
         bare, work, t = self.repo()
         slow = lambda: subprocess.run(["sh", "-c", f"sleep 2; git push -q {t['remote']} {t['head']}:refs/heads/{t['branch']}"],  # noqa: E731
                                       cwd=work, check=True, timeout=0.5)
@@ -155,14 +155,18 @@ class PushBranch(Drill):
             E.guard("push_branch", self.key(t), f"task:{TASK}", t, slow)
         self.assertEqual(E.show()["frozen"], [f"task:{TASK}"])
         time.sleep(2.5)                                                       # 被杀掉的那次不会晚到
+        with self.assertRaises(E.Refused):                                    # 对账：远端还是推之前的样子 → 核不清（P1-10）
+            E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
+        self.assertEqual(self.push_count(), 0)
+        E.settle(self.key(t), "failed", "常浩核过：远端没有这条分支", confirm=True)
         out = E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
-        self.assertEqual(out["again"], False)                                 # 对账确认没推过：重做一次
+        self.assertEqual(out["again"], False)                                 # 常浩结算成没推：重做一次
         self.assertEqual(self.push_count(), 1)
 
     def test_timeout_after_push_is_not_redone(self):
         bare, work, t = self.repo()
-        slow = lambda: subprocess.run(["sh", "-c", f"git push -q {t['remote']} {t['head']}:refs/heads/{t['branch']}; sleep 2"],  # noqa: E731
-                                      cwd=work, check=True, timeout=1)
+        slow = lambda: subprocess.run(["sh", "-c", f"git push -q {t['remote']} {t['head']}:refs/heads/{t['branch']}; sleep 6"],  # noqa: E731
+                                      cwd=work, check=True, timeout=4)   # 留够推送和计数钩子跑完（负载高时 1 秒不够，钩子被杀、计数漏记）
         with self.assertRaises(subprocess.TimeoutExpired):
             E.guard("push_branch", self.key(t), f"task:{TASK}", t, slow)
         out = E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
@@ -180,6 +184,10 @@ class PushBranch(Drill):
         R.ensure_open()                                                       # 闸照常开，只冻这张单
         self.assertEqual(R.status()["frozen"], [f"task:{TASK}"])
         away.rename(bare)                                                     # 网通了
+        with self.assertRaises(E.Refused):                                    # 远端还是推之前的样子 → 核不清，交常浩（P1-10）
+            E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
+        self.assertEqual(self.push_count(), 0)
+        E.settle(self.key(t), "failed", "常浩核过：断网那次没推上", confirm=True)
         out = E.guard("push_branch", self.key(t), f"task:{TASK}", t, self.push(work, t))
         self.assertEqual(out["again"], False)
         self.assertEqual(self.push_count(), 1)

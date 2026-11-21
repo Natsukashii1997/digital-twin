@@ -32,7 +32,9 @@ elif a[:2] == ["pr", "create"]:
     n = len(st["prs"]) + 1
     st["prs"].append({"number": n, "url": f"https://github.com/{arg('-R')}/pull/{n}", "state": "OPEN",
                       "headRefName": arg("-H"), "headRefOid": os.environ["DRILL_GH_HEAD"], "baseRefName": arg("-B"),
-                      "mergeCommit": None})
+                      "mergeCommit": None, "isCrossRepository": False,             # 来源本仓库（对账按 pr_is_ours 核）
+                      "headRepository": {"name": arg("-R").split("/")[1]},
+                      "headRepositoryOwner": {"login": arg("-R").split("/")[0]}})
     st["creates"] += 1
     json.dump(st, open(state_file, "w"))
     print(st["prs"][-1]["url"])

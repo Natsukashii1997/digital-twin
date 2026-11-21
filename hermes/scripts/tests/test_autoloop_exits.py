@@ -341,10 +341,19 @@ class Readers(Base):
         self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "a", cwd=work)
         head = self.git("rev-parse", "HEAD", cwd=work)
         t = {"remote": f"file://{bare}", "branch": "claude/t-20261118-abcdef", "head": head}
-        self.assertEqual(E.read_push(t, {}, None)[0], "failed")
+        verdict, ev = E.read_push(t, {}, None)                       # 远端没有这条分支：分不清没推还是推了又删（P1-10）
+        self.assertIsNone(verdict)
+        self.assertIn("分不清", ev["note"])
         self.git("push", "-q", f"file://{bare}", f"HEAD:refs/heads/{t['branch']}", cwd=work)
         self.assertEqual(E.read_push(t, {}, None)[0], "done")
         self.assertIsNone(E.read_push({**t, "head": "0" * 40}, {}, None)[0])
+        self.git("push", "-q", "--delete", f"file://{bare}", t["branch"], cwd=work)   # 推上之后分支被删：不判没推
+        self.assertIsNone(E.read_push(t, {}, None)[0])
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "b", cwd=work)
+        before = self.git("rev-parse", "HEAD~1", cwd=work)
+        new = self.git("rev-parse", "HEAD", cwd=work)
+        self.git("push", "-q", f"file://{bare}", f"HEAD~1:refs/heads/{t['branch']}", cwd=work)
+        self.assertIsNone(E.read_push({**t, "head": new, "before": before}, {}, None)[0])   # 续推前的旧提交：同样分不清
         with self.assertRaises(E.Unreachable):
             E.read_push({**t, "remote": f"file://{self.root}/nowhere.git"}, {}, None)
 
@@ -356,8 +365,14 @@ class Readers(Base):
 
     def test_read_pr(self):
         t = {"github": "o/r", "branch": "claude/x", "head": "h"}
-        with self.fake_gh([{"number": 3, "url": "u", "state": "OPEN", "headRefOid": "h", "baseRefName": "main"}]):
+        ours = {"number": 3, "url": "u", "state": "OPEN", "headRefOid": "h", "baseRefName": "main", "headRefName": t["branch"],
+                "isCrossRepository": False, "headRepository": {"name": "r"}, "headRepositoryOwner": {"login": "o"}}
+        with self.fake_gh([ours]):
             self.assertEqual(E.read_pr(t, {}, None), ("done", {"pr": "u", "number": 3}))
+        fork = {**ours, "isCrossRepository": True, "headRepositoryOwner": {"login": "someone"}}   # P2-04：同 SHA 同分支的 fork PR
+        for bad in (fork, {**ours, "headRepositoryOwner": {"login": "someone"}}, {**ours, "headRefName": "other"}):
+            with self.subTest(bad=bad), self.fake_gh([bad]):
+                self.assertIsNone(E.read_pr(t, {}, None)[0])
         with self.fake_gh([]):
             self.assertEqual(E.read_pr(t, {}, None)[0], "failed")
         with self.fake_gh([{"headRefOid": "other", "baseRefName": "main"}]):

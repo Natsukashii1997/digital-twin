@@ -328,15 +328,17 @@ def _run(cmd, timeout=60):
 
 
 def read_push(t, row, now):
-    """远端分支正好是这次的头提交 → 做成；远端还是推之前的样子（target 的 before：没有这条分支，或续推前的旧提交）→ 没做成；
-    别的情况（推之前有分支、现在没了，或是别的提交）→ 核不清。"""
+    """远端分支正好是这次的头提交 → 做成；其余一律核不清，交常浩 settle（L3 第 3 轮 P1-10）。
+    远端还是推之前的样子（target 的 before：没有这条分支，或续推前的旧提交）也不判没做成：推上去之后分支被删、被重置回
+    旧提交，看起来和没推过一样，git 远端给不出「这次推送没到过」的可靠证据，凭当前提交授权重推可能推第二次。"""
     out = _run(["git", "-c", "core.hooksPath=/dev/null", "ls-remote", t["remote"], f"refs/heads/{t['branch']}"])
     sha = out.split()[0] if out.split() else None
     if sha == t["head"]:
         return "done", {"remote_head": sha}
+    ev = {"remote_head": sha, "before": t.get("before")}
     if sha == t.get("before"):
-        return "failed", {"remote_head": sha}
-    return None, {"remote_head": sha, "before": t.get("before")}
+        ev["note"] = "远端还是推之前的样子：可能没推上，也可能推上后分支被删或回退，分不清"
+    return None, ev
 
 
 def _gh():
@@ -344,10 +346,13 @@ def _gh():
 
 
 def read_pr(t, row, now):
-    """这条分支上有一个头提交是这次的、目标 main 的 PR → 做成；一个也没有 → 没做成；多个或对不上 → 核不清。"""
+    """这条分支上只有一个 PR、且正是这次的（和受信发布同一套判断 pr_is_ours：目标本仓库 main、来源本仓库、本单分支、
+    头提交一致，L3 第 3 轮 P2-04——同名分支的 fork PR 不算）→ 做成；一个也没有 → 没做成（GitHub 的 PR 删不掉，
+    --state all 看得到关掉的）；多个或对不上 → 核不清。"""
+    import autoloop_publish as P                 # 放函数里：受信发布导入本模块
     prs = json.loads(_run([_gh(), "pr", "list", "-R", t["github"], "--head", t["branch"], "--state", "all",
-                           "--json", "number,url,state,headRefOid,baseRefName"]) or "[]")
-    ours = [p for p in prs if p.get("headRefOid") == t["head"] and p.get("baseRefName") == "main"]
+                           "--json", P.PR_FIELDS]) or "[]")
+    ours = [p for p in prs if P.pr_is_ours(p, t["github"], t["branch"], t["head"])]
     if len(ours) == 1 and len(prs) == 1:
         return "done", {"pr": ours[0].get("url"), "number": ours[0].get("number")}
     if not prs:
