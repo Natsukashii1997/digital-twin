@@ -7,25 +7,33 @@ do_merge_revert）、下游影响清单的格式和规则 3、4（custody_impact
 秘书自己的：按天和按托管时段取决定、每行怎么写（五种动作）、推翻多出来的冻结任务、停掉在跑的轮次、改选卡、记更正。
 
 汇报（只发常浩私聊 twin_state.owner_chat_id，回读核对，同一份只发一次）：
-  day --day YYYY-MM-DD      每天 21:00 一张（白天的：那一天记账的全部秘书决定；按 Asia/Shanghai 日期，同 secretary_ledger.stats）；
+  day --day YYYY-MM-DD      每天 21:00 一张（白天的：前一天 21:00 到这天 21:00 记账的秘书决定，扣掉托管时段里的，那些进托管时段那张；
+                            这天 21:00 之前只能 --card-only 预览，不发，免得早发了把 21:00 前后的漏掉）；
   custody --session c-…     托管时段结束一张（托管排空完成或冻结后；取托管开着时记账的秘书决定）；
   alert                     立刻报：秘书冻结了、有结果不明 / 对账不清的决定，没报过的才报（一项只报一次）。
+  发卡前核对账本身份：这一份涉及的秘书会话，加上这段时间里开过的秘书会话（一个决定都没有时也核：账本丢了不能当成「没做决定」）。
   卡片：「等你处理」（交常浩、结果不明、对账不清、还在途）和「替你定了的」（做成、没做成）两张六列表，表下「推翻」按钮
   （按钮值 {"secretary": "overturn", "ref": 决定号, "card": 卡片令牌}）。发卡前核对账本身份（每个涉及的秘书会话：库还是开启时
   登记的那一份、没有有原文没账本的决定）。记录在 DT_SECRETARY_DIR/reports/<份>.json（同 custody report.json 的结构）：
-  同一份有回读核实过的就不再发（--force 才再发）；只有没核实的，先按原消息号回读，核实了不重发，核实不了才换新令牌重发。
+  同一份有回读核实过的就不再发（--force 才再发）；只有没核实的，先按原消息号回读，核实了不重发，核实不了才换新令牌重发；
+  同一份发了 3 次都回读不了就不再自动重发（--force 才再发）。同一时间只发一份（reports/.deliver.lock）。
   21:00 定时、alert 每分钟由谁调都是定时任务（D 档），本批只写命令，不装。
 
 推翻（按钮经 merge-buttons 插件转来：button overturn <决定号> --chat --operator --card；只认常浩本人、常浩私聊、最新一张核实过的
   汇报卡上真有「推翻」按钮的决定；同一决定同时只处理一次点击）。分阶段、可恢复，进度在 DT_SECRETARY_DIR/<会话>/<决定号>.overturn.json：
     registered 登记推翻（处置改成「已推翻·已记录」）→ candidate 规则补丁候选（DT_SECRETARY_DIR/rule-candidates.jsonl，进每周提案）
     → freeze 冻结任务凭证并作废当前代次（autoloop_grants.freeze；凭证已是终态的不用）→ stop 停掉这件事排队或在跑的轮次
-      （中台 POST /v1/runs/<号>/cancel，本人密钥；回读到全部终态才算完，没停下记「等停下」，再点或 resume 再查；冻结后旧代次的
-      剩余动作本来就会被启动脚本和发布出口拒绝）→ impacts 下游影响清单 → 合并：revert 开撤销 PR（只开不合）→ revert_card
+      （第一次停时记下冻结前建的、还在排队或在跑的轮次号，之后只管这一批，常浩恢复任务后的新轮次不碰；中台 POST /v1/runs/<号>/cancel，
+      本人密钥，取消成功才记「问过」；回读到这一批全部终态才算完，没停下记「等停下」，再点或 resume 再查；中台标「不确定」的取消不了，
+      只记下；冻结后旧代次的剩余动作本来就会被启动脚本和发布出口拒绝）→ impacts 下游影响清单 → 合并：revert 开撤销 PR（只开不合）→ revert_card
       「合并撤销 PR」按钮卡 → 答卡：reselect_card 发一张同样选项的改选卡（按钮 {"secretary": "reselect", "ref", "card", "o"}）
       → 其余：resolution 记更正（autoloop_grants.record_resolution，被替代的决定号和下游怎么处理）→ result 把结果发到私聊。
-  只有做成、结果不明、对账不清的决定才冻结、停轮次（没做成的什么都没发生，只登记推翻和规则候选）。
+  只有做成、结果不明、对账不清的决定才冻结、停轮次（没做成的什么都没发生，只登记推翻和规则候选）；第一次推翻时按当时的状态定下
+  （effects 记进进度文件），之后对账核清了也照这个走完（合并核清没合上：不用撤销，记更正；答卡的凭证已是终态：不发改选卡）。
+  冻结码只在更正记过之后才告诉常浩（没记更正恢复会被拒）。
   改选（button reselect <决定号> --option N）：只认最新一张核实过的改选卡，记更正（常浩改选第几项）、处置改成「已纠正」。
+  先把选的哪项落进进度文件（reselect_pending）再写凭证库，中断后再点按上次那项接着记，两边不会记成不同的项；
+  同一次冻结已经由别的推翻记过更正、或任务已经恢复了，选择只记在推翻记录里，并照实告诉常浩。
   恢复任务仍是常浩私聊「恢复 <单号> <冻结码>」（autoloop_grants.unfreeze，代次 +1）：更正记过才恢复得了。
   **更正事件开关 REAL_CORRECTION 关着**：常浩改选的答案现在送不到工人手里（工人只认任务单五要素，启动脚本要另加读更正的地方，
   0C 文件、另开单）；开关关着时 resume 只报告、不发「更正」事件。
@@ -74,6 +82,21 @@ EFFECTS = ("done", "unknown", "unreconciled")      # 可能已经有了效果：
 LIVE_RUNS = ("queued", "claimed")             # 中台能取消的（queued 直接取消，claimed 记下取消、等工人收手）
 DOUBT_RUNS = ("unknown",)                      # 中台失联、不确定还在不在跑的：取消接口不收（回「已经结束」），只记下
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DAY_END_HOUR = 21                 # 日报 21:00 发：窗口是前一天 21:00 到这天 21:00
+RESEND_MAX = 3                    # 同一份发了几次都回读不了就不再自动重发
+RUN_STATE = {"queued": "排队中", "claimed": "在跑", "unknown": "不确定还在不在跑", "done": "跑完了", "nothing": "跑完了、没做事",
+             "failed": "没跑成", "cancelled": "已停下"}
+PLAIN_REASON = {   # 交常浩的原因写给常浩看（账本里的 HANDOFF_REASONS 有内部词，卡片上用这份）
+    "d_level": "会动到只能你亲手做的事（合并、安装、改配置这类）",
+    "decided": "要改你定过的内容或验收标准",
+    "scope": "会扩大任务范围（换仓库、加功能、改目标、换人做）",
+    "unclear": "选项说不清会做什么，或做了难恢复",
+    "unbound": "这张卡对不上你批准过的任务，或那个任务已过期、撤销、冻结",
+    "induced": "卡片里写着「已同意」「秘书请选」这类话，像在诱导",
+    "model": "判断用的模型不对，或判断超时、出错",
+    "gate": "今天代批次数用完、秘书没开着、清单失效，或同一仓库有没核清的合并",
+    "unsure": "拿不准",
+}
 CUSTODY_SID = re.compile(r"^c-\d{8}-\d{6}-[0-9a-f]{12}$")
 REAL_CORRECTION = False           # 更正事件：工人侧能读到更正内容之前整体关闭（见头注释）
 TEST_CORRECTION = False           # 测试在进程内打开；不经环境变量
@@ -131,7 +154,7 @@ def what_happened(d):
 
 def how_handled(d):
     if d["action"] == "handoff":
-        return f"**没替你定**（{SL.HANDOFF_REASONS.get(d['reason'], '拿不准')}）"
+        return f"**没替你定**（{PLAIN_REASON.get(d['reason'], '拿不准')}）"
     if d["status"] in ("unknown", "unreconciled"):
         return f"**{md(d['summary'])}**，但不确定做成没有"
     if d["status"] == "failed":
@@ -159,7 +182,7 @@ def owner_action(d):
 
 
 def row_of(d, waiting):
-    ask = d["question"] or {"redispatch": "（不是工人问的：中台停下了，按清单可以重派一次）",
+    ask = d["question"] or {"redispatch": "（不是工人问的：任务停下来没人接，按清单可以重派一次）",
                             "reject": "（不是工人问的：审查没过，按清单可以退回返修）",
                             "merge": "（不是工人问的：审查通过、测试全过，按清单可以直接合）"}.get(d["action"]) or "—"
     if d["action"] == "handoff":
@@ -173,9 +196,27 @@ def can_overturn(d):
 
 
 # ---------- 取决定 ----------
-def rows_of_day(st, day):
-    return [L._row(r) for r in st.conn.execute(f"SELECT * FROM {USE.decisions} WHERE substr(created_at, 1, 10) = ? "
-                                               "ORDER BY created_at, rowid", (day,))]
+def day_window(day):
+    """日报的窗口：前一天 21:00（不含）到这天 21:00（含），Asia/Shanghai。"""
+    end = dt.datetime.combine(dt.date.fromisoformat(day), dt.time(DAY_END_HOUR), C.TZ)
+    return end - dt.timedelta(days=1), end
+
+
+def custody_windows(cdoc=None):
+    """托管时段（custody.json 里现在这次和历史的）：[(开始, 结束或 None=还开着)]。读不了就不发日报（分不清哪些算托管时段）。"""
+    try:
+        cdoc = cdoc if cdoc is not None else C.load()
+    except ValueError as e:
+        raise ReportError(f"托管状态读不了，分不清哪些决定算托管时段：{e}", "Corrupt")
+    out = []
+    for s in ([cdoc["session"]] if cdoc.get("session") else []) + list(cdoc.get("history") or []):
+        end = (s.get("ended") or {}).get("at") or (s.get("frozen") or {}).get("at")
+        out.append((C.parse_iso(s["started_at"]), C.parse_iso(end) if end else None))
+    return out
+
+
+def in_windows(at, windows):
+    return any(a <= at and (b is None or at <= b) for a, b in windows)
 
 
 def custody_window(session_id, doc=None):
@@ -187,12 +228,27 @@ def custody_window(session_id, doc=None):
     return C.parse_iso(session["started_at"]), C.parse_iso(end)
 
 
-def rows_in(st, start, end):
+def rows_in(st, start, end, open_start=False):
     out = []
     for r in st.conn.execute(f"SELECT * FROM {USE.decisions} ORDER BY created_at, rowid"):
         at = C.parse_iso(r["created_at"])
-        if start <= at <= end:
+        if (start < at if open_start else start <= at) and at <= end:
             out.append(L._row(r))
+    return out
+
+
+def sessions_between(start, end, doc=None):
+    """secretary.json 里这段时间开过的秘书会话（现在这次和历史的）。"""
+    try:
+        doc = doc or S.load()
+    except ValueError as e:
+        raise ReportError(f"秘书状态读不了：{e}", "Corrupt")
+    out = []
+    for s in ([doc["session"]] if doc.get("session") else []) + list(doc.get("history") or []):
+        a = C.parse_iso(s["started_at"])
+        b = (s.get("ended") or {}).get("at")
+        if a <= end and (b is None or C.parse_iso(b) >= start):
+            out.append(s["id"])
     return out
 
 
@@ -265,26 +321,34 @@ def frozen_note(doc=None):
     return (f"**秘书已经冻结**（{md(f.get('reason') or '原因见电脑')}）：不再替你做新决定。你核对清楚后，在私聊说「解除冻结」。")
 
 
-def scope(kind, arg=None, st=None, doc=None, now=None):
-    """一份汇报取哪些决定：返回 (份名, 标题, 开头一句, 决定列表, 冻结说明)。"""
+def span(start, end):
+    return start.astimezone(C.TZ).strftime("%m-%d %H:%M") + " – " + end.astimezone(C.TZ).strftime("%m-%d %H:%M")
+
+
+def scope(kind, arg=None, st=None, doc=None, now=None, card_only=False, cdoc=None):
+    """一份汇报取哪些决定：返回 (份名, 标题, 开头一句, 决定列表, 冻结说明, 这段时间开过的秘书会话)。"""
     now = now or C.now_tz()
     if kind == "day":
         day = arg or now.astimezone(C.TZ).date().isoformat()
         if not DAY.match(day):
             raise ReportError(f"日期要写成 YYYY-MM-DD：{day}", "BadInput")
-        rows = rows_of_day(st, day)
+        start, end = day_window(day)
+        if now < end and not card_only:
+            raise ReportError(f"{day} 的日报 {DAY_END_HOUR}:00 以后才发（现在只能 --card-only 预览）", "NotYet")
+        windows = custody_windows(cdoc)
+        rows = [d for d in rows_in(st, start, end, open_start=True) if not in_windows(C.parse_iso(d["created_at"]), windows)]
         waiting = sum(1 for d in rows if d["status"] in WAITING or d["action"] == "handoff")
         decided = sum(1 for d in rows if d["action"] != "handoff" and d["status"] in DECIDED)
-        return (f"day-{day}", f"📋 秘书今天：替你定了 {decided} 件，{waiting} 件等你处理", lead_text(rows, f"{day} 白天"),
-                rows, frozen_note(doc))
+        return (f"day-{day}", f"📋 秘书今天：替你定了 {decided} 件，{waiting} 件等你处理",
+                lead_text(rows, span(start, end) + "（不含托管时段，那些另有一张）"), rows, frozen_note(doc),
+                sessions_between(start, end, doc))
     if kind == "custody":
         if not CUSTODY_SID.match(arg or ""):
             raise ReportError(f"托管号不对：{arg}", "BadInput")
-        start, end = custody_window(arg)
+        start, end = custody_window(arg, cdoc)
         rows = rows_in(st, start, end)
-        when = start.astimezone(C.TZ).strftime("%m-%d %H:%M") + " – " + end.astimezone(C.TZ).strftime("%m-%d %H:%M") + " 托管时段"
         return (f"custody-{arg}", f"🌙 托管时段秘书替你定了 {sum(1 for d in rows if d['action'] != 'handoff')} 件",
-                lead_text(rows, when), rows, frozen_note(doc))
+                lead_text(rows, span(start, end) + " 托管时段"), rows, frozen_note(doc), sessions_between(start, end, doc))
     raise ReportError(f"不认识的汇报：{kind}", "BadInput")
 
 
@@ -312,10 +376,26 @@ def _write(name, rec):
     CR.write_json(report_path(name), rec)
 
 
+@contextlib.contextmanager
+def deliver_lock():
+    """同一时间只发一份汇报（定时任务和手动同时跑不会各发一张）。拿不到锁就不发。"""
+    reports_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(reports_dir() / ".deliver.lock", "w") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ReportError("另一份汇报正在发，这次不发", "Busy")
+        yield
+
+
 def deliver(name, card_of, rows, force=False, now=None, sender=None, reader=None, extra=None):
     """发一份汇报并回读（同 custody_report.send_report 的做法）。card_of(token) 给出卡片；extra 并进记录条目。返回记录条目。"""
-    now = now or C.now_tz()
     chat = owner_chat()
+    with deliver_lock():
+        return _deliver(name, card_of, rows, force, now or C.now_tz(), sender, reader, extra, chat)
+
+
+def _deliver(name, card_of, rows, force, now, sender, reader, extra, chat):
     reader = reader or CR.read_back
     rec = read_report(name)
     if not force:
@@ -331,6 +411,11 @@ def deliver(name, card_of, rows, force=False, now=None, sender=None, reader=None
                 _write(name, rec)
                 return {**last, "rechecked": True}
             last["recheck"] = why
+            tries = sum(1 for x in rec["sent"] if x.get("message_id") and x.get("status") != "verified")
+            if tries >= RESEND_MAX:
+                _write(name, rec)
+                raise ReportError(f"这份汇报已经发了 {tries} 次都回读不了（{why}），不再自动重发：在电脑上查飞书回读，"
+                                  "确认要再发用 --force", "ReadbackFailing")
     token = secrets.token_hex(8)
     card = card_of(token)
     entry = {"at": C.iso(now), "card": token, "decisions": [d["id"] for d in rows],
@@ -354,15 +439,15 @@ def deliver(name, card_of, rows, force=False, now=None, sender=None, reader=None
     return entry
 
 
-def send_report(kind, arg=None, force=False, now=None, sender=None, reader=None, card_only=False, store=None, doc=None):
+def send_report(kind, arg=None, force=False, now=None, sender=None, reader=None, card_only=False, store=None, doc=None, cdoc=None):
     now = now or C.now_tz()
     try:
         cm = contextlib.nullcontext(store) if store else SL.open_store(now)
     except L.LedgerError as e:
         raise ReportError(f"秘书账本打不开，不汇报：{e}", e.code)
     with cm as st:
-        name, title, lead, rows, note = scope(kind, arg, st, doc, now)
-        check_ledger(st, [d["session_id"] for d in rows], doc)
+        name, title, lead, rows, note, sids = scope(kind, arg, st, doc, now, card_only, cdoc)
+        check_ledger(st, [d["session_id"] for d in rows] + sids, doc)
         if card_only:
             return {"name": name, "card": build_card(title, lead, rows, None, name, note), "decisions": len(rows)}
         return deliver(name, lambda tok: build_card(title, lead, rows, tok, name, note), rows, force, now, sender, reader)
@@ -396,8 +481,8 @@ def send_alert(now=None, sender=None, reader=None, card_only=False, store=None, 
         new = [i for i in items if i not in told]
         if not new:
             return None
-        check_ledger(st, [d["session_id"] for d in rows], doc)
         show = [d for d in rows if f"{d['id']}:{d['status']}" in new]
+        check_ledger(st, [d["session_id"] for d in show] + ([doc["session"]["id"]] if f else []), doc)   # 只核这次要报的：旧会话的老账不挡住新的立刻报
         title = "⚠️ 秘书：有事要你马上知道"
         lead = (f"<font color='grey'>{now.astimezone(C.TZ).strftime('%m-%d %H:%M')}</font>\n"
                 + (f"有 {len(show)} 件秘书做了但不确定做成没有，相关的任务和仓库先不再代批，核对清楚前不再替你做。" if show
@@ -418,8 +503,23 @@ def hub_live_runs(task_id, states=LIVE_RUNS):
     except Exception:  # noqa: BLE001
         return None
     try:
-        return [dict(r) for r in con.execute(f"SELECT id, state FROM runs WHERE lane = ? AND state IN "
+        return [dict(r) for r in con.execute(f"SELECT id, state, created_at FROM runs WHERE lane = ? AND state IN "
                                              f"({','.join('?' * len(states))}) ORDER BY id", (task_id, *states))]
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        con.close()
+
+
+def hub_states(task_id, ids):
+    """中台库只读：这件事里这些轮次现在的状态 {号: 状态}。读不了返回 None。"""
+    try:
+        con = P._hub()
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        rows = con.execute(f"SELECT id, state FROM runs WHERE lane = ? AND id IN ({','.join('?' * len(ids))})", (task_id, *ids))
+        return {r["id"]: r["state"] for r in rows}
     except Exception:  # noqa: BLE001
         return None
     finally:
@@ -445,31 +545,47 @@ def freeze_step(d, rec, now):
     return True
 
 
-def stop_step(d, rec, cancel=None):
+def stop_step(d, rec, now, cancel=None):
     """停掉这件事还在排队或在跑的轮次（第 2 步）：本人密钥调中台取消，回读到全部终态才算完。返回做完没有。
+    第一次停时记下要停的这一批（冻结那一刻之前建的、还在排队或在跑的，targets），之后只管这一批：常浩恢复任务后再点「推翻」，
+    不会把恢复后的新轮次停掉。取消成功才记「问过」（asked）；出错（连不上、已经结束回 400）不记，以回读为准，下次还在跑就再取消。
     中台标成「不确定」（unknown）的轮次取消接口不收，只记在 doubt 里、写进给常浩的话，不卡住这一步：冻结后它剩下的推送、开 PR 会被拒。"""
     task = d["target"]["task"]
-    live = hub_live_runs(task)
-    if live is None:
-        rec["stop"] = {"status": "unknown", "why": "中台库读不了，不知道还有没有在跑的轮次"}
+    sp = dict(rec.get("stop") or {})
+    if "targets" not in sp:
+        live, doubt = hub_live_runs(task), hub_live_runs(task, DOUBT_RUNS)
+        if live is None or doubt is None:
+            rec["stop"] = {**sp, "status": "unknown", "why": "调度记录读不了，不知道还有没有在跑的"}
+            return False
+        cutoff = C.parse_iso(rec["stages"]["freeze"]) if rec["stages"].get("freeze") else now
+
+        def before(r):
+            at = IMP.parse_time(r.get("created_at"))
+            return at is None or at <= cutoff
+        sp = {"targets": [r["id"] for r in live if before(r)], "doubt": [r["id"] for r in doubt if before(r)], "asked": []}
+    asked, errors = list(sp.get("asked") or []), []
+    states = hub_states(task, sp["targets"]) if sp["targets"] else {}
+    if states is None:
+        rec["stop"] = {**sp, "status": "unknown", "why": "调度记录读不了，不知道停下没有"}
         return False
-    asked = list((rec.get("stop") or {}).get("asked") or [])
-    errors = []
-    for r in live:
-        if r["id"] in asked:
+    for rid in sp["targets"]:
+        if states.get(rid) not in LIVE_RUNS or rid in asked:
             continue
         try:
-            (cancel or (lambda rid: AC.hub("POST", f"/v1/runs/{rid}/cancel", {})))(r["id"])
-            asked.append(r["id"])
-        except Exception as e:  # noqa: BLE001  已经结束的会回 400：下面回读为准
-            errors.append(f"轮次 {r['id']}：{getattr(e, 'args', [e])[0]}"[:120])
-            asked.append(r["id"])
-    left, doubt = hub_live_runs(task), hub_live_runs(task, DOUBT_RUNS)
-    if left is None or doubt is None:
-        rec["stop"] = {"status": "unknown", "asked": asked, "why": "取消后中台库读不了"}
+            (cancel or (lambda r: AC.hub("POST", f"/v1/runs/{r}/cancel", {})))(rid)
+            asked.append(rid)
+        except Exception as e:  # noqa: BLE001  已经结束会回 400、连不上等：不记问过，以下面的回读为准
+            errors.append(f"轮次 {rid}：{getattr(e, 'args', [e])[0]}"[:120])
+    states = hub_states(task, sp["targets"]) if sp["targets"] else {}
+    if states is None:
+        rec["stop"] = {**sp, "asked": asked, "status": "unknown", "why": "取消后调度记录读不了"}
         return False
-    rec["stop"] = {"status": "stopped" if not left else "stopping", "asked": asked, "left": [r["id"] for r in left],
-                   **({"doubt": [r["id"] for r in doubt]} if doubt else {}), **({"errors": errors} if errors else {})}
+    left = [rid for rid in sp["targets"] if states.get(rid) in LIVE_RUNS]
+    rec["stop"] = {**sp, "asked": asked, "status": "stopped" if not left else "stopping", "left": left,
+                   **({"errors": errors} if errors else {})}
+    rec["stop"].pop("why", None)
+    if not rec["stop"].get("doubt"):
+        rec["stop"].pop("doubt", None)
     return not left
 
 
@@ -490,9 +606,10 @@ def impacts_of(st, d, gh=None):
         for r in runs:
             at = IMP.parse_time(r.get("created_at"))
             if at and at > since:
-                items.append({"rule": 1, "what": f"轮次 {r['id']}（{r['state']}）", "ref": str(r["id"]), "url": ""})
+                items.append({"rule": 1, "what": f"轮次 {r['id']}（{RUN_STATE.get(r['state'], '状态不明')}）", "ref": str(r["id"]),
+                              "url": ""})
     except Exception as e:  # noqa: BLE001
-        gaps.append({"rule": 1, "why": f"中台库读不了（{type(e).__name__}）"})
+        gaps.append({"rule": 1, "why": f"调度记录读不了（{type(e).__name__}）"})
         gaps.append({"rule": 2, "why": "规则 1 没取到轮次，PR 只按受信发布记录列"})
     try:
         for line in P.log_path().read_text(encoding="utf-8").splitlines():
@@ -642,16 +759,16 @@ def overturn_message(d, rec):
     msg = [f"已推翻：{d['context']}（{short_ref(d)}），秘书当时定的是「{d['summary']}」。记下了，以后同类事按你的意思办。"]
     fz, sp = rec.get("freeze") or {}, rec.get("stop") or {}
     if fz.get("status") == "frozen":
-        msg.append(f"任务 {fz['task']} 已冻结（第 {fz['generation']} 代作废）：新的轮次起不来、不再推分支开 PR，秘书也不再替它做决定。")
+        msg.append(f"任务 {fz['task']} 已冻结：之前排着的活不会再起来，也不再推分支、开 PR，秘书也不再替它做决定。")
     elif fz.get("status") == "failed":
         msg.append(f"任务冻结没成功（{fz.get('why')}），再点一次「推翻」会重试；在那之前它还可能接着跑。")
-    if sp.get("status") == "stopped" and sp.get("asked"):
-        msg.append(f"在排队或在跑的 {len(sp['asked'])} 个轮次已停下。")
-    if sp.get("doubt"):
-        msg.append(f"另有 {len(sp['doubt'])} 个轮次中台也不确定还在不在跑（停不了）；冻结后它们剩下的推送、开 PR 会被拒。")
+    if sp.get("status") == "stopped" and sp.get("targets"):
+        msg.append(f"在排队或在跑的 {len(sp['targets'])} 个轮次已停下。")
     elif sp.get("status") in ("stopping", "unknown"):
         msg.append(f"还有轮次没确认停下（{sp.get('why') or '、'.join(map(str, sp.get('left') or []))}）；冻结后它们剩下的推送、开 PR 会被拒，"
                    "再点一次「推翻」我会再查。")
+    if sp.get("doubt"):
+        msg.append(f"另有 {len(sp['doubt'])} 个轮次调度那边也不确定还在不在跑（停不了）；冻结后它们剩下的推送、开 PR 会被拒。")
     if "impacts" in rec:
         msg += ["受影响的后续：", *IMP.describe(rec["impacts"])]
     if d["action"] == "merge":
@@ -663,22 +780,31 @@ def overturn_message(d, rec):
                     "not_needed": "这次合并没合上，不用撤销。",
                     "unsure": f"撤销 PR 开没开成不确定（{rv.get('why')}）；我不会再推一次，再点「推翻」我只去 GitHub 上查。"}.get(
             s, f"撤销 PR 没开成（{rv.get('why') or '原因不明'}），原因解决后再点一次「推翻」会重试。"))
-    if d["action"] == "ask" and d["status"] in EFFECTS:
-        if (rec.get("reselect_card") or {}).get("status") == "verified":
+    if d["action"] == "ask" and effects_of(d, rec):
+        if (rec.get("reselect_card") or {}).get("status") == "not_needed":
+            msg.append("这张任务已经结束了，不用改选。")
+        elif (rec.get("reselect_card") or {}).get("status") == "verified":
             msg.append("我发了一张同样选项的卡，你点一个就记下你的选择。注意：现在工人还收不到改选的答案（工人那边还不支持更正），"
                        "恢复后它会按冻结前的状态接着做；在那之前建议改选后先别恢复。")
         else:
             msg.append("改选卡没发成，再点一次「推翻」我会重发。")
-    if fz.get("status") == "frozen" and fz.get("code"):
-        if d["action"] != "ask" or rec.get("reselected"):
-            msg.append(f"要让它接着做：私聊发「恢复 {fz['task']} {fz['code']}」（代次加 1）；不做了就跟我说，我撤销这张任务。")
+    rs = (rec.get("resolution") or {}).get("status")
+    if fz.get("status") == "frozen" and fz.get("code") and rs in ("recorded", "recorded_before"):   # 没记更正，恢复会被拒：先不给冻结码
+        msg.append(f"要让它接着做：私聊发「恢复 {fz['task']} {fz['code']}」；不做了就跟我说，我撤销这张任务。")
+    elif fz.get("status") == "frozen" and rs == "failed":
+        msg.append(f"更正没记进去（{(rec.get('resolution') or {}).get('why')}），再点一次「推翻」会重试；记好之前任务恢复不了。")
     return "\n".join(msg)
+
+
+def effects_of(d, rec):
+    """这次推翻要不要冻结、停轮次：第一次推翻时按当时的状态定下（记在进度文件 effects），之后对账核清了也照它走完。"""
+    return rec.get("effects", d["status"] in EFFECTS)
 
 
 def finished(d, rec):
     st = rec["stages"]
     need = ["registered", "candidate", "impacts", "result"]
-    if d["status"] in EFFECTS:
+    if effects_of(d, rec):
         need += ["freeze", "stop"]
         if d["action"] == "merge":
             need.append("revert_card" if (rec.get("revert") or {}).get("status") == "opened" else "revert")
@@ -694,7 +820,8 @@ def do_overturn(st, d, say, now, chat, sender=None, gh=None, revert=None, lookup
         if d["disposition"] != "open":
             say(f"「{d['context']}」这件你已经处理过（{L.DISPOSITION[d['disposition']]}），不用再推翻。")
             return 0
-        rec = {"decision": d["id"], "at": C.iso(now), "stages": {}}
+        rec = {"decision": d["id"], "at": C.iso(now), "stages": {}, "effects": d["status"] in EFFECTS}
+    rec.setdefault("effects", d["status"] in EFFECTS)
     stages = rec["stages"]
 
     def save():
@@ -718,7 +845,7 @@ def do_overturn(st, d, say, now, chat, sender=None, gh=None, revert=None, lookup
         stages["candidate"] = C.iso(now)
         save()
     ok = True
-    effects = d["status"] in EFFECTS
+    effects = rec["effects"]
     if effects and "freeze" not in stages:
         if freeze_step(d, rec, now):
             stages["freeze"] = C.iso(now)
@@ -726,7 +853,7 @@ def do_overturn(st, d, say, now, chat, sender=None, gh=None, revert=None, lookup
             ok = False
         save()
     if effects and "stop" not in stages:
-        if stop_step(d, rec, cancel):
+        if stop_step(d, rec, now, cancel):
             stages["stop"] = C.iso(now)
         else:
             ok = False
@@ -751,7 +878,10 @@ def do_overturn(st, d, say, now, chat, sender=None, gh=None, revert=None, lookup
         rs = (rec.get("revert") or {}).get("status")
         ok = ok and rs in ("opened", "waiting", "not_needed") and (rs != "opened" or "revert_card" in stages)
     if effects and d["action"] == "ask" and "reselect_card" not in stages and "freeze" in stages:
-        if deliver_reselect(d, rec, save, now, chat, sender, reader):
+        if (rec.get("freeze") or {}).get("status") == "not_needed":       # 凭证已是终态：改选也记不进去，不发卡
+            rec["reselect_card"] = {"status": "not_needed", "why": "这张任务已经结束"}
+            stages["reselect_card"] = C.iso(now)
+        elif deliver_reselect(d, rec, save, now, chat, sender, reader):
             stages["reselect_card"] = C.iso(now)
         else:
             ok = False
@@ -776,10 +906,21 @@ def do_overturn(st, d, say, now, chat, sender=None, gh=None, revert=None, lookup
 
 
 def do_reselect(st, d, say, card, option, now):
-    """常浩点改选卡上的一项：只认最新一张核实过的改选卡；记更正（被替代的决定号、改选第几项），处置改成「已纠正」。"""
+    """常浩点改选卡上的一项：只认最新一张核实过的改选卡；记更正（被替代的决定号、改选第几项），处置改成「已纠正」。
+    先把选的哪项落进进度文件（reselect_pending）再写凭证库：中断后再点按上次那项接着记，两边不会记成不同的项。"""
     rec = CR.read_overturn(d, USE) or {}
     rc, fz = rec.get("reselect_card") or {}, rec.get("freeze") or {}
     opts = options_of(d)
+
+    def save():
+        CR.write_json(CR.overturn_path(d, USE), rec)
+
+    def mark_corrected(text):
+        try:
+            L.set_disposition(st, d["id"], "corrected", text, by="user", now=now, use=USE)
+            return True
+        except L.LedgerError:
+            return False
     if not CR.CARD_TOKEN.match(card or "") or card != rc.get("card") or rc.get("status") != "verified":
         say("没记下：这个按钮不是最新一张改选卡上的，请用最新那张。")
         return 1
@@ -787,23 +928,43 @@ def do_reselect(st, d, say, card, option, now):
         say("没记下：选项号不在卡片的选项里。")
         return 1
     if rec.get("reselected"):
-        say(f"你已经改选过了（第 {rec['reselected']['o']} 项），不用再选。")
+        o = rec["reselected"]["o"]
+        if d["disposition"] == "overturned":                  # 上次处置没改成：补上
+            mark_corrected(f"常浩改选第 {o} 项（替代秘书决定 {d['id']}）")
+        say(f"你已经改选过了（第 {o} 项），不用再选。")
         return 0
     if d["disposition"] != "overturned" or fz.get("status") != "frozen":
         say(f"没记下：「{d['context']}」现在不在等你改选的状态。")
         return 1
+    pend = rec.get("reselect_pending")
+    lead = ""
+    if pend and pend.get("o") != option:
+        lead = f"上次你点的是第 {pend['o']} 项、还没记完，按第 {pend['o']} 项接着记。"
+        option = pend["o"]
+    rec["reselect_pending"] = {"o": option, "at": C.iso(now)}
+    save()
     text = f"常浩改选第 {option} 项「{CR.clip(opts[option - 1], 40)}」（替代秘书决定 {d['id']}）"
-    if not resolution_step(d, rec, now, text):
-        CR.write_json(CR.overturn_path(d, USE), rec)
-        say(f"没记下：更正没写进凭证库（{(rec.get('resolution') or {}).get('why')}），再点一次会重试。")
+    good = resolution_step(d, rec, now, text)
+    why = (rec.get("resolution") or {}).get("why") or ""
+    note = ""
+    if not good and "不是冻结状态" in why:                    # 任务已经恢复或结束：凭证库记不进了，选择记在推翻记录里
+        rec["resolution"] = {"status": "after_thaw", "why": why[:200], "text": text}
+        note = "这张任务已经不在冻结状态（恢复了或结束了），你的选择只记在推翻记录里，工人那边不会按它改。"
+    elif not good:
+        save()
+        say(f"{lead}没记下：更正没写进凭证库（{why}），再点一次会重试。")
         return 1
+    elif rec["resolution"]["status"] == "recorded_before":
+        note = "同一张任务这次冻结已经记过一条更正（另一件推翻时记的），你的选择记在推翻记录里。"
     rec["reselected"] = {"o": option, "at": C.iso(now)}
+    rec.pop("reselect_pending", None)
     rec["stages"]["resolution"] = C.iso(now)
-    CR.write_json(CR.overturn_path(d, USE), rec)
-    with contextlib.suppress(L.LedgerError):
-        L.set_disposition(st, d["id"], "corrected", text, by="user", now=now, use=USE)
-    say(f"记下了：你改选第 {option} 项「{opts[option - 1]}」。要让任务接着做，私聊发「恢复 {fz['task']} {fz['code']}」；"
-        "注意现在工人还收不到改选的答案（工人那边还不支持更正），恢复后它会按冻结前的状态接着做。")
+    save()
+    mark_corrected(text)                                      # 没改成下次点击补（上面「已经改选过了」分支）
+    tail = ("" if rec["resolution"]["status"] == "after_thaw" else
+            f"要让任务接着做，私聊发「恢复 {fz['task']} {fz['code']}」；注意现在工人还收不到改选的答案（工人那边还不支持更正），"
+            "恢复后它会按冻结前的状态接着做。")
+    say(f"{lead}记下了：你改选第 {option} 项「{opts[option - 1]}」。{note}{tail}")
     return 0
 
 

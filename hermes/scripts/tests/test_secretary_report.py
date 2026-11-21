@@ -39,8 +39,10 @@ class Base(TSL.Base):
         super().setUp()
         os.environ.update(DT_OWNER_CHAT_ID=CHAT, DT_OWNER_OPEN_ID=OWNER, DT_PUBLISH_LOG=str(self.root / "publish.jsonl"),
                           DT_GRANTS_DB=str(self.root / "grants.db"))
-        self.doc = {"state": "on", "session": {"id": SID, "ledger": {"id": self.lid}, "frozen": None},
-                    "history": [{"id": SID2, "ledger": {"id": self.lid}}]}
+        self.doc = {"state": "on", "session": {"id": SID, "started_at": C.iso(T0 - dt.timedelta(hours=4)), "ledger": {"id": self.lid},
+                                               "frozen": None},
+                    "history": [{"id": SID2, "started_at": C.iso(T0 - dt.timedelta(days=2)), "ledger": {"id": self.lid},
+                                 "ended": {"at": C.iso(T0 - dt.timedelta(days=1, hours=20))}}]}
         for target, value in ((SR.S, "load"), ):
             p = mock.patch.object(target, value, side_effect=lambda *a, **k: self.doc)
             p.start()
@@ -68,6 +70,7 @@ class Base(TSL.Base):
         p.start()
         self.addCleanup(p.stop)
         self.cancelled = []
+        self.addCleanup(self.no_jargon)
 
     # ---- 桩 ----
     def hub(self):
@@ -101,6 +104,15 @@ class Base(TSL.Base):
             self.set_run(rid, "cancelled")
         elif state != "claimed":
             raise SR.AC.Rejected("中台回 HTTP 400（POST /v1/runs/x/cancel）")
+
+    def no_jargon(self):
+        """写给常浩看的私聊文字和卡片文字不许有内部术语（托管账本的 JARGON 规则，验收第 7 条）。"""
+        for x in self.sent:
+            shown = x["content"]["text"] if x["type"] == "text" else "\n".join(
+                TCR._walk_text(x["content"]) + [b["text"]["content"] for b in TCR._button_nodes(x["content"])] +
+                [x["content"]["header"]["title"]["content"]])
+            m = L.JARGON.search(shown)
+            self.assertIsNone(m, f"写给常浩的话里有内部术语「{m and m.group(0)}」：{shown[:300]}")
 
     fake_send = TCR.Base.fake_send
     fake_lark = TCR.Base.fake_lark
@@ -189,7 +201,7 @@ class CardTests(Base):
         self.assertTrue(all(v == {"secretary": "overturn", "ref": v["ref"]} for v in buttons(card)))   # 预览没有令牌
         self.assertEqual(card["header"]["template"], "blue")
         self.assertIn("没替你定", text)
-        self.assertIn(SL.HANDOFF_REASONS["decided"], text)
+        self.assertIn(SR.PLAIN_REASON["decided"], text)                    # 卡片上用白话原因
 
     def test_empty_day_says_nothing_happened(self):
         card = self.day(card_only=True)["card"]
@@ -206,6 +218,32 @@ class CardTests(Base):
         card = self.day(card_only=True)["card"]
         self.assertEqual(card["header"]["template"], "red")
         self.assertIn("秘书已经冻结", "".join(TCR._walk_text(card)))
+
+    def test_day_window_is_last_21_to_21_without_custody(self):
+        late = self.decided("ask", now=T0.replace(hour=22))                       # 11-18 22:00：进 11-19 那份
+        early = self.decided("ask", now=T0 - dt.timedelta(hours=16, minutes=30))  # 11-17 21:30：进 11-18 那份
+        night = self.decided("ask", now=T0 - dt.timedelta(hours=10))              # 11-18 04:00：在托管时段里
+        cdoc = {"state": "off", "session": None, "history": [
+            {"id": "c-20261118-010000-0123456789ab", "started_at": C.iso(T0 - dt.timedelta(hours=13)),
+             "ended": {"at": C.iso(T0 - dt.timedelta(hours=7))}, "frozen": None}]}
+        r = SR.send_report("day", "2026-11-18", store=self.st, doc=self.doc, card_only=True, cdoc=cdoc)
+        self.assertEqual([v["ref"] for v in buttons(r["card"])], [early["id"]])
+        self.assertIn("不含托管时段", "".join(TCR._walk_text(r["card"])))
+        r = SR.send_report("day", "2026-11-19", store=self.st, doc=self.doc, card_only=True, cdoc=cdoc)
+        self.assertEqual([v["ref"] for v in buttons(r["card"])], [late["id"]])
+        self.assertNotIn(night["id"], json.dumps(r["card"]))
+
+    def test_day_not_sent_before_21(self):
+        with self.assertRaises(SR.ReportError) as cm:
+            SR.send_report("day", "2026-11-18", now=T1 - dt.timedelta(minutes=1), sender=self.fake_send, store=self.st, doc=self.doc)
+        self.assertEqual(cm.exception.code, "NotYet")
+        self.assertEqual(self.sent, [])
+
+    def test_custody_unreadable_blocks_day(self):
+        with mock.patch.object(SR.C, "load", side_effect=ValueError("custody.json 坏了")):
+            with self.assertRaises(SR.ReportError) as cm:
+                self.day(card_only=True)
+        self.assertEqual(cm.exception.code, "Corrupt")
 
     def test_bad_day_rejected(self):
         with self.assertRaises(SR.ReportError) as cm:
@@ -267,6 +305,39 @@ class SendTests(Base):
         self.assertEqual(cm.exception.code, "LedgerMismatch")
         self.assertEqual(self.sent, [])
 
+    def test_empty_report_still_checks_ledger(self):
+        """一个决定都没有也核账本身份：库被换成新建的，不能当成「秘书没做决定」发出去。"""
+        self.doc["session"]["ledger"]["id"] = "L-0000000000000000"
+        with self.assertRaises(SR.ReportError) as cm:
+            self.day()
+        self.assertEqual(cm.exception.code, "LedgerMismatch")
+        self.assertEqual(self.sent, [])
+
+    def test_readback_failing_stops_resending(self):
+        self.decided("ask")
+        with mock.patch.object(CR, "lark", side_effect=CR.SendError("回读超时")):
+            for _ in range(SR.RESEND_MAX):
+                with self.assertRaises(SR.ReportError):
+                    self.day()
+            with self.assertRaises(SR.ReportError) as cm:
+                self.day()
+        self.assertEqual(cm.exception.code, "ReadbackFailing")
+        self.assertEqual(len(self.sent), SR.RESEND_MAX)
+        with mock.patch.object(CR, "lark", side_effect=CR.SendError("回读超时")):
+            with self.assertRaises(SR.ReportError) as cm:
+                self.day(force=True)                                             # --force 才再发
+        self.assertEqual(len(self.sent), SR.RESEND_MAX + 1)
+
+    def test_one_delivery_at_a_time(self):
+        self.decided("ask")
+        SR.reports_dir().mkdir(parents=True, exist_ok=True)
+        with open(SR.reports_dir() / ".deliver.lock", "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            with self.assertRaises(SR.ReportError) as cm:
+                self.day()
+        self.assertEqual(cm.exception.code, "Busy")
+        self.assertEqual(self.sent, [])
+
     def test_raw_without_ledger_row_blocks_report(self):
         d = self.decided("ask")
         orphan = Path(d["raw_path"]).with_name("d-261118-ffffff.json")
@@ -326,6 +397,16 @@ class AlertTests(Base):
         self.assertEqual(r["items"], [f"frozen:{SID}:{C.iso(T0)}"])
         self.assertIn("秘书已经冻结", "".join(TCR._walk_text(r["card"])))
         self.assertEqual(self.sent, [])
+
+    def test_old_session_debt_does_not_block_new_alert(self):
+        self.session = SID2                                                  # 记账时开着的是老会话
+        old = self.decided("ask", "unknown", session=SID2, now=T0 - dt.timedelta(days=1, hours=21))
+        self.session = SID
+        self.assertEqual(self.alert()["items"], [f"{old['id']}:unknown"])
+        self.doc["history"] = []                                             # 老会话从 history 里滚出去了
+        new = self.decided("ask", "unknown")
+        e = self.alert()
+        self.assertEqual(e["items"], [f"{new['id']}:unknown"])
 
     def test_unverified_alert_is_not_counted_as_told(self):
         self.decided("ask", "unknown")
@@ -448,6 +529,55 @@ class OverturnTests(Base):
         self.assertIn("恢复 t-20261118-abcdef a1b2c3", texts[-1])
         self.assertIn("2 个轮次已停下", texts[-1])
 
+    def test_stop_never_touches_runs_after_resume(self):
+        """第一次停时记下的那一批才管：常浩恢复任务后再点「推翻」，恢复后的新轮次不能被停掉。"""
+        d = self.decided("redispatch", target={"task": TASK, "generation": 1})
+        c = self.add_run("claimed")
+        self.assertEqual(self.overturn(d)[0], 1)
+        new = self.add_run("queued", at=T1 + dt.timedelta(hours=1))         # 恢复以后排进来的
+        self.set_run(c, "cancelled")
+        self.assertEqual(self.overturn(d)[0], 0)
+        self.assertEqual(self.cancelled, [c])
+        self.assertNotIn(new, self.progress(d)["stop"]["targets"])
+
+    def test_stop_targets_fixed_late_exclude_runs_after_freeze(self):
+        d = self.decided("redispatch", target={"task": TASK, "generation": 1})
+        self.hub_ok = False
+        self.overturn(d)                                                     # 冻结了，但调度记录读不了：这次没记下要停哪些
+        self.hub_ok = True
+        old = self.add_run("queued")
+        new = self.add_run("queued", at=T1 + dt.timedelta(hours=1))
+        self.assertEqual(self.overturn(d, now=T1 + dt.timedelta(hours=2))[0], 0)
+        self.assertEqual(self.cancelled, [old])
+        self.assertNotIn(new, self.cancelled)
+
+    def test_cancel_error_is_retried(self):
+        d = self.decided("redispatch", target={"task": TASK, "generation": 1})
+        q = self.add_run("queued")
+        calls = []
+
+        def flaky(rid):
+            calls.append(rid)
+            if len(calls) == 1:
+                raise SR.AC.Rejected("连不上中台：OSError")
+            self.cancel(rid)
+        self.assertEqual(self.overturn(d, cancel=flaky)[0], 1)
+        self.assertEqual(self.progress(d)["stop"]["asked"], [])
+        self.assertEqual(self.overturn(d, cancel=flaky)[0], 0)
+        self.assertEqual(calls, [q, q])
+
+    def test_freeze_code_only_after_resolution(self):
+        d = self.decided("redispatch", target={"task": TASK, "generation": 1})
+        self.resolve.side_effect = SR.G.Rejected("凭证库被锁")
+        code, texts = self.overturn(d)
+        self.assertEqual(code, 1)
+        self.assertNotIn("a1b2c3", texts[-1])
+        self.assertIn("更正没记进去", texts[-1])
+        self.resolve.side_effect = None
+        code, texts = self.overturn(d)
+        self.assertEqual(code, 0)
+        self.assertIn("恢复 t-20261118-abcdef a1b2c3", texts[-1])
+
     def test_unknown_run_noted_but_does_not_block(self):
         d = self.decided("redispatch", target={"task": TASK, "generation": 1})
         u = self.add_run("unknown")
@@ -455,7 +585,7 @@ class OverturnTests(Base):
         self.assertEqual(code, 0)
         self.assertEqual(self.cancelled, [])                                 # 中台不收「不确定」轮次的取消
         self.assertEqual(self.progress(d)["stop"]["doubt"], [u])
-        self.assertIn("中台也不确定", texts[-1])
+        self.assertIn("调度那边也不确定", texts[-1])
 
     def test_hub_unreadable_means_not_stopped(self):
         d = self.decided("redispatch", target={"task": TASK, "generation": 1})
@@ -603,6 +733,51 @@ class AskOverturnTests(Base):
         self.resume.assert_not_called()
         self.assertNotIn("correction", self.progress(self.d))
 
+    def test_terminal_grant_sends_no_reselect_card(self):
+        d = self.decided("ask", target={"card": 9, "task": TASK2, "generation": 1})
+        self.freeze.side_effect = SR.G.Rejected(f"{TASK2} 已经是终态（done），不能再改")
+        n = len(self.cards())
+        code, texts = self.overturn(d)
+        self.assertEqual(code, 0)
+        self.assertFalse(any(v.get("secretary") == "reselect" for c in self.cards(n) for v in buttons(c)))
+        self.assertIn("不用改选", texts[-1])
+        self.assertTrue(SR.finished(SL.get(self.st, d["id"]), self.progress(d)))
+
+    def test_reselect_after_task_thawed_kept_in_record(self):
+        self.resolve.side_effect = SR.G.Rejected(f"{TASK} 不是冻结状态，没有要更正的")
+        code, texts = self.click("reselect", self.d["id"], card=self.reselect_token(), option=2)
+        self.assertEqual(code, 0)
+        rec = self.progress(self.d)
+        self.assertEqual((rec["resolution"]["status"], rec["reselected"]["o"]), ("after_thaw", 2))
+        self.assertEqual(SL.get(self.st, self.d["id"])["disposition"], "corrected")
+        self.assertIn("只记在推翻记录里", texts[-1])
+        self.assertNotIn("恢复 t-", texts[-1])
+
+    def test_reselect_recorded_before_said_plainly(self):
+        self.resolve.side_effect = SR.G.Rejected("这次冻结已经记过更正")
+        code, texts = self.click("reselect", self.d["id"], card=self.reselect_token(), option=1)
+        self.assertEqual(code, 0)
+        self.assertIn("已经记过一条更正", texts[-1])
+
+    def test_interrupted_reselect_continues_with_first_choice(self):
+        rec = self.progress(self.d)
+        rec["reselect_pending"] = {"o": 1, "at": C.iso(T1)}
+        CR.write_json(CR.overturn_path(self.d, SL.SECRETARY), rec)
+        code, texts = self.click("reselect", self.d["id"], card=self.reselect_token(), option=2)
+        self.assertEqual(code, 0)
+        self.assertIn("按第 1 项接着记", texts[-1])
+        self.assertIn("改选第 1 项", self.resolve.call_args[0][3])
+        self.assertEqual(self.progress(self.d)["reselected"]["o"], 1)
+        self.assertNotIn("reselect_pending", self.progress(self.d))
+
+    def test_disposition_repaired_on_next_click(self):
+        with mock.patch.object(SR.L, "set_disposition", side_effect=L.LedgerError("库忙")):
+            self.assertEqual(self.click("reselect", self.d["id"], card=self.reselect_token(), option=1)[0], 0)
+        self.assertEqual(SL.get(self.st, self.d["id"])["disposition"], "overturned")
+        code, texts = self.click("reselect", self.d["id"], card=self.reselect_token(), option=1)
+        self.assertEqual(code, 0)
+        self.assertEqual(SL.get(self.st, self.d["id"])["disposition"], "corrected")
+
     def test_reselect_card_resent_when_not_verified(self):
         d = self.decided("ask", target={"card": 8, "task": TASK2, "generation": 1})
         self.freeze.return_value = {"task_id": TASK2, "status": "frozen", "generation": 1, "freeze_code": "d4e5f6"}
@@ -657,6 +832,28 @@ class MergeOverturnTests(Base):
         self.freeze.assert_called_once()
         self.resolve.assert_not_called()
         self.assertIn("还没核清", texts[-1])
+
+    def test_unknown_merge_settled_failed_finishes_with_resolution(self):
+        """结果不明时推翻（冻结了）→ 后来核清没合上：再点「推翻」不用撤销，补记更正，冻结码才给（第 1 轮自审 P1-1）。"""
+        d = self.decided("merge", "unknown")
+        self.overturn(d, revert=lambda *a, **k: self.fail("没核清不能开撤销 PR"))
+        SL.reconcile(self.st, d["id"], "failed", {"checked": "gh pr view", "pr_state": "OPEN"}, now=T1)
+        code, texts = self.overturn(d, revert=lambda *a, **k: self.fail("没合上不用撤销"))
+        self.assertEqual(code, 0)
+        rec = self.progress(d)
+        self.assertEqual(rec["revert"]["status"], "not_needed")
+        self.resolve.assert_called_once()
+        self.assertTrue(SR.finished(SL.get(self.st, d["id"]), rec))
+        self.assertIn("恢复 t-20261118-abcdef a1b2c3", texts[-1])
+
+    def test_unknown_merge_settled_done_opens_revert(self):
+        d = self.decided("merge", "unknown")
+        self.overturn(d, revert=lambda *a, **k: self.fail("没核清不能开撤销 PR"))
+        SL.reconcile(self.st, d["id"], "done", {"checked": "gh pr view", "pr_state": "MERGED", "merge_commit": MC}, now=T1)
+        code, _ = self.overturn(d, revert=self.revert(d))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.progress(d)["revert"]["status"], "opened")
+        self.assertEqual(SL.get(self.st, d["id"])["disposition"], "reverted")
 
     def test_failed_merge_needs_no_revert(self):
         d = self.decided("merge", "failed")
