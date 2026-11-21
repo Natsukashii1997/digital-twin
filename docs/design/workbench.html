@@ -516,6 +516,11 @@ svg.iso .led-ok{fill:var(--ok)} svg.iso .led-warn{fill:var(--warn)}
 .mx-wait li .m{grid-column:1/-1;font-size:11px;opacity:.7}
 .mx-wait .tag{font-size:11px;border:1px solid var(--accent);color:var(--accent);padding:0 6px;white-space:nowrap}
 .mx-wait .btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);padding:1px 10px;font-size:12px}
+/* 甲版「只算发起」（2026-11-21，#303）：点完这一行写清还差飞书一步，可撤回 */
+.mx-wait li .done{display:none;grid-column:1/-1;margin:0;font-size:12px;color:var(--accent)}
+.mx-wait li[data-done] .done{display:block}
+.mx-wait li[data-done] .btn{display:none}
+.mx-wait .done .undo{color:inherit;opacity:.8}
 .mx-merged{display:flex;gap:10px;align-items:center;font-size:13px;border:1px dashed var(--line);padding:8px 12px;color:var(--mute)}
 .mx-merged b{color:var(--ink);font-weight:400}
 .mx-wait li+li{border-left:1px solid rgba(128,128,128,.4)}
@@ -1377,7 +1382,7 @@ const mlHead=(m,mi)=>`<div class="mx-mh"><div class="t"><h3>${m.name}</h3><span 
 function waitBox(){
   const W=waits();
   return `<section class="mx-wait"><div class="hd"><b>等你</b><span class="num">${W.length} 件</span></div>
-   <ul>${W.map(w=>`<li><span class="m">${w.m.name} · ${w.it.t}</span><b>${w.k.t}</b>${w.k.ex==='me'?'<span class="tag">你亲手</span>':'<button class="btn pri" type="button">合并</button>'}</li>`).join('')}</ul></section>`;
+   <ul>${W.map(w=>`<li><span class="m">${w.m.name} · ${w.it.t}</span><b>${w.k.t}</b>${w.k.ex==='me'?'<span class="tag">你亲手</span>':'<button class="btn pri" type="button" data-wait>'+goLabel('合并')+'</button><p class="done"></p>'}</li>`).join('')}</ul></section>`;
 }
 const mergedRow=()=>MERGED.map(x=>`<div class="mx-merged"><span class="mx-s s-drop">→</span><b>${x.name}</b><span class="mute">${x.issue} · ${x.done}/${x.total}</span><span>${x.note}</span></div>`).join('');
 const pageHead=()=>`<div class="h-sec"><h2><i class="sq"></i>主线</h2><span class="hint num">${ML.length} 条在推进 · ${MERGED.length} 条已并入 · 等你 ${waits().length} 件</span></div>`;
@@ -1576,6 +1581,7 @@ document.addEventListener('click',e=>{
   const p=e.target.closest('[data-page]'); if(p){state.page=p.dataset.page;render();document.getElementById('main').scrollTop=0;return}
   const u=e.target.closest('.done .undo'); if(u){delete u.closest('[data-done]').dataset.done;return}
   const n=e.target.closest('[data-inl]'); if(n){n.textContent='已发起，去飞书确认';n.disabled=true;return}
+  const w=e.target.closest('[data-wait]'); if(w){const li=w.closest('li');li.dataset.done='';li.querySelector('.done').innerHTML='已发起「合并」· 待飞书确认<button class="undo" type="button">撤回</button>';return}
   const q=e.target.closest('[data-quick]'); if(q){const r=q.closest('.drow');r.dataset.done='';r.querySelector('.done').innerHTML=`已发起「${SHORT[q.dataset.quick]||q.dataset.quick}」· 待飞书确认`+'<button class="undo" type="button">撤回</button>';return}
   const j=e.target.closest('[data-jump]'); if(j){document.getElementById(j.dataset.jump)?.scrollIntoView({behavior:'smooth'});return}
   const b=e.target.closest('.dc .acts .btn'); if(!b) return;
