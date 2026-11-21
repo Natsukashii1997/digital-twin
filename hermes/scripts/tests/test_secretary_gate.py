@@ -1016,6 +1016,7 @@ class MergeTests(Base):
     def test_not_in_whitelist_or_no_trigger_recorded(self):
         self.whitelist = {}
         self.assertIn("白名单", self.handoff(self.go(), "gate")["basis"])
+        self.assertEqual(self.gh_calls(), [])                                    # 前闸先挡，不读 GitHub（账本记账时还会再核一次）
         self.setUp()
         self.triggers = {REPO: None}
         self.assertIn("触发条件", self.handoff(self.go(), "gate")["basis"])
