@@ -31,6 +31,10 @@
 并且这次冻结已经由推翻流程记过更正（规格 §8 第 4 步「更正先持久记在账本」，record_resolution，0B-5 调用，本批不给命令行，
 所以本批恢复入口实际关闭）；恢复时代次 +1，被作废的旧代次永久失效。
 
+恢复闸与出口账本（批 0D）：propose（发确认消息）和 send_pending（往中台发事件）先过 autoloop_recovery.ensure_open()，
+关着就不发（事件留在账里，开闸后 send-pending 补发）；冻结、撤销照常立刻生效，输出里的 in_flight 列出冻结前已经开始的
+受保护动作（出口账本 autoloop_exits 在凭证库写锁里落盘 executing，所以和冻结有先后，见那边的头注释）。
+
 工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-autoloop/grants/status.json（状态、代次、到期、动作）和
 任务单，读不到凭证库，也改不了镜像。check() 是主账号出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
 工人侧按镜像做的检查只防正常流程误操作，不当作不可绕过的边界；权威判定在主账号的出口（方案 5.1 第 3 条）。
@@ -84,6 +88,7 @@ MAX_HOURS = 72
 APPROVE_TEXT = re.compile(r"^派单\s*([0-9a-f]{8})$")
 UNFREEZE_TEXT = re.compile(r"^恢复\s*(t-\d{8}-[0-9a-f]{6})\s+([0-9a-f]{6})$")
 TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")
+REF = re.compile(r"^[A-Za-z0-9][\w.-]{0,63}$")              # 续接的决定号（秘书决定号 d-…）
 REPO_NAME = re.compile(r"^[\w.-]{1,100}$")
 MAX_SCOPE = 3000
 SCHEMA_VERSION = 2
@@ -360,19 +365,54 @@ def _claim_next(con, now, seen):
     return None, None, skipped
 
 
+def require_recovery():
+    """恢复闸（批 0D，autoloop_recovery）：开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才往外发。
+    返回核过的纪元；真正领发送资格时还要在领取的写事务里再核（admission）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        return R.ensure_open()
+    except E.Refused as e:
+        raise Rejected(f"{e}；事件已记账，开闸后 send-pending 补发")
+
+
+def in_flight(task_id):
+    """出口账本里这张任务正在进行或结果不明的动作（冻结、撤销时一并报出；这些已经开始，撤不回，结果出来照常对账）。
+    出口账本还不存在就是没有。"""
+    import autoloop_exits as E
+    if not E.db_path().exists():
+        return []
+    return E.in_flight(f"task:{task_id}")
+
+
 def send_pending(path=None, post=None, now=None):
     """把记了账、还没确认送到中台的事件逐个发出去。每个：同一写事务里先按已提交状态写镜像、再现读凭证并领取 → 提交 →
-    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。"""
+    POST → 送达后条件更新。镜像写不成就一个也不领取、不发。恢复闸（批 0D）：每发一个之前都重新核，并且在领取的同一个
+    写事务里再核一次开闸资格（审查 P1-03），循环中途闸关了，后面的一个也不发。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
     post = post or post_event
     results, seen = [], set()
     while True:
         t = now or now_tz()
         try:
-            with tx(path) as con:
+            epoch = require_recovery()
+        except Rejected:
+            if not results:
+                raise
+            results.append({"sent": False, "why": "恢复闸中途关了，剩下的事件开闸后 send-pending 补发"})
+            return results
+        try:
+            with tx(path) as con, R.admission(epoch):     # 锁顺序：凭证库 → 出口账本
                 write_status(con, t)          # 领取前、同一把写锁下：要发的任务和代次先进镜像
                 ev, row, skipped = _claim_next(con, t, seen)
         except OSError as e:
             raise Rejected(f"状态镜像写不了（{type(e).__name__}），事件先不发")
+        except E.Refused as e:
+            if not results:
+                raise Rejected(f"{e}；事件已记账，开闸后 send-pending 补发")
+            results.append({"sent": False, "why": f"{e}；剩下的事件开闸后 send-pending 补发"})
+            return results
         results += skipped
         if ev is None:
             return results
@@ -458,6 +498,23 @@ def notice_text(code, github, executor, actions, valid_until, scope_text):
         f"同意就回：派单 {code}", f"（{int(PROPOSAL_TTL.total_seconds() // 60)} 分钟内有效，只认你本人在这个私聊里回；不同意不用回）"])
 
 
+def _notify_once(code, text):
+    """确认消息走出口账本（批 0D，审查 P1-03）：先记账、在登记的写事务里核开闸资格、再发；结果不明不重发（确认码正文里有，
+    对账按它在私聊里找那条文字消息）。发不成的提议本来就批不了，所以这里任何异常都按结果不明记、不重发。"""
+    import autoloop_exits as E
+    import twin_state as T
+    try:
+        chat = T.owner_chat_id()
+    except T.StateError as e:
+        raise Rejected(str(e))
+    try:
+        return E.guard("send_feishu", f"send_feishu:grant-{code}", f"chat:grant-{code}",
+                       {"chat": chat, "marker": f"派单 {code}", "msg_type": "text"},
+                       lambda: {"message_id": notify_owner(text, f"dt-grant-{code}")})["message_id"]
+    except E.Refused as e:
+        raise Rejected(str(e))
+
+
 def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None):
     now = now or now_tz()
     if not REPO_NAME.match(repo or ""):
@@ -477,6 +534,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
         raise Rejected(f"有效期 1 到 {MAX_HOURS} 小时")
     valid_until = iso(now + dt.timedelta(hours=hours))
     h = content_hash(repo, github, executor, actions, valid_until, scope_text)
+    require_recovery()                         # 确认消息是往私聊发飞书：恢复闸关着就不提议
     with tx(path) as con:
         for _ in range(5):
             code = secrets.token_hex(4)
@@ -490,7 +548,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
                 continue
         else:
             raise Rejected("确认码连撞 5 次，请重试")
-    notice = notify_owner(notice_text(code, github, executor, actions, valid_until, scope_text), f"dt-grant-{code}")
+    notice = _notify_once(code, notice_text(code, github, executor, actions, valid_until, scope_text))
     with tx(path) as con:
         con.execute("UPDATE proposals SET notice_message = ? WHERE code = ? AND notice_message IS NULL", (notice, code))
     return {"code": code, "repo": repo, "github": github, "executor": executor, "actions": list(actions),
@@ -536,23 +594,71 @@ def approve(message_id, now=None, path=None, post=None):
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
-def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None):
+def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=None, generation=None):
+    """续接（重派 / 返修 / 更正）：记一条派单事件再尝试发。ref = 发起这次续接的决定号（秘书代批传自己的决定号），
+    和事件号记在同一条续接日志里，恢复闸据此认「只差网关补发」的是不是这次决定的事件（L3 第 3 轮 P1-09）；
+    同一个 ref 只能续接一次。generation = 发起方认定的代次，凭证已经不是这一代就不续接。"""
     now = now or now_tz()
     if kind not in KINDS:
         raise Rejected("续接只有 redispatch、rework、correction 三种")
     if not (reason or "").strip():
         raise Rejected("续接要写原因")
+    if ref is not None and not REF.match(ref):
+        raise Rejected("续接的决定号写法不对")
     with tx(path) as con:
         row = grant_row(con, task_id)
+        if generation is not None and row["generation"] != generation:
+            raise Rejected(f"不能续接：凭证已经是第 {row['generation']} 代，不是发起时的第 {generation} 代")
         why = check_row(row, "edit", row["generation"], now, voided_of(con, task_id))
         if why:
             raise Rejected(f"不能续接：{why}")
+        if ref is not None and ref in resume_refs(con, task_id):
+            raise Rejected(f"决定 {ref} 已经续接过，不再记第二条事件")
         n = con.execute("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND generation = ? AND kind = ?",
                         (task_id, row["generation"], kind)).fetchone()[0]
         key = f"{task_id}:g{row['generation']}:{kind}:{n + 1}"
         record_event(con, row, kind, key, now)
-        log(con, task_id, "续接", now, kind=kind, reason=reason.strip()[:200], event=key)
+        log(con, task_id, "续接", now, kind=kind, reason=reason.strip()[:200], event=key, generation=row["generation"],
+            **({"ref": ref} if ref is not None else {}))
     return {"event_key": key, "send": _try_send(path, post, now)}
+
+
+def bound_event(con, task_id, ref, kind, generation=None, event_key=None, now=None):
+    """按决定号认这次续接的派单事件（L3 第 3、4 轮 P1-09；恢复闸和秘书对账共用，常浩 11-21 定秘书对账也改成这样）。
+    不按时间猜。返回 (结论, 事件, 说明)：
+      none：凭证库没有带这个决定号的续接记录（网关先记账后发：没记就没发）；
+      bad ：带这个决定号的记录不止一条，或决定自己记的事件号、事件的任务 / 种类 / 代次（等于记录里的，也等于决定里记的）
+            对不上——核不清；
+      ok  ：正好这一条；事件 dict 另带 invalid：凭证对这条事件的代次现在是否已失效（失效的事件不会再发出去）。"""
+    logs = resume_refs(con, task_id).get(ref, [])
+    if not logs:
+        return "none", None, "凭证库没有带这个决定号的续接记录"
+    if len(logs) != 1:
+        return "bad", None, f"带这个决定号的续接记录有 {len(logs)} 条"
+    lg = logs[0]
+    if event_key and lg.get("event") != event_key:
+        return "bad", None, f"决定记的事件 {event_key} 和续接记录里的 {lg.get('event')} 对不上"
+    e = con.execute("SELECT * FROM hub_events WHERE event_key = ?", (lg.get("event"),)).fetchone()
+    if e is None or e["task_id"] != task_id or e["kind"] != kind or e["generation"] != lg.get("generation") \
+            or (generation is not None and e["generation"] != generation):
+        return "bad", (dict(e) if e else None), f"续接事件 {lg.get('event')} 的任务、种类或代次对不上"
+    e = dict(e)
+    row = con.execute("SELECT * FROM grants WHERE task_id = ?", (task_id,)).fetchone()
+    e["invalid"] = check_row(row, None, e["generation"], now or now_tz(), voided_of(con, task_id))
+    return "ok", e, f"续接事件 {e['event_key']}：sent={e['sent']}"
+
+
+def resume_refs(con, task_id):
+    """这张任务的续接日志：{决定号: [日志内容, ...]}（只收带决定号的；日志坏行跳过）。"""
+    out = {}
+    for (detail,) in con.execute("SELECT detail FROM grant_log WHERE task_id = ? AND what = '续接' ORDER BY id", (task_id,)):
+        try:
+            d = json.loads(detail)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("ref"), str):
+            out.setdefault(d["ref"], []).append(d)
+    return out
 
 
 # ---------- 收紧方向：冻结、撤销、完成（先在权威库提交，再写镜像） ----------
@@ -572,7 +678,11 @@ def _tighten(task_id, status, what, reason, now, path):
                     (status, code, iso(now), task_id))
         con.execute("UPDATE hub_events SET sent = -1 WHERE task_id = ? AND sent = 0", (task_id,))
         log(con, task_id, what, now, reason=reason[:200], generation=row["generation"], voided=status != "done")
-    return _publish_after_commit({**out, "freeze_code": code} if code else out, path, now)
+    out = {**out, "freeze_code": code} if code else out
+    busy = in_flight(task_id)                 # 冻结前已经开始的受保护动作（批 0D）：撤不回，结果出来照常对账
+    if busy:
+        out["in_flight"] = busy
+    return _publish_after_commit(out, path, now)
 
 
 def freeze(task_id, reason, now=None, path=None):

@@ -33,6 +33,8 @@ import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
 import fake_gh  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
+import autoloop_recovery as Rv  # noqa: E402
 from test_autoloop_grants import CHAT, OWNER as GRANT_OWNER, raw_msg  # noqa: E402
 from test_autoloop_hub_e2e import OWNER, SKIP, HubFixture, raw_post  # noqa: E402
 from test_dt_worktree import FAKE_CLI, GIT_ENV, SCRIPT, git  # noqa: E402
@@ -109,6 +111,7 @@ class ExecGateEndToEnd(HubFixture):
                   mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": GRANT_OWNER}),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
                   mock.patch.object(G, "notify_owner", return_value="om_notice0001"),
+                  mock.patch.object(Rv, "ensure_open"), mock.patch.object(Rv, "admit"),   # 恢复闸放行（闸本身见 0D 测试）
                   mock.patch.object(P, "GATE_USER", __import__("pwd").getpwuid(os.geteuid()).pw_name),
                   mock.patch.object(P, "TEST_BACKEND", backend)):
             q.start()
