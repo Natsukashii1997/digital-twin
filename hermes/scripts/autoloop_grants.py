@@ -54,10 +54,13 @@
   autoloop_grants.py show [--task T] | send-pending
 环境变量：DT_GRANTS_DB（默认 DigitalTwin/autoloop/grants.db）、DT_GRANTS_STATUS（共享镜像）、DT_GRANTS_TASKS（任务单目录）、
 DT_HUB（中台地址）、DT_HERMES_SOURCE_KEY_FILE（hermes 来源密钥文件，600；0B-2 建）。
+任务锁（task_lock）不另设环境变量：固定在凭证库旁边的 task-locks/<单号>.lock（跟着 DT_GRANTS_DB 走），续接、受信发布、
+秘书 ② / ③ 共用这一把（续审第 3 轮）。
 """
 import argparse
 import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import hmac
 import json
@@ -117,6 +120,33 @@ CREATE TABLE IF NOT EXISTS hub_events (event_key TEXT PRIMARY KEY, task_id TEXT 
 
 class Rejected(Exception):
     """拒绝：说人话的原因，不带身份值、不带密钥。"""
+
+
+class Busy(Rejected):
+    """这张单的任务锁被别人持着（秘书 ② / ③、受信发布或另一次续接正在处理）。"""
+
+
+@contextlib.contextmanager
+def task_lock(task_id, path=None):
+    """这张单的任务锁（续审第 3 轮 P1-08-01）：受信发布、秘书 ② / ③、续接共用这一把，锁文件在凭证库旁边的 task-locks/，
+    写同一个凭证库的进程必然拿同一把（不靠环境变量对齐）。不等待：被别人持着抛 Busy；锁文件建不了抛 Rejected（不往下做）。
+    flock 按打开的文件算：同一进程已经持着时再拿也会被拒，调用方已持锁就别再拿（resume_dispatch 的 task_locked）。"""
+    if not TASK_ID.match(str(task_id or "")):
+        raise Rejected("单号写法不对")
+    d = Path(path or db_path()).parent / "task-locks"
+    try:
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(d / f"{task_id}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as e:
+        raise Rejected(f"查不了这张单的任务锁（{type(e).__name__}）")
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Busy("这张单秘书或受信发布正在处理，等它做完")
+        yield
+    finally:
+        os.close(fd)
 
 
 # ---------- 路径、时间 ----------
@@ -598,18 +628,16 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=N
     """续接（重派 / 返修 / 更正）：记一条派单事件再尝试发。ref = 发起这次续接的决定号（秘书代批传自己的决定号），
     和事件号记在同一条续接日志里，恢复闸据此认「只差网关补发」的是不是这次决定的事件（L3 第 3 轮 P1-09）；
     同一个 ref 只能续接一次。generation = 发起方认定的代次，凭证已经不是这一代就不续接。
-    整个续接持这张任务的受信发布锁（和 autoloop_publish、秘书 ② / ③ 同一把，不等待，拿不到就拒绝）：秘书 ② / ③ 或
+    整个续接持这张单的任务锁（task_lock，和受信发布、秘书 ② / ③ 同一把，不等待，拿不到就拒绝）：秘书 ② / ③ 或
     受信发布正在处理这张单时，命令行和别的调用方都不能另记一条事件（续审第 3 轮 P1-08-01）。task_locked=True 表示
-    调用方已经持着这把锁（秘书 ② / ③），这里不再拿（同一进程再拿会自己等自己）。"""
+    调用方已经持着这把锁（秘书 ② / ③），这里不再拿（同一进程再拿会被自己挡住）。这张单还有没确认送到中台的派单事件
+    （续接类、sent 0 / 2）也不续接：锁放开以后同一张单照样不会冒出第二个事件号（续审第 3 轮预审 P1-A）。"""
     if not task_locked:
-        if not TASK_ID.match(str(task_id or "")):
-            raise Rejected("单号写法不对")
-        import autoloop_publish as P
-        lock = P.task_lock(task_id)
         try:
+            lock = task_lock(task_id, path)
             lock.__enter__()
-        except P.Rejected as e:
-            raise Rejected(f"不能续接：{e}（秘书或受信发布正在处理这张单，等它做完）")
+        except Rejected as e:
+            raise Rejected(f"不能续接：{e}")
         try:
             return resume_dispatch(task_id, kind, reason, now, path, post, ref, generation, task_locked=True)
         finally:
@@ -630,6 +658,12 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=N
             raise Rejected(f"不能续接：{why}")
         if ref is not None and ref in resume_refs(con, task_id):
             raise Rejected(f"决定 {ref} 已经续接过，不再记第二条事件")
+        pending = [r[0] for r in con.execute(                       # 只看续接事件：开单的 start 不是「只差补发」的那一类
+            f"SELECT event_key FROM hub_events WHERE task_id = ? AND kind IN ({','.join('?' * len(KINDS))}) "
+            "AND sent IN (0, 2) ORDER BY rowid", (task_id, *KINDS))]
+        if pending:                              # 「只差网关补发」的前提：同一张单不会再冒出另一个事件号（续审第 3 轮预审 P1-A）
+            raise Rejected(f"不能续接：这张单还有没确认送到中台的派单事件（{'、'.join(pending[:3])}），"
+                           "先 send-pending 补发，或等秘书对账结掉")
         n = con.execute("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND generation = ? AND kind = ?",
                         (task_id, row["generation"], kind)).fetchone()[0]
         key = f"{task_id}:g{row['generation']}:{kind}:{n + 1}"

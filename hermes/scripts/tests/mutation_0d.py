@@ -153,8 +153,8 @@ M = [
      "P1-09 续接核发起时的代次", [GR + ".Resume"]),
     ("autoloop_grants.py", "        if ref is not None and ref in resume_refs(con, task_id):", "        if False:",
      "P1-09 同一决定只续接一次", [GR + ".Resume"]),
-    ("secretary_gate.py", "        out = G.resume_dispatch(d[\"task_id\"], kind, reason, now=now, ref=d[\"id\"], generation=generation)",
-     "        out = G.resume_dispatch(d[\"task_id\"], kind, reason, now=now)",
+    ("secretary_gate.py", "        out = G.resume_dispatch(d[\"task_id\"], kind, reason, now=now, ref=d[\"id\"], generation=generation,\n",
+     "        out = G.resume_dispatch(d[\"task_id\"], kind, reason, now=now,\n",
      "P1-09 秘书续接带上决定号", [SG + ".RejectTests", SG + ".RedispatchTests"]),
     ("autoloop_exits.py", "    ours = [p for p in prs if P.pr_is_ours(p, t[\"github\"], t[\"branch\"], t[\"head\"])]",
      "    ours = [p for p in prs if p.get(\"headRefOid\") == t[\"head\"] and p.get(\"baseRefName\") == \"main\"]",
@@ -236,9 +236,15 @@ M = [
     ("autoloop_recovery.py", "EXPIRY_MARGIN = dt.timedelta(seconds=60)", "EXPIRY_MARGIN = dt.timedelta(seconds=0)",
      "快到期的续接事件也算只差补发", [SG + ".RedispatchTests.test_grant_about_to_expire_is_not_waiting_for_resend"]),
     # 续审第 3 轮 P1-08-01
-    ("autoloop_grants.py", "    if not task_locked:\n        if not TASK_ID.match", "    if False:\n        if not TASK_ID.match",
+    ("autoloop_grants.py", "    if not task_locked:\n        try:\n", "    if False:\n        try:\n",
      "续接不拿任务锁（命令行能另记一条事件）",
      [SG + ".RedispatchTests.test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task"]),
+    # 续审第 3 轮预审 P1-A / P2-A
+    ("autoloop_grants.py", "        if pending:                              #", "        if False:                              #",
+     "这张单还有没确认送到的续接事件也照样续接（锁放开后冒出第二个事件号）",
+     [GR + ".Resume", SG + ".RedispatchTests.test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task"]),
+    ("autoloop_grants.py", '    d = Path(path or db_path()).parent / "task-locks"', '    d = Path(path or db_path()).parent / "locks-elsewhere"',
+     "任务锁不在凭证库旁边", [GR + ".Resume.test_task_lock_lives_next_to_the_grants_db"]),
 ]
 
 

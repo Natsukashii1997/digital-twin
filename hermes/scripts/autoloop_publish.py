@@ -35,7 +35,8 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
 测试只推本地裸仓库。推送和开 PR 用运行账号自己的 git / gh 登录：0E 在 dt-gate 里配机器账号令牌（只能推非 main、不能合并，
 #132 的做法），之前不在主账号或秘书账号里真跑（ADR-015 第 5 节第 6 条「真实特权不回流」）。
-状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；
+状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；任务锁例外：
+在凭证库旁边（autoloop_grants.task_lock），和续接、秘书 ② / ③ 共用一把（续审第 3 轮）；
 凭证库随 autoloop_grants 一起搬进 dt-gate。写前账本、结果不明冻结已接（0D）；接成正式出口在批 3。
 
   autoloop_publish.py publish --task t-20261118-abcdef
@@ -46,7 +47,6 @@ DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://g
 """
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -194,17 +194,18 @@ def assert_not_main(branch):
 
 @contextlib.contextmanager
 def task_lock(task_id):
-    d = mirrors()
-    d.mkdir(parents=True, exist_ok=True)
-    fd = os.open(d / f"{task_id}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    """这张单的任务锁：和续接、秘书 ② / ③ 共用 autoloop_grants.task_lock（凭证库旁边的 task-locks/，续审第 3 轮）。"""
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Rejected("这张单另一个发布还在进行")
+        lock = G.task_lock(task_id)
+        lock.__enter__()
+    except G.Busy:
+        raise Rejected("这张单另一个发布还在进行")
+    except G.Rejected as e:
+        raise Rejected(str(e))
+    try:
         yield
     finally:
-        os.close(fd)
+        lock.__exit__(None, None, None)
 
 
 def record(entry):

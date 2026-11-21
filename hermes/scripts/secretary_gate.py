@@ -49,8 +49,8 @@
         unsure；每张任务最多 1 次由账本额度管；
   ③ 另核：受信发布记录里有这个 PR（task_id、PR 号、提交、代次都对上）、现在 PR 开着且头提交没变、有能绑定 PR 和受审提交的审查记录、
         机器账号留言开关开着 → 否则 unsure / gate。**审查记录现在没有可信来源**（见 review_record），③ 一律交常浩。
-  任务锁（审查 P1-03）：②③ 从前闸到续接事件发出，全程持着这张任务的受信发布锁（autoloop_publish.task_lock，和 publish 同一把）：
-        持锁期间受信发布开不了，发布进行中秘书拿不到锁（→ unsure）；查活动轮次、查交接包、记账、获准、发续接事件都在锁里。
+  任务锁（审查 P1-03）：②③ 从前闸到续接事件发出，全程持着这张任务的任务锁（autoloop_grants.task_lock，和受信发布、续接同一把，
+        在凭证库旁边，续审第 3 轮）：持锁期间受信发布、命令行续接都进不来，发布进行中秘书拿不到锁（→ unsure）；查活动轮次、查交接包、记账、获准、发续接事件都在锁里。
         同一事项的轮次由中台自己串行（kernel/decide.ts：同组同事项同时只认领一轮，新事件并进还在排队的那一轮），
         所以锁外中台新排的轮次只会排在后面，不会和新派的这一轮并跑。
 记账：前闸过 → secretary_ledger.issue 预占额度（① 带卡片版本，v6 唯一约束：同卡同版本只许一个可送达决定，重复 → refused）。
@@ -305,7 +305,7 @@ def publish_record(task_id, pr):
 
 
 def unpublished_package(task_id):
-    """交接目录里有没有这张任务还没发布出去的包。返回原因或 None。调用方必须持着这张任务的发布锁（task_locked），
+    """交接目录里有没有这张任务还没发布出去的包。返回原因或 None。调用方必须持着这张任务的任务锁（task_locked），
     否则查完到续接之间受信发布可能开始（审查 P1-03）。"""
     try:
         m = P.read_manifest(task_id)
@@ -947,14 +947,15 @@ def front_gates(p, ctx, st_status, t, st):
 # ---------- 任务锁、获准（唯一的送达授权点）与送达 ----------
 @contextlib.contextmanager
 def task_locked(task_id):
-    """这张任务的受信发布锁（和 autoloop_publish.publish 同一把，不等待）：持着时发布开不了；发布正持着就交常浩。"""
+    """这张任务的任务锁（autoloop_grants.task_lock，和受信发布、续接同一把，不等待）：持着时发布、续接都进不来；
+    别人正持着就交常浩。"""
     try:
-        lock = P.task_lock(task_id)
+        lock = G.task_lock(task_id)
         lock.__enter__()
-    except P.Rejected:
-        raise Handoff("unsure", "这张任务的受信发布正在进行，秘书不同时续接")
-    except OSError:
-        raise Handoff("gate", "查不了这张任务的受信发布锁")
+    except G.Busy:
+        raise Handoff("unsure", "这张任务的受信发布或续接正在进行，秘书不同时续接")
+    except G.Rejected:
+        raise Handoff("gate", "查不了这张任务的任务锁")
     try:
         yield
     finally:
@@ -1115,7 +1116,7 @@ def _resume(st, d, kind, reason, now, generation, partial=False):
     续接带上决定号和前闸核过的代次（L3 第 3 轮 P1-09）：事件和这次决定绑在同一条续接日志里，凭证换了代就不续接。"""
     try:
         out = G.resume_dispatch(d["task_id"], kind, reason, now=now, ref=d["id"], generation=generation,
-                                task_locked=True)              # 调用方（_route）全程持着这张任务的受信发布锁
+                                task_locked=True)              # 调用方 submit 全程持着这张任务的任务锁
     except G.Rejected as e:
         result = "unknown" if partial else "failed"
         finish(st, d["id"], result, {"error": str(e), **({"note": "留言已发出、返修没派出"} if partial else {})}, now=now)

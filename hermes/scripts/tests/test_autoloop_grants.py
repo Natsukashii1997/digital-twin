@@ -7,9 +7,11 @@ autoloop_grants.py（任务凭证与派单网关，#195 批 0B-1）：两步批�
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
+import fcntl
 import io
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -576,6 +578,50 @@ class Resume(Base):
             refs = G.resume_refs(con, tid)
         self.assertEqual(list(refs), ["d-1"])
         self.assertEqual((refs["d-1"][0]["event"], refs["d-1"][0]["generation"]), (out["event_key"], 1))
+
+    def test_resume_refuses_while_a_resume_event_is_unsent(self):
+        """续审第 3 轮：这张单还有没确认送到中台的续接事件（sent 0 未发、2 发送中）就不再续接，
+        锁放开以后同一张单也不会冒出第二个事件号；送到了（sent=1）才能再续接。开单的 start 不算。"""
+        tid = self.new_task()
+
+        def down(*a, **k):
+            raise G.Rejected("连不上中台")
+        first = G.resume_dispatch(tid, "redispatch", "中台放弃了", now=T0, post=down)["event_key"]
+        for sent in (0, 2):
+            with self.subTest(sent=sent):
+                self.sql("UPDATE hub_events SET sent = ?, claimed_at = ? WHERE event_key = ?", (sent, G.iso(T0), first))
+                with self.assertRaisesRegex(G.Rejected, "没确认送到中台.*" + re.escape(first)):
+                    G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post)
+                n = self.sql("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind != 'start'", (tid,))[0][0]
+                self.assertEqual(n, 1)
+        self.sql("UPDATE hub_events SET sent = 1 WHERE event_key = ?", (first,))
+        self.sql("UPDATE hub_events SET sent = 0 WHERE task_id = ? AND kind = 'start'", (tid,))   # 开单事件没送到不挡续接
+        out = G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post)
+        self.assertEqual(out["event_key"], f"{tid}:g1:rework:1")
+
+    def test_task_lock_lives_next_to_the_grants_db(self):
+        """续审第 3 轮：任务锁文件在凭证库旁边的 task-locks/，写同一个凭证库的进程（续接、受信发布、秘书 ② / ③）必然拿同一把，
+        不靠各自的环境变量对齐；被持着时续接拒绝、另一次拿锁抛 Busy；放了就能拿。"""
+        tid = self.new_task()
+        f = self.db.parent / "task-locks" / f"{tid}.lock"
+        with G.task_lock(tid):
+            self.assertTrue(f.is_file())
+            fd = os.open(f, os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            with self.assertRaises(G.Busy):
+                with G.task_lock(tid):
+                    pass
+            with self.assertRaisesRegex(G.Rejected, "不能续接：.*正在处理"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post)
+        with G.task_lock(tid):
+            pass
+        with self.assertRaisesRegex(G.Rejected, "单号写法"):
+            with G.task_lock("../x"):
+                pass
 
     def test_log_is_append_only_history(self):
         tid = self.new_task()

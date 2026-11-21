@@ -1154,7 +1154,7 @@ class RedispatchTests(Base):
     def test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task(self):
         """续审第 3 轮 P1-08-01：秘书 ② 持着任务锁、决定还在 executing、恢复闸按 11-20 例外开着时，直接用命令行
         `autoloop_grants.py resume-dispatch` 对同一张单续接，不能另记第二个派单事件；锁放了才可以。"""
-        did = self._stuck_redispatch_with_unsent_event()
+        self._stuck_redispatch_with_unsent_event()
         clock = [T + dt.timedelta(minutes=2)]
 
         def redispatch_events():
@@ -1165,25 +1165,32 @@ class RedispatchTests(Base):
         with stack:
             for x in patches:
                 stack.enter_context(x)
-            stack.enter_context(P.task_lock(TASK))              # 原秘书 ② 还持着这张单的锁
+            stack.enter_context(G.task_lock(TASK))              # 原秘书 ② 还持着这张单的任务锁
             rep = R.reconcile()
             self.assertTrue(rep["open"], rep["why"])            # 11-20 例外：闸开着
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = G.main(["resume-dispatch", "--task", TASK, "--kind", "redispatch", "--reason", "人工重派"])
             self.assertEqual(code, 1)
-            self.assertIn("正在处理这张单", out.getvalue())
-            with self.assertRaisesRegex(G.Rejected, "正在处理这张单"):
+            self.assertIn("秘书或受信发布正在处理", out.getvalue())
+            with self.assertRaisesRegex(G.Rejected, "秘书或受信发布正在处理"):
                 G.resume_dispatch(TASK, "redispatch", "别的调用方")
             self.assertEqual(redispatch_events(), 1)
-        stack, patches = self._real_gate(clock)                  # 锁放了：同一个命令就能记（证明拦它的是任务锁）
+        stack, patches = self._real_gate(clock)                  # 锁放了：原事件还没确认送到，照样不另记（预审 P1-A）
         with stack:
             for x in patches:
                 stack.enter_context(x)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = G.main(["resume-dispatch", "--task", TASK, "--kind", "redispatch", "--reason", "人工重派"])
+            self.assertEqual(code, 1)
+            self.assertIn("没确认送到中台", out.getvalue())
+            self.assertEqual(redispatch_events(), 1)
+            with G.tx() as con:                                  # 原事件送到了：同一个命令才能再记（证明拦它的是这两道）
+                con.execute("UPDATE hub_events SET sent = 1 WHERE task_id = ? AND kind = 'redispatch'", (TASK,))
             stack.enter_context(mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")))
             G.resume_dispatch(TASK, "redispatch", "人工重派")
         self.assertEqual(redispatch_events(), 2)
-        self.assertTrue(did)
 
     def test_fresh_claim_is_a_send_in_progress_not_a_resend(self):
         """续审第 1 轮：sent=2 刚领走不到 60 秒是一次正在进行的发送，不算只差补发（挡闸）；过了 60 秒才算（不挡）。"""
@@ -1276,7 +1283,7 @@ class RedispatchTests(Base):
         with P.task_lock(TASK):
             out = self.submit()
         self.assertEqual(out["reason"], "unsure")
-        self.assertIn("受信发布正在进行", self.get(out["decision"])["basis"])
+        self.assertIn("受信发布或续接正在进行", self.get(out["decision"])["basis"])
 
     def test_unpublished_package_hands_off(self):
         """交接目录里有这张任务还没发布出去的包：不重派（前闸、后闸各查一次）。"""
@@ -1423,11 +1430,17 @@ class RejectTests(Base):
     @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=3))   # 凭证按 T 建、2 小时有效；事件 T+1 分钟领走，
     def test_rework_waits_on_its_own_event_even_without_event_key(self):   # 过了 60 秒才算只差补发（续审第 1 轮）
         """反过来：这次决定自己的续接事件（日志里带决定号）只差补发，哪怕结果里还没记上事件号（进程在记结果前没了），
-        照样不挡闸；同一张单别的续接事件不影响。"""
+        照样不挡闸；同一张单别的续接事件不影响。这时再手动续接会被拒（这张单还有没确认送到的续接事件，续审第 3 轮），
+        「别的续接事件」直接写进凭证库模拟（如这条规则之前留下的）。"""
         with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
                 mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
             out = self.submit()
-            G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+            with self.assertRaisesRegex(G.Rejected, "没确认送到中台"):
+                G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        with G.tx() as con:
+            con.execute("INSERT INTO hub_events (event_key, task_id, rule, executor, generation, kind, at) "
+                        "SELECT ?, task_id, rule, executor, generation, kind, at FROM hub_events WHERE event_key = ?",
+                        (f"{TASK}:g1:rework:2", f"{TASK}:g1:rework:1"))
         self.assertEqual(out["result"], "unknown", out["msg"])
         self.assertIsNone(R._secretary()[0])
         with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:
