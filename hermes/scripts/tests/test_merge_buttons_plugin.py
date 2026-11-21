@@ -22,7 +22,7 @@ def load():
 class MergeButtonsPlugin(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_AUTOLOOP_ANSWER": "/x/autoloop_answer.py", "DT_PDAILY_ACT": "/x/pdaily_act.py", "DT_MERGE_PYTHON": "/x/python3",
+        env = {"DT_SHADOW_DIR": self.tmp.name, "DT_MERGE_ACT": "/x/merge_act.py", "DT_CUSTODY_REPORT": "/x/custody_report.py", "DT_SECRETARY_REPORT": "/x/secretary_report.py", "DT_AUTOLOOP_ANSWER": "/x/autoloop_answer.py", "DT_PDAILY_ACT": "/x/pdaily_act.py", "DT_MERGE_PYTHON": "/x/python3",
                "HERMES_SESSION_CHAT_ID": "oc_home", "DT_PROBE_DIR": self.tmp.name + "/probe",
                "HERMES_SESSION_USER_ID": "ou_owner", "HERMES_SESSION_USER_ID_ALT": "on_owner", "HERMES_SESSION_USER_NAME": "常浩",
                "HERMES_SESSION_CHAT_TYPE": "dm", "HERMES_SESSION_PLATFORM": "feishu", "HERMES_SESSION_MESSAGE_ID": "c-callbacktoken123"}
@@ -69,6 +69,39 @@ class MergeButtonsPlugin(unittest.TestCase):
     def test_ignores_bad_custody_clicks(self):
         for raw in ('button {"custody": "delete", "ref": "d-261115-3fa2c1"}', 'button {"custody": "overturn", "ref": "d-1; rm -rf /"}',
                     'button {"custody": "overturn", "ref": "trainee-hub#31@1cc8e02"}', 'button {"custody": "overturn"}'):
+            out, popen = self.click(raw)
+            self.assertIsNone(out)
+            popen.assert_not_called()
+
+    def test_secretary_buttons_forward_chat_operator_card(self):
+        """#195 0B-5：秘书汇报卡的推翻、撤销卡的合并撤销 PR、改选卡；令牌必带，点击人一起转，日志不记令牌。"""
+        base = ["/x/python3", "/x/secretary_report.py", "button"]
+        tail = ["--chat", "oc_home", "--operator", "ou_owner", "--card", "0123456789abcdef"]
+        for verb in ("overturn", "merge_revert"):
+            out, popen = self.click('button {"secretary": "%s", "ref": "d-261118-3fa2c1", "card": "0123456789abcdef"}' % verb)
+            self.assertIsNone(out)
+            self.assertEqual(popen.call_args[0][0], base + [verb, "d-261118-3fa2c1"] + tail)
+            self.assertTrue(popen.call_args[1]["start_new_session"])
+        _, popen = self.click('button {"secretary": "reselect", "ref": "d-261118-3fa2c1", "card": "0123456789abcdef", "o": 2}')
+        self.assertEqual(popen.call_args[0][0], base + ["reselect", "d-261118-3fa2c1"] + tail + ["--option", "2"])
+        log = (Path(self.tmp.name) / "buttons.log").read_text()
+        self.assertIn("secretary reselect d-261118-3fa2c1", log)
+        self.assertNotIn("0123456789abcdef", log)
+
+    def test_secretary_rejects_bad_values(self):
+        ok = '"ref": "d-261118-3fa2c1", "card": "0123456789abcdef"'
+        for raw in ('button {"secretary": "delete", %s}' % ok,
+                    'button {"secretary": "overturn", "ref": "d-261118-3fa2c1"}',                      # 没令牌
+                    'button {"secretary": "overturn", "ref": "d-1; rm -rf /", "card": "0123456789abcdef"}',
+                    'button {"secretary": "overturn", "ref": "d-261118-3fa2c1", "card": "0123"}',
+                    'button {"secretary": "overturn", %s, "o": 1}' % ok,                               # 推翻不带选项
+                    'button {"secretary": "overturn", %s, "by": "ou_x"}' % ok,                         # 多带键
+                    'button {"secretary": "reselect", %s}' % ok,                                       # 改选没选项
+                    'button {"secretary": "reselect", %s, "o": "1"}' % ok,
+                    'button {"secretary": "reselect", %s, "o": true}' % ok,
+                    'button {"secretary": "reselect", %s, "o": 0}' % ok,
+                    'button {"secretary": "reselect", %s, "o": 100}' % ok,
+                    'button {"secretary": "overturn", "custody": "overturn", %s}' % ok):
             out, popen = self.click(raw)
             self.assertIsNone(out)
             popen.assert_not_called()

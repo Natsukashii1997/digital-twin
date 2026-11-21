@@ -71,7 +71,8 @@ WHO = "秘书"
 WAITING = ("handoff", "unknown", "unreconciled", "executing", "issued")
 DECIDED = ("done", "failed")
 EFFECTS = ("done", "unknown", "unreconciled")      # 可能已经有了效果：推翻时要冻结任务、停轮次
-LIVE_RUNS = ("queued", "claimed")
+LIVE_RUNS = ("queued", "claimed")             # 中台能取消的（queued 直接取消，claimed 记下取消、等工人收手）
+DOUBT_RUNS = ("unknown",)                      # 中台失联、不确定还在不在跑的：取消接口不收（回「已经结束」），只记下
 DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CUSTODY_SID = re.compile(r"^c-\d{8}-\d{6}-[0-9a-f]{12}$")
 REAL_CORRECTION = False           # 更正事件：工人侧能读到更正内容之前整体关闭（见头注释）
@@ -410,15 +411,15 @@ def send_alert(now=None, sender=None, reader=None, card_only=False, store=None, 
 
 
 # ---------- 推翻 ----------
-def hub_live_runs(task_id):
-    """中台库只读：这件事（事项 = 任务号，所有规则）还在排队或在跑的轮次。读不了返回 None。"""
+def hub_live_runs(task_id, states=LIVE_RUNS):
+    """中台库只读：这件事（事项 = 任务号，所有规则）处在 states 里的轮次（默认还在排队或在跑的）。读不了返回 None。"""
     try:
         con = P._hub()
     except Exception:  # noqa: BLE001
         return None
     try:
         return [dict(r) for r in con.execute(f"SELECT id, state FROM runs WHERE lane = ? AND state IN "
-                                             f"({','.join('?' * len(LIVE_RUNS))}) ORDER BY id", (task_id, *LIVE_RUNS))]
+                                             f"({','.join('?' * len(states))}) ORDER BY id", (task_id, *states))]
     except Exception:  # noqa: BLE001
         return None
     finally:
@@ -445,7 +446,8 @@ def freeze_step(d, rec, now):
 
 
 def stop_step(d, rec, cancel=None):
-    """停掉这件事还在排队或在跑的轮次（第 2 步）：本人密钥调中台取消，回读到全部终态才算完。返回做完没有。"""
+    """停掉这件事还在排队或在跑的轮次（第 2 步）：本人密钥调中台取消，回读到全部终态才算完。返回做完没有。
+    中台标成「不确定」（unknown）的轮次取消接口不收，只记在 doubt 里、写进给常浩的话，不卡住这一步：冻结后它剩下的推送、开 PR 会被拒。"""
     task = d["target"]["task"]
     live = hub_live_runs(task)
     if live is None:
@@ -457,17 +459,17 @@ def stop_step(d, rec, cancel=None):
         if r["id"] in asked:
             continue
         try:
-            (cancel or (lambda rid: AC.hub("POST", f"/v1/runs/{rid}/cancel")))(r["id"])
+            (cancel or (lambda rid: AC.hub("POST", f"/v1/runs/{rid}/cancel", {})))(r["id"])
             asked.append(r["id"])
         except Exception as e:  # noqa: BLE001  已经结束的会回 400：下面回读为准
             errors.append(f"轮次 {r['id']}：{getattr(e, 'args', [e])[0]}"[:120])
             asked.append(r["id"])
-    left = hub_live_runs(task)
-    if left is None:
+    left, doubt = hub_live_runs(task), hub_live_runs(task, DOUBT_RUNS)
+    if left is None or doubt is None:
         rec["stop"] = {"status": "unknown", "asked": asked, "why": "取消后中台库读不了"}
         return False
     rec["stop"] = {"status": "stopped" if not left else "stopping", "asked": asked, "left": [r["id"] for r in left],
-                   **({"errors": errors} if errors else {})}
+                   **({"doubt": [r["id"] for r in doubt]} if doubt else {}), **({"errors": errors} if errors else {})}
     return not left
 
 
@@ -645,6 +647,8 @@ def overturn_message(d, rec):
         msg.append(f"任务冻结没成功（{fz.get('why')}），再点一次「推翻」会重试；在那之前它还可能接着跑。")
     if sp.get("status") == "stopped" and sp.get("asked"):
         msg.append(f"在排队或在跑的 {len(sp['asked'])} 个轮次已停下。")
+    if sp.get("doubt"):
+        msg.append(f"另有 {len(sp['doubt'])} 个轮次中台也不确定还在不在跑（停不了）；冻结后它们剩下的推送、开 PR 会被拒。")
     elif sp.get("status") in ("stopping", "unknown"):
         msg.append(f"还有轮次没确认停下（{sp.get('why') or '、'.join(map(str, sp.get('left') or []))}）；冻结后它们剩下的推送、开 PR 会被拒，"
                    "再点一次「推翻」我会再查。")
