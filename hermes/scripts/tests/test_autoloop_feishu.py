@@ -357,6 +357,8 @@ class MaintenanceQuiet(Base):
         hub.assert_not_called()
         hub2.assert_not_called()
         self.assertEqual(self.lark.sent(), [])
+        with F.db() as con:                                       # 锁里就停了：连令牌都没登记（不是靠出口账本那道才挡住）
+            self.assertIsNone(con.execute("SELECT 1 FROM feishu_cards WHERE card_id = 7").fetchone())
 
 
 class Answer(Base):

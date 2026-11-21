@@ -933,13 +933,18 @@ class RedispatchTests(Base):
         later = T + dt.timedelta(hours=13)                                        # 凭证 12 小时有效
         self.assertEqual(SG.reconcile(now=later), [(out["decision"], "failed")])
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证有效：挡闸只能是因为事件已作废 / 已送达
     def test_redispatch_without_a_gateway_event_still_blocks(self):
         """只差网关补发的才放：这次续接的事件已作废（或找不到、已送达）照常挡闸，由秘书对账结掉。"""
         with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
             out = self.submit()
-        with G.tx() as con:
-            con.execute("UPDATE hub_events SET sent = -1 WHERE kind = 'redispatch'")
-        self.assertIn(out["decision"], R._secretary()[0])
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertIsNone(R._secretary()[0])                                      # 对照：待发（sent=0）只差补发，不挡
+        for sent in (1, -1):                                                      # 已送达 / 已作废：照常挡
+            with self.subTest(sent=sent):
+                with G.tx() as con:
+                    con.execute("UPDATE hub_events SET sent = ? WHERE kind = 'redispatch'", (sent,))
+                self.assertIn(out["decision"], R._secretary()[0])
 
     def handoff_quota(self, out):
         self.assertEqual((out["result"], out["reason"]), ("handoff", "gate"), out["msg"])
@@ -1145,6 +1150,17 @@ class RejectTests(Base):
         with G.tx() as con:                                                     # 绑定的事件代次和日志记的对不上：挡闸
             con.execute("UPDATE hub_events SET generation = 9 WHERE event_key = ?", (f"{TASK}:g1:rework:1",))
         self.assertIn(out["decision"], R._secretary()[0])
+        with G.tx() as con:                                                     # 事件、决定、凭证都是第 1 代，只有续接日志记的
+            con.execute("UPDATE hub_events SET generation = 1 WHERE event_key = ?", (f"{TASK}:g1:rework:1",))   # 代次不同：照样挡
+        self.assertIsNone(R._secretary()[0])
+        with G.tx() as con:
+            for rid, detail in con.execute("SELECT id, detail FROM grant_log WHERE task_id = ? AND what = '续接'", (TASK,)).fetchall():
+                d = json.loads(detail)
+                if d.get("ref") == out["decision"]:
+                    d["generation"] = 9
+                    con.execute("UPDATE grant_log SET detail = ? WHERE id = ?", (json.dumps(d), rid))
+        self.assertIn(out["decision"], R._secretary()[0] or "")
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=2)), [(out["decision"], "unreconciled")])   # 秘书对账同一认法
 
     @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
     def test_secretary_reconcile_never_takes_a_delivered_event_of_another_generation(self):
