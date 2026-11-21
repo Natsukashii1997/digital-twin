@@ -4,7 +4,7 @@
   progress   项目推进进度：每周三 18:30 私发常浩（版式 11-18 定稿卡片）
 
 用法（亚古兽在终端里跑）：
-  python3 sidebar_reports.py feedback status                 上一期草稿、取数起点、上期待解决 / 待上线清单
+  python3 sidebar_reports.py feedback status                 上一期草稿、取数起点、上期待解决 / 待上线清单（上一期以群里常浩发的版本为准）
   python3 sidebar_reports.py feedback render  草稿.json      只核对并打印飞书 post，不发
   python3 sidebar_reports.py feedback send    草稿.json      核对 → 私发常浩（同一天已发过就原地改）→ 读回 → 存档
   python3 sidebar_reports.py feedback group   [--date D]     常浩确认后发群：核对 @ 的人都在群里 → 本人身份发 → 读回 @
@@ -160,24 +160,85 @@ def fb_render(draft):
     return {"zh_cn": {"title": "", "content": rows}}
 
 
-def fb_status(today=None):
-    """上一期（早于今天的最近一期）。今天已出过（试跑或常浩让改过）时，仍从上一期截止时间读起、对照上一期复核，
-    发送时原地改今天那条，免得漏掉今天早些时候的反馈。"""
+HEAD_RE = re.compile(r"^(✅|♐|✴|⬆)\s*\*\*(.+?)\*\*\s*$")
+QUOTE_RE = re.compile(r"^(?:>\s*)?“(.*)”@(.+?)\s*$")
+TYPE_OF = {"✅": "fixed", "♐": "launched", "✴": "pending", "⬆": "planned"}
+
+
+def parse_group_post(msg):
+    """把群里那条《需求反馈》（消息接口给的 markdown 正文 + mentions）解析回 items。
+    原话里的 @ 按出现顺序对 mentions，名字对不上、条数对不上都算读不懂，不猜。"""
+    ments = list(msg.get("mentions") or [])
+    items = []
+    for raw in str(msg.get("content", "")).splitlines():
+        line = raw.replace("\u200b", "").replace("\ufe0f", "").strip()
+        h = HEAD_RE.match(line)
+        if h:
+            t = TYPE_OF[h.group(1)]
+            label, _, title = h.group(2).partition("：")
+            if label != LABEL[t] or (t != "fixed") != bool(title.strip()):
+                raise md.Fail(f"群里那期的类型行读不懂：{line[:60]}")
+            items.append({"type": t, "quotes": []} if t == "fixed" else {"type": t, "title": title.strip(), "quotes": []})
+            continue
+        q = QUOTE_RE.match(line)
+        if q:
+            m = ments.pop(0) if ments else {}
+            if not items or m.get("name") != q.group(2):
+                raise md.Fail(f"群里那期的原话和 @ 对不上：{line[:60]}")
+            items[-1]["quotes"].append({"text": q.group(1), "name": m["name"], "open_id": m["id"]})
+    if not items or ments:
+        raise md.Fail(f"群里那期（{msg.get('message_id')}）读不出条目，或 @ 比原话多，先人工核对")
+    return items
+
+
+def group_post(prev, run):
+    """群里常浩发的那期《需求反馈》（同一天发了几次取最后一条），没有返回 None。读群失败直接报错，不退回私聊存档。"""
+    title = f"{prev['date']} 需求反馈"
+    data = run("im", "+chat-messages-list", "--chat-id", GROUP, "--start", f"{prev['date']}T00:00:00+08:00",
+               "--order", "asc", "--page-all", "--no-reactions", identity="user") or {}
+    hits = [m for m in data.get("messages") or []
+            if (m.get("sender") or {}).get("id") == OWNER and m.get("msg_type") == "post" and not m.get("deleted")
+            and title in (str(m.get("content", "")).splitlines() or [""])[0]]
+    return max(hits, key=lambda m: str(m.get("create_time", ""))) if hits else None
+
+
+def fb_previous(key, run=md.lark):
+    """上一期（严格早于 key 的最近一期），以群里实际发出的版本为准（2026-11-20 常浩定：他会自己改了再发群，
+    11-19 那期删了 ✴️ 微信支付截图、加了两条 ♐，只看私聊存档就带错了）。找到群里版本就写回存档：
+    items 换成群里那版，私聊原版留在 dm_items。返回 (上一期, 依据说明)；没有上一期返回 (None, None)。"""
+    old = [p for p in archives("feedback") if p.stem < key]
+    if not old:
+        return None, None
+    prev = load(old[-1])
+    msg = group_post(prev, run)
+    if not msg:
+        return prev, "私聊存档（群里没找到常浩发的这期）"
+    items = parse_group_post(msg)
+    prev.setdefault("dm_items", prev.get("items") or [])
+    prev.update(items=items, group_message_id=msg["message_id"],
+                group_sent_at=prev.get("group_sent_at") or msg.get("create_time"))
+    save(old[-1], prev)
+    return prev, f"群里常浩发的版本（{msg['message_id']}，{msg.get('create_time')}）"
+
+
+def fb_status(today=None, run=md.lark):
+    """上一期（早于今天的最近一期，以群里发出的版本为准）。今天已出过（试跑或常浩让改过）时，仍从上一期截止时间读起、
+    对照上一期复核，发送时原地改今天那条，免得漏掉今天早些时候的反馈。"""
     today = (today or dt.date.today()).isoformat()
-    last = previous("feedback", today)
+    last, source = fb_previous(today, run)
     cur = HOME / "feedback" / f"{today}.json"
     out = {"today": today, "today_sent": load(cur).get("dm_message_id") if cur.exists() else None}
     if not last:
         return {**out, "previous": None, "read_from": None, "note": "还没有更早的存档，取数起点问常浩"}
     return {**out, "previous": last.get("date"), "read_from": last.get("cutoff"),
-            "previous_group_sent": bool(last.get("group_message_id")),
+            "previous_group_sent": bool(last.get("group_message_id")), "previous_source": source,
             "carry": [{"type": i["type"], "title": i.get("title"), "quotes": i.get("quotes")}
                       for i in last.get("items", []) if i["type"] in OPEN_TYPES]}
 
 
 def fb_send(path, run=md.lark):
     draft = load(path)
-    prev = previous("feedback", draft.get("date", ""))
+    prev, _ = fb_previous(draft.get("date", ""), run)
     errs = fb_check(draft, prev)
     if errs:
         raise Invalid(errs)
@@ -411,7 +472,7 @@ def main(argv=None):
             ap.error(f"{a.action} 要给内容 JSON 的路径")
         elif a.action == "render":
             d = load(a.path)
-            errs = fb_check(d, previous("feedback", d.get("date", ""))) if a.kind == "feedback" else pg_check(d)
+            errs = fb_check(d, fb_previous(d.get("date", ""))[0]) if a.kind == "feedback" else pg_check(d)
             if errs:
                 raise Invalid(errs)
             out = fb_render(d) if a.kind == "feedback" else pg_render(d)
