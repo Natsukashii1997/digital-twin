@@ -6,6 +6,15 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-21 · 未闭环账本 5a-3c 已安装、两个定时任务已建（#293）
+
+- 入口脚本 PR #294 已合并（`bd0f2ad`）：常浩 11-21 15:24 在飞书私聊回确认单 7 第 11 项「合并」（经「数字分身｜离开时托管推进」会话转达；Claude 读飞书原消息核过发送人是常浩本人、在他私聊里）。
+- 已装到 `~/.hermes/scripts/`（和 main 逐字一致）：`openloop.py`、`openloop_slip.py`、`openloop_job.py`、`pdaily_facts.py`（新版，原来钉住的旧版备份在 evidence/2026-11-20-openloop-5a3/claude-12-安装前备份/）。`pdaily_facts.py --dry-run` 正常，入口能导入。
+- 首次扫描（终端里手动跑，15:32）：115 行（卡住 13、等你 48、待验证 3、等外部 15、在做 36；停了 85、对不上 23），约 70 秒；写出 `DigitalTwin/openloop/ledger.json`、`history/2026-11-21.json`。`openloop_slip.py build` 预览是 7 件的午间单，**没发**。
+- Hermes 无模型定时任务（回读过，active，送常浩私聊）：「未闭环账本·午间单」`08cfe98a8b81` 每天 12:30；「未闭环账本·晚间单」`d26f8d26d2f1` 每天 21:00。每日巡检按 jobs.json 查全部任务，晚点、没跑成会报。
+- `hermes/install_hold.txt` 删掉 openloop、openloop_slip、pdaily_facts 三行；AGENTS 里这几个脚本改成已安装。
+- **到点验收（没在会话里等）**：① 今晚 21:00 第一张晚间单：看 `DigitalTwin/openloop/slips/runs.jsonl` 最后一行是 `2026-11-21-晚`、`sent`，私聊有卡片；Hermes 环境里的扫描还没跑过，失败会有一句原因发到私聊，巡检次日 09:45 也会报。② 11-22 10:00 日报：拍板候选里有账本来的（最多 5 件），风险里一行「未闭环账本：卡住 N 件…」。核对人：下一个接手丁线的会话，或常浩看私聊。
+
 ## 2026-11-21 · #257 合并放权：PR #260 已合并、已装机，策略未签（Claude）
 
 - 审查：ChatGPT 审查链 `r1a1f829d58103` 共 9 轮，受审 `340a1ff` 通过（P0、P1 都是 0；P2-08 留到真实环境复核，P2-15 转 #284，残余风险跟 #285）。送审记录 `evidence/2026-11-20-合并放权-257/claude-08-送审记录.md`。
