@@ -16,7 +16,8 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号, "v": 按钮所在�
   unknown   结果不明：连不上、超时、HTTP 5xx、回应读不懂、回读对不上、发送中途进程没了。**不重答、不自动放开**：
             请求可能已进中台、晚些才被处理；只有回读看到「已决定 / 已结束」才能自动结算，卡还开着就交常浩决定（release）
   （释放）  只在能证明中台没受理时自动删掉这一行（claim_log 留底），常浩可以再点：请求根本没发出去，或中台明确拒绝
-            （400/401/403/404/409）
+            （400/401/403/404/409）。409 是中台说「卡片已不是你点的那一版」（见下面「版本」）：释放后请常浩在新版卡片上重点
+            （中台的版本反而更旧时不说会有新版，请人工核查，见 stale_note）
 所有改状态的写入都带「尝试号 + 预期状态」做条件更新，改到 0 行就说明状态已变，放弃这次改动，不覆盖新的尝试。
 发送只有一个入口 submit()：本人点击、桥接送达后的 flush、对账，都走它，所以一次尝试最多发一次。
 对账（reconcile）：queued 的卡已有消息号但本地没记「中台确认送达」→ 按登记原样重报送达（中台幂等），再领发送资格；
@@ -27,8 +28,10 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号, "v": 按钮所在�
 完的新版本）直接拒、不排队，请常浩在最新的卡上重点；没带版本的旧样式按钮一律拒（0B-4a 起发的卡没有版本号）。登记时在写锁里
 再核一次，排队的那一行记的是回调携带的版本。
 （#218 第 2 轮 P1-03）排队的选择记着点击时卡片在飞书上的版本；提交前卡片已改版（feishu_cards.version 变了）就作废、
-请常浩在新版上重点，不转到新版本；中台确认送达也按版本记（autoloop_feishu）。剩余：领到发送资格到 POST 之间中台改版，
-中台 answer 不核版本，要中台版本核对（规格第 9 节验收 12）才能堵住。
+请常浩在新版上重点，不转到新版本；中台确认送达也按版本记（autoloop_feishu）。
+（#278，引擎批 C）交给中台的回答带上点的那一版（version）。中台（agent-autoloop `30f5a8e` 起，docs/protocol.md）核对：卡片还
+开着、版本对不上 → 409，不记决定、卡片照旧开着；卡片已答过或结案的照旧回 changed=false。领到发送资格到 POST 之间中台改版的
+口子由它堵住（规格第 9 节验收 12 的本人这一半）。更老的中台不认识 version，会当没带一样照答：要靠它把关，中台不能比这一版旧。
 秘书：本人一侧从不改秘书的行；秘书已获准送达时本人照样提交，以中台先受理的为准（契约见 autoloop_feishu 头注释）。
 秘书先答成功、常浩的点击迟到（中台回 changed=false，或对账看到别的结果）时，回话里补一句「秘书替你选了「X」，不同意可以推翻」
 （secretary_note；推翻入口在代批汇报卡上，0B-5 做）。
@@ -235,9 +238,24 @@ def secretary_note(c):
     return f"秘书替你选了「{label}」，不同意可以推翻（入口在秘书代批汇报卡上）。"
 
 
+def stale_note(seen, cur, err):
+    """中台按版本拒了这次回答（409）时给常浩的话。seen：点的那一版；cur：只读窗口现在读到的中台版本（读不到是 None）。"""
+    if type(cur) is not int:
+        return (f"中台说这张卡已经不是你点的第 {seen} 版（现在是第几版没读到），你的选择没有算数；"
+                "卡片更新后请在新版卡片上重新点一次。")
+    if cur > seen:
+        return (f"这张卡在你点之后改版了（你点的是第 {seen} 版，中台已经是第 {cur} 版），你的选择没有算数；"
+                "新版卡片送到后请在新版上重新点一次。")
+    if cur < seen:                                   # 中台比飞书上的还旧：中台库可能被恢复成旧快照，不会有新版送来
+        return (f"中台里这张卡是第 {cur} 版，比你点的第 {seen} 版还旧（中台库可能被恢复过），你的选择没有算数；"
+                "先别重复点，这张卡要人工核查。")
+    return f"这次没交上：{err}。中台没有受理，你可以再点一次。"     # 版本一样却被拒：不是版本的事，照一般的没受理说
+
+
 def submit(card_id):
     """唯一的发送入口。原子领取这次尝试的发送资格（queued → inflight，且卡已有消息号、中台已确认送达），
-    领到的才发请求。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，返回 None；还不能发返回 (3, …)。"""
+    领到的才发请求；请求带上点的那一版，中台对不上就拒绝（409）。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，
+    返回 None；还不能发返回 (3, …)。"""
     owner = identities()[0]
     with F.db(write=True) as con:
         r = owner_row(con, card_id)
@@ -257,12 +275,14 @@ def submit(card_id):
         if cur.rowcount != 1:
             return None
         F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
-        attempt, choice, ref = r["attempt"], r["choice"], card["message_id"]
+        attempt, choice, ref, version = r["attempt"], r["choice"], card["message_id"], r["version"]
     try:
-        out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": owner, "ref": ref})
+        out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": owner, "ref": ref, "version": version})
     except F.HubError as e:
         if not e.sent or e.status in DEFINITE:
-            release(card_id, attempt, "inflight", str(e))
+            release(card_id, attempt, "inflight", str(e))        # 先释放，再去读版本拼话（读中台慢，中途进程没了也不留在途）
+            if e.sent and e.status == 409:           # 带了版本：中台说卡片已不是点的那一版，这次不算数（#278）
+                return 1, stale_note(version, (read_card(card_id) or {}).get("version"), e)
             return 1, f"这次没交上：{e}。中台没有受理，你可以再点一次。"
         move(card_id, attempt, "inflight", "unknown", str(e))
         return 2, f"这次回答结果不明（{e}），我不会重答，会对账后告诉你。"

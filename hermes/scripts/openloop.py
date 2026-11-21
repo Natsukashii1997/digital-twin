@@ -42,6 +42,10 @@ import pdaily_data  # noqa: E402  复用 gh 取数（带等网络重试）、读
 import progress_data  # noqa: E402  名册路径
 
 TZ = ZoneInfo("Asia/Shanghai")
+# 写进行里的几句固定说法。午晚单（openloop_slip.py）靠它们分「合并 / 亲手做 / 拍板」和「可能已过期」，改这里两边一起变
+MERGE_NEXT = "常浩决定合并"
+SAID = "会话最后一次答复〔{}〕"
+GONE_NOTE = "（它的 PR 都已合并或关闭，这条可能已经过期）"
 VERSION = 1
 UNKNOWN = "未知"
 OWNER = "常浩"
@@ -296,7 +300,7 @@ def pr_row(repo, node, rules, reviews=(), known=True):
     if passed or tier == "L0":
         why = f"{last['by']}通过" if passed else "只改文档（L0，不用审）"
         at = max((t for t in (pushed, last["at"] if last else None) if t), default=None)
-        return make(state="等你", owner=OWNER, at=at, evidence=f"{why}，{ci}", next_="常浩决定合并",
+        return make(state="等你", owner=OWNER, at=at, evidence=f"{why}，{ci}", next_=MERGE_NEXT,
                     check_at=next_slip(at) if at else None, **base)
     stale = f"；上一次审的是旧版本（{last['by']}）" if last else "，没有审查或送审记录" if known else "，GitHub 上没有审查，驿窗的送审记录这次没读到"
     return make(state="待验证", owner=UNKNOWN, at=pushed, evidence=f"最近一次提交，{ci}{stale}",
@@ -564,7 +568,7 @@ def project_at(projects, cwd):
 def session_row(row, name, meta):
     """拍板清单脚本给的一个会话 → 账本的一行（规格第 5 节「会话的状态词」一列）；状态词不归账本管的返回 None。"""
     word, at = row.get("word"), parse_ts(row.get("statusAt"))
-    said = f"会话最后一次答复〔{word}〕：{clip(row.get('status'), 80)}"
+    said = f"{SAID.format(word)}：{clip(row.get('status'), 80)}"
     step = clip(row.get("next"), 200) or "来源没写下一步"
     refs = sorted({f"pr:{(x.get('repo') or '').split('/')[-1] or name}#{x.get('prNumber')}"
                    for x in meta.get("prs") or [] if isinstance(x, dict) and x.get("prNumber")})
@@ -585,7 +589,7 @@ def session_row(row, name, meta):
         return make(state="卡住", owner=UNKNOWN, at=at, evidence=said, next_=step, check_at=next_slip(at) if at else None,
                     blocked=clip(row.get("status"), 120) or "会话写了〔受阻〕，没写原因", **base)
     if word in ("等你决定", "等你操作"):
-        done = "（它的 PR 都已合并或关闭，这条可能已经过期）" if row.get("prDone") else ""
+        done = GONE_NOTE if row.get("prDone") else ""
         return make(state="等你", owner=OWNER, at=at, evidence=said + done, next_=step, check_at=next_slip(at) if at else None, **base)
     return None
 
