@@ -247,6 +247,7 @@ class Cli(unittest.TestCase):
         self.open_sheet()
         self.ok("push")
         self.ask(task="数字分身 · 合并官")
+        self.reply("托管流水｜还等你 2 件")
         self.ok("push")                                                   # 提醒的消息号 om_remind_1 也算这张单子的
 
         def msg(mid, who, text, quote=None):
