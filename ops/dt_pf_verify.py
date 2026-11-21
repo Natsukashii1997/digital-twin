@@ -750,6 +750,7 @@ def verify():
     path = write_report("", report)
     print({0: "全部符合", 1: "有该挡没挡住或该通不通", 2: "测试不完整（见上面「没法判断」「没跑完」）"}[worst] + f"；记录在 {path}")
     print("不在承诺里的已知风险（常浩 11-20 接受）：ICMP（ping）、系统解析器代发的 DNS 查询，pf 按账号认不出")
+    print("另：每秒强制重新加载的压力测试里偶发漏过（常浩 11-21 接受）；验收用 verify stress 600 0（不重载）零漏过")
     return worst
 
 
