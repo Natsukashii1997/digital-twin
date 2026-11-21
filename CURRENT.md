@@ -6,6 +6,13 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-21 · #293 未闭环账本 5a-3c：午晚单定时任务入口（未安装）
+
+- 来由：5a-1、5a-2、5a-3a（#282）、5a-3b（#290）都已合并，都还没装。常浩 11-21 在应用内问答框选「是我，按计划装」，同意 5a-3c 四件事：拉齐主目录、写「先扫账本再发单」的入口脚本走 PR、装三个脚本、建 12:30 和 21:00 两个定时任务。
+- 已做：主目录丢掉了没提交的 `projects.json`（只差 3 行，都是远端更新过的旧内容）并快进到 `origin/main`；工程自检账本相关 0 项不一致（剩 1 项是 #256 的 `autoloop_cardview.py` 没装，别的线）。
+- 本 PR：新增 `hermes/scripts/openloop_job.py`（netwait 等飞书和 GitHub → `openloop.scan` → `openloop_slip.send`；扫描没成不拿旧账本发单）和 `tests/test_openloop_job.py`（5 条：先扫后发、同档不重发、没事不发不出声、扫描没成不发且一句原因、发单失败一句原因、网络不通扫都不扫）。
+- **下一步**：合并本 PR（常浩定）→ 装 `openloop.py`、`openloop_slip.py`、`pdaily_facts.py`、`openloop_job.py` → 建两个无模型定时任务并回读 → 另开文档 PR 删 `install_hold.txt` 三行、改 AGENTS 的「未安装」。
+
 ## #195 批 1 飞书拍板：卡片渲染模块，样式定丙版（2026-11-20，Claude；PR #256，未合并、未安装）
 
 - 做了什么：新增 `hermes/scripts/autoloop_cardview.py`（和发送通道无关的渲染模块，桥接和门卫共用；接口见文件头和 PR 正文）和 `tests/test_autoloop_cardview.py`（开着 / 已定 / 已办完 / 已失效、和定稿样例逐字比对；批 1 验收里本模块负责的一段：渲染出的按钮值经 `autoloop_answer` 点两次只答一次、引用回答的解析（调用方还没接）、插件原有合并 / 推翻按钮测试原样再跑）。没改 `autoloop_feishu.py`、`autoloop_answer.py`（甲线 line-a-0e3 在抽共用模块）。
