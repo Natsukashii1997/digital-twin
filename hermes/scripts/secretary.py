@@ -57,7 +57,7 @@ docs/代批清单-模板.md 填。字段位置固定、每项恰好一处、引�
   ## 3. 额度：每天代批总数 N 次、每张任务最多代批 N 次、每天合并 N 个（N 在 1–100）、放弃后重派：每张任务 1 次（只能是 1）；
           「每天」按 Asia/Shanghai 自然日；
   ## 4. 合并白名单：表「| owner/仓库 | 触发的工作流 / 外部动作 |」，④ 关时可以空表，④ 开时至少一行；仓库不重复，
-          每个都要是第 2 节某个项目签署时在名册里的完整仓库名；可加第三列「触发条件指纹」（0B-4d：wf-16 位十六进制，
+          每个都要是第 2 节某个项目签署时在名册里的完整仓库名；可加第三列「触发条件指纹」（0B-4d：wf-32 位十六进制，
           secretary_gate.py fingerprint 现读 main 上 .github 目录算；写「不记」或留空就是没记，④ 对这个仓库一律交常浩；原来的两列表照旧能签）；
   ## 5. 等待与排空：「白天先等：30 分钟」（只能是 30：常浩 11-17 定，规格第 10 节；要改先改规格）、「排空截止：N 小时 / N 分钟」（大于 0、不超过 24 小时）。
   签署时：除模板里两行固定说明（EXEMPT_LINES，逐字相同才豁免）外不许有〔填…〕；文件版本 = 口令版本；版本比签过的都大；
@@ -168,7 +168,7 @@ def _section(sec, heads, title, errors):
     return found[0]
 
 
-TRIGGER = r"wf-[0-9a-f]{16}"   # 触发条件指纹（secretary_gate.trigger_fingerprint 算）
+TRIGGER = r"wf-[0-9a-f]{32}"   # 触发条件指纹（secretary_gate.trigger_fingerprint 算）
 NO_TRIGGER = "不记"             # 第三列写「不记」或留空：这个仓库没记指纹，④ 对它一律交常浩（0B-4d）
 
 
@@ -176,7 +176,7 @@ def parse_whitelist(body, errors):
     """第 4 节的表：表头「| 仓库 | … |」+ 分隔行，之后每行一个仓库；可以没有数据行。返回 ({仓库: 说明}, {仓库: 指纹或 None})。
     两种表头（0B-4d 加第三列，原来的两列表照旧能签、能用）：
       两列「| 仓库 | 合并到 main 触发的工作流 / 外部动作 |」：每行「| owner/仓库 | 说明 |」，读法和原来逐字一样，指纹一律 None；
-      三列「| 仓库 | 合并到 main 触发的工作流 / 外部动作 | 触发条件指纹 |」：每行三格，第三格是 wf-16 位十六进制、「不记」或空。
+      三列「| 仓库 | 合并到 main 触发的工作流 / 外部动作 | 触发条件指纹 |」：每行三格，第三格是 wf-32 位十六进制、「不记」或空。
     没记指纹的仓库 ④ 一律交常浩（合并前要现读触发条件和签署时比，规格第 3 节）。"""
     rows = [ln.strip() for ln in body if ln.strip().startswith("|")]
     if len(rows) < 2 or not re.match(r"^\|\s*仓库\s*\|", rows[0]) or not re.fullmatch(r"\|(\s*:?-{3,}:?\s*\|)+", rows[1]):
@@ -189,7 +189,7 @@ def parse_whitelist(body, errors):
             m = re.fullmatch(rf"\|\s*({REPO_FULL})\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|", ln)
             fp = m.group(3) if m else ""
             if m and fp not in ("", NO_TRIGGER) and not re.fullmatch(TRIGGER, fp):
-                errors.append(f"合并白名单这一行的触发条件指纹看不懂（要写 wf-16 位十六进制，或「{NO_TRIGGER}」）：{ln}")
+                errors.append(f"合并白名单这一行的触发条件指纹看不懂（要写 wf-32 位十六进制，或「{NO_TRIGGER}」）：{ln}")
                 continue
         else:
             m = re.fullmatch(rf"\|\s*({REPO_FULL})\s*\|\s*(.*?)\s*\|", ln)

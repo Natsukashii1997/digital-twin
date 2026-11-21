@@ -562,13 +562,18 @@ class CustodyCredential(unittest.TestCase):
     def card(self, repo=None):
         return {"pr": 5, "repo": repo or self.REPO, "head": "a" * 40}
 
-    MERGED_REPLY = {"sha": "m" * 40, "merged": True, "message": "Pull Request successfully merged"}
+    UID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    PENDING = {"status": "pending", "details": {"uuid": UID, "message": "Merge request accepted", "merge_method": "squash",
+                                                "merge_action": "direct_merge", "expected_head_sha": "a" * 40}}
+    POLL_MERGED = {"status": "merged", "details": {"message": "Pull Request successfully merged", "sha": "e" * 40}}
 
     def fake(self, sec_code=0, sec_out=None, sec_exc=None, merge_code=0, merge_err="", merge_timeout=False,
-             view=None, view_code=0, gh_exc=None, reply=None, view_raw=None):
-        """按命令分派：security 读钥匙串、gh pr merge、gh pr view。记下每次调用的命令和 env。"""
+             view=None, view_code=0, gh_exc=None, reply=None, view_raw=None, polls=None, poll_code=0, poll_err=""):
+        """按命令分派：security 读钥匙串、gh api PUT merge-async、gh api GET merge-async/<请求号>、gh pr view。记下每次调用的命令和 env。"""
         calls = []
-        view = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "m" * 40}} if view is None else view
+        view = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "e" * 40}, "baseRefName": "main"} \
+            if view is None else view
+        polls = list([self.POLL_MERGED] if polls is None else polls)
 
         def run(cmd, **kw):
             calls.append((cmd, kw.get("env")))
@@ -581,8 +586,12 @@ class CustodyCredential(unittest.TestCase):
             if cmd[1:3] in (["pr", "merge"], ["api", "-X"]):
                 if merge_timeout:
                     raise subprocess.TimeoutExpired(cmd, 1)
-                body = reply if reply is not None else (self.MERGED_REPLY if merge_code == 0 else None)
+                body = reply if reply is not None else (self.PENDING if merge_code == 0 else None)
                 return subprocess.CompletedProcess(cmd, merge_code, stdout=json.dumps(body) if body else "", stderr=merge_err)
+            if cmd[1] == "api" and "/merge-async/" in cmd[2]:
+                body = polls.pop(0) if len(polls) > 1 else polls[0]
+                return subprocess.CompletedProcess(cmd, poll_code, stdout=json.dumps(body) if poll_code == 0 else "",
+                                                   stderr=poll_err)
             if cmd[1:3] == ["pr", "view"]:
                 raw = view_raw if view_raw is not None else json.dumps(view)
                 return subprocess.CompletedProcess(cmd, view_code, stdout=raw, stderr="")
@@ -591,8 +600,15 @@ class CustodyCredential(unittest.TestCase):
 
     def go(self, run, card=None, env=None):
         with unittest.mock.patch.dict(os.environ, env or {"PATH": "/usr/bin"}, clear=True), \
+                unittest.mock.patch.dict(os.environ, {"DT_MERGE_LOCK_DIR": str(self.locks)}), \
+                unittest.mock.patch.object(self.ma, "MERGE_POLL_WAITS", (0, 0, 0)), \
                 unittest.mock.patch.object(self.ma.subprocess, "run", run):
             return self.ma.run_custody_merge(card or self.card())
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.locks = Path(self.tmp.name) / "locks"
 
     def gh_calls(self, calls):
         return [c for c in calls if c[0][0] != self.ma.SECURITY]
@@ -605,9 +621,12 @@ class CustodyCredential(unittest.TestCase):
         self.assertEqual(out["status"], "merged")
         self.assertEqual(out["identity"], "custody")
         self.assertEqual([c[0][1:5] for c in self.gh_calls(calls)],
-                         [["api", "-X", "PUT", f"repos/{self.REPO}/pulls/5/merge"], ["pr", "view", "5", "--repo"]])
-        self.assertIn(f"sha={'a' * 40}", calls[1][0])          # 合并请求绑定卡片上的 HEAD
-        self.assertEqual(out["merge_commit"], "m" * 40)
+                         [["api", "-X", "PUT", f"repos/{self.REPO}/pulls/5/merge-async"],
+                          ["api", f"repos/{self.REPO}/pulls/5/merge-async/{self.UID}"], ["pr", "view", "5", "--repo"]])
+        put = calls[1][0]
+        for arg in (f"sha={'a' * 40}", "merge_action=direct_merge", "bypass_rules=false", "merge_method=squash"):
+            self.assertIn(arg, put)                         # 绑定 HEAD、不进合并队列、不绕过规则
+        self.assertEqual((out["merge_commit"], out["request"], out["async_status"]), ("e" * 40, self.UID, "merged"))
 
     def test_unregistered_or_other_owner_repo_stops_before_keychain(self):
         for repo in ("Natsukashii1997/digital-twin", "someone-else/dt-sandbox"):
@@ -633,8 +652,8 @@ class CustodyCredential(unittest.TestCase):
         run, calls = self.fake()
         self.go(run, env=host)
         envs = [e for _, e in self.gh_calls(calls)]
-        self.assertEqual(len(envs), 2)
-        self.assertIs(envs[0], envs[1])                       # 写和回读用同一个受控环境
+        self.assertEqual(len(envs), 3)
+        self.assertTrue(envs[0] is envs[1] is envs[2])           # 写、查请求和回读用同一个受控环境
         e = envs[0]
         self.assertEqual(e["GH_TOKEN"], self.TOKEN)
         self.assertEqual(e["GH_HOST"], "github.com")
@@ -647,40 +666,95 @@ class CustodyCredential(unittest.TestCase):
         self.assertEqual(e["HOME"], "/Users/x")
 
     def test_status_matrix(self):
-        merged = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "m" * 40}}
-        open_ = {"state": "OPEN", "headRefOid": "a" * 40, "mergeCommit": None}
+        merged = {"state": "MERGED", "headRefOid": "a" * 40, "mergeCommit": {"oid": "e" * 40}, "baseRefName": "main"}
+        open_ = {"state": "OPEN", "headRefOid": "a" * 40, "mergeCommit": None, "baseRefName": "main"}
+        pending = {"status": "pending", "details": {"uuid": self.UID}}
+        failed = {"status": "failed", "details": {"message": "Required status check \"test\" is expected"}}
         cases = [
-            (dict(merge_code=0, view=merged), "merged"),
-            (dict(merge_code=1, merge_err="Cannot update this protected ref", view=open_), "failed"),
+            (dict(view=merged), "merged"),
+            (dict(view=open_, polls=[pending]), "unsure"),                   # 约 1 分钟还在排：结果不明，留请求号对账
+            (dict(view=merged, polls=[pending, pending, self.POLL_MERGED]), "merged"),   # 查了几次才合上：等到结论
+            (dict(view=open_, polls=[failed]), "failed"),                    # 请求明确失败、仍开着
+            (dict(view=merged, polls=[failed]), "unsure"),                   # 请求说失败却合上了：别人合的
+            (dict(view={**merged, "baseRefName": "dev"}), "unsure"),         # 合进的不是 main（审查 P1-02）
+            (dict(view=merged, polls=[{**self.POLL_MERGED, "details": {"sha": "z" * 40}}]), "unsure"),   # 提交号对不上
+            (dict(view=merged, polls=[{"status": "merged", "details": {"message": "x"}}]), "unsure"),  # 没有合并提交号
+            (dict(view=open_, poll_code=1, poll_err="gh: Not Found (HTTP 404)"), "unsure"),  # 查不到：不推断
+            # 回 200 已合上、不带请求号：不是本次合的
+            (dict(reply={"status": "merged", "details": {"message": "already merged", "sha": "e" * 40}}, view=merged), "unsure"),
+            # 409：已有一个合并请求在排（不是明确拒绝），记下那个请求号
+            (dict(merge_code=1, merge_err="gh: Conflict (HTTP 409)", reply={"status": "pending", "details": {"uuid": self.UID}},
+                  view=open_), "unsure"),
+            (dict(merge_code=1, merge_err="gh: Validation Failed (HTTP 422)", view=open_), "failed"),
+            (dict(merge_code=1, merge_err="gh: Pull request is a draft (HTTP 400)", view=open_), "unsure"),   # 没归类：不确定
+            (dict(merge_code=1, merge_err="gh: Resource not accessible by personal access token (HTTP 403)", view=open_), "failed"),
             (dict(merge_code=1, view=merged), "unsure"),                     # 命令失败却已合并：可能是别人合的
-            (dict(merge_code=0, view=open_), "unsure"),
             (dict(merge_timeout=True, view=merged), "unsure"),
             (dict(merge_timeout=True, view=open_), "unsure"),
-            (dict(merge_code=0, view_code=1), "unsure"),                     # 回读失败
-            (dict(merge_code=0, view={**merged, "headRefOid": "b" * 40}), "unsure"),
-            (dict(merge_code=1, merge_err='Post "https://api.github.com/graphql": EOF', view=open_), "unsure"),
+            (dict(view_code=1), "unsure"),                                   # 回读失败
+            (dict(view={**merged, "headRefOid": "b" * 40}), "unsure"),
+            (dict(merge_code=1, merge_err='Put "https://api.github.com/...": EOF', view=open_), "unsure"),
             (dict(merge_code=1, merge_err="read: connection reset by peer", view=open_), "unsure"),
             (dict(merge_code=1, merge_err="something unclassified", view=open_), "unsure"),
-            (dict(merge_code=1, merge_err="X Pull request #5 is not mergeable: the base branch policy prohibits the merge.",
-                  view=open_), "failed"),
-            (dict(merge_code=1, merge_err="Head branch was modified. Review and try the merge again.", view=open_), "failed"),
-            # PR 已被别人合上：接口拒绝、回读 MERGED 且 HEAD 对得上，不能记成本次合并
-            (dict(merge_code=1, merge_err="gh: Pull Request is not mergeable (HTTP 405)", view=merged), "unsure"),
-            (dict(merge_code=0, reply={"merged": False, "message": "x"}, view=merged), "unsure"),
-            (dict(merge_code=0, reply={"merged": True}, view=merged), "unsure"),                    # 没有合并提交号
-            (dict(merge_code=0, reply={**self.MERGED_REPLY, "sha": "z" * 40}, view=merged), "unsure"),  # 提交号对不上
             # 多行报错：最后一行像拒绝，前面有网络中断 → 网络优先，判 unsure
-            (dict(merge_code=1, merge_err='Post "https://api.github.com/...": EOF\ngh: Pull Request is not mergeable (HTTP 405)',
+            (dict(merge_code=1, merge_err='Put "https://api.github.com/...": EOF\ngh: Validation Failed (HTTP 422)',
                   view=open_), "unsure"),
-            (dict(merge_code=0, view_raw="null"), "unsure"),                                        # 回读不是对象
-            (dict(merge_code=0, view_raw="[]"), "unsure"),
-            (dict(merge_code=0, view_raw="not json"), "unsure"),
+            (dict(view_raw="null"), "unsure"),                               # 回读不是对象
+            (dict(view_raw="[]"), "unsure"),
+            (dict(view_raw="not json"), "unsure"),
+            (dict(reply={"status": "pending", "details": {"uuid": "不是请求号"}}, view=merged), "unsure"),
         ]
         for kw, want in cases:
             run, calls = self.fake(**kw)
             out = self.go(run)
             self.assertEqual(out["status"], want, kw)
             self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)].count(["api", "-X"]), 1, kw)  # 不重发
+        run, _ = self.fake(merge_code=1, merge_err="gh: Conflict (HTTP 409)", reply={"status": "pending", "details": {"uuid": self.UID}},
+                           view=open_)
+        self.assertEqual(self.go(run)["request"], self.UID)
+
+    def test_repo_lock_held_elsewhere_stops_before_keychain(self):
+        """审查 P1-01：同仓库另一个合并（托管或秘书）持着锁时不读钥匙串、不发任何请求；同进程已持锁时不自锁。"""
+        import fcntl
+        self.locks.mkdir(parents=True)
+        fd = os.open(str(self.locks / "Natsukashii1997__dt-sandbox.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        run, calls = self.fake()
+        with self.assertRaises(self.ma.Stop) as c:
+            self.go(run)
+        self.assertIn("另一个合并正在进行", c.exception.why)
+        self.assertEqual(calls, [])
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_LOCK_DIR": str(self.locks)}):
+            with self.ma.repo_merge_lock(self.REPO):
+                run, calls = self.fake()
+                self.assertEqual(self.go(run)["status"], "merged")
+                with self.assertRaises(BlockingIOError):         # 同进程持着时，别的打开方式拿不到
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)        # 出来后释放了
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with self.assertRaises(self.ma.Stop):
+            with self.ma.repo_merge_lock("../etc"):
+                pass
+
+    def test_poll_custody_merge_reads_by_request_only(self):
+        cases = [(dict(), "merged"), (dict(polls=[{"status": "pending", "details": {"uuid": self.UID}}]), "pending"),
+                 (dict(polls=[{"status": "failed", "details": {"message": "x"}}]), "failed"),
+                 (dict(poll_code=1, poll_err="gh: Not Found (HTTP 404)"), "gone"),
+                 (dict(poll_code=1, poll_err='Get "https://api.github.com": EOF'), "unread"),
+                 (dict(polls=[{"status": "weird"}]), "unread")]
+        for kw, want in cases:
+            run, calls = self.fake(**kw)
+            with unittest.mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True), \
+                    unittest.mock.patch.object(self.ma.subprocess, "run", run):
+                got = self.ma.poll_custody_merge(self.REPO, 5, self.UID)
+            self.assertEqual(got["status"], want, kw)
+            self.assertEqual([c[0][1] for c in self.gh_calls(calls)], ["api"], kw)   # 只读，不发合并
+        self.assertEqual(self.ma.poll_custody_merge(self.REPO, 5, "坏号")["status"], "unread")
+        run, _ = self.fake(sec_code=44, sec_out="")
+        with unittest.mock.patch.object(self.ma.subprocess, "run", run), self.assertRaises(self.ma.Stop):
+            self.ma.poll_custody_merge(self.REPO, 5, self.UID)
 
     def test_gh_launch_failure_returns_failed_not_exception(self):
         for exc in (FileNotFoundError(), PermissionError()):
@@ -692,7 +766,7 @@ class CustodyCredential(unittest.TestCase):
 
     def test_token_in_gh_output_is_redacted(self):
         run, _ = self.fake(merge_code=1, merge_err=f"bad credentials for {self.TOKEN}",
-                           view={"state": "OPEN", "headRefOid": "a" * 40})
+                           view={"state": "OPEN", "headRefOid": "a" * 40, "baseRefName": "main"})
         out = self.go(run)
         self.assertNotIn(self.TOKEN, json.dumps(out))
         self.assertIn("***", out["why"])
