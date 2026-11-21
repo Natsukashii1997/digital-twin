@@ -3,6 +3,9 @@
 
 用 feishu 通道钥匙向中台领卡片，以猛鬼兽机器人发到常浩私聊，报送达；卡片状态变了就改那条消息。点击不在这里收：
 猛鬼兽网关的 merge-buttons 插件把按钮点击转给 autoloop_answer.py（这里只负责发卡和登记）。
+机器人身份（ADR-015 修订 1 批 0E-3，全局坑 G-43）：用哪个飞书机器人发卡、回话，常浩在这个机器人下的 open_id 和私聊号从哪来，
+只在 Bot 一处定义；默认是猛鬼兽（Bot，读 twin_state 的身份配置）。门卫（gatekeeper.py，跑在 dt-gate）换成 GateBot，
+发卡、改卡、报送达、状态机、本人点击核对和卡片库都和这里共用一份，不另写。
 
 0B-3 实测：网关转来的点击里有点击人 open_id 和聊天号，**没有原消息号**。所以每张卡发出前先登记一个随机令牌，
 按钮里只带 {"autoloop": 令牌, "o": 选项号, "v": 这条消息展示的版本}；点击回来按令牌找到卡片号和送达的消息号（中台要求 ref 和
@@ -98,6 +101,46 @@ class HubError(Fail):
     def __init__(self, msg, status=None, sent=True):
         super().__init__(msg)
         self.status, self.sent = status, sent
+
+
+class Bot:
+    """发卡、回话、认本人的那一个飞书机器人。open_id 按应用区分（G-43），所以本人的 open_id、私聊号跟着机器人走。
+    默认是猛鬼兽：lark-cli 用猛鬼兽应用（tidings_weekly），身份读 twin_state（twin_identity.py setup / setup-chat 配的）。"""
+    name = "猛鬼兽"
+    unbound = "本机没配置常浩的 open_id 或私聊号（twin_identity.py setup / setup-chat）"
+    no_chat = "没配置常浩私聊的 chat_id（先 twin_identity.py setup-chat），或格式不对"
+
+    def lark(self, args, what):
+        return lark(args, what)                  # 运行时取本模块的 lark（测试替换 F.lark 照样生效）
+
+    def send_text(self, chat, text, key):
+        from tidings_weekly import send
+        send(chat, "text", {"text": text}, key)
+
+    def owner(self):
+        """(常浩的 open_id, 常浩私聊号)，没配置的项是空值；读配置出错抛 Fail。"""
+        import twin_state as T
+        try:
+            return T.owner_open_id(), T.owner_chat_id()
+        except T.StateError as e:
+            raise Fail(str(e))
+
+    def owner_chat(self):
+        """只要私聊号（发卡、提醒用）：只读私聊号的配置，不连带读 open_id（审查 P2-6：原链路发卡只看私聊号）。"""
+        import twin_state as T
+        try:
+            return T.owner_chat_id()
+        except T.StateError as e:
+            raise Fail(str(e))
+
+
+BOT = Bot()
+
+
+def use(bot):
+    """换机器人（门卫启动时调用一次）。一个进程只用一个机器人。"""
+    global BOT
+    BOT = bot
 
 
 def owner_holds(con, card_id):
@@ -247,13 +290,9 @@ def render(card, token):
 
 # ---------- 发送 ----------
 def owner_chat():
-    import twin_state as T
-    try:
-        chat = T.owner_chat_id()
-    except T.StateError as e:
-        raise Fail(str(e))
+    chat = BOT.owner_chat()
     if not (chat or "").startswith("oc_"):
-        raise Fail("没配置常浩私聊的 chat_id（先 twin_identity.py setup-chat），或格式不对")
+        raise Fail(BOT.no_chat)
     return chat
 
 
@@ -270,7 +309,7 @@ def token_for(card, chat):
 
 
 def send_card(chat, content, key):
-    out = lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "interactive",
+    out = BOT.lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "interactive",
                 "--content", json.dumps(content, ensure_ascii=False), "--idempotency-key", key], "发卡片")
     mid = out.get("message_id")
     if not mid:
@@ -299,7 +338,7 @@ def _deliver(card):
             raise Fail(f"中台给的消息号和登记的对不上（卡片 {card['id']}）")
         content = render(card, r["token"] if r else "")
         try:
-            lark(["im", "messages", "patch", "--message-id", card["ref"],
+            BOT.lark(["im", "messages", "patch", "--message-id", card["ref"],
                   "--data", json.dumps({"content": json.dumps(content, ensure_ascii=False)}, ensure_ascii=False)], "改卡片")
         except SendError:
             if card["state"] == "open":                # 开着的卡：原消息的按钮还能用，不另发
@@ -386,9 +425,8 @@ def alert(key, text, every=ALERT_EVERY):
             age = float("inf")
         if every is None or age < every:
             return False
-    from tidings_weekly import send
     try:
-        send(owner_chat(), "text", {"text": text}, f"al-alert-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
+        BOT.send_text(owner_chat(), text, f"al-alert-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
     except (SendError, Fail):
         return False
     with db(write=True) as con:
@@ -434,9 +472,11 @@ def check_given_up():
     return told
 
 
-def once(wait=50):
+def once(wait=50, ready=None):
     """领一张、处理一张；没有卡片返回 None。领卡前先确认中台库能读（读不到这轮不领，返回 paused）；处理在桥接锁里做，
-    锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。"""
+    锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。
+    ready（门卫用，同 run）：长轮询要等一阵，领到卡后发卡前再问一次；这时不能干活（收点击的长连接断了）就不发，
+    向中台报 failed 写明原因（中台退避重递）。猛鬼兽不传，行为不变。"""
     if not hub_readable():                       # 第 5 轮 P1-01：领一次就用掉中台一次尝试，读不到就先别领
         why = "读不到中台库，暂停领卡"
         alert("hub-unreadable", f"飞书桥接：{why}，中台卡片暂时送不到你这里（不会用掉中台的重试次数）；中台库恢复后自动继续。")
@@ -444,6 +484,13 @@ def once(wait=50):
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
+    try:
+        why = ready() if ready else None
+    except Exception as e:                       # 核对本身出错也报 failed，不让卡空等中台租约过期（复核 P2-6）
+        why = f"领到卡后核对能不能发时出错（{type(e).__name__}）"
+    if why:
+        hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
+        return {"card": card["id"], "ok": False, "paused": why}
     with bridge_lock():
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
@@ -506,16 +553,27 @@ def _flush(card_id):
     A.flush(card_id)
 
 
-def run():
+def run(ready=None):
+    """常驻。ready：每轮先问一次能不能干活（门卫没绑定常浩时返回原因：这时不对账、不领卡，领了也发不出去，
+    还会用掉中台的重试次数），返回 None 才干活。"""
     import autoloop_answer as A
+    paused = None
     while True:
         try:
+            why = ready() if ready else None
+            if why:
+                if why != paused:                      # 只在暂停原因变化时记一行
+                    print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
+                paused = why
+                time.sleep(30)
+                continue
+            paused = None
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
                 A.tell(A.identities()[1], text)
             for cid in check_given_up():               # 中台已放弃送达的卡：每一轮放弃私聊说一次
                 print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
-            out = once()
+            out = once(ready=ready)
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
             if out and out.get("paused"):              # 中台库读不到：歇 30 秒再看，别空转

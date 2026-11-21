@@ -67,22 +67,24 @@ class Quiet(F.Fail):
 
 
 def identities():
-    import twin_state as T
+    """当前机器人（F.BOT：猛鬼兽或门卫）下常浩的 (open_id, 私聊号)。"""
     try:
-        owner, home = T.owner_open_id(), T.owner_chat_id()
-    except T.StateError as e:
+        owner, home = F.BOT.owner()
+    except F.Fail as e:
         raise Quiet(str(e))
     if not owner or not home:                    # 没配置就一律不认，不拿空值去比
-        raise Quiet("本机没配置常浩的 open_id 或私聊号（twin_identity.py setup / setup-chat）")
+        raise Quiet(F.BOT.unbound)
     return owner, home
 
 
-def check(token, option, chat, operator, version=None):
+def check(token, option, chat, operator, version=None, message_id=None):
+    """message_id：点击回调里带的卡片消息号。门卫的回调带这一项，传进来就必须等于登记的那条消息；猛鬼兽网关转不来
+    消息号（0B-3 实测），不传就不核。"""
     owner, home = identities()
     if not operator or operator != owner:
         raise Quiet("点按钮的不是常浩本人")
     if not chat or chat != home:
-        raise Quiet("不是在常浩和猛鬼兽的私聊里点的")
+        raise Quiet(f"不是在常浩和{F.BOT.name}的私聊里点的")
     if not F.TOKEN_RE.match(token or ""):
         raise Quiet("按钮里的令牌格式不对")
     card = F.card_by_token(token)
@@ -92,6 +94,10 @@ def check(token, option, chat, operator, version=None):
         raise F.Fail("这张卡登记的私聊和现在的对不上")
     if not (0 <= option < card["options"]):
         raise F.Fail("选项号不在这张卡的选项里")
+    if message_id is not None and not card["message_id"]:   # 卡已发出、消息号还没写进登记（审查 P2-7）
+        raise F.Fail("这张卡还在登记，稍后再点一次")
+    if message_id is not None and message_id != card["message_id"]:
+        raise F.Fail("点的这条消息不是登记的那张卡")
     version_ok(card, version)
     return card
 
@@ -378,10 +384,10 @@ def release_unknown(card_id):
 
 
 # ---------- 入口 ----------
-def answer(token, option, chat, operator, version=None):
-    """返回 (退出码, 给常浩的话或 None（不回话）, 记录)。"""
+def answer(token, option, chat, operator, version=None, message_id=None):
+    """返回 (退出码, 给常浩的话或 None（不回话）, 记录)。message_id 见 check。"""
     try:
-        card = check(token, option, chat, operator, version)
+        card = check(token, option, chat, operator, version, message_id)
     except Quiet as e:
         return 1, None, {"ok": False, "quiet": True, "why": str(e)}
     except F.Fail as e:
@@ -402,10 +408,9 @@ def answer(token, option, chat, operator, version=None):
 
 
 def tell(chat, text):
-    from tidings_weekly import SendError, send
     try:
-        send(chat, "text", {"text": text}, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
-    except SendError:
+        F.BOT.send_text(chat, text, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
+    except F.SendError:
         pass                                     # 回话发不出不影响答卷结果；结果在卡片上会更新
 
 
