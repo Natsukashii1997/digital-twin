@@ -158,7 +158,10 @@ def send(now, force=False):
                     "--content", json.dumps(card, ensure_ascii=False), "--idempotency-key", idem], "发卡片").get("message_id")
         if not mid:
             raise Fail("发卡片没拿到消息号")
-        rec.update(result="sent", message_id=mid, rows=len(pick(ledger)[0]), ledger_at=ledger.get("generated_at"))
+        todo, _, gone = pick(ledger)
+        # 记下单上列了哪几件（账本编号）：追问登记（openloop_ask.py）靠它判「问之前报过没有」
+        rec.update(result="sent", message_id=mid, rows=len(todo), ledger_at=ledger.get("generated_at"),
+                   ids=[r.get("id") for r in todo], ids_gone=[r.get("id") for r in gone])
         state[key] = {"at": ol.iso(now), "message_id": mid}
         write_json(folder / "state.json", state)
         write_json(folder / f"{key}.card.json", card)
