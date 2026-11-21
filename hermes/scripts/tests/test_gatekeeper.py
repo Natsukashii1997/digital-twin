@@ -583,7 +583,8 @@ class Clicks(Base):
         self.assertEqual(sends[-1][sends[-1].index("--chat-id") + 1], CHAT)       # 发到绑定的私聊
         rec = self.click()
         self.assertTrue(rec["ok"], rec)
-        self.assertEqual(self.hub_calls, [("/v1/cards/7/answer", {"choice": 1, "by": OWNER, "ref": self.mid})])
+        self.assertEqual(self.hub_calls, [("/v1/cards/7/answer",                # 带点的那一版（#278：中台按版本核对）
+                                           {"choice": 1, "by": OWNER, "ref": self.mid, "version": 1})])
         self.assertIn("已交给中台", self.lark.texts()[-1])
 
     def test_replayed_event_is_handled_once(self):
