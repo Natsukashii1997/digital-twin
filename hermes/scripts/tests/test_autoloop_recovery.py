@@ -201,9 +201,9 @@ class Markers(Base):
         E.write_marker("第一次")
         real = R._secretary
 
-        def late():
+        def late(*a):
             E.write_marker("对账期间又出现")                                    # 账本那笔没记上，只有标记
-            return real()
+            return real(*a)
         with mock.patch.object(R, "_secretary", late):
             rep = R.reconcile()
         self.assertFalse(rep["open"])

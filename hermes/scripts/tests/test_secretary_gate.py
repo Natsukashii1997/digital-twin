@@ -909,6 +909,26 @@ class RedispatchTests(Base):
         self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
         self.assertEqual(self.get(out["decision"])["status"], "done")
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_redispatch_stuck_in_executing_does_not_deadlock_the_gate(self):
+        """L3 第 5 轮 P1-08 预审：② 的续接事件已记账、进程在 finish 之前没了（或 SL.finish 写不进），决定停在 executing。
+        第 4 步认它只差网关补发、不挡；第 5 步「已开始没记结果」那一关也不能把它算进来，否则又是 11-20 那个死锁。"""
+        import sqlite3
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as c:
+            c.execute("UPDATE secretary_decisions SET status = 'executing' WHERE id = ?", (out["decision"],))
+        self.assertIsNone(R._secretary()[0])
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40):
+            rep = R.reconcile()
+            self.assertTrue(rep["open"], rep["why"])
+            sent = G.send_pending(now=T + dt.timedelta(minutes=5))
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
+
     def test_event_of_a_frozen_or_expired_grant_is_not_waiting_for_resend(self):
         """L3 第 4 轮 P1-09 另一处：② 的续接事件已领走在发（sent=2、超过 60 秒）时任务被冻结——冻结只作废没领走的，
         这条补发不了：恢复闸不再当「只差补发」放行，秘书对账记核不清（发没发出去要核）；没领走的（sent=0）凭证过期了，
