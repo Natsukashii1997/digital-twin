@@ -487,7 +487,7 @@ class Auto(Fixture, unittest.TestCase):
         self.assertIn("推一个新提交", frozen.stdout)
         new_head = self.pr_commit(5, {"docs/a.md": "hi again\n"})    # 推了新提交：旧请求绑着旧版本，合不了它
         self.update_pr(headRefOid=new_head)
-        r = self.auto()                                              # 会话重新交出：当场只读核对、结清旧的，再合新版本
+        r = self.auto(f"app#5@{new_head[:7]}")                       # 会话看过新版本、写明版本号重新交出：结清旧的，再合新版本
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("没合上", r.stdout)
         self.assertEqual(self.events(), ["intent", "not_merged", "intent", "merged"])
@@ -512,6 +512,26 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(self.scan_at("2026-11-07T10:20:00+08:00"), "")           # 巡视也不合：没有新版本的交出登记
         self.assertEqual(self.merges_called(), [])
         r = self.auto(f"app#5@{new_head[:7]}")                       # 会话看过新版本、交出它：这才合
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (merge,) = self.merges_called()
+        self.assertIn(f"sha={new_head}", merge)
+
+    def test_rerunning_a_handoff_without_version_after_a_new_commit_stops(self):
+        """#260-P1-01 第 5 轮：旧版本的请求结果不明，PR 被推了新版本，会话异常恢复后重跑当初没写版本号的交出命令。
+        当场核对把旧请求结清之后停下：不登记新版本、不记新的要合、不发请求，PR 仍开着；要写明版本号再交出。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")
+        new_head = self.pr_commit(5, {"docs/a.md": "someone else pushed\n"})
+        self.update_pr(headRefOid=new_head)
+        r = self.auto("app#5")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("没合上", r.stdout)
+        self.assertIn("写明版本号再交出", r.stdout)
+        self.assertEqual((self.events(), self.handoffs(), self.merges_called(), self.state()),
+                         (["intent", "not_merged"], [], [], "OPEN"))
+        self.assertEqual(self.scan_at("2026-11-07T10:20:00+08:00"), "")           # 巡视也不合
+        self.assertEqual(self.merges_called(), [])
+        r = self.auto("app#5")                                       # 旧请求已经结清：再交出就是一次普通的交出
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         (merge,) = self.merges_called()
         self.assertIn(f"sha={new_head}", merge)

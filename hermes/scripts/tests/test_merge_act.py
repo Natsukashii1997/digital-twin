@@ -782,6 +782,11 @@ class CustodyCredential(unittest.TestCase):
             (dict(merge_code=0, view_raw="null"), "unsure"),                                        # 回读不是对象
             (dict(merge_code=0, view_raw="[]"), "unsure"),
             (dict(merge_code=0, view_raw="not json"), "unsure"),
+            # #260-P2-16：合并请求自己收到 (HTTP 4xx)，回读失败或不是对象 → failed（服务端已答复不处理）；没有状态码的照旧 unsure
+            (dict(merge_code=1, merge_err="gh: Validation Failed (HTTP 422)", view_code=1), "failed"),
+            (dict(merge_code=1, merge_err="gh: API rate limit exceeded (HTTP 429)", view_raw="null"), "failed"),
+            (dict(merge_code=1, merge_err="Cannot update this protected ref", view_code=1), "unsure"),
+            (dict(merge_code=1, merge_err='Put "https://api.github.com/repos/o/r/pulls/422/merge": EOF', view_code=1), "unsure"),
         ]
         for kw, want in cases:
             run, calls = self.fake(**kw)

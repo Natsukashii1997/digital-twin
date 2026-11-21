@@ -38,7 +38,8 @@
   merge_act.py button merge|return <仓库#PR@HEAD前缀> --chat <chat_id>
                                              卡片按钮（#78）：Hermes 的 /card 插件在后台调用；进度和结果直接发到常浩私聊
   merge_act.py auto <仓库#PR[@HEAD前缀]> [--by 谁]
-                                             按策略合并（#257）：交出这个 PR 现在的版本并当场试合。退出码：0 已合并；2 已登记、
+                                             按策略合并（#257）：交出这个 PR 现在的版本并当场试合（这个 PR 上一次按策略合并
+                                             结果不明、刚被核对结清时，必须写 @版本前缀）。退出码：0 已合并；2 已登记、
                                              现在还不能合（合并官巡视时再试）；3 不归策略管，仍要常浩决定（例外、策略没生效、
                                              仓库没覆盖）；1 其他（结果不明、被上限拦下、出错）
   merge_act.py revert <仓库#PR> [原因]        撤回一个按策略合并的 PR：开撤回 PR，记进账本
@@ -561,8 +562,10 @@ def run_custody_merge(card):
     走 REST 合并接口（PUT pulls/{n}/merge，sha 绑定 HEAD），以接口返回的「本次已合并 + 合并提交号」为成功证据——
     gh pr merge 对已经被别人合上的 PR 也返回 0，不能当本次合并的证据。写和回读用同一个受控环境。status：
     merged（接口说本次合上了、回读已合并、HEAD 对得上、合并提交号一致）；
-    failed（GitHub 明确拒绝且回读仍开着，或 gh 没起来、请求没发出去）；
-    unsure（其余一切：超时、网络中断、没归类的报错、已被别人合上、HEAD 对不上、回读失败或不是对象）——只做只读对账，不重发合并。"""
+    failed（GitHub 明确拒绝且回读仍开着；合并请求自己收到「(HTTP 4xx)」而回读失败或不是对象，也算——服务端已答复不处理
+    这次请求，#260-P2-16；或 gh 没起来、请求没发出去）；
+    unsure（其余一切：超时、网络中断、没归类的报错、已被别人合上、HEAD 对不上、没有状态码时的回读失败或不是对象）——
+    只做只读对账，不重发合并。判定见 _merge_verdict，和按策略合并共用。"""
     token = custody_token(card["repo"])
     out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"], "merge_commit": None}
     cmd = [mo.GH, "api", "-X", "PUT", f"repos/{card['repo']}/pulls/{card['pr']}/merge",
@@ -1070,8 +1073,16 @@ def cmd_auto(ref, by):
         if pending:                                        # 上次结果不明：先当场只读核对（PR 换了版本就能结清），不用等巡视
             for line in reconcile_unsettled(repo, pr, remind=False):
                 print(line)
-            if any(m["id"] == pending[-1]["id"] and m["status"] == "merged_unknown" for m in MP.merges()):
+            now = {m["id"]: m["status"] for m in MP.merges()}
+            if now.get(pending[-1]["id"]) == "merged_unknown":
                 return 1                                   # 核对出来已经合并了（来源不明）：没有可合的
+            if not want and now.get(pending[-1]["id"]) == "not_merged":
+                # 刚结清的旧请求说明 PR 换了版本；没写版本号的交出命令可能是会话异常恢复后重跑的旧命令，
+                # 不能拿它给没人看过的新版本建立授权（#260-P1-01，第 5 轮）。要合得写明现在的版本号再交出。
+                print(f"{name}#{pr} 没合并：上一次按策略合并结果不明，刚核对结清（PR 换了版本）。这次交出没写版本号，"
+                      f"不知道交出的是不是现在这个版本，所以不登记、不合并。看过现在的版本后，写明版本号再交出："
+                      f"merge_act.py auto {name}#{pr}@<版本前缀>")
+                return 1
         res = auto_try(repo, pr, by, mo.load_rules(), want=want, register=True)
     print(res["text"])
     return AUTO_EXIT.get(res["status"], 1)
