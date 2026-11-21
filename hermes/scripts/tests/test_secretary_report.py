@@ -499,6 +499,16 @@ class OverturnTests(Base):
         self.assertIn("推翻过了", texts[-1])
         self.assertEqual(len((SL.raw_dir() / "rule-candidates.jsonl").read_text(encoding="utf-8").splitlines()), 1)
 
+    def test_already_handled_elsewhere_not_overturned_again(self):
+        d = self.decided("ask", "failed")
+        tok = self.day()["card"]
+        L.set_disposition(self.st, d["id"], "overturned", "常浩在电脑上处理过", by="user", now=T1, use=SL.SECRETARY)
+        code, texts = self.click("overturn", d["id"], card=tok)
+        self.assertEqual(code, 0)
+        self.assertIn("已经处理过", texts[-1])
+        self.assertIsNone(self.progress(d))
+        self.assertFalse((SL.raw_dir() / "rule-candidates.jsonl").exists())
+
     def test_done_redispatch_freezes_stops_lists_and_records_resolution(self):
         d = self.decided("redispatch", target={"task": TASK, "generation": 1})
         q, c = self.add_run("queued"), self.add_run("claimed")
