@@ -224,12 +224,15 @@ def _begin(key, kind, scope, target, task, now, epoch):
             raise Refused(f"同一个动作（{key}）换了目标，拒绝（幂等键第一次登记后目标不能改）")
         if row and row["state"] == "done":
             return {"done": True, "again": True, **json.loads(row["outcome"] or "{}")}
+        if row and row["state"] == "unreconciled":         # 核不清是终态，对账不会再动它（预审 P2）
+            raise Refused(f"这个动作上一次核不清（{key}），对账结不掉，要常浩核实后用 "
+                          f"autoloop_exits settle --key {key} --result done|failed --note 依据 --confirm 结算，不重做")
         if row and row["state"] in UNSETTLED:
             raise Refused(f"这个动作上一次结果不明或还在进行（{key}），先对账，不重做")
         busy = con.execute(f"SELECT key, state FROM exits WHERE scope = ? AND key != ? AND state IN "
                            f"({','.join('?' * len(UNSETTLED))})", (scope, key, *UNSETTLED)).fetchone()
         if busy:
-            word = "正在进行" if busy["state"] == "executing" else "结果不明，已冻结"
+            word = {"executing": "正在进行", "unreconciled": "核不清（等常浩 settle 结算），已冻结"}.get(busy["state"], "结果不明，已冻结")
             raise Refused(f"{scope} 里有别的动作{word}（{busy['key']}），先等它或对账")
         t = iso(now)
         if row:                                            # 上一次确认没做成：重做，记一次新的尝试

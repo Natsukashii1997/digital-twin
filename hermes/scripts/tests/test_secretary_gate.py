@@ -12,6 +12,7 @@ import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一�
 import contextlib
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import sqlite3
@@ -773,6 +774,10 @@ class RecoveryGateTests(Base):
             out = SG.lease(wait=0)
         self.assertIn("睡醒", out["paused"])
         self.assertEqual(self.calls, [])                                        # 没领卡、没报送达
+        buf = io.StringIO()                                                     # 预审 P2：命令行照实说闸关着，不崩
+        with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED), contextlib.redirect_stdout(buf):
+            self.assertEqual(SG.main(["lease", "--wait", "0"]), 1)
+        self.assertIn("恢复闸关着", json.loads(buf.getvalue())["msg"])
 
 
 class ReconcileTests(Base):
@@ -1722,6 +1727,16 @@ class LeaseTests(Base):
             self.assertTrue(SG.lease(wait=1)["ok"])
         self.assertEqual(seen, [("db", True), ("/v1/cards/30/delivered", True, ["飞书桥接或秘书领卡正持桥接锁"]), ("db", True)])
         self.assertFalse(F.bridge_busy())
+
+    def test_lease_cli_prints_the_card(self):
+        """命令行领到卡：照实打印，不因结果里带 ok 和打印函数的参数重名而崩（预审时发现）。"""
+        card = {"id": 31, "version": 1, "ref": None, "state": "open"}
+        buf = io.StringIO()
+        with mock.patch.object(F, "hub", lambda m, p, b=None, timeout=20, channel="feishu": {"card": dict(card)} if m == "GET" else {}), \
+                contextlib.redirect_stdout(buf):
+            self.assertEqual(SG.main(["lease", "--wait", "1"]), 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual((out["ok"], out["msg"], out["card"]), (True, "领到卡片 31", 31))
 
     def test_lease_registers_ref_and_reports_once_per_version(self):
         card = {"id": 30, "version": 1, "ref": None, "state": "open"}

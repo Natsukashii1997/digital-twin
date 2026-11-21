@@ -1445,8 +1445,9 @@ def main(argv=None):
             return 0
         if a.cmd == "lease":
             out = lease(a.wait)
-            done_line(bool(out is None or out["ok"]), "没有卡片" if out is None else (out.get("why") or f"领到卡片 {out['card']}"),
-                      **(out or {}))
+            msg = "没有卡片" if out is None else (out.get("why") or (f"恢复闸关着，这轮没领 / 没处理：{out['paused']}"
+                                                              if out.get("paused") else f"领到卡片 {out['card']}"))
+            done_line(bool(out is None or out["ok"]), msg, **{k: v for k, v in (out or {}).items() if k not in ("ok", "msg")})
             return 0 if out is None or out["ok"] else 1
         print(json.dumps(show(), ensure_ascii=False, indent=1))
         done_line(True, "只读")

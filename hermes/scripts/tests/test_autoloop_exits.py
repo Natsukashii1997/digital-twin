@@ -282,7 +282,7 @@ class Reconcile(Base):
         self.assertEqual(E.show()["frozen"], ["task:t3", "task:t4"])
         E.reconcile({"push_branch": lambda t, row, now: ("failed", {})})          # 审查 P1-01：核不清的不再自动改
         self.assertEqual(self.row("push_branch:t3:b:h1")["state"], "unreconciled")
-        with self.assertRaisesRegex(E.Refused, "结果不明或还在进行"):
+        with self.assertRaisesRegex(E.Refused, "核不清"):
             E.guard("push_branch", "push_branch:t3:b:h1", "task:t3", {}, self.act())
         again = E.guard("push_branch", "push_branch:t1:b:h1", "task:t1", {}, self.act())
         self.assertTrue(again["again"])                                   # 对账确认做成的：不重做
@@ -296,6 +296,10 @@ class Reconcile(Base):
         with self.assertRaisesRegex(E.Refused, "先对账"):
             E.settle("merge:o/r:1:h", "done", "看过", confirm=True)
         E.reconcile({"merge": lambda t, r, n: (None, {})})
+        with self.assertRaisesRegex(E.Refused, "核不清.*settle --key merge:o/r:1:h"):     # 预审 P2：不再叫人「先对账」
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, self.act())
+        with self.assertRaisesRegex(E.Refused, "核不清（等常浩 settle 结算）"):
+            E.guard("merge", "merge:o/r:2:h", "repo:o/r", {}, self.act())
         with self.assertRaisesRegex(E.Refused, "依据"):
             E.settle("merge:o/r:1:h", "done", " ", confirm=True)
         self.assertEqual(E.settle("merge:o/r:1:h", "failed", "GitHub 上看过没合并", confirm=True)["state"], "failed")
