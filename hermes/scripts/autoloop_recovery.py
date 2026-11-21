@@ -172,6 +172,8 @@ def gate_row():
 def closed_reason(row, epoch):
     if row and row.get("hold"):
         return f"维护中（恢复点 {row['hold']}），停写到维护结束"
+    if E.read_markers():                                 # 关闸标记（P1-08）：账本那笔没记上也算关着
+        return "出现结果不明（关闸标记），要先对账"
     if not row or not row.get("epoch"):
         return "还没对过账"
     if row["dirty"]:
@@ -226,6 +228,8 @@ def admit(con, epoch):
         raise E.Refused(f"恢复闸关着：维护中（恢复点 {r['hold']}）")
     if r["dirty"]:
         raise E.Refused(f"恢复闸关着：{r['dirty_reason'] or '出现结果不明'}，要先对账")
+    if E.read_markers():
+        raise E.Refused("恢复闸关着：出现结果不明（关闸标记），要先对账")
 
 
 @contextlib.contextmanager
@@ -452,6 +456,7 @@ def reconcile(readers=None):
     steps, why = [], None
     row = gate_row() or {}
     seen = row.get("dirty", 0)
+    marks = E.read_markers()                                              # 只清这几个标记，对账期间新建的留到下次
     if row.get("hold"):                                                   # 维护停写只由 release 结束，对账不开
         why = f"维护中（恢复点 {row['hold']}），停写到维护结束"                             # 只清这个数，对账期间新出的不明留到下次
     with E.db() as con:                                                   # 1 本机账本
@@ -486,7 +491,12 @@ def reconcile(readers=None):
         now_dirty = (con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone() or [0])[0]
         if why is None and now_dirty != seen:
             why = "对账期间又出现结果不明，要再对一次"
+        if why is None and "?" in marks:
+            why = "关闸标记目录读不了，不开闸"
+        if why is None and set(E.read_markers()) - set(marks):
+            why = "对账期间又出现结果不明（关闸标记），要再对一次"
         if why is None:
+            E.clear_markers(marks)
             con.execute("INSERT INTO gate (id, epoch, opened_at, dirty, dirty_reason, report) VALUES (1, ?, ?, 0, NULL, ?) "
                         "ON CONFLICT(id) DO UPDATE SET epoch = excluded.epoch, opened_at = excluded.opened_at, dirty = 0, "
                         "dirty_reason = NULL, report = excluded.report",

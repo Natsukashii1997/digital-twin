@@ -144,6 +144,67 @@ def mark_dirty(con, reason):
                 "ON CONFLICT(id) DO UPDATE SET dirty = gate.dirty + 1, dirty_reason = excluded.dirty_reason", (reason[:300],))
 
 
+# ---------- 关闸标记（L3 第 4 轮 P1-08，常浩 11-21 选甲） ----------
+# 结果不明关闸要往出口账本写一笔，账本被别的进程锁住超过 30 秒就写不进去；那时闸看起来还开着，入口照常放行。
+# 所以关闸先在账本旁的标记目录里建一个文件（建文件不等数据库锁），再记账本；两步有一步成功闸就是关的。
+# 每次关闸一个新文件，入口看闸（closed_reason）、领资格（admit）只要目录里有文件就当关着；对账开闸时只删它开始时看到的
+# 那几个，对账期间新建的留着，下一次再对。
+def marker_dir():
+    return db_path().with_name("gate-dirty.d")
+
+
+def read_markers():
+    """现有的关闸标记文件名（排好序）；没有目录就是没有；目录在却读不了，当作有（返回 ['?']，宁可关着）。"""
+    try:
+        return sorted(n for n in os.listdir(marker_dir()) if not n.startswith("."))
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return ["?"]
+
+
+def write_marker(reason):
+    """建一个关闸标记文件（先写临时文件再改名，读的一方只会看到完整的）。失败抛 OSError。"""
+    d = marker_dir()
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name = f"{now_tz().strftime('%Y%m%dT%H%M%S')}-{os.getpid()}-{os.urandom(4).hex()}"
+    tmp = d / f".{name}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, reason[:300].encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, d / name)
+    return name
+
+
+def clear_markers(names):
+    """对账开闸时删掉它开始时看到的那几个标记（别的不碰）。"""
+    for n in names:
+        try:
+            os.unlink(marker_dir() / n)
+        except FileNotFoundError:
+            pass
+
+
+def close_gate(reason):
+    """结果不明关闸：先建标记、再在账本记一笔（mark_dirty）。两步都失败才抛出（抛账本的那个错）。"""
+    marked = False
+    try:
+        write_marker(reason)
+        marked = True
+    except OSError:
+        pass
+    try:
+        with db() as con:
+            mark_dirty(con, reason)
+    except Exception:
+        if not marked:
+            raise
+    return marked
+
+
 # ---------- 进程与开机 ----------
 def boot_id():
     """这次开机的标识：macOS 读 kern.boottime，Linux（CI）读 /proc 的 boot_id；都读不到返回 '?'（当成进程不在）。"""
@@ -249,6 +310,11 @@ def _begin(key, kind, scope, target, task, now, epoch):
 
 
 def _finish(key, state, outcome=None, note=None):
+    if state == "unknown":                               # 先建关闸标记（P1-08）：下面账本写不进去时闸照样是关的
+        try:
+            write_marker(f"{key} 结果不明")
+        except OSError:
+            pass
     with db() as con:
         con.execute("UPDATE exits SET state = ?, outcome = ?, updated_at = ? WHERE key = ? AND state = 'executing' "
                     "AND pid = ?", (state, json.dumps(outcome or {}, ensure_ascii=False, sort_keys=True),

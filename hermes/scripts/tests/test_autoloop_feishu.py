@@ -652,6 +652,13 @@ class Answer(Base):
         self.assertEqual(len(seen), 1)
         self.assertTrue(seen[0] and seen[0][0])
 
+    def test_gate_close_failure_still_records_unknown(self):
+        """L3 第 4 轮 P1-08：关闸两步都失败时，本人回答照样记成结果不明（不停在在途），再把错报出来。"""
+        self.hub_reply = F.HubError("没等到回应")
+        with mock.patch.object(E, "close_gate", side_effect=OSError("盘满了")), self.assertRaises(OSError):
+            A.answer(self.tok, 1, CHAT, OWNER, self.ver())
+        self.assertEqual(self.claim()["state"], "unknown")
+
     def test_unknown_answer_closes_the_gate_and_gate_reconcile_skips_queued(self):
         def dirty():
             with E.db(write=False) as con:

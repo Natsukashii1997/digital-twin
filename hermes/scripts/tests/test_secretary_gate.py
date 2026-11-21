@@ -768,6 +768,34 @@ class RecoveryGateTests(Base):
         with E.db(write=False) as con:
             self.assertTrue(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0])
 
+    def test_locked_ledger_while_closing_still_keeps_the_gate_closed(self):
+        """L3 第 4 轮 P1-08：结果不明关闸时出口账本被锁住（写不进 dirty）：标记文件让闸照样关着；锁放开后别的写也过不了，
+        要等秘书对账结掉这条决定。"""
+        real_gate(self)
+        R.ensure_open()
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        real_close = E.close_gate
+
+        def locked(reason):
+            with mock.patch.object(E, "mark_dirty", side_effect=sqlite3.OperationalError("database is locked")):
+                return real_close(reason)
+        with mock.patch.object(E, "close_gate", locked):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertEqual(self.get(out["decision"])["status"], "unknown")
+        with E.db(write=False) as con:
+            self.assertEqual(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0], 0)   # 账本那笔确实没记上
+        with self.assertRaisesRegex(E.Refused, "恢复闸关着"):                                     # 锁放开后：照样拦住
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, dict)
+        self.assertTrue(E.read_markers())                                                         # 秘书没结掉：标记不清
+
+    def test_both_closing_steps_failing_still_records_unknown(self):
+        """P1-08：标记和账本都写不进：照样把秘书决定记成结果不明，再把错报出来。"""
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        with mock.patch.object(E, "close_gate", side_effect=OSError("盘满了")), self.assertRaisesRegex(OSError, "盘满了"):
+            self.submit()
+        self.assertEqual([d[3] for d in self.decisions()], ["unknown"])
+
     def test_lease_waits_while_gate_closed(self):
         self.calls.clear()
         with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED):

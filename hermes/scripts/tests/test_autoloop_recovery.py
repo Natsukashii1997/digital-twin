@@ -178,6 +178,61 @@ class Order(Base):
         submit.assert_not_called()
 
 
+class Markers(Base):
+    """L3 第 4 轮 P1-08（常浩 11-21 选甲）：关闸先建标记文件、再记账本；账本那笔写不进去时闸照样是关的。"""
+
+    def test_marker_alone_closes_the_gate_until_reconciled(self):
+        epoch = R.ensure_open()
+        name = E.write_marker("秘书代批 sd-1 结果不明")                 # 只有标记、账本里 dirty 还是 0
+        self.assertEqual(R.gate_row()["dirty"], 0)
+        self.assertIn("关闸标记", R.status()["why"])
+        with self.assertRaisesRegex(E.Refused, "关闸标记"), E.db() as con:     # 领资格时也认
+            R.admit(con, epoch)
+        with mock.patch.object(R, "ensure_open", lambda readers=None: epoch), \
+                self.assertRaisesRegex(E.Refused, "关闸标记"):                  # 「看一眼」说开着也拦得住
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, dict)
+        R.ensure_open()                                                         # 对账：没有别的结果不明 → 开闸、清标记
+        self.assertTrue(R.status()["open"])
+        self.assertEqual(E.read_markers(), [])
+        self.assertTrue(name)
+
+    def test_marker_written_during_reconcile_keeps_the_gate_closed(self):
+        R.ensure_open()
+        E.write_marker("第一次")
+        real = R._secretary
+
+        def late():
+            E.write_marker("对账期间又出现")                                    # 账本那笔没记上，只有标记
+            return real()
+        with mock.patch.object(R, "_secretary", late):
+            rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIn("关闸标记", rep["why"])
+        self.assertEqual(len(E.read_markers()), 2)                              # 没开闸：一个都不删
+        rep = R.reconcile()
+        self.assertTrue(rep["open"], rep["why"])
+        self.assertEqual(E.read_markers(), [])
+
+    def test_unreadable_marker_dir_keeps_the_gate_closed(self):
+        R.ensure_open()
+        with mock.patch.object(E, "read_markers", return_value=["?"]):
+            self.assertIn("关闸标记", R.status()["why"])
+            self.assertIn("读不了", R.reconcile()["why"])
+
+    def test_close_gate_survives_a_locked_ledger(self):
+        """账本被锁住（mark_dirty 抛错）：标记已建，闸是关的，close_gate 不抛；两步都失败才抛。"""
+        import sqlite3
+        R.ensure_open()
+        with mock.patch.object(E, "mark_dirty", side_effect=sqlite3.OperationalError("database is locked")):
+            self.assertTrue(E.close_gate("x 结果不明"))
+        self.assertEqual(R.gate_row()["dirty"], 0)
+        self.assertIn("关闸标记", R.status()["why"])
+        with mock.patch.object(E, "mark_dirty", side_effect=sqlite3.OperationalError("database is locked")), \
+                mock.patch.object(E, "write_marker", side_effect=OSError("盘满了")), \
+                self.assertRaises(sqlite3.OperationalError):
+            E.close_gate("y 结果不明")
+
+
 class AdmissionRace(Base):
     """审查 P1-03：ensure_open() 只是先看一眼；它放行之后闸立刻被关（别的进程登记了结果不明、或开始维护），
     领写入资格的那个写事务里的 admit 必须拦住，外部动作一次也不做。"""

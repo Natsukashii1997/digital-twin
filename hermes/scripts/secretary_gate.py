@@ -979,11 +979,10 @@ def finish(st, decision_id, result, outcome=None, now=None):
     if result != "unknown":
         SL.finish(st, decision_id, result, outcome, now=now)
         return
-    try:                                         # 先关闸、再记结果不明（L3 第 3 轮 P1-08）：两步之间别的写入者过不了 admit；
-        with E.db() as con:                      # 关闸失败也照样记账（恢复闸对账看到秘书结果不明不开闸）
-            E.mark_dirty(con, f"秘书代批 {decision_id} 结果不明")
-    finally:                                     # 记账失败：闸已关，决定停在 executing，2 分钟后秘书对账接手
-        SL.finish(st, decision_id, result, outcome, now=now)
+    try:                                         # 先关闸、再记结果不明（L3 第 3 轮 P1-08）：两步之间别的写入者过不了 admit。
+        E.close_gate(f"秘书代批 {decision_id} 结果不明")   # 关闸先建标记文件、再记出口账本（第 4 轮，常浩 11-21 选甲），
+    finally:                                     # 账本被锁住也是关的；两步都失败才抛出，照样记账。记账失败：闸已关，
+        SL.finish(st, decision_id, result, outcome, now=now)   # 决定停在 executing，2 分钟后秘书对账接手
 
 
 def _yield(st, d, con, card_id, choice, note, now):
