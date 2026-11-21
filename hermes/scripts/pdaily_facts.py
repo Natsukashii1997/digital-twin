@@ -365,7 +365,8 @@ def new_lessons(span, projects, notes):
 
 
 def officer_misses(span):
-    """合并官判断和真实结局对不上的（agreement.csv 的 agree=否），按「判了什么 → 结局」归类计数；够 2 次标可升提案。"""
+    """合并官判断和真实结局对不上的（agreement.csv 的 agree=否），按「判了什么 → 结局」归类计数；够 2 次标可升提案。
+    按策略合并的（owner=策略合并，#257）不算：合并官判「退回」的第一版不拦，那个结局是策略自己促成的，不是常浩推翻了判断。"""
     f = actions.SHADOW / "agreement.csv"
     if not f.exists():
         return []
@@ -373,7 +374,8 @@ def officer_misses(span):
     groups = {}
     with f.open(encoding="utf-8", errors="replace", newline="") as fh:
         for r in csv.DictReader(fh):
-            if r.get("agree") != "否" or r.get("source") != "live" or not r.get("outcome_at"):
+            if (r.get("agree") != "否" or r.get("source") != "live" or not r.get("outcome_at")
+                    or r.get("owner") == actions.POLICY_OWNER):
                 continue
             try:
                 r["outcome_at"] = actions.stamp(r["outcome_at"])     # 统一成北京时间，first / last 才能直接比
@@ -433,6 +435,7 @@ def build(day, projects, gh_wait=0):
         rsk.extend(loop[1])
     refs = part("跨项目引用", cross_refs, w, recs, projects)
     obs = part("观察池", observations, w, projects, notes)
+    auto = part("按策略合并", actions.policy_book, w)     # 「替你合并了什么」的原料（#257）；账本还没有时三样都是空的
     ids = {r["project_id"] for r in recs}
     yd = lambda r, k: r["yesterday_delta"].get(k)
     unknown = [r["project_id"] for r in recs if any(yd(r, k) is None for k in ("merged_prs", "closed_issues", "commits"))]
@@ -452,6 +455,7 @@ def build(day, projects, gh_wait=0):
         "projects": recs,
         "actions": acts, "other_actions": others,
         "decisions": dec, "risks": rsk, "cross_refs": refs, "observations": obs,
+        "auto_merges": auto,
         "counts": {   # 开头三个数的原料（4.1）：「实质推进」要不要算，由 Hermes 看成果判断
             "projects_with_delta": delta,
             "projects_delta_unknown": unknown,      # 增量有一项取不到的项目：不当成「没有新动作」

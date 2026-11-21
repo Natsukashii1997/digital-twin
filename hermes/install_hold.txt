@@ -15,9 +15,6 @@ hermes/scripts/custody.py @648658c0e795e1a6043abb4f85686051f84904e5  # 托管开
 hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_ledger.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_report.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
-hermes/scripts/openloop.py  # 未闭环账本（#266 批 5a），5a-1、5a-2 只读不装；5a-3 接日报和午晚单时常浩点头再装
-hermes/scripts/openloop_slip.py  # 午晚单（#281 批 5a-3a），和 openloop.py 一起在 5a-3c 常浩点头后装
-hermes/scripts/pdaily_facts.py @30b9f5a9d244f886aaf68ef2f0f966b675cdfd86  # 日报事实快照；main 版多了未闭环账本来源（#288 批 5a-3b），要 openloop.py 一起装才跑得起来，5a-3c 常浩点头后一起装
 hermes/scripts/secretary.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_gate.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_ledger.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
