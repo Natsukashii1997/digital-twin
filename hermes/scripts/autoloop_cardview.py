@@ -16,7 +16,7 @@ title、text、options、recommend、choice、answer、by、result、rule、crea
       结束后大字写结果（一行；Agent 的总结放在大字下面），原问题收进「当时问的是什么」折叠面板；通知卡（含中台一建出来
       就关的只读通知）结束后正文直接摊开，常浩结案时写了处理说明（answer）就附「处理说明：…」。
       只有 card.text 按 markdown 显示；选项、回答、结果、规则名是纯文本：单独成行的用纯文本组件，放进大字和页脚的
-      先把 markdown / HTML 有含义的字符换成全角（esc）。
+      先把 markdown / HTML 有含义的字符换成全角（esc），调用方传的 hint 和 mark 也一样。
       mark：页脚小字（如卡片令牌尾号，回读时认卡用）；
       secretary：秘书在 by 里的名字（同 autoloop_config.SECRETARY）；hint：开着时的「怎么回」提示，None 用默认。
   outcome(card, secretary="秘书") -> str | None   结束的卡写什么结果（开着的卡返回 None）
@@ -129,7 +129,9 @@ def footer(card, mark, extra=""):
         bits.append(f"来源 {esc(card['rule'])}")
     if mark:
         bits.append(esc(mark))
-    return grey("｜".join(bits) + (f"｜{extra}" if extra else ""))
+    if extra:
+        bits.append(esc(extra))                    # 「怎么回」提示也是纯文本，调用方可以自定（L3 第 2 轮 #256-P2-01）
+    return grey("｜".join(bits))
 
 
 def card_json(header, elements):

@@ -174,6 +174,19 @@ class Render(unittest.TestCase):
         self.assertIn("自定提示", text(V.render(ASK, bridge(), hint="自定提示")))
         self.assertNotIn("引用这张卡片", text(V.render(DECIDED, bridge())))  # 结束的卡不再教怎么回
 
+    def test_custom_hint_is_plain_text(self):
+        """调用方自定的「怎么回」提示是纯文本：不能闭合灰字标签、造链接或加粗（L3 第 2 轮 #256-P2-01）。"""
+        evil = "</font>\n[查看权限](https://example.invalid) <at id=all></at> **粗**"
+        foot = V.render(ASK, bridge(), hint=evil)["body"]["elements"][-1]["content"]
+        self.assertTrue(foot.startswith("<font color='grey'>") and foot.endswith("</font>"))
+        self.assertEqual(foot.count("</font>"), 1)                      # 只有外层自己的那个结束标签
+        for bad in ("[查看权限](", "<at", "**粗**", "\n"):
+            self.assertNotIn(bad, foot, bad)
+        self.assertIn("＜／font＞".replace("／", "/"), foot)
+        self.assertIn("［查看权限］", foot)
+        self.assertIn(V.DEFAULT_HINT, text(V.render(ASK, bridge())))     # 默认提示和普通自定提示照常
+        self.assertIn("自定提示", text(V.render(ASK, bridge(), hint="自定提示")))
+
 
 class QuotedReply(unittest.TestCase):
     """引用卡片打字回答：只认一种明确的意思。"""
