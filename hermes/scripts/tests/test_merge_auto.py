@@ -560,6 +560,32 @@ class Auto(Fixture, unittest.TestCase):
         (merge,) = self.merges_called()
         self.assertIn(f"sha={new_head}", merge)
 
+    def test_leading_zeros_in_pr_number_are_the_same_pr(self):
+        """#260-P1-01 第 7 轮：gh 和 GitHub 把 app#05、app#0005 都当成 app#5；账本按字符串比。PR 号不规范的话，
+        前导零能绕过「有过没合上就要写版本号」和「结果不明先冻结」。两种都要拦住，账本和交出登记里也只记 5。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")                     # 结果不明、PR 还开着、版本没变
+        for ref in ("app#05", "app#0005"):
+            r = self.auto(ref)
+            self.assertEqual(r.returncode, 1, ref + r.stdout + r.stderr)
+            self.assertIn("还没核对清楚", r.stdout)                  # 冻结：不重发
+        self.assertEqual((self.merges_called(), self.events()), ([], ["intent"]))
+        new_head = self.pr_commit(5, {"docs/a.md": "someone else pushed\n"})
+        self.update_pr(headRefOid=new_head)
+        self.scan_at("2026-11-07T10:20:00+08:00")                    # 巡视结清：app#5 有过没合上
+        r = self.auto("app#005", env={"DT_NOW": "2026-11-07T10:30:00+08:00"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("写明版本号", r.stdout)
+        self.assertEqual((self.merges_called(), self.handoffs(), self.events()), ([], [], ["intent", "not_merged"]))
+        r = self.auto(f"app#05@{new_head[:7]}", env={"DT_NOW": "2026-11-07T10:35:00+08:00"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        intents = [b for b in self.book() if b["event"] == "intent"]
+        self.assertEqual([b["pr"] for b in intents], ["5", "5"])     # 账本里只有规范写法
+        (merge,) = self.merges_called()
+        self.assertEqual(merge[3], "repos/o/app/pulls/5/merge")
+        r = self.cli(ACT, "revert", "app#05")                        # 撤回也认同一个 PR
+        self.assertIn("已开撤回 PR", r.stdout)
+
     def test_settled_because_closed_says_closed(self):
         """#260-P2-17：旧请求是因为 PR 被关掉才结清的，提示要说 PR 已关闭，不说换了版本。"""
         self.sign()

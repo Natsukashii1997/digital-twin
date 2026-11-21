@@ -245,6 +245,7 @@ def find_card(ref):
     if not m:
         raise Stop(f"看不懂「{ref}」（要写成 仓库#PR@版本，例如 digital-twin#68@1a2b3c4）", "引用飞书里的卡片{again}")
     name, pr, h = m.groups()
+    pr = str(int(pr))                                       # 05 和 5 是同一个 PR（#260-P1-01 第 7 轮）
     hits = [c for c in read_cards()["cards"]
             if c["repo"].split("/")[-1] == name and str(c["pr"]) == pr and c["head"].startswith(h)]
     if not hits:
@@ -1067,6 +1068,9 @@ def cmd_auto(ref, by):
     if not m:
         raise Stop(f"看不懂「{ref}」（要写成 仓库#PR，或 仓库#PR@版本，例如 my-skills#121@1a2b3c4）", "")
     name, pr, want = m.groups()
+    # PR 号规范成不带前导零的写法：gh 和 GitHub 把 05、0005 都当成 5，账本和交出登记却按原样的字符串比，
+    # 不规范的话 app#05 能绕过 app#5 的结果不明和「要写版本号」的约束（#260-P1-01，第 7 轮审查）。
+    pr = str(int(pr))
     repo = repo_of(name)
     with MP.locked():
         pending = MP.unsettled(repo, pr)
@@ -1240,6 +1244,7 @@ def cmd_revert(ref, reason):
     if not m:
         raise Stop(f"看不懂「{ref}」（要写成 仓库#PR，例如 my-skills#121）", "")
     name, pr, _ = m.groups()
+    pr = str(int(pr))                                       # 同 cmd_auto：05 和 5 是同一个 PR
     repo = repo_of(name)
     rules = mo.load_rules()
     with MP.locked():
