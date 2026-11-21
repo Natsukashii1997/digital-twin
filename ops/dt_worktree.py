@@ -7,9 +7,12 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
 把其余参数原样交给真正的 CLI（dt-worker 自己的 ~/.agent-autoloop/bin/<执行方>-proxy.sh，带过滤代理）。
 
 每一轮：
-  1. 准入（不过就不启动 CLI）：这一轮的事件都来自 hermes 来源、事项（subject）是同一个任务单号；派单事件的类型是
+  1. 准入（不过就不启动 CLI）：门卫规则在生效——root 每 5 分钟核对后写的状态文件
+     （/Library/Application Support/DigitalTwin/pf-dt-worker.status）是 state=ok、10 分钟内刷新过、管着 dt-worker；
+     规则没装上、正在加载、加载失败或核对不过，都不开工（常浩 11-20 定，ADR-015 0E-1 L3 第 3 轮 P1-03）。
+     这一轮的事件都来自 hermes 来源、事项（subject）是同一个任务单号；派单事件的类型是
      dispatch.<仓库>.<执行方>.write、detail 里的单号对得上；回答和复查事件沿用这张单上次派单的代次。
-     读工人只读的凭证镜像（/Users/Shared/dt-autoloop/grants/status.json）和任务单（tasks/<单号>.md）：凭证有效、没过期、
+     读工人只读的凭证镜像（/Users/Shared/dt-gate/grants/status.json，0E-2 起由 dt-gate 写）和任务单（tasks/<单号>.md）：凭证有效、没过期、
      允许改文件、代次是当前的且没作废、执行方 / 仓库 / 规则名对得上、任务单五要素的哈希等于凭证记的范围哈希；
      续接时还要和第一轮钉下的范围哈希、仓库、执行方一致（续接后范围不扩大）；这张单累计用时没到上限（2 小时）。
   2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 <执行方>/<单号>（如 claude/t-…），基线是第一轮时的 origin/main；
@@ -33,8 +36,8 @@ PR 审查、常浩合并兜底，0D 的结果账本记「轮次 × 交接头提�
 这里的检查只防正常流程出错，不当作不可绕过的边界：脚本归主账号所有、工人只能运行不能改，但工人账号的进程能伪造镜像
 路径之类；真正的边界在主账号的受信发布（再按凭证库核一遍）和 GitHub 保护（方案 5.1 第 3 条）。
 
-只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_AUTOLOOP_SHARED、DT_GRANTS_STATUS、
-DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET。
+只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_GATE_SHARED、DT_GRANTS_STATUS、
+DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET、DT_PF_STATUS。
 """
 import datetime as dt
 import fcntl
@@ -56,6 +59,8 @@ GITHUB = re.compile(r"^[\w.-]{1,100}/[\w.-]{1,100}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 FOLLOW_TYPES = ("card.answered", "timer.due")     # 回答、复查：沿用这张单上次派单的代次
 CHECK_ARGS = {"claude": (["auth", "status"], ["--version"]), "codex": (["login", "status"], ["--version"])}
+PF_STALE_SECONDS = 10 * 60                         # 门卫规则每 5 分钟核对一次；超过两个周期没刷新就当停了
+PF_ACCOUNT = "dt-worker"
 BUDGET_SECONDS = 2 * 3600                          # 每张单跨轮累计（常浩 2026-11-18 定：一律 2 小时）
 KILL_GRACE = 10
 STOP_GRACE = 7                                     # 接单程序取消后 10 秒强杀，本脚本 7 秒内先清掉 CLI 整组
@@ -100,16 +105,17 @@ def stopped():
 
 
 # ---------- 路径 ----------
-def shared():
-    return Path(os.environ.get("DT_AUTOLOOP_SHARED") or "/Users/Shared/dt-autoloop")
+def gate_shared():
+    """dt-gate 的共享目录（ADR-015 0E-2）：root 建、grants/ 和 tasks/ 只有 dt-gate 能写，工人只读。"""
+    return Path(os.environ.get("DT_GATE_SHARED") or "/Users/Shared/dt-gate")
 
 
 def status_path():
-    return Path(os.environ.get("DT_GRANTS_STATUS") or shared() / "grants/status.json")
+    return Path(os.environ.get("DT_GRANTS_STATUS") or gate_shared() / "grants/status.json")
 
 
 def tasks_dir():
-    return Path(os.environ.get("DT_GRANTS_TASKS") or shared() / "tasks")
+    return Path(os.environ.get("DT_GRANTS_TASKS") or gate_shared() / "tasks")
 
 
 def work_root():
@@ -131,6 +137,29 @@ def remote_url(github):
 
 def budget():
     return int(os.environ.get("DT_WORKTREE_BUDGET") or BUDGET_SECONDS)
+
+
+def pf_status_path():
+    return Path(os.environ.get("DT_PF_STATUS") or "/Library/Application Support/DigitalTwin/pf-dt-worker.status")
+
+
+def pf_problem(now_ts=None):
+    """门卫规则不在生效就返回原因，在生效返回 None（L3 第 3 轮 P1-03：加载失败时 pf 保留旧规则，只写状态拦不住人，
+    要在开工前看状态）。状态文件由 root 写（ops/dt_worker_pf.sh apply）、所有人可读、工人改不了。"""
+    p = pf_status_path()
+    try:
+        text = p.read_text()
+        age = (now_ts or time.time()) - p.stat().st_mtime
+    except OSError:
+        return "门卫规则没装（没有状态文件）"
+    fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
+    if fields.get("state") != "ok":
+        return f"门卫规则没在生效（{fields.get('state') or '状态不明'}：{fields.get('reason', '').replace('_', ' ')[:80]}）"
+    if fields.get("enabled") != "yes" or PF_ACCOUNT not in fields.get("users", "").split(","):
+        return "门卫规则的状态不对（pf 没开或没管上 dt-worker）"
+    if not 0 <= age <= PF_STALE_SECONDS:
+        return f"门卫规则 {int(age // 60)} 分钟没刷新，开机任务可能停了"
+    return None
 
 
 def branch_name(executor, task_id):
@@ -240,6 +269,9 @@ def admit(executor, repo, context, now, check_budget=True):
     task_id = subjects.pop()
     if not isinstance(task_id, str) or not TASK_ID.match(task_id):
         raise Refused("事件对象不是任务单号")
+    pf = pf_problem()
+    if pf:                                      # 交接前重核也走这里：跑到一半规则掉了，这一轮同样不交接
+        raise Refused(f"{pf}，工人不开工", task_id)
     dispatch_type = f"dispatch.{repo}.{executor}.write"
     gens = []
     for e in events:

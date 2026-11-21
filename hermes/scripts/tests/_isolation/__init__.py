@@ -13,7 +13,8 @@
 1. 清掉可能指向正式环境的环境变量（前缀见 SCRUB_PREFIXES，KEEP 里的测试开关除外），再把 HOME、XDG_*、
    AGENT_AUTOLOOP_HOME、HERMES_HOME、CODEX_HOME、CLAUDE_CONFIG_DIR 指到本次运行的临时目录（AGENT_AUTOLOOP_HOME 特意不放在
    临时家目录下，和默认的 ~/.agent-autoloop 不同，「--target 和实际目录不一致」这类检查才测得到）；默认路径不在家目录下的
-   DT_GRANTS_STATUS、DT_GRANTS_TASKS、DT_AUTOLOOP_SHARED（默认 /Users/Shared/dt-autoloop/…）、DT_PUBLISH_OUTBOX
+   DT_GRANTS_STATUS、DT_GRANTS_TASKS、DT_GATE_SHARED（默认 /Users/Shared/dt-gate/…）、DT_GATE_ROOT、DT_GATE_LOGS、
+   DT_GATE_DAEMONS（0E-2 搬家脚本的 root 目录）、DT_PUBLISH_OUTBOX
    （默认 /Users/dt-worker/dt-outbox）也指过去，DT_HUB 指到不监听的 127.0.0.1:9。
    要读真正的正式目录（只读核对、上游源码）用 REAL_HOME（按系统账号取），不用 ~。
    git 用临时全局配置（固定的测试身份、默认分支 main），不读本机 ~/.gitconfig。
@@ -41,7 +42,7 @@ SCRUB_PREFIXES = ("DT_", "HERMES_", "AGENT_AUTOLOOP", "AGENT_KIT_", "FEISHU_", "
                   "TIDINGS_", "RELAY_", "ORCA_", "SKILL_HEALTH_", "MY_SKILLS_", "GH_", "GITHUB_TOKEN", "GIT_CONFIG",
                   "ANTHROPIC_", "OPENAI_", "CODEX_", "CLAUDE_", "XDG_")
 KEEP = {"DT_HUB_E2E", "DT_AUTOLOOP_CLI"}                # 跑测试的人给的开关，不指向正式数据
-PROD_PORTS = {3350, 3352, 5433, 8085, 8086, 8090}      # 中台、只读窗口、本机数据库、加速器控制口 / 代理、工人过滤代理
+PROD_PORTS = {3350, 3352, 3353, 5433, 8085, 8086, 8090}   # 中台、只读窗口、秘书窄窗口、本机数据库、加速器控制口 / 代理、工人过滤代理
 DEAD = "http://127.0.0.1:9"
 STUB_COMMANDS = ("launchctl", "security", "sudo", "crontab", "osascript", "pfctl", "lark-cli", "hermes", "claude",
                  "codex", "gh", "multica", "docker")
@@ -79,9 +80,11 @@ def isolated_env():
         "XDG_CACHE_HOME": str(HOME / ".cache"), "XDG_STATE_HOME": str(HOME / ".local/state"),
         "AGENT_AUTOLOOP_HOME": str(ROOT / "agent-autoloop"), "HERMES_HOME": str(HOME / ".hermes"),
         "CODEX_HOME": str(HOME / ".codex"), "CLAUDE_CONFIG_DIR": str(HOME / ".claude"),
-        "DT_GRANTS_STATUS": str(ROOT / "shared/dt-autoloop/grants/status.json"),
-        "DT_GRANTS_TASKS": str(ROOT / "shared/dt-autoloop/tasks"),
-        "DT_AUTOLOOP_SHARED": str(ROOT / "shared/dt-autoloop"),
+        "DT_GRANTS_STATUS": str(ROOT / "shared/dt-gate/grants/status.json"),
+        "DT_GRANTS_TASKS": str(ROOT / "shared/dt-gate/tasks"),
+        "DT_GATE_SHARED": str(ROOT / "shared/dt-gate"),
+        "DT_GATE_ROOT": str(ROOT / "library/gate"), "DT_GATE_LOGS": str(ROOT / "library/logs/gate"),
+        "DT_GATE_DAEMONS": str(ROOT / "library/LaunchDaemons"),
         "DT_PUBLISH_OUTBOX": str(ROOT / "users/dt-worker/dt-outbox"),
         "DT_HUB": DEAD,
         "HTTP_PROXY": DEAD, "HTTPS_PROXY": DEAD, "ALL_PROXY": DEAD, "http_proxy": DEAD, "https_proxy": DEAD,

@@ -52,12 +52,14 @@ if mode in ("orphan", "orphan_sleep"):          # 留一个不理 SIGTERM 的后
         time.sleep(0.05)
 if mode == "orphan_sleep":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-if mode in ("edit", "revoke", "branch", "sleep", "orphan", "orphan_sleep"):
+if mode in ("edit", "revoke", "branch", "sleep", "orphan", "orphan_sleep", "pf_fail"):
     with open("README.md", "a") as f:
         f.write("一行改动 %d\n" % time.time_ns())
 if mode == "workflow":
     Path(".github/workflows").mkdir(parents=True, exist_ok=True)
     Path(".github/workflows/ci.yml").write_text("on: push\n")
+if mode == "pf_fail":                          # 跑到一半门卫规则加载失败
+    Path(os.environ["DT_PF_STATUS"]).write_text("at=x state=failed enabled=yes reason=加载失败\n")
 if mode == "revoke":
     p = Path(os.environ["DT_GRANTS_STATUS"])
     doc = json.loads(p.read_text())
@@ -73,6 +75,9 @@ if mode in ("sleep", "orphan_sleep"):           # 已经交了结果还没退出
     time.sleep(30)
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 '''
+
+
+PF_OK = "at=2026-11-20T10:00:00+0800 state=ok enabled=yes rules=9 users=dt-worker,dt-secretary reloaded=no\n"
 
 
 def git(*args, cwd=None):
@@ -102,7 +107,10 @@ class WorkerBase(Base):
         fake.parent.mkdir()
         fake.write_text(FAKE_CLI.format(py=sys.executable))
         fake.chmod(0o755)
+        self.pf_status = r / "pf-dt-worker.status"                   # 门卫规则在生效（L3 P1-03 的开工闸）
+        self.pf_status.write_text(PF_OK)
         self.wenv = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(r / "home"),
+                     "DT_PF_STATUS": str(self.pf_status),
                      "DT_GRANTS_STATUS": str(self.status), "DT_GRANTS_TASKS": str(self.tasks),
                      "DT_WORK_ROOT": str(self.work), "DT_OUTBOX": str(self.outbox),
                      "DT_WORKTREE_REAL_CLAUDE": str(fake), "DT_WORKTREE_REAL_CODEX": str(fake),
@@ -272,6 +280,42 @@ class FirstTurnAndResume(WorkerBase):
         lines = [json.loads(x) for x in r.stdout.strip().splitlines()]
         self.assertEqual([x["type"] for x in lines], ["item.completed", "turn.completed"])
         self.assertTrue(lines[0]["item"]["text"].startswith("停下了：凭证已撤销"))
+
+
+class PfGate(WorkerBase):
+    """ADR-015 0E-1 L3 第 3 轮 P1-03（常浩 11-20 定）：门卫规则不在生效就不开工——规则加载失败时 pf 保留旧规则，
+    只写状态拦不住人，所以工人每一轮开工前、交接前都看 root 写的状态文件。"""
+
+    def test_not_ok_never_starts_cli(self):
+        cases = (("at=x state=failed enabled=yes reason=规则没加载上（pf_保留了旧规则）\n", "规则没加载上"),
+                 ("at=x state=applying\n", "applying"),
+                 ("at=x state=ok enabled=no rules=9 users=dt-worker\n", "状态不对"),
+                 ("at=x state=ok enabled=yes rules=4 users=dt-secretary\n", "状态不对"),
+                 ("at=x enabled=yes rules=4\n", "状态不明"),                  # 0A 旧版状态文件没有 state
+                 ("", "状态不明"))
+        for text, words in cases:
+            self.pf_status.write_text(text)
+            r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+            self.assert_stopped(r, calls, words)
+
+    def test_missing_or_stale(self):
+        self.pf_status.unlink()
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_stopped(r, calls, "门卫规则没装")
+        self.pf_status.write_text(PF_OK)
+        old = time.time() - 11 * 60
+        os.utime(self.pf_status, (old, old))
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_stopped(r, calls, "11 分钟没刷新")
+
+    def test_dropped_mid_run_no_handoff(self):
+        """跑到一半规则掉了：改动照样在本地提交，但不交接。"""
+        tid = self.new_live_task()
+        r, calls = self.run_turn([self.dispatch_event(tid)], FAKE_MODE="pf_fail")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(self.final(r)["result"].startswith("停下了：门卫规则没在生效"), self.final(r)["result"])
+        self.assertIsNone(self.handoff(tid))
+        self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))   # 有改动，照样在本地提交
 
 
 class ScopeDoesNotGrow(WorkerBase):
