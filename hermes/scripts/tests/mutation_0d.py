@@ -219,17 +219,22 @@ M = [
     ("autoloop_answer.py", '            con.execute("COMMIT")                # 放出口账本写锁之前',
      '            pass                                 # 放出口账本写锁之前', "本人回答 inflight 放锁之后才提交",
      [RC + ".OwnerCommitVisibility"]),
-    ("autoloop_recovery.py", "        if gcon is not None:\n            waits = []\n            sec_bad, _ = _secretary(waits, gcon)",
-     "        if False:\n            waits = []\n            sec_bad, _ = _secretary(waits, gcon)", "开闸前不持凭证库锁重判只差补发（用第 4 步的旧名单）",
+    ("autoloop_recovery.py", "            waits = []\n            sec_bad, _ = _secretary(waits, gcon)\n            why = why or sec_bad\n",
+     "            pass\n", "开闸前不持凭证库锁重判只差补发（用第 4 步的旧名单）",
      [SG + ".RedispatchTests.test_freeze_between_step4_and_open_keeps_the_gate_closed",
       SG + ".RedispatchTests.test_grant_expiring_between_step4_and_open_keeps_the_gate_closed"]),
     ("autoloop_recovery.py", 'return e["sent"] == 2 and G.now_tz() - G.parse_iso(e["claimed_at"]) >= G.STALE',
      'return e["sent"] == 2', "刚领走在发的事件也算只差补发",
      [SG + ".RedispatchTests.test_fresh_claim_is_a_send_in_progress_not_a_resend"]),
-    ("autoloop_recovery.py", "        try:\n            con = locks.enter_context(E.db(timeout=",
-     "        locks.close()\n        try:\n            con = locks.enter_context(E.db(timeout=",
+    ("autoloop_recovery.py", "            why = why or sec_bad\n        frozen = E.frozen_scopes(con)",
+     "            why = why or sec_bad\n            gcon.execute(\"COMMIT\")\n            gcon.execute(\"BEGIN\")\n        frozen = E.frozen_scopes(con)",
      "重判完先放凭证库锁再开闸（冻结能插进来）",
      [SG + ".RedispatchTests.test_freeze_waits_until_the_gate_decision_is_committed"]),
+    # 续审第 2 轮 P1-08-02
+    ("autoloop_recovery.py", '        try:\n            con = locks.enter_context(E.db(timeout=5 if gcon is not None else 30))\n        except sqlite3.OperationalError as e:\n            locks.close()\n            return {"open": False, "why": f"出口账本这会儿被别的写入者占着（{e}），这次不开闸，下次再对", "frozen": [],\n                    "steps": steps, "epoch": epoch}\n        if gcon is not None:                      # 两把锁都拿到之后才重判：等出口账本锁那几秒里凭证可能自然过期（续审第 2 轮）\n            waits = []\n            sec_bad, _ = _secretary(waits, gcon)\n            why = why or sec_bad\n', '        if gcon is not None:                      # 两把锁都拿到之后才重判：等出口账本锁那几秒里凭证可能自然过期（续审第 2 轮）\n            waits = []\n            sec_bad, _ = _secretary(waits, gcon)\n            why = why or sec_bad\n        try:\n            con = locks.enter_context(E.db(timeout=5 if gcon is not None else 30))\n        except sqlite3.OperationalError as e:\n            locks.close()\n            return {"open": False, "why": f"出口账本这会儿被别的写入者占着（{e}），这次不开闸，下次再对", "frozen": [],\n                    "steps": steps, "epoch": epoch}\n', "重判放在拿出口账本锁之前（等锁那几秒里过期了也不知道）",
+     [SG + ".RedispatchTests.test_grant_expiring_while_waiting_for_the_exits_lock_keeps_the_gate_closed"]),
+    ("autoloop_recovery.py", "EXPIRY_MARGIN = dt.timedelta(seconds=60)", "EXPIRY_MARGIN = dt.timedelta(seconds=0)",
+     "快到期的续接事件也算只差补发", [SG + ".RedispatchTests.test_grant_about_to_expire_is_not_waiting_for_resend"]),
 ]
 
 

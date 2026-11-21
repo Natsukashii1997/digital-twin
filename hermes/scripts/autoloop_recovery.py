@@ -265,6 +265,7 @@ def hold(point_id, snapshot, hub_commit, max_card):
 
 
 SECRETARY_STALE = dt.timedelta(seconds=120)   # 同 secretary_gate.STALE
+EXPIRY_MARGIN = dt.timedelta(seconds=60)      # 凭证再过这么久就到期的续接事件，不算「只差网关补发」（续审第 2 轮 P1-08）
 
 
 def in_flight_writes():
@@ -471,7 +472,8 @@ def _waits_on_gateway(r, gcon=None):
     事件号的也要是同一个（G.bound_event，秘书对账同一套）。不按时间猜：别的代次、人工续接的事件一律不算。凭证对这条事件
     的代次已失效（冻结、撤销、过期）的补发不了，也不算（第 4 轮）。找不到、对不上、已作废或已送达的照常挡闸，
     由秘书对账结掉（核不清的由常浩 secretary_gate settle 定）。刚领走在发的（sent=2、领走不到 60 秒，同 G.STALE）还不是
-    「只差补发」，是一次正在进行的发送：照常挡闸，等它出结果或过了 60 秒再算（续审第 1 轮）。"""
+    「只差补发」，是一次正在进行的发送：照常挡闸，等它出结果或过了 60 秒再算（续审第 1 轮）。凭证有效期按「此刻 + 60 秒」
+    判（EXPIRY_MARGIN）：快到期的不靠「开闸后补发」放过——判完到开闸提交之间、开闸后网关领取之前，时间都还在走（续审第 2 轮）。"""
     did, status, action, task_id, outcome, target = r
     if action not in ("redispatch", "reject") or status not in ("executing", "unknown") or not G.db_path().exists():
         return False
@@ -484,9 +486,9 @@ def _waits_on_gateway(r, gcon=None):
     try:
         if gcon is None:
             with G.tx() as own:
-                verdict, e, _ = G.bound_event(own, task_id, did, kind, gen, key)
+                verdict, e, _ = G.bound_event(own, task_id, did, kind, gen, key, now=G.now_tz() + EXPIRY_MARGIN)
         else:
-            verdict, e, _ = G.bound_event(gcon, task_id, did, kind, gen, key)
+            verdict, e, _ = G.bound_event(gcon, task_id, did, kind, gen, key, now=G.now_tz() + EXPIRY_MARGIN)
         if verdict != "ok" or e["invalid"]:                       # 凭证已失效的事件补发不了，不算只差补发（第 4 轮）
             return False
         if e["sent"] == 0:
@@ -532,7 +534,7 @@ def reconcile(readers=None):
     steps.append({"step": "外部回读", "exits": exits, "answers": answers, "secretary": sec_bad or sec_note})
     why = why or sec_bad
     with contextlib.ExitStack() as locks:                                 # 5 结算开闸
-        # 先拿凭证库写锁、再拿出口账本写锁（锁顺序「凭证库 → 出口账本」）：第 4 步认定的「只差网关补发」在这里重新判一次，
+        # 先拿凭证库写锁、再拿出口账本写锁（锁顺序「凭证库 → 出口账本」），两把都拿到后把第 4 步认定的「只差网关补发」重新判一次，
         # 判完到开闸提交之间冻结、撤销、续接都进不来；凭证自然过期按此刻的时间判（续审第 1 轮 P1-08）。凭证库还不在就没有可补发的。
         # 已经知道不开闸就不拿凭证库锁（不白挡冻结、撤销）。拿着凭证库锁时出口账本只等 5 秒：等不到就这次不开闸，
         # 不让冻结、撤销跟着干等（它们自己最多等 30 秒）。
@@ -542,16 +544,16 @@ def reconcile(readers=None):
                 gcon = locks.enter_context(G.tx())
             except sqlite3.Error as e:
                 why = f"凭证库这会儿打不开（{type(e).__name__}），不开闸"
-        if gcon is not None:
-            waits = []
-            sec_bad, _ = _secretary(waits, gcon)
-            why = why or sec_bad
         try:
             con = locks.enter_context(E.db(timeout=5 if gcon is not None else 30))
         except sqlite3.OperationalError as e:
             locks.close()
             return {"open": False, "why": f"出口账本这会儿被别的写入者占着（{e}），这次不开闸，下次再对", "frozen": [],
                     "steps": steps, "epoch": epoch}
+        if gcon is not None:                      # 两把锁都拿到之后才重判：等出口账本锁那几秒里凭证可能自然过期（续审第 2 轮）
+            waits = []
+            sec_bad, _ = _secretary(waits, gcon)
+            why = why or sec_bad
         frozen = E.frozen_scopes(con)
         report = {"steps": steps, "frozen": frozen}
         now_dirty = (con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone() or [0])[0]

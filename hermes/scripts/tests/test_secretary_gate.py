@@ -129,6 +129,40 @@ CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT
 """
 
 
+@contextlib.contextmanager
+def watch_begin(thread_box, db):
+    """盯住某个线程（thread_box[0]）对库 db 新开的连接上的 BEGIN IMMEDIATE：entered 进去了、returned 返回了。
+    用来确定性地证明那个线程正卡在别人持着的写锁上（续审第 2 轮 P2-06）。"""
+    entered, returned = threading.Event(), threading.Event()
+    real_connect = sqlite3.connect
+
+    class Watch:
+        def __init__(self, con):
+            object.__setattr__(self, "_c", con)
+
+        def __getattr__(self, k):
+            return getattr(self._c, k)
+
+        def __setattr__(self, k, v):
+            setattr(self._c, k, v)
+
+        def execute(self, sql, *a):
+            if sql == "BEGIN IMMEDIATE":
+                entered.set()
+                try:
+                    return self._c.execute(sql, *a)
+                finally:
+                    returned.set()
+            return self._c.execute(sql, *a)
+
+    def connect(*a, **kw):
+        con = real_connect(*a, **kw)
+        hit = threading.current_thread() is thread_box[0] and a and str(a[0]) == str(db)
+        return Watch(con) if hit else con
+    with mock.patch.object(sqlite3, "connect", side_effect=connect):
+        yield entered, returned
+
+
 def make_hermes(home):
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text(f"model:\n  default: {MAIN}\n  provider: {MAIN_PROVIDER}\nfallback_model:\n"
@@ -985,40 +1019,114 @@ class RedispatchTests(Base):
         self.assertIsNotNone(rep["why"])
         self.assertIn(did, rep["why"])
 
-    def test_freeze_waits_until_the_gate_decision_is_committed(self):
-        """续审第 1 轮预审 P2：第 5 步重判完到开闸提交之间凭证库锁不能放——这时发起的冻结要卡到开闸提交之后才进去。"""
-        import threading
-        import time
-        did = self._stuck_redispatch_with_unsent_event()
-        froze = threading.Event()
-        errors = []
+    def _real_gate(self, clock):
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        return contextlib.ExitStack(), [
+            mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT),
+            mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40),
+            mock.patch.object(G, "now_tz", lambda: clock[0])]
 
-        def freeze():
+    def _in_step5(self, target, clock, db, extra=()):
+        """真恢复闸对账一次；第 5 步（两把锁都拿到、重判过之后，frozen_scopes 那里）起线程跑 target，
+        确定性地等它卡在 BEGIN IMMEDIATE 上，再让对账提交。返回 (对账结果, 线程卡住时的状态, 线程的异常)。"""
+        box, seen, errors = [None], [], []
+
+        def run():
             try:
-                G.freeze(TASK, "推翻", now=T + dt.timedelta(minutes=2))
-                froze.set()
+                target()
             except Exception as e:                             # pragma: no cover - 失败时给断言看
                 errors.append(e)
-        t = threading.Thread(target=freeze)
-        real, seen = E.frozen_scopes, []
+        box[0] = threading.Thread(target=run)
+        real = E.frozen_scopes
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in [*patches, *extra]:
+                stack.enter_context(x)
+            entered, returned = stack.enter_context(watch_begin(box, db))
 
-        def in_final_tx(con):                                   # 第 5 步：已持凭证库锁、出口账本锁，重判过
-            t.start()
-            time.sleep(0.5)
-            seen.append(froze.is_set())
-            return real(con)
-        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
-        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
-                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40), \
-                mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=2)), \
-                mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx):
+            def in_final_tx(con):
+                box[0].start()
+                self.assertTrue(entered.wait(10))               # 线程已经在 BEGIN IMMEDIATE 上
+                time.sleep(0.3)
+                seen.append(returned.is_set())                  # 还没拿到锁：确实排在对账后面
+                return real(con)
+            stack.enter_context(mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx))
             rep = R.reconcile()
-            t.join(35)
+            box[0].join(35)
+            self.assertTrue(returned.is_set())                  # 对账提交后拿到了
+        return rep, seen, errors
+
+    def test_freeze_waits_until_the_gate_decision_is_committed(self):
+        """续审第 1 轮预审 P2：第 5 步重判完到开闸提交之间凭证库锁不能放——这时发起的冻结要卡到开闸提交之后才进去。
+        续审第 2 轮 P2-06：用连接代理确定性地证明冻结线程卡在凭证库的 BEGIN IMMEDIATE 上。"""
+        self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+        rep, seen, errors = self._in_step5(lambda: G.freeze(TASK, "推翻", now=clock[0]), clock, G.db_path())
         self.assertEqual(errors, [])
-        self.assertEqual(seen, [False])                         # 开闸提交之前冻结进不去
-        self.assertTrue(froze.is_set())                         # 提交之后进去了
+        self.assertEqual(seen, [False])
         self.assertTrue(rep["open"], rep["why"])                # 判的那一刻只差补发：开闸
-        self.assertTrue(did)
+        with G.tx() as con:                                     # 冻结在开闸提交之后进去了
+            self.assertEqual(con.execute("SELECT status FROM grants WHERE task_id = ?", (TASK,)).fetchone()[0], "frozen")
+
+    def test_grant_expiring_while_waiting_for_the_exits_lock_keeps_the_gate_closed(self):
+        """续审第 2 轮 P1-08-02：第 5 步拿凭证库锁之后、拿到出口账本锁之前（那里最多等 5 秒）凭证自然过期——
+        重判放在两把锁都拿到之后，按那一刻的时间判，闸关着。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        until = T + dt.timedelta(hours=12)
+        clock = [until - dt.timedelta(minutes=2)]               # 第 4 步时还有 2 分钟：只差补发
+        real_db = E.db
+
+        def slow_db(*a, **kw):
+            if kw.get("timeout") == 5:                          # 第 5 步持着凭证库锁去等出口账本：等的这几秒里过期了
+                clock[0] = until + dt.timedelta(seconds=1)
+            return real_db(*a, **kw)
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            self.assertIsNone(R._secretary()[0])
+            stack.enter_context(mock.patch.object(E, "db", side_effect=slow_db))
+            rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIsNotNone(rep["why"])
+        self.assertIn(did, rep["why"])
+
+    def test_grant_about_to_expire_is_not_waiting_for_resend(self):
+        """续审第 2 轮 P1-08-02：凭证 60 秒内就到期的续接事件，不靠「开闸后补发」放过（判完到网关领取之间时间还在走）。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        until = T + dt.timedelta(hours=12)
+        with mock.patch.object(G, "now_tz", lambda: until - dt.timedelta(seconds=90)):
+            self.assertIsNone(R._secretary()[0])
+        with mock.patch.object(G, "now_tz", lambda: until - dt.timedelta(seconds=30)):
+            bad = R._secretary()[0]
+            self.assertIsNotNone(bad)
+            self.assertIn(did, bad)
+
+    def test_late_unknown_finish_of_a_waiting_redispatch_is_the_decided_cost(self):
+        """续审第 2 轮 P1-08-01（提议判定不成立）：② 的续接事件只差网关补发，决定还停在 executing，秘书进程这时才走到
+        finish(unknown)：标记写不进、关闸那笔排在对账后面。按 11-20 选甲这类结果不明不挡闸，对账照样开闸（别的动作照常
+        放行，是那次定下的代价）；关闸那笔随后记上，下一次对账照样开闸，补发一次，秘书对账记 done，不死锁、不多派。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+
+        def late_finish():
+            with L.TS.Store(L.db_path()) as st:
+                SG.finish(st, did, "unknown", {"error": "进程挂起后恢复"}, now=clock[0])
+        rep, seen, errors = self._in_step5(late_finish, clock, E.db_path(),
+                                           [mock.patch.object(E, "write_marker", side_effect=PermissionError("只读"))])
+        self.assertEqual(errors, [])
+        self.assertEqual(seen, [False])                         # 关闸那笔确实排在对账后面
+        self.assertTrue(rep["open"], rep["why"])                # 11-20 选甲：只差补发的不挡
+        self.assertEqual(self.get(did)["status"], "unknown")
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            self.assertFalse(R.status()["open"])                # 关闸那笔记上了
+            self.assertTrue(R.reconcile()["open"])              # 再对一次：照样只差补发，开闸
+            sent = G.send_pending(now=clock[0])
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual(SG.reconcile(now=clock[0] + dt.timedelta(minutes=1)), [(did, "done")])
 
     def test_fresh_claim_is_a_send_in_progress_not_a_resend(self):
         """续审第 1 轮：sent=2 刚领走不到 60 秒是一次正在进行的发送，不算只差补发（挡闸）；过了 60 秒才算（不挡）。"""
