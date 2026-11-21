@@ -1,0 +1,127 @@
+{
+ "schema": "2.0",
+ "config": {
+  "update_multi": true
+ },
+ "header": {
+  "title": {
+   "tag": "plain_text",
+   "content": "🧾 晚间单 · 11-20"
+  },
+  "subtitle": {
+   "tag": "plain_text",
+   "content": "要你亲手做 4 件｜一张表从上往下做"
+  },
+  "template": "indigo"
+ },
+ "body": {
+  "elements": [
+   {
+    "tag": "table",
+    "page_size": 10,
+    "row_height": "auto",
+    "row_max_height": "999px",
+    "header_style": {
+     "text_align": "left",
+     "text_size": "normal",
+     "background_style": "grey",
+     "bold": true,
+     "lines": 1
+    },
+    "columns": [
+     {
+      "name": "n",
+      "display_name": "#",
+      "data_type": "lark_md",
+      "width": "8%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "what",
+      "display_name": "哪件事",
+      "data_type": "lark_md",
+      "width": "37%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "do",
+      "display_name": "你要做什么",
+      "data_type": "lark_md",
+      "width": "42%",
+      "vertical_align": "top"
+     },
+     {
+      "name": "age",
+      "display_name": "已挂",
+      "data_type": "lark_md",
+      "width": "13%",
+      "vertical_align": "top"
+     }
+    ],
+    "rows": [
+     {
+      "n": "1",
+      "what": "[dt#7](https://github.com/o/dt/pull/7) 加一个开关",
+      "do": "**合并**：常浩决定合并",
+      "age": "今天"
+     },
+     {
+      "n": "2",
+      "what": "dt｜【交接】收尾",
+      "do": "**点卡**：你点下方交接卡开始新会话",
+      "age": "2 天"
+     },
+     {
+      "n": "3",
+      "what": "home｜机器人权限",
+      "do": "**亲手做**：审批通过后你回复「已开通」",
+      "age": "13 天"
+     },
+     {
+      "n": "4",
+      "what": "[skills#81](https://github.com/o/skills/pull/81) 月度策略",
+      "do": "**亲手做**：你打开 report.md 看哪里不像",
+      "age": "10 天"
+     }
+    ]
+   },
+   {
+    "tag": "collapsible_panel",
+    "expanded": false,
+    "background_color": "grey-50",
+    "border": {
+     "color": "grey",
+     "corner_radius": "6px"
+    },
+    "padding": "4px 10px 8px 10px",
+    "vertical_spacing": "8px",
+    "header": {
+     "title": {
+      "tag": "plain_text",
+      "content": "可能已过期的 1 件 · 展开"
+     },
+     "width": "fill",
+     "vertical_align": "center",
+     "icon": {
+      "tag": "standard_icon",
+      "token": "down-small-ccm_outlined",
+      "color": "grey",
+      "size": "16px 16px"
+     },
+     "icon_position": "right",
+     "icon_expanded_angle": -180
+    },
+    "elements": [
+     {
+      "tag": "markdown",
+      "content": "- dt｜旧事（19 天前）"
+     }
+    ]
+   },
+   {
+    "tag": "markdown",
+    "content": "<font color='grey'>另有 2 件等你拍板（不在这张单上）｜1 件可能已过期（它的 PR 已合并或关闭）｜账本 20:55 扫描</font>"
+   }
+  ]
+ }
+}
