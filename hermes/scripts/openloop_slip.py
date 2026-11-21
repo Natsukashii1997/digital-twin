@@ -30,28 +30,10 @@ from feishu_home import home_chat  # noqa: E402
 MAX_ROWS = 7          # 表里最多几件，多的收进折叠（常浩没单独定，先按推荐值）
 STALE_HOURS = 2       # 账本比这更旧，卡片最上面说一句
 EVENING_FROM = 17     # 这个钟点起算晚间单
-ORDER = ["合并", "点卡", "亲手做"]
 
 
-def kind(r):
-    """这一行要常浩做哪种事。PR 行的「下一步」可能来自并进来的会话：写着合并才算合并，别的是要他亲手做的事。"""
-    ev, nx = r.get("evidence") or "", r.get("next") or ""
-    if r.get("source") == "pr":
-        return "合并" if "合并" in nx else "亲手做"
-    if re.search("交接卡|任务卡", nx):
-        return "点卡"
-    if ol.SAID.format("等你操作") in ev:
-        return "亲手做"
-    return "拍板"
-
-
-def pick(ledger):
-    """（上单的，等他拍板的，可能已过期的）。上单的按 合并 → 点卡 → 亲手做 排，同一类里挂得久的在前。"""
-    waiting = [r for r in ledger.get("rows") or [] if r.get("state") == "等你"]
-    gone = [r for r in waiting if ol.GONE_NOTE in (r.get("evidence") or "")]
-    live = [r for r in waiting if r not in gone]
-    todo = sorted((r for r in live if kind(r) != "拍板"), key=lambda r: (ORDER.index(kind(r)), r.get("evidence_at") or ""))
-    return todo, [r for r in live if kind(r) == "拍板"], gone
+kind = ol.ask_kind   # 这一行要常浩做哪种事；判法在账本脚本里，日报的拍板候选用同一份
+pick = ol.waiting    # （上单的，等他拍板的，可能已过期的）
 
 
 def name(r, repos):

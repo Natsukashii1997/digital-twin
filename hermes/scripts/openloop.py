@@ -46,6 +46,7 @@ TZ = ZoneInfo("Asia/Shanghai")
 MERGE_NEXT = "常浩决定合并"
 SAID = "会话最后一次答复〔{}〕"
 GONE_NOTE = "（它的 PR 都已合并或关闭，这条可能已经过期）"
+HANDS = ["合并", "点卡", "亲手做"]   # 要常浩亲手做的三种事，午晚单按这个顺序排；另一种是「拍板」
 VERSION = 1
 UNKNOWN = "未知"
 OWNER = "常浩"
@@ -894,6 +895,38 @@ def mismatches_of(candidates, hub):
 
 def out_dir():
     return Path(os.environ.get("DT_OPENLOOP_DIR", "~/Library/Application Support/DigitalTwin/openloop")).expanduser()
+
+
+def ask_kind(r):
+    """一行「等你」的事要常浩做哪种：合并 / 点卡 / 亲手做 / 拍板。午晚单收前三种，日报的拍板候选收最后一种。
+    PR 行的「下一步」可能来自并进来的会话：写着合并才算合并，别的是要他亲手做的事。"""
+    ev, nx = r.get("evidence") or "", r.get("next") or ""
+    if r.get("source") == "pr":
+        return "合并" if "合并" in nx else "亲手做"
+    if re.search("交接卡|任务卡", nx):
+        return "点卡"
+    if SAID.format("等你操作") in ev:
+        return "亲手做"
+    return "拍板"
+
+
+def waiting(ledger):
+    """账本里「等你」的行分三堆：（要他亲手做的，等他拍板的，可能已过期的）。
+    亲手做的按 合并 → 点卡 → 亲手做 排，同一类里挂得久的在前；过期的是它的 PR 都已合并或关闭的。"""
+    rows = [r for r in ledger.get("rows") or [] if r.get("state") == "等你"]
+    gone = [r for r in rows if GONE_NOTE in (r.get("evidence") or "")]
+    live = [r for r in rows if r not in gone]
+    todo = sorted((r for r in live if ask_kind(r) != "拍板"), key=lambda r: (HANDS.index(ask_kind(r)), r.get("evidence_at") or ""))
+    return todo, [r for r in live if ask_kind(r) == "拍板"], gone
+
+
+def day_ledger(day, folder=None):
+    """某一天的账本快照（history/<日期>.json，那天最后一次扫描）；没有或读不了返回 None。"""
+    try:
+        data = json.loads(((folder or out_dir()) / "history" / f"{day}.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def read_ledger(folder=None):
