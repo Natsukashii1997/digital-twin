@@ -92,10 +92,11 @@
   waited_seconds（飞书送达 → 秘书送达，给 secretary_ledger.stats）；中台说 changed=false → failed（是常浩先答的就记「你先答了」）。
 reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书决定，按回读到的结构化证据调 secretary_ledger.reconcile，从不重发。
   ④ 先不等待地拿这张任务的受信发布锁（送合并的进程从前闸到记结果一直持着；拿不到就跳过，不和还在调执行器的进程同时判），
-  有本次请求号（202 新建的）先按它查（还在排就不动），再用 gh pr view 回读（merge_verdict）：合上、头提交对得上、合进 main → done
-  （带合并提交号）；本次请求明确失败，或开着、头提交变了且不是别人的请求 / 合并队列 → failed；关了、开着头提交没变、409 别人的
-  请求、合并队列、请求号过期，拿不到请求已结束的证据 → 过 2 分钟记 unreconciled 交常浩，不推断没合（审查 P1-03、P1-05）；
-  合上的不是这个头提交或不是 main → unreconciled。执行器说合上了但记不进「做成」，改按对账记做成、留下合并提交号。
+  按执行器记下的这次 PUT 落到哪一种（submission：own 202 本次请求 / already_merged 200 早已合上 / existing 409 别人的请求 /
+  enqueued 合并队列 / unknown 没拿到回应）分开判（merge_verdict）：本次请求先按请求号查（还在排就不动）；只有本次请求明确失败、
+  或本次请求且开着头提交变了才判 failed；200 早已合上的要回读提交号和回应一致、409 别人的请求要它的合并参数和本次授权一致，
+  才在合上时记 done（归属 unknown）；合并队列合上也对账不清；没拿到回应的不拿头提交变化、PR 关闭推断没合；拿不到请求已结束的
+  证据 → 过 2 分钟记 unreconciled 交常浩（审查第 2、3 轮 P1-03、P1-05、P1-08）；合上的不是这个头提交或不是 main → unreconciled。执行器说合上了但记不进「做成」，改按对账记做成、留下合并提交号。
   ① 停在 executing 超过 2 分钟、回读给不出结论的（中台库读不到，或卡片还开着）一律转 unreconciled：额度保留、冻结这张任务、
   交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
   换成旧快照，推断不可靠；① 现在整体关着，多冻结没有实际代价。frozen_task 也把超时的 executing 算进去，同任务第二张卡不能再获准。
@@ -965,7 +966,7 @@ def frozen_repo(st, repo, but=None, busy=False):
     """这个仓库有没有结果不明 / 对账不清 / 卡在执行中超过 STALE 的代合并（规格第 7 节：合并结果不明冻结这个仓库所有后续代批合并）。
     busy=True 时还没超时的执行中也算（同一仓库一次只合一个，审查 P2-03：两个合并并发时，前一个中途变成结果不明，后一个照样会合进去）。
     秘书账本、托管账本和按策略合并账本（merge_policy.unsettled）的合并都算；读不了、对象认不出是哪个仓库（不是对象、缺 repo、
-    repo 不是完整仓库名）都当挡路，
+    repo 不是完整仓库名）、按策略合并账本有读不懂的行或缺记录号的「要合」，都当挡路，
     对所有仓库都挡（审查 P1-04）。返回挡路的决定号列表。"""
     out = []
     for table in ("secretary_decisions", "custody_decisions"):
@@ -985,8 +986,16 @@ def frozen_repo(st, repo, but=None, busy=False):
             if same and (busy or status != "executing" or _age(at) >= STALE):
                 out.append(did)
     try:                                                      # 按策略合并（#257）结果不明的也冻结这个仓库（同类）
-        out += [f"按策略合并 {m.get('id')}" for m in MP.unsettled() if m.get("repo") == repo]
-    except (OSError, ValueError, MP.Rejected):
+        recs, bad = MP.lines()
+        if bad:                                               # 坏行可能就是一条没结清的合并：对所有仓库都挡（审查第 3 轮 P1-07）
+            out.append(f"按策略合并账本有 {bad} 行读不懂")
+        if any(r.get("event") == "intent" and not r.get("id") for r in recs):   # merges() 会跳过这种行：同样当挡路
+            out.append("按策略合并账本有缺记录号的「要合」")
+        for m in MP.unsettled():
+            got = m.get("repo")
+            if got == repo or not (isinstance(got, str) and re.fullmatch(S.REPO_FULL, got)):
+                out.append(f"按策略合并 {m.get('id')}")
+    except Exception:                                         # 账本读不了、记录缺字段让 merge_policy 读崩了：都当挡路
         out.append("按策略合并账本读不了")
     return out
 
@@ -1013,17 +1022,22 @@ def check_apps(rules, repo, names):
 
 
 def require_check_sources(repo, head, apps):
-    """登记的测试项要来自登记的 CI（审查 P1-06）：GET commits/<头提交>/check-runs?check_name=<名> 列出的同名检查，每个都要是
+    """登记的测试项要来自登记的 CI（审查 P1-06）：GET commits/<头提交>/check-runs?check_name=<名>&filter=all 列出的同名检查
+    （含重跑的全部记录；total_count 和列出来的对不上就交常浩，第 3 轮 P2-07），每个都要是
     登记的 App 建的（app.id），至少一个、全部跑完且 SUCCESS；同名的旧式提交状态（commits/<头提交>/status 里 context 同名）
     一条都不许有——有写权限就能写状态，混在一起分不清。读不了也交常浩。"""
     try:
         legacy = MO.gh_json(["api", f"repos/{repo}/commits/{head}/status?per_page=100"], f"{repo} 读提交状态")
-        contexts = {x.get("context") for x in (legacy.get("statuses") if isinstance(legacy, dict) else None) or []
-                    if isinstance(x, dict)}
+        sts = legacy.get("statuses") if isinstance(legacy, dict) else None
+        if not isinstance(sts, list) or legacy.get("total_count") != len(sts):     # 一页没列全：判不了有没有同名的（第 3 轮 P2-07）
+            raise Handoff("gate", "提交状态一页列不全，判不了有没有同名的别的来源，交给你合")
+        contexts = {x.get("context") for x in sts if isinstance(x, dict)}
         for name, app in apps.items():
-            got = MO.gh_json(["api", f"repos/{repo}/commits/{head}/check-runs?check_name={urllib.parse.quote(name)}&per_page=100"],
-                             f"{repo} 读检查 {name}")
+            got = MO.gh_json(["api", f"repos/{repo}/commits/{head}/check-runs?check_name={urllib.parse.quote(name)}"
+                                     "&filter=all&per_page=100"], f"{repo} 读检查 {name}")
             runs = got.get("check_runs") if isinstance(got, dict) else None
+            if isinstance(runs, list) and got.get("total_count") != len(runs):        # 含重跑的全部记录，一页没列全
+                raise Handoff("gate", plain(f"测试项 {name} 的检查记录一页列不全，判不了是不是都来自登记的 CI", 100))
             if not isinstance(runs, list) or not runs or name in contexts:
                 raise Handoff("gate", plain(f"测试项 {name} 没有、或有同名的别的来源，分不清是不是真跑过", 100))
             for r in runs:
@@ -1422,7 +1436,7 @@ def deliver_merge(st, d, ctx, now):
     status = res.get("status") if isinstance(res, dict) else None
     sha = str(res.get("merge_commit") or "") if isinstance(res, dict) else ""
     facts = {k: res.get(k) for k in ("identity", "returncode", "timed_out", "launched", "why", "request", "async_status",
-                                     "existing_request")} \
+                                     "existing_request", "submission", "reply_sha")} \
         if isinstance(res, dict) else {}
     if status == "merged" and L.SHA.match(sha):
         try:
@@ -1593,25 +1607,29 @@ def _merge_settle(st, d, now):
         return None
 
 
+EXPECTED = {"merge_method": "squash", "merge_action": "direct_merge", "bypass_rules": False}   # 本次授权的合并方式
+
+
 def merge_verdict(d):
-    """④ 只读对账（规格第 7 节：以合并接口返回的提交为证据，结果不明只读对账、不重发）。按执行器留下的样子分三种：
-      本次请求（outcome.executor.request：202 新建、绑定头提交的请求）：先按请求号查（merge_act.poll_custody_merge），
-        还在排或查不了 → 不动；
-      别人的请求（executor.existing_request：409）或已在合并队列（async_status=enqueued）：不认领、不按它查；
-      不知道建没建成（超时、进程中途没了）：要是建成了，也只会是本次 PUT 建的、绑定这个头提交的请求。
-    再用 gh pr view 回读：
-      合上了、头提交是这次的、合进 main、有合并提交号（本次请求说合上了时还要和它给的一致）→ done；只有本次请求查到合上的记
-      execution_attribution=request，其余 unknown（只确认「合上了」，不确认是谁合的，审查 P2-04 / P1-05）；
-      合上的不是这次的版本 / 不是 main，或本次请求说合上了而 PR 没合 → 对账不清；
-      本次请求明确失败、PR 没合 → failed；
-      开着、头提交变了、不是别人的请求或合并队列 → failed（文档：请求执行前 PR 有新推送就取消；本次 PUT 带着 sha）；
-      其余（关了、开着头提交没变、别人的请求、合并队列、请求号过期）拿不到请求已经结束的证据 → 过 2 分钟记对账不清、交常浩，
-      **不推断没合**（审查 P1-03）。读不了 → None。"""
+    """④ 只读对账（规格第 7 节：以合并接口返回的提交为证据，结果不明只读对账、不重发）。按执行器记下的这次 PUT 落到哪一种
+    （outcome.executor.submission，第 3 轮 P1-03）分开判：
+      own（202 新建的本次请求，带 request）：先按请求号查（merge_act.poll_custody_merge），还在排或查不了 → 不动；
+        明确失败 → failed；开着且头提交变了 → failed（文档：执行前 PR 有新推送，本次带 sha 的请求就取消）；
+        合上了、头提交对得上、合进 main、提交号和请求给的一致 → done（execution_attribution=request）。
+      already_merged（200，PUT 时 PR 早已合上，reply_sha 是回应里的合并提交号）：回读合上、提交号一致、头提交和 main 对得上
+        → done（归属 unknown）；其余（开着、关了、提交号不一致）→ 立刻对账不清。
+      existing（409 别人的请求）：它的 expected_head_sha / merge_method / merge_action / bypass_rules 要和本次授权一致
+        （本次头提交、squash、direct_merge、不绕过规则），合上了且对得上才 done（归属 unknown）；参数缺一项或不一致，合上了也
+        对账不清（第 3 轮 P1-08）。
+      enqueued（200，已在合并队列）：一期不收合并队列，合上了也对账不清。
+      unknown / 没记（超时、断网、进程中途没了）：不知道 GitHub 回的是 202、409 还是 200，**头提交变了、PR 关了都不当没合的证据**；
+        合上了且对得上 → done（归属 unknown）。
+    共同：合上的不是这次的版本 / 不是 main → 对账不清；拿不到请求已经结束的证据 → 过 2 分钟记对账不清、交常浩，不推断没合。读不了 → None。"""
     t = d["target"]
     ex = (d.get("outcome") or {}).get("executor")
     ex = ex if isinstance(ex, dict) else {}
-    uuid = ex.get("request")
-    foreign = bool(ex.get("existing_request")) or ex.get("async_status") == "enqueued"
+    kind = ex.get("submission") if ex.get("submission") in ("own", "already_merged", "existing", "enqueued") else "unknown"
+    uuid = ex.get("request") if kind == "own" else None
     polled = None
     if uuid:
         try:
@@ -1630,25 +1648,41 @@ def merge_verdict(d):
     state, head, base = got.get("state"), got.get("headRefOid"), got.get("baseRefName")
     sha = str((got.get("mergeCommit") or {}).get("oid") or "")
     req = polled.get("status") if polled else None
-    checked = (f"GitHub {t['repo']}#{t['pr']}：{state}，合进 {base}，头提交 {str(head)[:12]}，合并提交 {sha[:12] or '无'}"
-               + (f"；本次合并请求 {uuid[:8]}…：{req}" if polled else "；别人的合并请求或合并队列" if foreign else "；没有合并请求号"))
-    if state == "MERGED":
-        if head == t["head"] and base == "main" and L.SHA.match(sha) and (req != "merged" or polled.get("sha") == sha):
-            return "done", {"checked": checked, "pr_state": "MERGED", "merge_commit": sha,
-                            "execution_attribution": "request" if req == "merged" else "unknown"}
-        return "unreconciled", {"checked": checked + "（合上的不是这次要合的版本或不是 main，核不清）"}
-    if req == "merged":
-        return "unreconciled", {"checked": checked + "（本次合并请求说合上了，PR 却没合，核不清）"}
-    if state not in ("OPEN", "CLOSED"):
+    what = {"own": f"本次合并请求 {str(uuid)[:8]}…：{req}" if polled else "本次合并请求",
+            "already_merged": "发请求时 PR 已经合上", "existing": "别人的合并请求（409）", "enqueued": "已在合并队列",
+            "unknown": "没拿到合并请求的回应"}[kind]
+    checked = f"GitHub {t['repo']}#{t['pr']}：{state}，合进 {base}，头提交 {str(head)[:12]}，合并提交 {sha[:12] or '无'}；{what}"
+    unclear = lambda why: ("unreconciled", {"checked": f"{checked}（{why}）"})   # noqa: E731
+    if state not in ("OPEN", "CLOSED", "MERGED"):
         return None
+    if state == "MERGED":
+        if not (head == t["head"] and base == "main" and L.SHA.match(sha)):
+            return unclear("合上的不是这次要合的版本或不是 main，核不清")
+        if kind == "own" and req == "merged" and polled.get("sha") != sha:
+            return unclear("本次合并请求给的提交号和合上的对不上，核不清")
+        if kind == "already_merged" and ex.get("reply_sha") != sha:
+            return unclear("回应里的合并提交号和合上的对不上，核不清")
+        if kind == "existing":
+            other = ex.get("existing_request") if isinstance(ex.get("existing_request"), dict) else {}
+            if other.get("expected_head_sha") != t["head"] or not all(type(other.get(k)) is type(v) and other.get(k) == v
+                                                                       for k, v in EXPECTED.items()):
+                return unclear("别人的合并请求和这次授权的合并方式不一致（版本、合并方式或绕过规则），合上了也不算这次代批")
+        if kind == "enqueued":
+            return unclear("经合并队列合上的，一期不收合并队列，核不清")
+        return "done", {"checked": checked, "pr_state": "MERGED", "merge_commit": sha,
+                        "execution_attribution": "request" if req == "merged" else "unknown"}
+    if req == "merged":
+        return unclear("本次合并请求说合上了，PR 却没合，核不清")
+    if kind == "already_merged":
+        return unclear("发请求时 GitHub 说 PR 已经合上，现在回读却没合，核不清")
     if req == "failed":
         return "failed", {"checked": checked + f"（本次合并请求明确失败：{polled.get('message') or '没写原因'}）", "pr_state": state}
-    if state == "OPEN" and head != t["head"] and not foreign:
+    if kind == "own" and state == "OPEN" and head != t["head"]:
         return "failed", {"checked": checked + "（头提交变了，本次绑定原头提交的合并请求执行前就被取消）", "pr_state": "OPEN"}
     if req == "enqueued":
-        return "unreconciled", {"checked": checked + "（进了合并队列，核不清）"}
+        return unclear("本次合并请求进了合并队列，核不清")
     if _age(d["updated_at"]) >= STALE:
-        return "unreconciled", {"checked": checked + "（拿不到合并请求已经结束的证据，不判没合，交给你）"}
+        return unclear("拿不到合并请求已经结束的证据，不判没合，交给你")
     return None
 
 

@@ -649,7 +649,7 @@ def run_custody_merge(card):
         raise Stop("调用方没持合并锁（merge_lock），不合并", "在电脑上交给 Claude 会话看")
     token = custody_token(card["repo"])
     out = {"identity": "custody", "repo": card["repo"], "pr": card["pr"], "head": card["head"], "merge_commit": None,
-           "request": None, "existing_request": None}
+           "request": None, "existing_request": None, "submission": None, "reply_sha": None}
     cmd = [mo.GH, "api", "-X", "PUT", f"repos/{card['repo']}/pulls/{card['pr']}/merge-async",
            "-f", "merge_method=squash", "-f", "merge_action=direct_merge", "-F", "bypass_rules=false",
            "-f", f"sha={card['head']}"]
@@ -681,14 +681,30 @@ def run_custody_merge(card):
     detail = res.pop("detail")
     out.update(res)
     out["async_status"] = reply["status"] if (own or not conflict) else None
+    first = _async_reply(None) if conflict or own else reply                   # 200 的回应（已合上 / 已入队）
     if reply.get("message"):
         out["why"] = (out["why"] + "；" if out["why"] else "") + reply["message"].replace(token, "***")
     if not res["launched"]:
-        out["status"] = "failed"                      # 合并请求没发出去，确定没合
+        out["status"], out["submission"] = "failed", "not_sent"   # 合并请求没发出去，确定没合
         return out
     state = (after or {}).get("state")
     out["merge_commit"] = ((after or {}).get("mergeCommit") or {}).get("oid")
     refused = (res["returncode"] not in (None, 0) and not conflict and HTTP_4XX.search(detail) and not NET_ERR.search(detail))
+    # 这次 PUT 落到了哪一种（审查 0B-4d 第 3 轮 P1-03）：own 202 新建的本次请求；existing 409 别人的请求；already_merged / enqueued
+    # 200 早已合上 / 已在合并队列（reply_sha 留 200 回应里的合并提交号）；rejected 409 以外的 4xx；unknown 没拿到回应或认不出
+    # （超时、断网、没归类的报错、回应不是这几种）——不知道 GitHub 回的是 202、409 还是 200，对账不能拿它推断没合。
+    if own:
+        out["submission"] = "own"
+    elif conflict:
+        out["submission"] = "existing"
+    elif res["returncode"] == 0 and first["status"] == "merged" and not first["uuid"]:
+        out["submission"], out["reply_sha"] = "already_merged", first["sha"]
+    elif res["returncode"] == 0 and first["status"] == "enqueued":
+        out["submission"] = "enqueued"
+    elif refused:
+        out["submission"] = "rejected"
+    else:
+        out["submission"] = "unknown"
     if own and reply["status"] == "merged" and reply.get("sha") and state == "MERGED" and after.get("headRefOid") == card["head"] \
             and out["merge_commit"] == reply["sha"] and after.get("baseRefName") == "main":
         out["status"] = "merged"

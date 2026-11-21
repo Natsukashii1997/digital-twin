@@ -975,7 +975,8 @@ class MergeTests(Base):
                       "elif sys.argv[1] == 'api' and '/check-runs?' in sys.argv[2]:\n"
                       "    print(json.dumps(st['runs']))\n"
                       "elif sys.argv[1] == 'api' and '/status?' in sys.argv[2]:\n"
-                      "    print(json.dumps({'state': 'success', 'statuses': st['statuses']}))\n"
+                      "    print(json.dumps({'state': 'success', 'statuses': st['statuses'], "
+                      "'total_count': st.get('status_total', len(st['statuses']))}))\n"
                       "elif sys.argv[1] == 'api' and 'rules/branches' in sys.argv[2]:\n"
                       "    if st['rules'] == 404:\n        sys.stderr.write('gh: Not Found (HTTP 404)\\n'); sys.exit(1)\n"
                       "    print(json.dumps(st['rules']))\n"
@@ -1046,7 +1047,7 @@ class MergeTests(Base):
                          (FP, "PASS", {"merge": True, "head": HEAD}))
         # 前闸读一次、合并前再现读一次：主分支规则 + PR 状态 + 改动文件数 + 根目录（.github）
         self.assertEqual(self.gh_calls(), [["api", RULES_PATH], ["pr", "view"], ["api", f"repos/{REPO}/commits/{HEAD}/status?per_page=100"],
-                                           ["api", f"repos/{REPO}/commits/{HEAD}/check-runs?check_name=test&per_page=100"],
+                                           ["api", f"repos/{REPO}/commits/{HEAD}/check-runs?check_name=test&filter=all&per_page=100"],
                                            ["pr", "view"], ["api", f"repos/{REPO}/contents/?ref=main"]] * 2)
         self.assertEqual(self.answers(), [])
         self.assertEqual(self.posted, [])                                        # 合并不经中台、不发续接
@@ -1409,7 +1410,7 @@ class MergeTests(Base):
         self.assertEqual(SG.frozen_repo(type("St", (), {"conn": Other()})(), REPO), [])  # 认得出是别的仓库：不挡
 
     def test_reconcile_verdicts(self):
-        cases = [(pr_json(state="CLOSED"), None), (pr_json(head="d" * 40), "failed"),
+        cases = [(pr_json(state="CLOSED"), None), (pr_json(head="d" * 40), None),     # 没拿到回应：头提交变了也不判没合
                  (pr_json(state="MERGED", head="d" * 40, merged=MERGE_SHA), "unreconciled"), (pr_json(), None)]
         for pj, want in cases:
             with self.subTest(want=want, state=pj["state"]):
@@ -1440,10 +1441,11 @@ class MergeTests(Base):
         other = {"uuid": "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "expected_head_sha": HEAD, "merge_method": "merge",
                  "merge_action": "direct_merge", "bypass_rules": True}
         cases = [({}, pr_json(state="CLOSED"), "unreconciled"),
-                 ({"existing_request": other}, pr_json(head="d" * 40), "unreconciled"),    # 别人的请求：头提交变了也不算取消证据
-                 ({"existing_request": other}, pr_json(state="CLOSED"), "unreconciled"),
-                 ({"async_status": "enqueued"}, pr_json(head="d" * 40), "unreconciled"),
-                 ({"existing_request": other}, pr_json(state="MERGED", merged=MERGE_SHA), "done")]
+                 ({"submission": "existing", "existing_request": other}, pr_json(head="d" * 40), "unreconciled"),  # 头提交变了也不算取消证据
+                 ({"submission": "existing", "existing_request": other}, pr_json(state="CLOSED"), "unreconciled"),
+                 ({"submission": "enqueued", "async_status": "enqueued"}, pr_json(head="d" * 40), "unreconciled"),
+                 # 别人的请求绕过规则（bypass_rules=true）后来合上了：不算这次代批（第 3 轮 P1-08）
+                 ({"submission": "existing", "existing_request": other}, pr_json(state="MERGED", merged=MERGE_SHA), "unreconciled")]
         for extra, pj, want in cases:
             with self.subTest(extra=extra, state=pj["state"]):
                 self.setUp()
@@ -1459,6 +1461,101 @@ class MergeTests(Base):
                     self.assertEqual(d["outcome"]["reconcile"]["execution_attribution"], "unknown")
                 else:
                     self.assertEqual(sorted(self.held()), [("day", "frozen"), ("merge_day", "frozen"), ("task", "frozen")])
+
+    def reconcile_after(self, result, pj, stale=True, **poll):
+        self.setUp()
+        self.result = {"status": "unsure", "merge_commit": None, **result}
+        out = self.go()
+        self.gh_state(prs=[pj])
+        with mock.patch.object(MA, "poll_custody_merge", **(poll or {"return_value": {"status": "pending"}})) as p, \
+                mock.patch.object(SG, "STALE", 0 if stale else 10 ** 9):
+            got = SG.reconcile()
+        return out["decision"], got, p
+
+    def test_no_reply_is_never_failed(self):
+        """第 3 轮 P1-03-A：没拿到 PUT 的回应（submission=unknown 或没记），不知道 GitHub 回的是 202、409 还是 200：
+        头提交变了、PR 关了都不当没合的证据；只有合上了且对得上才记做成（归属 unknown）。"""
+        for result in ({"submission": "unknown", "timed_out": True}, {}):
+            for pj, want in ((pr_json(head="d" * 40), "unreconciled"), (pr_json(state="CLOSED"), "unreconciled"),
+                             (pr_json(state="MERGED", merged=MERGE_SHA), "done")):
+                with self.subTest(result=result, state=pj["state"], head=pj["headRefOid"][:1]):
+                    did, got, poll = self.reconcile_after(result, pj)
+                    self.assertEqual(got, [(did, want)])
+                    poll.assert_not_called()
+                    if want == "unreconciled":
+                        self.assertEqual(sorted(self.held()), [("day", "frozen"), ("merge_day", "frozen"), ("task", "frozen")])
+            with self.subTest(result=result, fresh=True):                               # 没过 2 分钟：先不动
+                did, got, _ = self.reconcile_after(result, pr_json(head="d" * 40), stale=False)
+                self.assertEqual(got, [])
+
+    def test_already_merged_reply_sha_must_match(self):
+        """第 3 轮 P1-03-B：PUT 回 200（PR 早已合上）时留下回应里的合并提交号，对账要和回读一致才记做成（归属 unknown）；
+        不一致、回读还开着或关了，立刻对账不清。"""
+        res = {"submission": "already_merged", "reply_sha": MERGE_SHA, "async_status": "merged"}
+        for pj, want in ((pr_json(state="MERGED", merged=MERGE_SHA), "done"),
+                         (pr_json(state="MERGED", merged="e" * 40), "unreconciled"),
+                         (pr_json(), "unreconciled"), (pr_json(head="d" * 40), "unreconciled"),
+                         (pr_json(state="CLOSED"), "unreconciled")):
+            with self.subTest(state=pj["state"], merged=(pj["mergeCommit"] or {}).get("oid", "")[:1]):
+                did, got, poll = self.reconcile_after(res, pj, stale=False)
+                self.assertEqual(got, [(did, want)])
+                poll.assert_not_called()
+                if want == "done":
+                    self.assertEqual(self.get(did)["outcome"]["reconcile"]["execution_attribution"], "unknown")
+
+    def test_existing_request_must_match_authorized_options(self):
+        """第 3 轮 P1-08：409 别人的请求，合并参数（头提交、squash、direct_merge、不绕过规则）都和本次授权一致，合上了才记做成；
+        缺一项或不一致（含 0 冒充 False），合上了也对账不清。"""
+        good = {"uuid": "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "expected_head_sha": HEAD, "merge_method": "squash",
+                "merge_action": "direct_merge", "bypass_rules": False}
+        merged = pr_json(state="MERGED", merged=MERGE_SHA)
+        cases = [(good, "done"), ({**good, "bypass_rules": True}, "unreconciled"), ({**good, "bypass_rules": 0}, "unreconciled"),
+                 ({**good, "bypass_rules": None}, "unreconciled"), ({**good, "merge_method": "merge"}, "unreconciled"),
+                 ({**good, "merge_action": "merge_queue"}, "unreconciled"), ({**good, "expected_head_sha": "c" * 40}, "unreconciled"),
+                 ({k: v for k, v in good.items() if k != "merge_method"}, "unreconciled"), ({}, "unreconciled")]
+        for other, want in cases:
+            with self.subTest(other=other):
+                did, got, poll = self.reconcile_after({"submission": "existing", "existing_request": other}, merged, stale=False)
+                self.assertEqual(got, [(did, want)])
+                poll.assert_not_called()
+
+    def test_enqueued_merge_is_never_done(self):
+        """一期不收合并队列：PUT 回 200 已入队的，合上了也对账不清。"""
+        did, got, _ = self.reconcile_after({"submission": "enqueued", "async_status": "enqueued"},
+                                           pr_json(state="MERGED", merged=MERGE_SHA), stale=False)
+        self.assertEqual(got, [(did, "unreconciled")])
+
+    def test_policy_ledger_bad_lines_or_unknown_repo_block_all(self):
+        """第 3 轮 P1-07：按策略合并账本有读不懂的行、缺记录号的「要合」、没结清的记录缺 repo 或 repo 不是完整仓库名，
+        对所有仓库都挡；认得出是别的仓库的不挡。"""
+        led = MP.ledger_path()
+        at = "2026-11-21T10:00:00+08:00"
+        cases = [("坏 JSON", "{这不是 JSON\n"), ("缺 id", json.dumps({"event": "intent", "at": at, "repo": REPO}) + "\n"),
+                 ("缺 repo", json.dumps({"event": "intent", "at": at, "id": "m-2", "pr": "9"}) + "\n"),
+                 ("repo 不完整", json.dumps({"event": "intent", "at": at, "id": "m-3", "repo": "dt-sandbox", "pr": "9"}) + "\n"),
+                 ("repo 不是字符串", json.dumps({"event": "intent", "at": at, "id": "m-4", "repo": 7, "pr": "9"}) + "\n"),
+                 ("缺时间读崩", json.dumps({"event": "intent", "id": "m-6", "repo": "someone/else", "pr": "9"}) + "\n")]
+        for name, line in cases:
+            with self.subTest(name=name):
+                led.parent.mkdir(parents=True, exist_ok=True)
+                led.write_text(line, encoding="utf-8")
+                with SL.open_store() as st:
+                    self.assertTrue(SG.frozen_repo(st, REPO))
+                    self.assertTrue(SG.frozen_repo(st, "someone/else"))
+        led.write_text(json.dumps({"event": "intent", "at": at, "id": "m-5", "repo": "someone/else", "pr": "9"}) + "\n",
+                       encoding="utf-8")
+        with SL.open_store() as st:
+            self.assertEqual(SG.frozen_repo(st, REPO), [])
+
+    def test_check_records_must_be_complete(self):
+        """第 3 轮 P2-07：同名检查（filter=all 含重跑）或提交状态的 total_count 和列出来的对不上，判不了是不是都来自登记的 CI，
+        交常浩。"""
+        for kw in (dict(runs={**RUNS, "total_count": 101}), dict(status_total=150)):
+            with self.subTest(kw=kw):
+                self.setUp()
+                self.gh_state(**kw)
+                self.assertIn("列不全", self.handoff(self.go(), "gate")["basis"])
+                self.assertEqual(self.merged, [])
 
     def test_reconcile_by_request_id(self):
         """审查 P1-03：执行器留了异步合并请求号，对账先按它查；还在排就不动，明确失败才释放，合上了要和回读对得上。"""
@@ -1479,7 +1576,7 @@ class MergeTests(Base):
         for polled, pj, want in cases:
             with self.subTest(polled=polled, state=pj["state"]):
                 self.setUp()
-                self.result = {"status": "unsure", "merge_commit": None, "request": UID, "async_status": "pending"}
+                self.result = {"status": "unsure", "merge_commit": None, "submission": "own", "request": UID, "async_status": "pending"}
                 out = self.go()
                 self.assertEqual(self.get(out["decision"])["outcome"]["executor"]["request"], UID)
                 self.gh_state(prs=[pj])
@@ -1496,13 +1593,13 @@ class MergeTests(Base):
                     self.assertEqual(d["status"], "unknown")
                 self.assertEqual(len(self.merged), 1)                                       # 从不重发
         self.setUp()                       # 请求说合上了、PR 却开着：不用等 2 分钟，直接对账不清
-        self.result = {"status": "unsure", "merge_commit": None, "request": UID}
+        self.result = {"status": "unsure", "merge_commit": None, "submission": "own", "request": UID}
         out = self.go()
         with mock.patch.object(MA, "poll_custody_merge", return_value={"status": "merged", "sha": MERGE_SHA}), \
                 mock.patch.object(SG, "STALE", 10 ** 9):
             self.assertEqual(SG.reconcile(), [(out["decision"], "unreconciled")])
         self.setUp()                       # 本次请求查到进了合并队列：不用等 2 分钟，直接对账不清
-        self.result = {"status": "unsure", "merge_commit": None, "request": UID}
+        self.result = {"status": "unsure", "merge_commit": None, "submission": "own", "request": UID}
         out = self.go()
         with mock.patch.object(MA, "poll_custody_merge", return_value={"status": "enqueued", "sha": None}), \
                 mock.patch.object(SG, "STALE", 10 ** 9):

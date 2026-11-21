@@ -847,6 +847,22 @@ class CustodyCredential(unittest.TestCase):
             self.assertEqual([c[0][1:3] for c in self.gh_calls(calls)].count(["api", "-X"]), 1, kw)  # 不重发
             if kw.get("reply") is not None and kw["reply"] is not self.PENDING:
                 self.assertIsNone(out["request"], kw)                        # 不是 202 新建的就不算本次请求
+        # 这次 PUT 落到哪一种（审查第 3 轮 P1-03）：对账靠它分开判
+        kinds = [(dict(), "own", None), (dict(view=open_, polls=[pending]), "own", None),
+                 (dict(reply={"status": "merged", "details": {"message": "already merged", "sha": "e" * 40}}, view=merged),
+                  "already_merged", "e" * 40),
+                 (dict(reply={"status": "enqueued", "details": {"message": "queued"}}, view=open_), "enqueued", None),
+                 (dict(merge_code=1, merge_err="gh: Conflict (HTTP 409)", reply=c409, view=open_), "existing", None),
+                 (dict(merge_code=1, merge_err="gh: Validation Failed (HTTP 422)", view=open_), "rejected", None),
+                 (dict(merge_timeout=True, view=open_), "unknown", None),
+                 (dict(merge_code=1, merge_err='Put "https://api.github.com/...": EOF', view=open_), "unknown", None),
+                 (dict(merge_code=1, merge_err="something unclassified", view=open_), "unknown", None),
+                 (dict(reply={"weird": 1}, view=open_), "unknown", None),
+                 (dict(gh_exc=FileNotFoundError()), "not_sent", None)]
+        for kw, kind, reply_sha in kinds:
+            run, _ = self.fake(**kw)
+            out = self.go(run)
+            self.assertEqual((out["submission"], out["reply_sha"]), (kind, reply_sha), kw)
         run, calls = self.fake(merge_code=1, merge_err="gh: Conflict (HTTP 409)", reply=c409, view=merged)
         out = self.go(run)
         self.assertEqual(out["existing_request"], {"uuid": self.OTHER, "expected_head_sha": "a" * 40, "merge_method": "merge",
