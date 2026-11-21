@@ -901,10 +901,16 @@ class Verify(unittest.TestCase):
         self.assertIn(("udp", "::ffff:127.0.0.1"), {(t["kind"], t["host"]) for t in ts})   # IPv4 映射地址也试 UDP
         got = self.v.probe(specs)          # 映射地址测试隔离（#212）当成外连拦下，真机上由 root 对照覆盖
         self.assertTrue(all(self.v.reached(g) for g in got), got)
+        self.v.settle()                                # 对照的连接都收下了再布防
         self.assertEqual(own.hits, [])                 # 没布防：root 对照不算
         own.armed = True
         got = self.v.probe(specs[:2])
         self.assertTrue(all(self.v.reached(g) for g in got), got)
+        for _ in range(40):                            # TCP 连接由靶子线程稍后才收下
+            if len(own.hits) >= 2:
+                break
+            time.sleep(0.05)
+        self.v.settle()
         self.assertEqual(len(own.hits), 2)
         self.assertEqual(len(seen), 2)
         self.assertEqual({h["pf"]["pf"] for h in own.hits}, {1})

@@ -237,6 +237,12 @@ class Targets:
             s.close()
 
 
+def settle():
+    """靶子线程每 0.2 秒收一次连接：TCP 握手在内核里就完成了，探测那边已经返回，靶子可能还没 accept。
+    布防前等一会儿，别把 root 自己对照的晚到连接记成账号连进来的（CI 偶发 1≠2、本机偶发 3≠2）。"""
+    time.sleep(0.6)
+
+
 def listening():
     """本机正在监听的 TCP（地址, 端口），地址 * 表示所有网卡。"""
     r = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-F", "n"], capture_output=True, text=True)
@@ -691,6 +697,7 @@ def verify():
     try:
         ts = targets(own)
         ctrl = probe(ts)
+        settle()                                # root 对照的 TCP 连接可能还没被靶子线程收下，等它们收完再布防
         own.armed = True                        # 之后收到的都是账号连进来的（dt-gate 对照也会连进来）
         report = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "targets": ts, "root": ctrl, "accounts": {}}
         worst = 0
@@ -891,6 +898,7 @@ def stress(seconds, interval=1.0):
             report["anchor_before"] = pfctl("-a", ANCHOR, "-vsr")
             print(f"靶子 {len(ts)} 个（root 连不上、不算数的 {len(report['skipped'])} 个），{'、'.join(users)} 同时连 {seconds} 秒，"
                   f"dt-gate 和 root 同时连其中 {len(others)} 个本机已有监听和公网作对照，每 {interval:g} 秒强制重新加载一次规则……")
+            settle()
             own.armed = True
             rel = Reloader(interval) if interval > 0 else None   # 间隔 0：不强制重新加载，看平时会不会漏
             if rel:
