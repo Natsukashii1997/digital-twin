@@ -884,6 +884,7 @@ class RedispatchTests(Base):
         self.stop_card(cid=18, run=19)                                            # 又放弃了一次：每张任务最多 1 次
         self.handoff_quota(self.submit(self.prop(card=18)))
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
     def test_redispatch_unknown_does_not_deadlock_the_gate(self):
         """第 2 轮预审 P1-A（常浩 11-20 选甲）：② 发往中台结果不明 → 秘书记结果不明、关闸。原来恢复闸看到秘书结果不明就不开，
         补发 send-pending 又要过闸，秘书对账等事件发出——死循环。现在只差网关补发的不挡闸：真恢复闸对账开闸，补发送到
@@ -904,6 +905,33 @@ class RedispatchTests(Base):
         self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["redispatch"])
         self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
         self.assertEqual(self.get(out["decision"])["status"], "done")
+
+    def test_event_of_a_frozen_or_expired_grant_is_not_waiting_for_resend(self):
+        """L3 第 4 轮 P1-09 另一处：② 的续接事件已领走在发（sent=2、超过 60 秒）时任务被冻结——冻结只作废没领走的，
+        这条补发不了：恢复闸不再当「只差补发」放行，秘书对账记核不清（发没发出去要核）；没领走的（sent=0）凭证过期了，
+        秘书对账记没做成，不干等。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        key = self.get(out["decision"])["outcome"]["event_key"]
+        late = T + dt.timedelta(minutes=10)
+        with mock.patch.object(G, "now_tz", lambda: late):
+            self.assertIsNone(R._secretary()[0])                                  # 凭证有效、只差补发：不挡
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE event_key = ?", (G.iso(T), key))
+        G.freeze(TASK, "推翻", now=late)
+        with mock.patch.object(G, "now_tz", lambda: late):
+            self.assertIn(out["decision"], R._secretary()[0])                     # 冻结后补发不了：挡闸
+        self.assertEqual(SG.reconcile(now=late), [(out["decision"], "unreconciled")])
+
+    def test_unsent_event_of_an_expired_grant_is_failed(self):
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        key = self.get(out["decision"])["outcome"]["event_key"]
+        with G.tx() as con:                                                       # 发送那次已确定没出去（退回待发）
+            con.execute("UPDATE hub_events SET sent = 0, claimed_at = NULL WHERE event_key = ?", (key,))
+        later = T + dt.timedelta(hours=13)                                        # 凭证 12 小时有效
+        self.assertEqual(SG.reconcile(now=later), [(out["decision"], "failed")])
 
     def test_redispatch_without_a_gateway_event_still_blocks(self):
         """只差网关补发的才放：这次续接的事件已作废（或找不到、已送达）照常挡闸，由秘书对账结掉。"""
@@ -1079,6 +1107,7 @@ class RejectTests(Base):
         self.assertEqual(out["result"], "unknown", out["msg"])                    # 留言撤不回：不能当没做
         self.assertEqual(sorted(self.held()), [("day", "frozen"), ("task", "frozen")])
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
     def test_partial_rework_never_matches_another_generations_event(self):
         """L3 第 3 轮 P1-09：第 1 代 ③ 留言已发、续接没记上事件 → 结果不明；凭证换到第 2 代后有人手动续接一条 rework
         （还没发到中台）。这条不是这次决定的事件，恢复闸照样挡着，不按时间把它认成「只差网关补发」。"""
@@ -1094,6 +1123,7 @@ class RejectTests(Base):
         bad, _ = R._secretary()
         self.assertIn(out["decision"], bad)
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
     def test_rework_waits_on_its_own_event_even_without_event_key(self):
         """反过来：这次决定自己的续接事件（日志里带决定号）只差补发，哪怕结果里还没记上事件号（进程在记结果前没了），
         照样不挡闸；同一张单别的续接事件不影响。"""
@@ -1114,6 +1144,23 @@ class RejectTests(Base):
             con.execute("UPDATE secretary_decisions SET outcome = '{}' WHERE id = ?", (out["decision"],))
         with G.tx() as con:                                                     # 绑定的事件代次和日志记的对不上：挡闸
             con.execute("UPDATE hub_events SET generation = 9 WHERE event_key = ?", (f"{TASK}:g1:rework:1",))
+        self.assertIn(out["decision"], R._secretary()[0])
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_secretary_reconcile_never_takes_a_delivered_event_of_another_generation(self):
+        """L3 第 4 轮 P1-09（常浩 11-21 定改秘书对账）：第 1 代 ③ 留言已发、续接被拒 → 结果不明；换到第 2 代后人工续接一条
+        rework 而且真的送到了中台（sent=1）。秘书自己的对账不能把它认成这次的、记做成：记核不清，恢复闸照样挡着。"""
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
+                mock.patch.object(G, "resume_dispatch", side_effect=G.Rejected("不能续接：凭证已冻结")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with G.tx() as con:
+            con.execute("UPDATE grants SET generation = 2 WHERE task_id = ?", (TASK,))
+        ev = G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        with G.tx() as con:
+            self.assertEqual(con.execute("SELECT sent FROM hub_events WHERE event_key = ?", (ev["event_key"],)).fetchone()[0], 1)
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=2)), [(out["decision"], "unreconciled")])
+        self.assertEqual(self.get(out["decision"])["status"], "unreconciled")
         self.assertIn(out["decision"], R._secretary()[0])
 
     def test_comment_unknown_is_not_resent(self):

@@ -623,6 +623,31 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=N
     return {"event_key": key, "send": _try_send(path, post, now)}
 
 
+def bound_event(con, task_id, ref, kind, generation=None, event_key=None, now=None):
+    """按决定号认这次续接的派单事件（L3 第 3、4 轮 P1-09；恢复闸和秘书对账共用，常浩 11-21 定秘书对账也改成这样）。
+    不按时间猜。返回 (结论, 事件, 说明)：
+      none：凭证库没有带这个决定号的续接记录（网关先记账后发：没记就没发）；
+      bad ：带这个决定号的记录不止一条，或决定自己记的事件号、事件的任务 / 种类 / 代次（等于记录里的，也等于决定里记的）
+            对不上——核不清；
+      ok  ：正好这一条；事件 dict 另带 invalid：凭证对这条事件的代次现在是否已失效（失效的事件不会再发出去）。"""
+    logs = resume_refs(con, task_id).get(ref, [])
+    if not logs:
+        return "none", None, "凭证库没有带这个决定号的续接记录"
+    if len(logs) != 1:
+        return "bad", None, f"带这个决定号的续接记录有 {len(logs)} 条"
+    lg = logs[0]
+    if event_key and lg.get("event") != event_key:
+        return "bad", None, f"决定记的事件 {event_key} 和续接记录里的 {lg.get('event')} 对不上"
+    e = con.execute("SELECT * FROM hub_events WHERE event_key = ?", (lg.get("event"),)).fetchone()
+    if e is None or e["task_id"] != task_id or e["kind"] != kind or e["generation"] != lg.get("generation") \
+            or (generation is not None and e["generation"] != generation):
+        return "bad", (dict(e) if e else None), f"续接事件 {lg.get('event')} 的任务、种类或代次对不上"
+    e = dict(e)
+    row = con.execute("SELECT * FROM grants WHERE task_id = ?", (task_id,)).fetchone()
+    e["invalid"] = check_row(row, None, e["generation"], now or now_tz(), voided_of(con, task_id))
+    return "ok", e, f"续接事件 {e['event_key']}：sent={e['sent']}"
+
+
 def resume_refs(con, task_id):
     """这张任务的续接日志：{决定号: [日志内容, ...]}（只收带决定号的；日志坏行跳过）。"""
     out = {}

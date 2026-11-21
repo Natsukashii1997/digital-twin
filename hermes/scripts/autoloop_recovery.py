@@ -391,8 +391,8 @@ def _answers():
 
 
 def _secretary():
-    """秘书账本里结果不明、核不清、还在送的代批（常浩 11-19「都按推荐」：有就不开闸；秘书自己的对账逻辑不改，
-    由 secretary_gate.reconcile 结掉，核不清的由常浩定）。库不在、还没有秘书表就是没有（不新建）；读不了不开闸。
+    """秘书账本里结果不明、核不清、还在送的代批（常浩 11-19「都按推荐」：有就不开闸），由 secretary_gate.reconcile 结掉
+    （11-21 常浩定秘书对账也按决定号认续接事件，和这里同一套 G.bound_event），核不清的由常浩定。库不在、还没有秘书表就是没有（不新建）；读不了不开闸。
     返回 (不开闸的原因或 None, 说明)。"""
     import twin_state as TS
     p = Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser()
@@ -426,7 +426,8 @@ def _waits_on_gateway(r):
     而补发 send-pending 本身要过闸——挡闸就成了死循环（秘书等事件发出、事件等开闸）。开闸后补发送到，秘书对账记 done。
     认事件只认和这次决定绑定的（L3 第 3 轮 P1-09）：凭证库里正好一条带这个决定号的续接日志（和事件同一事务记的），
     日志里的事件就是它；事件的任务、续接种类要对上，代次要等于日志记的、也等于决定里记的（有记的话）；决定自己记了
-    事件号的也要是同一个。不按时间猜：别的代次、人工续接的事件一律不算。找不到、对不上、已作废或已送达的照常挡闸，
+    事件号的也要是同一个（G.bound_event，秘书对账同一套）。不按时间猜：别的代次、人工续接的事件一律不算。凭证对这条事件
+    的代次已失效（冻结、撤销、过期）的补发不了，也不算（第 4 轮）。找不到、对不上、已作废或已送达的照常挡闸，
     由秘书对账结掉（核不清的由常浩 secretary_gate settle 定）。"""
     did, status, action, task_id, outcome, target = r
     if action not in ("redispatch", "reject") or status not in ("executing", "unknown") or not G.db_path().exists():
@@ -439,16 +440,10 @@ def _waits_on_gateway(r):
     kind = "redispatch" if action == "redispatch" else "rework"
     try:
         with G.tx() as gcon:
-            logs = G.resume_refs(gcon, task_id).get(did, [])
-            if len(logs) != 1 or (key and logs[0].get("event") != key):
-                return False
-            e = gcon.execute("SELECT task_id, kind, generation, sent FROM hub_events WHERE event_key = ?",
-                             (logs[0].get("event"),)).fetchone()
-    except (sqlite3.Error, ValueError, TypeError):
+            verdict, e, _ = G.bound_event(gcon, task_id, did, kind, gen, key)
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
         return False
-    if not e or (e[0], e[1]) != (task_id, kind) or e[3] not in (0, 2):
-        return False
-    return e[2] == logs[0].get("generation") and (gen is None or e[2] == gen)
+    return verdict == "ok" and e["sent"] in (0, 2) and not e["invalid"]   # 凭证已失效的事件补发不了，不算只差补发（第 4 轮）
 
 
 def reconcile(readers=None):

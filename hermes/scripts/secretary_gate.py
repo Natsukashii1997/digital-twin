@@ -74,7 +74,7 @@
 恢复闸（批 0D，常浩 11-19「都按推荐」）：提议先看一眼 autoloop_recovery.ensure_open()，关着 → not_ready（不记账、不占额度，
   开闸后再提）；获准在 cards.db 写锁里再拿出口账本写锁核开闸资格（R.admission，锁顺序 cards.db → 出口账本 → 账本库），
   关了 → 作废、释放额度、不送；秘书决定记成结果不明时同时关闸（finish），恢复闸对账看到秘书账本里还有结果不明、核不清、
-  还在送的代批就不开闸，由下面的 reconcile 结掉（对账逻辑不变），核不清的由常浩用 settle 定（第 2 轮预审 P1-A：原来没有结算
+  还在送的代批就不开闸，由下面的 reconcile 结掉，核不清的由常浩用 settle 定（第 2 轮预审 P1-A：原来没有结算
   入口，只能改库）；② / ③ 只差网关补发派单事件的不挡闸（常浩 11-20 选甲：补发 send-pending 要过闸，挡了是死循环；
   中台按 id 去重，补发不会多派）；lease（报送达）关着时不领卡，报送达和桥接用同一把锁、锁里再核闸。
 settle：常浩核实后手动结算一个核不清（unreconciled）的秘书决定，done 要写核到的回答 / 事件 / 评论（--ref），要 --confirm；
@@ -84,6 +84,9 @@ reconcile：对 executing（超过 2 分钟）/ unknown / unreconciled 的秘书
   交常浩（#218 第 3 轮 P1-04 / P1-05，常浩 11-19 选甲）。不再拿 cards.db 里有没有获准记录推断「秘书肯定没发」：证据库可能被
   换成旧快照，推断不可靠；① 现在整体关着，多冻结没有实际代价。frozen_task 也把超时的 executing 算进去，同任务第二张卡不能再获准。
   回读到已决定却缺回答人或选项：证据不全，也记 unreconciled（专项续审 P2-04，同 autoloop_answer.judge）。
+  ② / ③ 按决定号认续接事件（L3 第 4 轮 P1-09，常浩 11-21 定改，原来按时间拿第一条）：和恢复闸同一套 autoloop_grants.bound_event，
+  只认凭证库续接日志里带这个决定号的那一条，核任务、种类、代次；没有这条记录 → ③ 核不清、② 没做成；对不上 → 核不清；
+  事件 sent=1 → 做成、-1 → 没做成；还没发（0 / 2）但凭证对它的代次已失效（冻结、撤销、过期）→ ② 没领走的没做成、其余核不清，不干等。
 lease：从 secretary 通道领一张卡，第一次领到时生成并落盘自己的 ref（cards.db 的 secretary_cards），报 delivered（同一 ref 重报幂等），
   中台收下后记「中台确认送达」；领到新版本时先清掉旧版本的确认时间，只有这一版报送达成功才记（审查 P1-02）；以后由常驻进程调（本批不装）。
 
@@ -209,22 +212,6 @@ def grant(task_id):
         return None
     finally:
         con.close()
-
-
-def gateway_events(task_id, kind, since=None):
-    """网关记的这类续接事件（凭证库 hub_events，只读），since（带时区的时刻）之后记的；读不了返回 None。"""
-    try:
-        con = _ro(G.db_path())
-    except sqlite3.Error:
-        return None
-    try:
-        rows = [dict(r) for r in con.execute("SELECT * FROM hub_events WHERE task_id = ? AND kind = ? ORDER BY rowid",
-                                             (task_id, kind))]
-    except sqlite3.Error:
-        return None
-    finally:
-        con.close()
-    return [r for r in rows if since is None or G.parse_iso(r["at"]) >= since]
 
 
 def gateway_check(row, generation):
@@ -1261,7 +1248,7 @@ def reconcile(card=None, now=None):
             d = SL.get(st, did)
             if d["status"] == "executing" and _age(d["updated_at"]) < STALE:
                 continue                                     # 可能正在送
-            got = _verdict(st, d)
+            got = _verdict(st, d, now)
             if not got and d["action"] == "ask" and d["status"] == "executing":   # ① 卡住又核不出：一律说不清（第 3 轮 P1-04 / P1-05）
                 got = ("unreconciled", {"checked": "卡在送达中超过 2 分钟，中台库读不到这张卡，核不清是否已送出"})
             if not got or (got[0] == "unreconciled" and d["status"] == "unreconciled"):
@@ -1274,7 +1261,7 @@ def reconcile(card=None, now=None):
     return notes
 
 
-def _verdict(st, d):
+def _verdict(st, d, now=None):
     """按回读证据给结论：(结论, 证据)；读不到返回 None（不动）。"""
     if d["action"] == "ask":
         raw = L.read_raw(d) or {}
@@ -1293,24 +1280,31 @@ def _verdict(st, d):
             return "failed", {"checked": checked, "found": False}
         return "unreconciled", {"checked": checked + "（还开着：请求可能晚到，不重答）"}
     kind = {"redispatch": "redispatch", "reject": "rework"}[d["action"]]
-    key = d["outcome"].get("event_key")
-    began = st.conn.execute("SELECT at FROM events WHERE object_type = ? AND object_id = ? AND kind = ? ORDER BY id LIMIT 1",
-                            (SL.SECRETARY.obj, d["id"], f"{SL.SECRETARY.event}.executing")).fetchone()
-    evs = gateway_events(d["task_id"], kind, CU.parse_iso(began[0] if began else d["created_at"]))
-    if evs is None:
+    try:                                                     # 按决定号认事件（L3 第 4 轮 P1-09，常浩 11-21 定改）：和恢复闸
+        con = _ro(G.db_path())                               # 同一套 G.bound_event，不再按时间拿第一条——那样会把别的代次、
+    except sqlite3.Error:                                    # 人工续接的事件认成这次的、记成做成
         return None
-    if key:
-        evs = [e for e in evs if e["event_key"] == key]
-    if not evs:
-        return ("unreconciled", {"checked": "网关没有这次续接的事件记录"}) if d["action"] == "reject" else \
-            ("failed", {"checked": "网关没有这次续接的事件记录（网关先记账后发，没记就没发）", "found": False})
-    e = evs[0]
-    checked = f"网关事件 {e['event_key']}：sent={e['sent']}"
+    try:
+        verdict, e, note = G.bound_event(con, d["task_id"], d["id"], kind, (d.get("target") or {}).get("generation"),
+                                         d["outcome"].get("event_key"), now=now)
+    except (sqlite3.Error, ValueError, TypeError, KeyError):
+        return None
+    finally:
+        con.close()
+    if verdict == "none":
+        return ("unreconciled", {"checked": note}) if d["action"] == "reject" else \
+            ("failed", {"checked": note + "（网关先记账后发，没记就没发）", "found": False})
+    if verdict == "bad":
+        return "unreconciled", {"checked": note}
     if e["sent"] == 1:
-        return "done", {"checked": checked, "found": True, "ref": e["event_key"]}
+        return "done", {"checked": note, "found": True, "ref": e["event_key"]}
     if e["sent"] == -1:
-        return "failed", {"checked": checked + "（作废未发）", "found": False}
-    return None if e["sent"] in (0, 2) else ("unreconciled", {"checked": checked})
+        return "failed", {"checked": note + "（作废未发）", "found": False}
+    if e["sent"] in (0, 2) and e["invalid"]:                 # 凭证已失效：这条事件不会再发出去，不干等（第 4 轮）
+        if d["action"] == "redispatch" and e["sent"] == 0:
+            return "failed", {"checked": f"{note}（{e['invalid']}，这条事件不会再发）", "found": False}
+        return "unreconciled", {"checked": f"{note}（{e['invalid']}，补发不了，发没发出去要核）"}
+    return None if e["sent"] in (0, 2) else ("unreconciled", {"checked": note})
 
 
 def lease(wait=50):
