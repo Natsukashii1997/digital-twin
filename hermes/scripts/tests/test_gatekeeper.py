@@ -225,6 +225,13 @@ class Config(Base):
                         G.launch_ok()
                     with mock.patch.object(G, "ROOT_UID", os.geteuid()):
                         G.launch_ok()
+                        (code / "sub").mkdir()                          # 子目录里的也核（L3 第 3 轮 P1-04-A：递归）
+                        G.launch_ok()
+                        evil = Path(self.tmp.name) / "evil.py"
+                        evil.write_bytes(b"")
+                        (code / "sub" / "autoloop_feishu.py").symlink_to(evil)   # root 的链接指向别人能改的文件
+                        with self.assertRaisesRegex(F.Fail, "符号链接"):
+                            G.launch_ok()
                     os.environ["PATH"] = "/usr/local/bin:" + G.ENTRY_PATH   # PATH 多了主账号能改的目录
                     with self.assertRaisesRegex(F.Fail, "PATH"), mock.patch.object(G, "ROOT_UID", os.geteuid()):
                         G.launch_ok()
@@ -536,6 +543,59 @@ class Bind(Base):
             G.bind_confirm(code)                                        # 确认码没被消耗
         self.assertEqual(G.binding()["open_id"], OTHER)
 
+    def test_rebind_confirm_waits_for_in_flight_delivery_to_old_chat(self):
+        """L3 第 3 轮 P2-04：发卡那边已经拿了旧私聊号、正在发（持桥接锁）时，bind confirm 要等它发完、登记完再查，
+        查到旧私聊有没答完的卡就不换绑。"""
+        self.bind()
+        import autoloop_readonly as R
+        snap = {"cards": [], "recentCards": []}
+        with mock.patch.object(R, "read", lambda: snap):
+            G.bind_start(open_id=OTHER, replace=True)
+        nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
+        self.click_bind(nonce, "e_r", operator=OTHER, chat="oc_other_chat_01")
+        code = self.shown_code()
+        holding, go, result = threading.Event(), threading.Event(), {}
+
+        def deliver():                                                  # 模拟发卡线程停在拿到旧私聊号之后
+            with F.bridge_lock():
+                holding.set()
+                go.wait(5)
+                F._deliver(dict(CARD))                                  # 发到旧私聊并登记
+                snap["cards"] = [{"id": 7, "state": "open"}]
+
+        def confirm():
+            try:
+                result["out"] = G.bind_confirm(code)
+            except F.Fail as e:
+                result["err"] = str(e)
+        t1 = threading.Thread(target=deliver)
+        t1.start()
+        self.assertTrue(holding.wait(5))
+        with mock.patch.object(R, "read", lambda: snap):
+            t2 = threading.Thread(target=confirm)
+            t2.start()
+            t2.join(0.5)
+            self.assertTrue(t2.is_alive())                              # 等发卡那边放锁
+            go.set()
+            t1.join(5)
+            t2.join(5)
+        self.assertIn("没答完", result.get("err", ""), result)
+        self.assertEqual(G.binding()["open_id"], OWNER)
+
+    def test_notice_not_retried_past_idempotency_window(self):
+        """L3 第 3 轮 P2-06：飞书幂等键只保证一小时：超过 50 分钟还没确认送到的通知不再自动重发，提醒一次请人工核查。"""
+        self.bind()
+        with G.db(write=True) as con:
+            con.execute("INSERT INTO notices (key, chat_id, text, created_at, last_error) VALUES "
+                        "('gate-rebound-old', 'oc_old_chat_00001', 'x', '2026-01-01T00:00:00+08:00', '超时')")
+        self.assertEqual(G.flush_notices(force=True), 0)
+        self.assertFalse([a for a in self.lark.calls if "oc_old_chat_00001" in a])   # 没再发
+        self.assertIn("人工核查", self.lark.texts()[-1])                 # 提醒发到现在绑定的私聊
+        self.assertTrue(G.show()["notices_pending"][0]["gave_up_at"])
+        n = len(self.lark.calls)
+        G.flush_notices(force=True)
+        self.assertEqual(len(self.lark.calls), n)                       # 放弃后不再提醒、不再发
+
     def test_rebind_to_another_chat_tells_the_old_chat(self):
         self.bind()
         G.bind_start(open_id=OTHER, replace=True)
@@ -831,41 +891,26 @@ class Listening(Base):
         super().setUp()
         self.addCleanup(G.LISTENING.clear)
 
-    def test_listening_follows_ready_marker_and_process_exit(self):
-        d = Path(self.tmp.name) / "bin"
-        d.mkdir()
-        exe = d / "lark-cli"
-        exe.write_text(textwrap.dedent("""\
-            #!/usr/bin/python3
-            import json, sys, time
-            print(json.dumps({"n": 0})); sys.stdout.flush()
-            time.sleep(0.5)
-            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
-            time.sleep(0.5)
-            print(json.dumps({"n": 1})); sys.stdout.flush()
-            time.sleep(0.5)
-            sys.stderr.write("[source] feishu: connected\\n"); sys.stderr.flush()
-            time.sleep(0.5)
-            print(json.dumps({"n": 2})); sys.stdout.flush()
-            """))
-        os.chmod(exe, 0o755)
-        sec = Path(os.environ["DT_GATE_SECRET_FILE"])
-        sec.parent.mkdir(parents=True)
-        sec.write_text("s\n")
-        os.chmod(sec, 0o600)
-        G.setup(APP)
-        seen = []
-        G.LISTENING.set()                                               # 上一次的残留：起新进程时先撤掉
-        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
-            G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
-        self.assertEqual(seen, [(0, False), (1, False), (2, True)])     # 总线 ready 还不够，要飞书长连接 connected
-        self.assertFalse(G.LISTENING.is_set())                          # 进程退出立刻撤掉
+    PRELUDE = """\
+#!/usr/bin/python3
+import json, os, subprocess, sys, time
+def blog(s):
+    d = os.path.join(os.environ["LARKSUITE_CLI_CONFIG_DIR"], "events", os.environ["LARKSUITE_CLI_APP_ID"])
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(d, "bus.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    os.write(fd, ("2026/11/21 10:00:00 " + s + "\\n").encode()); os.close(fd); time.sleep(0.3)
+def err(s):
+    sys.stderr.write(s + "\\n"); sys.stderr.flush(); time.sleep(0.3)
+def out(n):
+    print(json.dumps({"n": n})); sys.stdout.flush(); time.sleep(0.3)
+READY = "[event] ready event_key=card.action.trigger"
+"""
 
     def fake_cli(self, body):
         d = Path(self.tmp.name) / "bin"
         d.mkdir(exist_ok=True)
         exe = d / "lark-cli"
-        exe.write_text("#!/usr/bin/python3\nimport json, subprocess, sys, time\n" + textwrap.dedent(body))
+        exe.write_text(self.PRELUDE + textwrap.dedent(body))
         os.chmod(exe, 0o755)
         sec = Path(os.environ["DT_GATE_SECRET_FILE"])
         if not sec.exists():
@@ -875,76 +920,139 @@ class Listening(Base):
             G.setup(APP)
         return exe
 
+    def history(self, *lines, mode=0o600):
+        """consume 起来之前 bus.log 里已有的内容（加入一个已经在跑的总线）。"""
+        G.setup(APP)
+        f = G.bus_log_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        for d in (f.parent, f.parent.parent, f.parent.parent.parent):
+            os.chmod(d, 0o700)
+        f.write_text("".join(f"2026/11/21 09:00:00 {line}\n" for line in lines))
+        os.chmod(f, mode)
+
+    def consume(self, exe, **kw):
+        seen, told, logs = [], [], []
+        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
+            code = G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True},
+                                  logs.append, told.append, **kw)
+        return seen, told, "\n".join(logs), code
+
+    def test_listening_needs_bus_ready_and_feishu_connected_in_bus_log(self):
+        """总线 ready 还不够，要 bus.log 里当前总线的飞书长连接 connected；进程退出立刻撤。"""
+        exe = self.fake_cli("""\
+            out(0); blog("Bus started for app=x pid=1 addr=y"); blog("Starting source: feishu")
+            err(READY); out(1)
+            blog("[SDK] connected to wss://msg-frontier.feishu.cn/ws/v2?x"); out(2)
+            """)
+        G.LISTENING.set()                                               # 上一次的残留：起新进程时先撤掉
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(seen, [(0, False), (1, False), (2, True)])
+        self.assertFalse(G.LISTENING.is_set())
+
+    def test_disconnect_reconnect_and_source_exit_follow_bus_log(self):
+        """L3 第 3 轮 P1-03-A：连接状态以 bus.log 为准（写文件不会像广播那样被静默丢掉）；consume 的 stderr 状态行不算数。"""
+        exe = self.fake_cli("""\
+            blog("Bus started for app=x pid=1 addr=y"); err(READY); blog("[SDK] connected to wss://a"); out(1)
+            blog("[SDK ERROR] disconnected to wss://a, err: read: connection reset"); err("[source] feishu: connected"); out(2)
+            blog("[SDK] trying to reconnect: 1"); out(3)
+            blog("[SDK] connected to wss://a"); out(4)
+            blog("Source feishu exited with error: x — shutting down bus"); out(5)
+            """)
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(seen, [(1, True), (2, False), (3, False), (4, True), (5, False)])
+
+    def test_joining_running_bus_reads_current_state_from_history(self):
+        """L3 第 3 轮 P2-07：总线早就在、不给新 consume 补状态：从 bus.log 里最后一次 Bus started 之后取当前状态。
+        开始看之前的旧丢事件行不算、不提醒。"""
+        self.history("Bus started for app=x pid=1 addr=y", "[SDK] connected to wss://old",
+                     "[feishu] drop malformed event: unmarshal error: x body=y",
+                     "Bus started for app=x pid=2 addr=y", "Starting source: feishu", "[SDK] connected to wss://new")
+        exe = self.fake_cli("""\
+            err(READY); out(1)
+            """)
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(seen, [(1, True)])
+        self.assertEqual(told, [])
+        self.history("Bus started for app=x pid=1 addr=y", "[SDK] connected to wss://old",
+                     "Bus started for app=x pid=2 addr=y")              # 新总线还没报连上：旧总线的 connected 不算
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(seen, [(1, False)])
+
+    def test_new_bus_rotating_bus_log_is_followed(self):
+        """新总线启动时 bus.log 轮转成新文件：从头读新文件。"""
+        self.history("Bus started for app=x pid=1 addr=y", "[SDK] connected to wss://a")
+        exe = self.fake_cli("""\
+            err(READY); out(1)
+            d = os.path.join(os.environ["LARKSUITE_CLI_CONFIG_DIR"], "events", os.environ["LARKSUITE_CLI_APP_ID"])
+            os.rename(os.path.join(d, "bus.log"), os.path.join(d, "bus.log.1"))
+            blog("Bus started for app=x pid=2 addr=y"); blog("Starting source: feishu"); out(2)
+            blog("[SDK] connected to wss://b"); out(3)
+            """)
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(seen, [(1, True), (2, False), (3, True)])
+
+    def test_upstream_loss_in_bus_log_fails_closed_and_tells_owner(self):
+        """L3 第 3 轮 P2-02：适配器丢事件、hub 丢事件只写 bus.log：照样撤在线、提醒常浩、结束这次 consume。"""
+        for loss in ("[feishu] drop malformed event: unmarshal error: x body=y",
+                     "WARN: backpressure on conn pid=12 event_key=card.action.trigger dropped_total=3"):
+            exe = self.fake_cli(f"""\
+                blog("Bus started for app=x pid=1 addr=y"); err(READY); blog("[SDK] connected to wss://a"); out(1)
+                blog({loss!r}); time.sleep(30)
+                """)
+            import time as _t
+            t0 = _t.monotonic()
+            seen, told, logs, code = self.consume(exe)
+            self.assertLess(_t.monotonic() - t0, 15)
+            self.assertEqual(seen, [(1, True)])
+            self.assertEqual(len(told), 1)
+            self.assertIn(loss[:20], told[0])
+            self.assertFalse(G.LISTENING.is_set())
+            G.bus_log_file().unlink()
+        for line in ("[feishu] drop oversized event: 5 bytes > cap 4", "[feishu] drop event missing header fields: event_id=\"\""):
+            self.assertTrue(G.BUSLOG_LOSS_RE.match(line), line)
+        self.assertFalse(G.BUSLOG_LOSS_RE.match("Event deduplicated: id=x"))
+
+    def test_not_connected_too_long_ends_this_consume(self):
+        """L3 第 3 轮 P2-07：连接中（或断了、认不出）一直不到 connected，超过 CONNECT_WAIT 就结束这次 consume 再起。"""
+        exe = self.fake_cli("""\
+            blog("Bus started for app=x pid=1 addr=y"); blog("Starting source: feishu"); err(READY); time.sleep(30)
+            """)
+        import time as _t
+        t0 = _t.monotonic()
+        with mock.patch.object(G, "CONNECT_WAIT", 1):
+            seen, told, logs, code = self.consume(exe)
+        self.assertLess(_t.monotonic() - t0, 15)
+        self.assertIn("秒没连上（现在：connecting）", logs)
+
+    def test_untrusted_bus_log_never_counts_as_online(self):
+        self.history("Bus started for app=x pid=1 addr=y", "[SDK] connected to wss://a", mode=0o644)
+        exe = self.fake_cli("""\
+            err(READY); out(1); time.sleep(30)
+            """)
+        seen, told, logs, code = self.consume(exe)
+        self.assertFalse([n for n, on in seen if on])
+        self.assertIn("读不了 lark-cli 事件总线日志", logs)
+
     def test_exited_marker_drops_listening_before_process_ends(self):
         exe = self.fake_cli("""\
-            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
-            sys.stderr.write("[source] feishu: connected\\n"); sys.stderr.flush()
-            time.sleep(0.5)
-            print(json.dumps({"n": 1})); sys.stdout.flush()
-            time.sleep(0.5)
-            sys.stderr.write("[event] exited reason=bus_disconnected\\n"); sys.stderr.flush()
-            time.sleep(0.5)
-            print(json.dumps({"n": 2})); sys.stdout.flush()
+            blog("Bus started for app=x pid=1 addr=y"); err(READY); blog("[SDK] connected to wss://a"); out(1)
+            err("[event] exited reason=bus_disconnected"); out(2)
             """)
-        seen = []
-        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
-            G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
+        seen, told, logs, code = self.consume(exe)
         self.assertEqual(seen[0], (1, True))                            # exited 后撤在线、结束这次 consume；已在路上的
         self.assertFalse([n for n, on in seen[1:] if on])                # 那条照常处理（是真点击），但已不算在线
 
-    def test_feishu_disconnect_and_reconnect_follow_source_status(self):
-        """L3 第 2 轮 P1-03：总线还在、飞书长连接断了（disconnected / reconnecting）要撤；重新 connected 才恢复；
-        认不出的状态也不算在线。"""
+    def test_event_loss_warning_on_stderr_fails_closed_and_tells_owner(self):
+        """L3 第 2 轮 P2-02：consume 自己报确定丢了事件：撤在线、提醒常浩、结束这次 consume。"""
         exe = self.fake_cli("""\
-            def err(s):
-                sys.stderr.write(s + "\\n"); sys.stderr.flush(); time.sleep(0.4)
-            def out(n):
-                print(json.dumps({"n": n})); sys.stdout.flush(); time.sleep(0.4)
-            err("[event] ready event_key=card.action.trigger"); err("[source] feishu: connecting"); out(1)
-            err("[source] feishu: connected"); out(2)
-            err("[source] feishu: disconnected (read tcp: reset)"); out(3)
-            err("[source] feishu: reconnecting (attempt 1)"); out(4)
-            err("[source] feishu: connected"); out(5)
-            err("[source] feishu: weird_state"); out(6)
+            blog("Bus started for app=x pid=1 addr=y"); err(READY); blog("[SDK] connected to wss://a"); out(1)
+            err("WARN: event seq gap 3->5, missed 1 events (dropped by bus backpressure)"); time.sleep(30)
             """)
-        seen = []
-        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
-            G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
-        self.assertEqual(seen, [(1, False), (2, True), (3, False), (4, False), (5, True), (6, False)])
-
-    def test_no_connected_status_after_ready_ends_this_consume(self):
-        """总线早就在（不给新 consume 补当前状态）：ready 后等不到 connected 就结束这次 consume，run 隔一阵再起新总线。"""
-        exe = self.fake_cli("""\
-            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
-            time.sleep(30)
-            """)
-        logs = []
         import time as _t
         t0 = _t.monotonic()
-        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}), mock.patch.object(G, "SOURCE_WAIT", 1):
-            G.consume_once(lambda ev: {"ok": True}, logs.append)
+        seen, told, logs, code = self.consume(exe)
         self.assertLess(_t.monotonic() - t0, 15)
-        self.assertIn("没看到飞书长连接 connected", "\n".join(logs))
-        self.assertFalse(G.LISTENING.is_set())
-
-    def test_event_loss_warning_fails_closed_and_tells_owner(self):
-        """L3 第 2 轮 P2-02：lark-cli 报确定丢了事件：撤在线、提醒常浩、结束这次 consume。"""
-        exe = self.fake_cli("""\
-            sys.stderr.write("[event] ready event_key=card.action.trigger\\n")
-            sys.stderr.write("[source] feishu: connected\\n"); sys.stderr.flush()
-            time.sleep(0.5)
-            print(json.dumps({"n": 1})); sys.stdout.flush()
-            time.sleep(0.5)
-            sys.stderr.write("WARN: event seq gap 3->5, missed 1 events (dropped by bus backpressure)\\n"); sys.stderr.flush()
-            time.sleep(30)
-            """)
-        seen, told = [], []
-        import time as _t
-        t0 = _t.monotonic()
-        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
-            G.consume_once(lambda ev: seen.append(G.LISTENING.is_set()) or {"ok": True}, lambda line: None, told.append)
-        self.assertLess(_t.monotonic() - t0, 15)
-        self.assertEqual(seen, [True])
+        self.assertEqual(seen, [(1, True)])
         self.assertEqual(len(told), 1)
         self.assertIn("seq gap", told[0])
         self.assertFalse(G.LISTENING.is_set())
@@ -962,15 +1070,14 @@ class Listening(Base):
     def test_child_holding_the_pipe_does_not_hang_after_exit(self):
         """复核 P2-2：lark-cli 退了，但它起的子进程还占着 stdout：不能卡住、就绪要撤。"""
         exe = self.fake_cli("""\
-            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
+            err(READY)
             subprocess.Popen(["/bin/sleep", "20"])
             time.sleep(0.5)
             sys.exit(4)
             """)
         import time as _t
         t0 = _t.monotonic()
-        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
-            code = G.consume_once(lambda ev: {"ok": True}, lambda line: None)
+        seen, told, logs, code = self.consume(exe)
         self.assertEqual(code, 4)
         self.assertLess(_t.monotonic() - t0, 15)
         self.assertFalse(G.LISTENING.is_set())
