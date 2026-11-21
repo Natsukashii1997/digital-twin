@@ -291,6 +291,12 @@ class StartedBeforeOpen(Base):
         real = E.frozen_scopes
 
         def in_final_tx(con):                                                 # 第 5 步：对账已持出口账本写锁
+            probe = E.sqlite3.connect(str(E.db_path()), timeout=0, isolation_level=None)
+            try:                                                              # 确定性：此刻写锁在对账手里（续审第 3 轮 P2-06）
+                with self.assertRaisesRegex(E.sqlite3.OperationalError, "locked"):
+                    probe.execute("BEGIN IMMEDIATE")
+            finally:
+                probe.close()
             t.start()
             self.assertTrue(writing.wait(5))
             self.assertTrue(entered.wait(5))                                  # 关闸那笔已经在 BEGIN IMMEDIATE 上

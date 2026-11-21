@@ -235,6 +235,10 @@ M = [
      [SG + ".RedispatchTests.test_grant_expiring_while_waiting_for_the_exits_lock_keeps_the_gate_closed"]),
     ("autoloop_recovery.py", "EXPIRY_MARGIN = dt.timedelta(seconds=60)", "EXPIRY_MARGIN = dt.timedelta(seconds=0)",
      "快到期的续接事件也算只差补发", [SG + ".RedispatchTests.test_grant_about_to_expire_is_not_waiting_for_resend"]),
+    # 续审第 3 轮 P1-08-01
+    ("autoloop_grants.py", "    if not task_locked:\n        if not TASK_ID.match", "    if False:\n        if not TASK_ID.match",
+     "续接不拿任务锁（命令行能另记一条事件）",
+     [SG + ".RedispatchTests.test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task"]),
 ]
 
 

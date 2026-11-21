@@ -594,10 +594,26 @@ def approve(message_id, now=None, path=None, post=None):
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
-def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=None, generation=None):
+def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=None, generation=None, task_locked=False):
     """续接（重派 / 返修 / 更正）：记一条派单事件再尝试发。ref = 发起这次续接的决定号（秘书代批传自己的决定号），
     和事件号记在同一条续接日志里，恢复闸据此认「只差网关补发」的是不是这次决定的事件（L3 第 3 轮 P1-09）；
-    同一个 ref 只能续接一次。generation = 发起方认定的代次，凭证已经不是这一代就不续接。"""
+    同一个 ref 只能续接一次。generation = 发起方认定的代次，凭证已经不是这一代就不续接。
+    整个续接持这张任务的受信发布锁（和 autoloop_publish、秘书 ② / ③ 同一把，不等待，拿不到就拒绝）：秘书 ② / ③ 或
+    受信发布正在处理这张单时，命令行和别的调用方都不能另记一条事件（续审第 3 轮 P1-08-01）。task_locked=True 表示
+    调用方已经持着这把锁（秘书 ② / ③），这里不再拿（同一进程再拿会自己等自己）。"""
+    if not task_locked:
+        if not TASK_ID.match(str(task_id or "")):
+            raise Rejected("单号写法不对")
+        import autoloop_publish as P
+        lock = P.task_lock(task_id)
+        try:
+            lock.__enter__()
+        except P.Rejected as e:
+            raise Rejected(f"不能续接：{e}（秘书或受信发布正在处理这张单，等它做完）")
+        try:
+            return resume_dispatch(task_id, kind, reason, now, path, post, ref, generation, task_locked=True)
+        finally:
+            lock.__exit__(None, None, None)
     now = now or now_tz()
     if kind not in KINDS:
         raise Rejected("续接只有 redispatch、rework、correction 三种")

@@ -1114,7 +1114,8 @@ def _resume(st, d, kind, reason, now, generation, partial=False):
     partial：前面已经做了撤不回的一步（③ 的留言已发出），这时网关不放行也只能记结果不明，交对账、不重发。
     续接带上决定号和前闸核过的代次（L3 第 3 轮 P1-09）：事件和这次决定绑在同一条续接日志里，凭证换了代就不续接。"""
     try:
-        out = G.resume_dispatch(d["task_id"], kind, reason, now=now, ref=d["id"], generation=generation)
+        out = G.resume_dispatch(d["task_id"], kind, reason, now=now, ref=d["id"], generation=generation,
+                                task_locked=True)              # 调用方（_route）全程持着这张任务的受信发布锁
     except G.Rejected as e:
         result = "unknown" if partial else "failed"
         finish(st, d["id"], result, {"error": str(e), **({"note": "留言已发出、返修没派出"} if partial else {})}, now=now)

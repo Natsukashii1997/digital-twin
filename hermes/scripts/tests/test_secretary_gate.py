@@ -163,6 +163,26 @@ def watch_begin(thread_box, db):
         yield entered, returned
 
 
+def assert_write_locked(case, db):
+    """确定性地证明此刻有别人持着库 db 的写锁：新开一条不等待（timeout=0）的连接 BEGIN IMMEDIATE，必须马上被拒
+    （续审第 3 轮 P2-06：不靠调用前置位的事件加 sleep 推断）。"""
+    con = sqlite3.connect(str(db), timeout=0, isolation_level=None)
+    try:
+        with case.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+            con.execute("BEGIN IMMEDIATE")
+    finally:
+        con.close()
+
+
+def assert_write_free(case, db):
+    con = sqlite3.connect(str(db), timeout=0, isolation_level=None)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("ROLLBACK")
+    finally:
+        con.close()
+
+
 def make_hermes(home):
     home.mkdir(parents=True, exist_ok=True)
     (home / "config.yaml").write_text(f"model:\n  default: {MAIN}\n  provider: {MAIN_PROVIDER}\nfallback_model:\n"
@@ -1045,15 +1065,18 @@ class RedispatchTests(Base):
             entered, returned = stack.enter_context(watch_begin(box, db))
 
             def in_final_tx(con):
+                assert_write_locked(self, db)                   # 确定性：此刻 db 的写锁在对账手里，竞争事务完成不了
                 box[0].start()
-                self.assertTrue(entered.wait(10))               # 线程已经在 BEGIN IMMEDIATE 上
+                self.assertTrue(entered.wait(10))               # 线程已经走到 BEGIN IMMEDIATE（辅助证据）
                 time.sleep(0.3)
-                seen.append(returned.is_set())                  # 还没拿到锁：确实排在对账后面
+                seen.append(returned.is_set())
+                assert_write_locked(self, db)                   # 开闸提交之前一直持着
                 return real(con)
             stack.enter_context(mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx))
             rep = R.reconcile()
             box[0].join(35)
             self.assertTrue(returned.is_set())                  # 对账提交后拿到了
+        assert_write_free(self, db)                             # 都放了
         return rep, seen, errors
 
     def test_freeze_waits_until_the_gate_decision_is_committed(self):
@@ -1127,6 +1150,40 @@ class RedispatchTests(Base):
             sent = G.send_pending(now=clock[0])
         self.assertEqual([x.get("sent") for x in sent], [True], sent)
         self.assertEqual(SG.reconcile(now=clock[0] + dt.timedelta(minutes=1)), [(did, "done")])
+
+    def test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task(self):
+        """续审第 3 轮 P1-08-01：秘书 ② 持着任务锁、决定还在 executing、恢复闸按 11-20 例外开着时，直接用命令行
+        `autoloop_grants.py resume-dispatch` 对同一张单续接，不能另记第二个派单事件；锁放了才可以。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+
+        def redispatch_events():
+            with G.tx() as con:
+                return con.execute("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind = 'redispatch'",
+                                   (TASK,)).fetchone()[0]
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            stack.enter_context(P.task_lock(TASK))              # 原秘书 ② 还持着这张单的锁
+            rep = R.reconcile()
+            self.assertTrue(rep["open"], rep["why"])            # 11-20 例外：闸开着
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = G.main(["resume-dispatch", "--task", TASK, "--kind", "redispatch", "--reason", "人工重派"])
+            self.assertEqual(code, 1)
+            self.assertIn("正在处理这张单", out.getvalue())
+            with self.assertRaisesRegex(G.Rejected, "正在处理这张单"):
+                G.resume_dispatch(TASK, "redispatch", "别的调用方")
+            self.assertEqual(redispatch_events(), 1)
+        stack, patches = self._real_gate(clock)                  # 锁放了：同一个命令就能记（证明拦它的是任务锁）
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            stack.enter_context(mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")))
+            G.resume_dispatch(TASK, "redispatch", "人工重派")
+        self.assertEqual(redispatch_events(), 2)
+        self.assertTrue(did)
 
     def test_fresh_claim_is_a_send_in_progress_not_a_resend(self):
         """续审第 1 轮：sent=2 刚领走不到 60 秒是一次正在进行的发送，不算只差补发（挡闸）；过了 60 秒才算（不挡）。"""
