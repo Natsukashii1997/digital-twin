@@ -1359,36 +1359,44 @@ def cmd_button(verb, ref, chat):
     if not chat or chat != home_chat():
         print(f"不处理：点击不是来自常浩私聊（{chat or '没有 chat_id'}）")
         return 1
-    click = hashlib.sha1(f"{verb} {ref} {dt.datetime.now().isoformat()}".encode()).hexdigest()[:16]
     said = []
+    try:                                    # 先认出是哪张卡片：同一张卡片的不同写法（app#05、app#5）要落到同一把锁上（#260-P2-18）
+        card = find_card(ref)
+        key = card_ref(card["repo"], card["pr"], card["head"])
+    except Stop as e:
+        card, key, early = None, ref, e
+    click = hashlib.sha1(f"{verb} {key} {dt.datetime.now().isoformat()}".encode()).hexdigest()[:16]
 
     def say(text):                          # lark-cli 的幂等键最长 50 个字符
         send(chat, "text", {"text": text}, f"merge-btn-{click}-{len(said)}")
         said.append(text)
 
+    if card is None:                        # 没发过这张卡片、引用写错：什么都不做，说清楚
+        say(fail_text(verb, early))
+        return 1
     mo.SHADOW.mkdir(parents=True, exist_ok=True)
-    safe = re.sub(r"[^\w.-]", "_", ref)
+    safe = re.sub(r"[^\w.-]", "_", key)
     lock = open(mo.SHADOW / f"button-{safe}.lock", "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
-        say(f"{ref} 已经在处理了，等上一次的结果就好。")
+        say(f"{key} 已经在处理了，等上一次的结果就好。")
         return 1
     try:
         if verb == "return":
             try:
-                card = find_card(ref)
+                card = find_card(ref)       # 拿到锁之后再读一次（卡片记录可能刚被改过）
             except Stop as e:
                 say(fail_text("return", e))
                 return 1
-            say(f"↩️ 退回 {ref} 的原因是？直接回「退回 原因」就行，不用引用卡片。")
+            say(f"↩️ 退回 {key} 的原因是？直接回「退回 原因」就行，不用引用卡片。")
             ask_return(card)                # 问出去了才打标记
             return 0
-        say(f"⏳ 在核对 {ref}，稍后告诉你结果。")
+        say(f"⏳ 在核对 {key}，稍后告诉你结果。")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             code = main(["merge", ref])
-        say(out.getvalue().strip() or f"没合并：{ref} 没有输出")
+        say(out.getvalue().strip() or f"没合并：{key} 没有输出")
         return code
     finally:
         lock.close()

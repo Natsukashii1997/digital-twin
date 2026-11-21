@@ -644,6 +644,22 @@ class MergeAct(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.texts(), [f"{self.ref} 已经在处理了，等上一次的结果就好。"])
 
+    def test_button_lock_is_per_card_not_per_spelling(self):
+        """#260-P2-18：app#05@… 和 app#5@… 是同一张卡片，要落到同一把锁上：一个在处理时，另一种写法的
+        退回、合并按钮都只说「已经在处理了」，不发退回提示、不合并。"""
+        import fcntl
+        self.scan()
+        self.shadow.mkdir(parents=True, exist_ok=True)
+        alias = f"app#05@{self.head[:7]}"
+        with open(self.shadow / f"button-app_5_{self.head[:7]}.lock", "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for verb in ("return", "merge"):
+                r = self.cli(ACT, "button", verb, alias, "--chat", "oc_test0001")
+                self.assertEqual(r.returncode, 1, verb + r.stdout + r.stderr)
+        self.assertEqual(self.texts(), [f"{self.ref} 已经在处理了，等上一次的结果就好。"] * 2)
+        state = json.loads((self.fake / "prs.json").read_text())["o/app"]["5"]["state"]
+        self.assertEqual((state, [c for c in self.calls() if c[:2] == ["pr", "merge"]]), ("OPEN", []))
+
     def test_button_return_asks_reason_and_marks_card(self):
         self.scan()
         r = self.cli(ACT, "button", "return", self.ref, "--chat", "oc_test0001")
