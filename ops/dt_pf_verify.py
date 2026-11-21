@@ -13,7 +13,11 @@ IPv4 和 IPv6；本机没有 IPv6 公网时 root 也连不上 IPv6 那项，记�
 UDP 的规则不分端口（一律挡），所以用 root 自己的 UDP 回声靶子证明数据面，不逐个去试系统的 UDP 端口（那些端口不回话，
 分不清是被挡还是没回）。ICMP 和系统解析器代发的 DNS pf 按账号认不出，常浩 11-20 接受为已知风险，不在这里试。
 
-退出码：0 全部符合；1 有该挡没挡住（或该通不通）；2 测试本身不完整（账号没跑起来、结果条数不对、对照组 root 自己也连不上）。
+入站（L3 第 4 轮 P1-05）：两个受管账号各自开 TCP、UDP 监听（各本机地址，另试占另一个受管账号准连的端口），root、dt-gate、
+另一个受管账号去连，都必须连不上、监听那边一次也没收到；dt-gate 开的监听 root 必须连得上（对照）。
+
+退出码：0 全部符合；1 有该挡没挡住（或该通不通）；2 测试本身不完整（账号没跑起来、结果条数不对、对照组 root 自己也连不上、
+lsof / ifconfig 出错、开不了靶子、压力模式的重新加载没覆盖整段测试）。
 
 压力模式 `sudo bash ops/dt_worker_pf.sh verify stress 600`（L3 第 3 轮 P1-02、P2-06）：11-19 试装时两次偶发漏过都在规则重新加载附近。
 这个模式让两个账号同时、连续 N 秒不停去连上面这些该挡的靶子，root 同时每秒强制重新加载一次门卫规则（和开机任务加载的是同一份规则文件）。
@@ -181,8 +185,9 @@ class Targets:
                     s.bind((a, 0))
                 except OSError as e:
                     s.close()
-                    # 只有「这个地址不在本机了」（网卡刚切换）才跳过，记进报告；别的错不知道为什么开不了，算不完整
-                    (self.vanished if e.errno == errno.EADDRNOTAVAIL else self.bind_errors).append(
+                    # 只有「这个地址确实不在本机了」（网卡刚切换：报 EADDRNOTAVAIL，重读一遍网卡地址也没有它）才跳过，记进报告；
+                    # 别的错不知道为什么开不了，算不完整
+                    (self.vanished if gone(a, e) else self.bind_errors).append(
                         {"kind": kind, "host": a, "error": f"{e.errno}:{e.strerror}"})
                     continue
                 if kind == "tcp":
@@ -258,8 +263,20 @@ def local_addrs():
             a = parts[1].split("%")[0]
             if a.startswith(("127.", "::1", "fe80")):
                 continue
+            if {"tentative", "duplicated", "detached"} & set(parts):   # IPv6 地址还没就绪或冲突：谁都绑不上，不算本机地址
+                continue
             addrs.append(a)
     return addrs
+
+
+def gone(addr, err):
+    """绑定失败是不是因为这个地址已经不在本机：EADDRNOTAVAIL 本身不够，要重读一遍网卡地址确认没有它（子 agent 审查第 4 轮）。"""
+    if getattr(err, "errno", None) != errno.EADDRNOTAVAIL or addr in ("127.0.0.1", "::1"):
+        return False
+    try:
+        return addr not in local_addrs()
+    except Incomplete:
+        return False
 
 
 def own_addrs():
@@ -479,6 +496,8 @@ def serve_listen(hosts, ports, seconds):
         s = socket.socket(family(host), socket.SOCK_STREAM if kind == "tcp" else socket.SOCK_DGRAM)
         if family(host) == socket.AF_INET6:
             s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        if kind == "tcp":   # 上一个账号刚在这个端口上收过连接，留着 TIME_WAIT；不加这个，冒充端口对照接着开同一端口会绑不上
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind((host, port))
         except OSError as e:
@@ -501,14 +520,17 @@ def serve_listen(hosts, ports, seconds):
             try:
                 if kind == "tcp":
                     c, _ = s.accept()
-                    c.close()
                 else:
                     data, peer = s.recvfrom(512)
-                    s.sendto(data, peer)
             except OSError:
                 continue
+            # 收到就记，回包另算：包已经进来了，回包被自己的出站拒绝挡掉也是漏过（单向送数据本身就是通道）
             sys.stderr.write(f"HIT {kind} {host} {s.getsockname()[1]}\n")
             sys.stderr.flush()
+            try:
+                c.close() if kind == "tcp" else s.sendto(data, peer)
+            except OSError:
+                pass
     return 0
 
 
@@ -544,6 +566,38 @@ def inbound_judge(server, ts, probers, hits):
     return worst, rows
 
 
+def takeover_control(ports, users):
+    """冒充端口的对照：dt-gate 在同样的端口上开监听，受管账号去连必须连得上。连不上说明「连不上」可能是它自己的出站放行
+    坏了，不能算对方的入站拒绝起了作用：算测试不完整（子 agent 审查第 4 轮）。"""
+    p = run_as("dt-gate", [], "serve", SERVE_SECONDS, popen=True, extra=[json.dumps(ports)])
+    rows, worst = [], 0
+    try:
+        import select
+        ready = select.select([p.stdout], [], [], 60)[0]
+        first = p.stdout.readline() if ready else b""
+        try:
+            listeners = json.loads(first) if first.strip() else None
+        except ValueError:
+            listeners = None
+        if not isinstance(listeners, list):
+            return 2, [{"by": "dt-gate", "error": "冒充端口对照的监听没开起来"}]
+        ts = [t for t in inbound_targets(listeners) if t["kind"] == "tcp"]
+        if len(ts) != len(ports):
+            return 2, [{"by": "dt-gate", "error": f"冒充端口对照有端口开不了：{listeners}"}]
+        for u in users:
+            try:
+                got = run_as(u, ts)
+            except Exception as e:
+                got = e
+            w, r = inbound_judge("dt-gate", ts, {u: got}, [])
+            rows += [{**x, "what": "冒充端口对照（dt-gate 开）"} for x in r]
+            worst = max(worst, w)
+    finally:
+        p.kill()
+        p.wait()
+    return worst, rows
+
+
 def inbound():
     """L3 第 4 轮 P1-05：两个受管账号不能对外提供服务。每个账号各开一组监听（各本机地址上的 TCP、UDP，另试占另一个受管账号
     准连的端口），root、dt-gate 去连，被占端口再由另一个受管账号去连（它准连这些端口，正是冒充的场景）：全都要连不上、
@@ -556,7 +610,8 @@ def inbound():
         return 2, {"error": "没有对照账号"}
     for server in managed + ["dt-gate"]:
         others = [u for u in managed if u != server]
-        ports = sorted(set().union(*(ALLOWED[u] for u in others)) - ALLOWED.get(server, set())) if server in ALLOWED else []
+        # 另一个受管账号准连的端口都试着占（8090 也试：过滤代理没在跑时正是冒充的机会；在跑就绑不上，记「没测」）
+        ports = sorted(set().union(*(ALLOWED[u] for u in others))) if server in ALLOWED else []
         p = run_as(server, hosts, "serve", SERVE_SECONDS, popen=True, extra=[json.dumps(ports)])
         hits, errs = [], []
 
@@ -566,8 +621,10 @@ def inbound():
                 (hits if line.startswith("HIT ") else errs).append(line)
         th = threading.Thread(target=drain, daemon=True)
         th.start()
-        try:
-            first = p.stdout.readline()
+        import select
+        try:   # 第一行（开了哪些监听）等 60 秒，卡住就算没开起来
+            ready = select.select([p.stdout], [], [], 60)[0]
+            first = p.stdout.readline() if ready else b""
             listeners = json.loads(first) if first.strip() else None
         except ValueError:
             listeners = None
@@ -580,7 +637,9 @@ def inbound():
             worst = max(worst, 2)
             continue
         ts = inbound_targets(listeners)
-        failed = [l for l in listeners if "error" in l and not l["port"]]
+        failed = [l for l in listeners if "error" in l and not l["port"]
+                  and not gone(l["host"], OSError(int(l["error"]), ""))]
+        untested = sorted({l["port"] for l in listeners if "error" in l and l["port"]})
         probers = {"root": probe(ts)}
         try:
             probers["dt-gate"] = run_as("dt-gate", ts) if server != "dt-gate" else None
@@ -588,7 +647,7 @@ def inbound():
             probers["dt-gate"] = e
         if probers["dt-gate"] is None:
             del probers["dt-gate"]
-        take = [t for t in ts if t["takeover"]]
+        take = [t for t in ts if t["takeover"] and t["kind"] == "tcp"]   # 受管账号的 UDP 出站一律挡，只有 TCP 准连端口能冒充
         for u in others:
             try:
                 got = run_as(u, take) if take else []
@@ -596,7 +655,7 @@ def inbound():
                 got = e
             if isinstance(got, list):   # 只连被占的端口：结果按全部靶子对齐，没连的记「没试」
                 it = iter(got)
-                got = [next(it) if t["takeover"] else "没试" for t in ts]
+                got = [next(it) if t in take else "没试" for t in ts]
             probers[u] = got
         time.sleep(0.5)                  # 最后一个包到了再收
         early = p.poll() is not None     # 监听提前没了：后面的「连不上」可能只是没人在听，不能算挡住
@@ -604,16 +663,22 @@ def inbound():
         p.wait()
         th.join(5)
         w, rows = inbound_judge(server, ts, probers, hits)
+        if take and others:              # 冒充端口的对照：同一端口换 dt-gate 开，同一个受管账号去连，必须连得上
+            ctrl_w, ctrl_rows = takeover_control(sorted({t["port"] for t in take}), others)
+            rows += ctrl_rows
+            w = 1 if 1 in (w, ctrl_w) else max(w, ctrl_w)
+        if untested:
+            print(f"== 入站 {server}：这些冒充端口被占用（服务在跑），没测：{untested}")
         if failed or early:               # 端口 0 都开不了（这个地址没测到），或监听中途退了
             print(f"== 入站 {server}：测试不完整：" + ("监听中途退了；" if early else "") + (f"有地址开不了监听：{failed[:3]}" if failed else ""))
             w = max(w, 2) if w != 1 else 1
-        report[server] = {"listeners": listeners, "rows": rows, "hits": hits}
+        report[server] = {"listeners": listeners, "rows": rows, "hits": hits, "takeover_untested": untested}
         print(f"== 入站：{server} 开的监听" + ("（对照）" if server == "dt-gate" else ""))
         for r in rows:
             if "error" in r:
                 print(f"  [没跑完] {r['by']}：{r['error']}")
             else:
-                print(f"  [{r['verdict']}] {r['by']} → {r['kind']} {r['host']}:{r['port']}{'（占端口）' if r['takeover'] else ''} → {r['got']}")
+                print(f"  [{r['verdict']}] {r['by']} → {r['kind']} {r['host']}:{r['port']}{'（占端口）' if r.get('takeover') else ''} → {r['got']}")
         if hits and server != "dt-gate":
             print(f"  [没挡住] {server} 的监听收到了 {len(hits)} 次：{hits[:3]}")
         worst = 1 if 1 in (worst, w) else max(worst, w)
@@ -665,7 +730,11 @@ def verify():
             worst = worst or 2
         if own.vanished:
             print("== 这些地址测试时已不在本机，没开靶子：" + "、".join(b["host"] for b in own.vanished[:5]))
-        w, report["inbound"] = inbound()
+        try:
+            w, report["inbound"] = inbound()
+        except Exception as e:           # 入站这一段出错不能把出站已经判出的结果（尤其是 1）冲掉，也不能不写记录
+            print(f"== 入站：测试没跑完：{e!r}"[:300])
+            w, report["inbound"] = 2, {"error": repr(e)[:500]}
         worst = 1 if 1 in (worst, w) else max(worst, w)
         report["hits_on_own_targets"] = own.hits
     finally:
@@ -889,6 +958,9 @@ def main():
         return verify()
     except Incomplete as e:
         print(f"测试不完整：{e}")
+        return 2
+    except Exception as e:   # 没预料到的异常按「不完整」报：Python 默认退出码 1 会被读成「有漏过」
+        print(f"测试没跑完：{e!r}"[:500])
         return 2
 
 

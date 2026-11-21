@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -590,6 +591,9 @@ case "$*" in
   "-a com.apple/250.ApplicationFirewall -s nat") [ "$sc" = sibling_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
   "-a com.apple/dt-worker -s nat") [ "$sc" = own_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
   "-a com.apple/dt-worker -s Anchors") [ "$sc" = own_sub_anchor ] && echo "  com.apple/dt-worker/x"; exit 0 ;;
+  "-a com.apple -s rules") echo 'anchor "200.AirDrop/*" all'; echo 'anchor "250.ApplicationFirewall/*" all'
+                          [ "$sc" = apple_quick_anchor ] && echo 'anchor "300.Other/*" quick all'; exit 0 ;;
+  "-a com.apple -s nat") [ "$sc" = apple_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
   "-a "*" -s nat") exit 0 ;;
   "-a com.apple -s Anchors") [ "$sc" = anchors_fail ] && exit 1
                              echo "  com.apple/250.ApplicationFirewall"; echo "  com.apple/dt-worker"
@@ -601,6 +605,7 @@ case "$*" in
     [ "$sc" = sibling_pass ] && echo 'pass out quick proto tcp all flags S/SA keep state'
     [ "$sc" = sibling_pass_both ] && echo 'pass quick on en0 all'
     [ "$sc" = sibling_pass_in ] && echo 'pass in quick proto tcp to port 5000 keep state'
+    [ "$sc" = sibling_quick_anchor ] && echo 'anchor "x" quick all'
     [ "$sc" = sibling_fail ] && exit 1
     echo 'block drop in all'; exit 0 ;;
   "-q -f /etc/pf.conf") exit 0 ;;
@@ -641,9 +646,21 @@ exit 1
     # L3 第 4 轮 P1-03：发了信号要回查。kill_stuck：工人的进程一直在；pgrep_err：pgrep 出错（查不清）
     PGREP = """#!/bin/bash
 case "$SCENARIO:$2" in
-  kill_stuck:dt-worker) exit 0 ;;
   pgrep_err:*) exit 3 ;;
+  no_procs:*) exit 1 ;;
 esac
+echo 4242
+"""
+    # ps -o user= -p <pid>：只认动手前就在的 4242；kill_stuck 里它一直活着，其余场景里 pkill 后就没了
+    # （真机上 pgrep 再查可能看到系统新拉起的进程，那些生在新规则下，不算残留）
+    PS = """#!/bin/bash
+[ "$SCENARIO:${@: -1}" = kill_stuck:4242 ] && echo " dt-worker"
+exit 0
+"""
+    # 账号在不在：本机可能真有 dt-worker，id 不能用真的（目录服务查不清时 id 也查不到）
+    ID = """#!/bin/bash
+case "$SCENARIO:$1" in ds_fail:*|no_secretary:dt-secretary) exit 1 ;; esac
+case $1 in dt-worker|dt-secretary) exit 0 ;; esac
 exit 1
 """
 
@@ -664,8 +681,10 @@ exit 1
         pg.write_text(self.PGREP)
         pg.chmod(0o755)
         script = script.replace("/usr/bin/pgrep", str(pg)).replace("      sleep 0.5\n", "      sleep 0\n")
-        # 账号在不在只按桩 user_list 判（本机可能真有 dt-worker，id 查得到会让场景不受控）
-        script = script.replace('if ! id "$u" >/dev/null 2>&1; then', "if true; then")
+        for name, body in (("ps", self.PS), ("id", self.ID)):
+            (d / name).write_text(body)
+            (d / name).chmod(0o755)
+        script = script.replace("/bin/ps -o user=", f"{d}/ps -o user=").replace('if ! id "$u"', f'if ! {d}/id "$u"')
         script = script.replace("DS_TRIES=12", "DS_TRIES=3").replace("    sleep 5 ", "    sleep 0 ")
         script = re.sub(r'^\[ "\$\(id -u\)" = 0 \].*$', "", script, flags=re.M)
         (d / "pf.sh").write_text(script)
@@ -724,9 +743,12 @@ exit 1
                               ("nested_pass", "com.apple/250.ApplicationFirewall/x_里有：pass_out_quick"),
                               ("sibling_pass_both", "com.apple/250.ApplicationFirewall_里有：pass_quick"),
                               ("sibling_pass_in", "com.apple/250.ApplicationFirewall_里有：pass_in_quick"),
+                              ("sibling_quick_anchor", "com.apple/250.ApplicationFirewall_里有：anchor_\"x\"_quick"),
+                              ("apple_quick_anchor", "com.apple_里有：anchor_\"300.Other/*\"_quick"),
+                              ("apple_nat_pass", "com.apple_的地址转换里有：rdr_pass"),
                               ("own_nat_pass", "com.apple/dt-worker_的地址转换里有：rdr_pass"),
                               ("own_sub_anchor", "com.apple/dt-worker_下有子锚点：com.apple/dt-worker/x"),
-                              ("kill_stuck", "dt-worker_的进程结束不掉"),
+                              ("kill_stuck", "dt-worker_的进程结束不掉（4242）"),
                               ("pgrep_err", "查不清_dt-worker_还有没有进程（pgrep_返回_3）"),
                               ("skip_iface", "有网卡被_pf_跳过：lo0_(skip)"),
                               ("nat_pass", "主规则集的地址转换里有：nat_pass"),
@@ -752,7 +774,7 @@ exit 1
                 self.assertEqual(self.kills, [], scenario)
                 self.assertIn("查不清_dt-worker_在不在", f["reason"])
             elif scenario not in ("kill_stuck", "pgrep_err"):
-                self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * (1 + (scenario in ("partial", "dup", "tampered", "disabled"))), scenario)
+                self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * (1 + (scenario in ("partial", "dup", "tampered"))), scenario)
 
     def test_directory_unclear_keeps_rules(self):
         """审查第 4 轮 P1-1：目录服务一时查不清，不能当成「没有秘书」把秘书从规则里删掉；短暂查不清时重试后照常。"""
@@ -782,16 +804,23 @@ exit 1
         self.assertEqual(r.returncode, 1)
         self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
 
-    def test_reenable_writes_applying_and_kills_first(self):
-        """L3 第 4 轮 P1-03：pf 被关过、规则没变，原来直接重新打开就写 ok；现在打开前先写「进行中」、结束两个账号的进程。"""
+    def test_reenable_writes_applying_and_kills(self):
+        """L3 第 4 轮 P1-03：pf 被关过、规则没变，原来直接重新打开就写 ok；现在先写「进行中」、打开、再结束两个账号的进程。"""
         d = self.setup_dir()
         self.apply("ok", d)
         (d / "kills").unlink()
         r, f, _ = self.apply("reenable", d)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((f["state"], f["reloaded"], f["reenabled"]), ("ok", "no", "yes"))
-        self.assertIn("state=applying", (d / "status_at_enable").read_text())
-        self.assertEqual((d / "kills_at_enable").read_text().split("\n")[:2], ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
+        self.assertIn("state=applying", (d / "status_at_enable").read_text())   # 打开 pf 时工人已看到「进行中」
+        # 先开 pf 再清进程（清不干净时 pf 也已经开着）
+        self.assertFalse((d / "kills_at_enable").exists())
+        self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
+
+    def test_no_processes_nothing_to_kill(self):
+        r, f, _ = self.apply("no_procs")
+        self.assertEqual((r.returncode, f["state"]), (0, "ok"), r.stdout + r.stderr)
+        self.assertEqual(self.kills, [])
 
     def test_unsafe_dir_writes_nothing(self):
         """L3 第 3 轮 P2-05：状态目录不是只有 root 能改的，连状态文件都不写。"""
@@ -1103,6 +1132,9 @@ class Verify(unittest.TestCase):
         rel.times = [[100.0, 100.1]]               # 只在开头加载过一次，之后没动静
         self.assertTrue(any("空档" in b for b in self.v.reload_coverage(rel, 99.0, 200.0)))
         self.assertTrue(any("空档" in b for b in self.v.reload_coverage(self.v.Reloader(1.0), 0.0, 1.0)))   # 一次都没有
+        stuck = self.v.Reloader(1.0, ["/usr/bin/true"])
+        stuck.times, stuck.is_alive = [[0.5, 0.6]], lambda: True
+        self.assertTrue(any("没停下" in b for b in self.v.reload_coverage(stuck, 0.0, 1.0)))
         self.assertIn("reload_coverage(rel, started, ended)", VERIFY.read_text())
 
     def test_inbound_judge(self):
@@ -1144,12 +1176,80 @@ class Verify(unittest.TestCase):
             self.assertTrue(rows, server)
             self.assertTrue(all("error" not in r for r in rows), rows)
             self.assertTrue(report[server]["hits"], server)
-        w = report["dt-worker"]["rows"]
+        rows = report["dt-worker"]["rows"]
+        ctrl = [r for r in rows if r["what"].startswith("冒充端口对照")]
+        w = [r for r in rows if r not in ctrl]
         self.assertEqual({r["by"] for r in w}, {"root", "dt-gate", "dt-secretary"})
-        # 秘书只连被工人占住的端口（秘书准连的 free[1]），那正是冒充场景
-        self.assertEqual({(r["host"], r["port"]) for r in w if r["by"] == "dt-secretary"}, {("127.0.0.1", free[1])})
+        # 秘书只连被工人占住的端口（秘书准连的 free[1]），那正是冒充场景；只连 TCP（受管账号的 UDP 出站一律挡）
+        self.assertEqual({(r["kind"], r["host"], r["port"]) for r in w if r["by"] == "dt-secretary"},
+                         {("tcp", "127.0.0.1", free[1])})
         self.assertTrue(all(r["verdict"] == "没挡住" for r in w))
+        # 冒充端口的对照：同一端口换 dt-gate 开，秘书去连要连得上
+        self.assertEqual({(r["by"], r["port"], r["verdict"]) for r in ctrl}, {("dt-secretary", free[1], "对照")})
         self.assertTrue(all(r["verdict"] == "对照" for r in report["dt-gate"]["rows"]))
+
+    def test_inbound_udp_hit_recorded_even_if_reply_blocked(self):
+        """子 agent 审查第 4 轮：UDP 包已经进了受管账号的套接字、回包被它自己的出站拒绝挡掉时，也要记「收到」
+        （原来回包出错就跳过记录，root 那边只看到超时 → 判「符合」）。用 3.9 真起一个监听进程，回包一律报错。"""
+        code = (
+            "import importlib.util, socket, errno, sys\n"
+            f"spec = importlib.util.spec_from_file_location('v', {str(VERIFY)!r})\n"
+            "v = importlib.util.module_from_spec(spec); spec.loader.exec_module(v)\n"
+            "class NoReply(socket.socket):\n"
+            "    def sendto(self, *a):\n"
+            "        raise OSError(errno.EPERM, 'blocked')\n"
+            "v.socket.socket = NoReply\n"
+            "v.serve_listen(['127.0.0.1'], [], 3)\n")
+        p = subprocess.Popen(["/usr/bin/python3", "-I", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ls = json.loads(p.stdout.readline())
+        port = [l["port"] for l in ls if l["kind"] == "udp"][0]
+        c = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        c.sendto(b"x", ("127.0.0.1", port))
+        c.close()
+        _, err = p.communicate(timeout=10)
+        self.assertIn(f"HIT udp 127.0.0.1 {port}", err)
+
+    def test_inbound_incomplete_paths(self):
+        """入站：没有 dt-gate 对照、监听开不起来，都算不完整（2），不会报 0。"""
+        self.v.account_exists = lambda u: u != "dt-gate"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.v.inbound()[0], 2)
+        self.v.account_exists = lambda u: True
+        self.v.own_addrs = lambda: ["127.0.0.1"]
+        real_popen = subprocess.Popen
+        self.v.subprocess.Popen = lambda cmd, *a, **kw: real_popen(["/usr/bin/python3", "-c", "import sys; sys.exit(1)"], *a, **kw) \
+            if cmd[:2] == ["sudo", "-u"] else real_popen(cmd, *a, **kw)
+        self.addCleanup(setattr, self.v.subprocess, "Popen", real_popen)
+        with contextlib.redirect_stdout(io.StringIO()):
+            worst, report = self.v.inbound()
+        self.assertEqual(worst, 2)
+        self.assertEqual(report["dt-worker"], {"error": "监听没开起来"})
+
+    def test_gone_needs_address_really_missing(self):
+        """EADDRNOTAVAIL 不能单独证明地址没了：重读网卡地址确认没有它才算；回环地址、别的错一律不算。"""
+        self.v.local_addrs = lambda: ["192.168.1.16"]
+        e = OSError(errno.EADDRNOTAVAIL, "x")
+        self.assertTrue(self.v.gone("192.168.1.99", e))
+        self.assertFalse(self.v.gone("192.168.1.16", e))      # 地址还在（tentative 之类）：算开不了，不算消失
+        self.assertFalse(self.v.gone("127.0.0.1", e))
+        self.assertFalse(self.v.gone("192.168.1.99", OSError(errno.EACCES, "x")))
+        v2 = load_verify()                                     # 用没被换掉 local_addrs 的一份
+        real = v2.subprocess.run
+        self.addCleanup(setattr, v2.subprocess, "run", real)
+        v2.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(
+            c, 0, "lo0: flags\n\tinet6 2409::5 prefixlen 64 tentative\n\tinet6 2409::6 prefixlen 64 autoconf\n\tinet 10.0.0.2 netmask 0xff\n", "")
+        self.assertEqual(v2.local_addrs(), ["2409::6", "10.0.0.2"])   # 还没就绪的 IPv6 地址不算本机地址
+
+    def test_main_unexpected_error_is_incomplete(self):
+        """没预料到的异常按「不完整」（2）报，不能落到 Python 默认的退出码 1（会被读成「有漏过」）。"""
+        self.v.os.geteuid = lambda: 0
+        self.addCleanup(setattr, self.v.os, "geteuid", os.geteuid)
+        self.v.verify = lambda: 1 / 0
+        old = sys.argv
+        sys.argv = ["x"]
+        self.addCleanup(setattr, sys, "argv", old)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.v.main(), 2)
 
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()

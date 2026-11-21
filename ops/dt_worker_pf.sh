@@ -139,24 +139,30 @@ boot_sec() { /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = 
 # pgrep 出错（查不清）都打印原因、返回 1。账号确实不在（目录服务说清了）就不用清；目录服务查不清不当成不在。
 # 结果靠打印和返回码；在命令替换里调时先关 ERR 陷阱。
 kill_accounts() {
-  local u names rc i bad=""
+  local u names rc i old p left bad=""
   for u in "$WORKER" "$SECRETARY"; do
     if ! id "$u" >/dev/null 2>&1; then
       names=$(user_list) || { bad="${bad}；查不清 $u 在不在，没法确认它的进程清了"; continue; }
-      printf '%s\n' "$names" | awk '{print $1}' | grep -qx "$u" || continue
+      printf '%s\n' "$names" | awk -v u="$u" '$1 == u {f = 1} END {exit !f}' || continue
     fi
-    rc=0
+    # 先记下现在有哪些进程：只要它们都没了就算清干净。动手之后新起的（系统按账号身份重新拉起的 mdworker 之类）
+    # 生在新规则下，不算残留，不然会被误判成「结束不掉」（子 agent 审查第 4 轮）
+    old=$(/usr/bin/pgrep -u "$u" 2>/dev/null) && rc=0 || rc=$?
+    case $rc in
+      0) ;;
+      1) continue ;;
+      *) bad="${bad}；查不清 $u 还有没有进程（pgrep 返回 ${rc}）"; continue ;;
+    esac
     for i in 1 2 3 4 5 6 7 8 9 10; do
       /usr/bin/pkill -KILL -u "$u" 2>/dev/null || true
-      /usr/bin/pgrep -u "$u" >/dev/null 2>&1 && rc=0 || rc=$?
-      [ "$rc" = 0 ] || break
+      left=""
+      for p in $old; do
+        [ "$(/bin/ps -o user= -p "$p" 2>/dev/null | tr -d ' ')" = "$u" ] && left="$left $p"
+      done
+      [ -n "$left" ] || break
       sleep 0.5
     done
-    case $rc in
-      1) ;;
-      0) bad="${bad}；$u 的进程结束不掉" ;;
-      *) bad="${bad}；查不清 $u 还有没有进程（pgrep 返回 ${rc}）" ;;
-    esac
+    [ -z "$left" ] || bad="${bad}；$u 的进程结束不掉（${left# }）"
   done
   [ -z "$bad" ] || { echo "${bad#；}"; return 1; }
 }
@@ -189,9 +195,26 @@ order_ok() {
   no_quick_pass com.apple 0
 }
 
+# 一段过滤规则里会在门卫之前定局的：带 quick 的放行，和带 quick 的锚点调用（锚点里任何一条命中就定局，里面不带 quick 的
+# pass 也算数；子 agent 审查第 4 轮）
+quick_hit() { printf '%s\n' "$1" | grep -E '^(pass|anchor)[[:space:]]' | grep -E '[[:space:]]quick([[:space:]]|$)' | head -1 || true; }
+# 一段地址转换规则里的：带 pass 的转换（命中的包不过过滤规则）、带 quick 的转换锚点
+nat_hit() {
+  printf '%s\n' "$1" | grep -E '^(nat|rdr|binat)[[:space:]].*[[:space:]]pass([[:space:]]|$)|^(nat|rdr|binat)[[:space:]]+pass[[:space:]]|^(nat|rdr|binat)-anchor[[:space:]].*[[:space:]]quick([[:space:]]|$)' \
+    | head -1 || true
+}
+
 no_quick_pass() {
   local subs sub rules hit
   [ "$2" -lt 5 ] || { echo "$1 下的锚点层数太多，查不完"; return 1; }
+  if [ "$2" = 0 ]; then                     # com.apple 自己的规则（各个子锚点的调用在这里）也要查
+    rules=$(/sbin/pfctl -a "$1" -s rules 2>/dev/null) || { echo "读不出 $1 的规则"; return 1; }
+    hit=$(quick_hit "$rules")
+    [ -z "$hit" ] || { echo "$1 里有：$hit"; return 1; }
+    rules=$(/sbin/pfctl -a "$1" -s nat 2>/dev/null) || { echo "读不出 $1 的地址转换规则"; return 1; }
+    hit=$(nat_hit "$rules")
+    [ -z "$hit" ] || { echo "$1 的地址转换里有：$hit"; return 1; }
+  fi
   subs=$(/sbin/pfctl -a "$1" -s Anchors 2>/dev/null) || { echo "读不出 $1 下的锚点"; return 1; }
   for sub in $subs; do
     case $sub in "$1"/?*) ;; *) echo "认不出 $1 下的锚点名：$sub"; return 1 ;; esac   # pfctl 打印的是完整路径
@@ -205,10 +228,10 @@ no_quick_pass() {
       continue
     fi
     rules=$(/sbin/pfctl -a "$sub" -s rules 2>/dev/null) || { echo "读不出 $sub 的规则"; return 1; }
-    hit=$(printf '%s\n' "$rules" | grep -E '^pass[[:space:]]' | grep -E '[[:space:]]quick([[:space:]]|$)' | head -1 || true)
+    hit=$(quick_hit "$rules")
     [ -z "$hit" ] || { echo "$sub 里有：$hit"; return 1; }
     rules=$(/sbin/pfctl -a "$sub" -s nat 2>/dev/null) || { echo "读不出 $sub 的地址转换规则"; return 1; }
-    hit=$(printf '%s\n' "$rules" | grep -E '(^|[[:space:]])pass([[:space:]]|$)' | head -1 || true)
+    hit=$(nat_hit "$rules")
     [ -z "$hit" ] || { echo "$sub 的地址转换里有：$hit"; return 1; }
     no_quick_pass "$sub" $(( $2 + 1 )) || return 1
   done
@@ -216,7 +239,7 @@ no_quick_pass() {
 
 apply() {
   # 状态文件、规则文件都写在 $DIR 里：先确认从 / 起每一级只有 root 能改，不然连状态都不写（写了也不可信）
-  root_path "$DIR" || { echo "$DIR 不是只有 root 能改的目录，不动手"; exit 1; }
+  root_path "$DIR" || { echo "$DIR 不是只有 root 能改的目录，不动手"; kill_accounts >/dev/null || true; exit 1; }
   trap 'fail "第 $LINENO 行出错"' ERR
   tries=0
   while :; do
@@ -238,15 +261,17 @@ apply() {
   # 实际加载的规则必须和规则文件解析出来的一模一样（同一个 pfctl 打印，按 uid 展开）；一样就不重新加载
   expected=$(/sbin/pfctl -nvf "$RULES" 2>/dev/null)
   [ -n "$expected" ] || fail "规则文件解析不出来"
-  # pf 被关过（L3 第 4 轮 P1-03）：关着的这段时间两个账号随便联网，重新打开前先写「进行中」、结束它们的全部进程
+  # pf 被关过（L3 第 4 轮 P1-03）：关着的这段时间两个账号随便联网。先写「进行中」（工人不再开工），马上打开 pf，
+  # 再结束两个账号的全部进程。先开后清：清进程出问题时 pf 也已经开着（不会因为清不干净一直关着，子 agent 审查第 4 轮）；
+  # 关着时建的连接在 pf 里没有状态记录，打开后它们的包照样过门卫规则，结束进程再把它们彻底断掉
   reenabled=no
   if [ "$(pf_enabled)" != yes ]; then
     write_status "state=applying"
-    left=$(trap - ERR; kill_accounts) || fail "pf 没开，重新打开前没清掉受管账号的进程：$left"
     /sbin/pfctl -q -E 2>/dev/null || true
+    [ "$(pf_enabled)" = yes ] || fail "pf 没开"
     reenabled=yes
+    left=$(trap - ERR; kill_accounts) || fail "pf 关过，重新打开后没清掉受管账号的进程：$left"
   fi
-  [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
   reloaded=no
   if [ "$loaded" != "$expected" ]; then
