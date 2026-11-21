@@ -17,6 +17,7 @@ from test_aihot_hot import FAKE  # noqa: E402  假 lark-cli：按 replies.json �
 SCRIPT = SCRIPTS / "away_sheet.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "away_sheet"
 CHAT = "oc_testchat000001"
+OWNER = "ou_owner000001"
 T0 = "2026-11-21T12:00:00+08:00"
 NOW = dt.datetime.fromisoformat("2026-11-21T15:50:00+08:00")
 ASK = {"task": "磁盘瘦身 · 第三批整改", "what": "删 2 个用完的工作目录", "about": "留着只占地方。",
@@ -104,6 +105,30 @@ class Card(unittest.TestCase):
             with self.assertRaises(A.Fail):
                 call()
 
+    def test_hhmm_later_than_now_means_yesterday(self):
+        now = dt.datetime.fromisoformat("2026-11-22T00:05:00+08:00")
+        self.assertEqual(A.when("23:58", now), "2026-11-21T23:58:00+08:00")
+        self.assertEqual(A.when("00:03", now), "2026-11-22T00:03:00+08:00")
+        self.assertEqual(A.when(None, now), "2026-11-22T00:05:00+08:00")
+        for bad in ("25:00", "12:60", "下午三点"):
+            with self.assertRaises(A.Fail):
+                A.when(bad, now)
+
+    def test_ask_cannot_be_backdated_before_an_existing_number(self):
+        # 编号按先后发、流水按时间排：补记一件更早的事会让 ② 排到 ① 前面，常浩指出过序号要清楚
+        sheet = blank()
+        A.add_ask(sheet, ASK, "2026-11-21T12:35:00+08:00")
+        with self.assertRaises(A.Fail) as e:
+            A.add_ask(sheet, ASK, "2026-11-21T12:10:00+08:00")
+        self.assertIn("不能排到已有编号的前面", str(e.exception))
+        self.assertEqual(A.add_ask(sheet, ASK, "2026-11-21T12:35:30+08:00"), 2)
+
+    def test_inner_jargon_is_spotted_next_to_chinese(self):
+        for text in ("合并PR吗", "看issue", "PR #300 合不合", "修 #12"):
+            self.assertTrue(A.INNER.search(text), text)
+        for text in ("PRD 改不改", "发不发布到正式版", "SPRING 版"):
+            self.assertFalse(A.INNER.search(text), text)
+
     def test_long_sheet_folds_oldest_done_rows_and_keeps_asks_open(self):
         # 飞书卡片正文最多 199 个组件（11-21 实测）：装不下时把最早办完的收成一行折叠，要他做的永远摊开
         rows = [done("12:%02d" % i, f"第 {i} 件办完了。") for i in range(1, 41)]
@@ -164,20 +189,26 @@ class Cli(unittest.TestCase):
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
 
-    def reply(self, title, listed=()):
-        got = {"ok": True, "data": {"messages": [{"msg_type": "interactive", "content": f"<card title=\"{title}\">…</card>"}]}}
+    def reply(self, title, listed=(), sub="11-21 12:00 开始｜更新于 12:40", patch=True):
+        got = {"ok": True, "data": {"messages": [{"msg_type": "interactive", "content": f"<card title=\"{title}\" subtitle=\"{sub}\">…</card>"}]}}
         (self.fake / "replies.json").write_text(json.dumps({
             "+messages-send": {"ok": True, "data": {"message_id": "om_sheet_1"}}, "+messages-mget": got,
-            "im messages patch": {"ok": True, "data": {}}, "+messages-reply": {"ok": True, "data": {"message_id": "om_remind_1"}},
+            "im messages patch": {"ok": True, "data": {}} if patch else {"ok": False, "error": {"message": "改不了"}},
+            "+messages-reply": {"ok": True, "data": {"message_id": "om_remind_1"}},
             "+chat-messages-list": {"ok": True, "data": {"messages": list(listed)}}}, ensure_ascii=False), encoding="utf-8")
 
-    def run_script(self, *args, now="2026-11-21T12:40:00+08:00", chat=CHAT):
-        env = {k: v for k, v in os.environ.items() if k != "FEISHU_HOME_CHANNEL"}
+    def env(self, now="2026-11-21T12:40:00+08:00", chat=CHAT, owner=OWNER, home=CHAT):
+        env = {k: v for k, v in os.environ.items() if k not in ("FEISHU_HOME_CHANNEL", "DT_OWNER_OPEN_ID", "DT_OWNER_CHAT_ID")}
         env.update(DT_AWAY_DIR=str(self.dir), DT_LARK_CLI=str(self.fake / "lark-cli"), FAKE_DIR=str(self.fake),
-                   DT_NOW=now, HERMES_HOME="/x", DT_HERMES_ENV=str(self.tmp / "hermes.env"))
-        if chat:
-            env["FEISHU_HOME_CHANNEL"] = chat
-        return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
+                   DT_NOW=now, HERMES_HOME="/x", DT_HERMES_ENV=str(self.tmp / "hermes.env"),
+                   DT_OWNER_FILE=str(self.tmp / "no-owner"), DT_OWNER_CHAT_FILE=str(self.tmp / "no-chat"))
+        for k, v in (("FEISHU_HOME_CHANNEL", chat), ("DT_OWNER_OPEN_ID", owner), ("DT_OWNER_CHAT_ID", home)):
+            if v:
+                env[k] = v
+        return env
+
+    def run_script(self, *args, **kw):
+        return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], capture_output=True, text=True, env=self.env(**kw), timeout=60)
 
     def ok(self, *args, **kw):
         r = self.run_script(*args, **kw)
@@ -243,26 +274,43 @@ class Cli(unittest.TestCase):
         self.assertEqual(body["header"]["title"]["content"], "托管流水｜现在没有等你的事")
         self.assertIn("<font color='grey'>✅ ① **磁盘瘦身 · 第三批整改**｜已删掉（你 12:38 回的）</font>", texts(body))
 
-    def test_replies_are_only_his_messages_quoting_this_sheet(self):
+    def listed(self):
+        def msg(mid, who, text, quote=None, sender=OWNER, **more):
+            m = {"message_id": mid, "create_time": "2026-11-21 12:50", "content": text,
+                 "sender": {"sender_type": who, "id": sender, "name": "x"}}
+            if quote:
+                m["reply_to"] = quote
+            m.update(more)
+            return m
+        return [msg("om_a", "user", "1 删掉", "om_sheet_1"),                       # 他引用单子回的
+                msg("om_b", "user", "2 开了再恢复", "om_remind_1"),                 # 他引用提醒回的
+                msg("om_c", "user", "按推荐"),                                      # 没引用：是回猛鬼兽别的事的
+                msg("om_d", "user", "合并", "om_other_card"),                       # 引用的是别的卡片
+                msg("om_e", "app", "托管单多了 1 件", "om_sheet_1", sender="cli_x"),  # 机器人自己发的提醒
+                msg("om_f", "user", "1 留着", "om_sheet_1", sender="ou_someone"),   # 不是他本人
+                msg("om_g", "user", "撤回的", "om_sheet_1", deleted=True)]           # 他撤回了
+
+    def two_asks_pushed(self):
         self.open_sheet()
         self.ok("push")
         self.ask(task="数字分身 · 合并官")
         self.reply("托管流水｜还等你 2 件")
         self.ok("push")                                                   # 提醒的消息号 om_remind_1 也算这张单子的
+        self.reply("托管流水｜还等你 2 件", listed=self.listed())
 
-        def msg(mid, who, text, quote=None):
-            m = {"message_id": mid, "create_time": "2026-11-21 12:50", "content": text, "sender": {"sender_type": who, "name": "x"}}
-            if quote:
-                m["reply_to"] = quote
-            return m
-        self.reply("托管流水｜还等你 2 件", listed=[
-            msg("om_a", "user", "1 删掉", "om_sheet_1"),          # 他引用单子回的
-            msg("om_b", "user", "2 开了再恢复", "om_remind_1"),    # 他引用提醒回的
-            msg("om_c", "user", "按推荐"),                         # 没引用：是回猛鬼兽别的事的
-            msg("om_d", "user", "合并", "om_other_card"),          # 引用的是别的卡片
-            msg("om_e", "app", "托管单多了 1 件", "om_sheet_1")])  # 机器人自己发的提醒
+    def test_replies_are_only_his_own_messages_quoting_this_sheet(self):
+        self.two_asks_pushed()
         got = json.loads(self.ok("replies"))
-        self.assertEqual([(m["message_id"], m["text"]) for m in got], [("om_a", "1 删掉"), ("om_b", "2 开了再恢复")])
+        self.assertEqual([(m["message_id"], m["text"], m["new"]) for m in got], [("om_a", "1 删掉", True), ("om_b", "2 开了再恢复", True)])
+        again = json.loads(self.ok("replies"))
+        self.assertEqual([m["new"] for m in again], [False, False])       # 给过的不再算新的，免得同一句办两次
+
+    def test_replies_refused_without_knowing_who_he_is(self):
+        self.two_asks_pushed()
+        for kw, word in (({"owner": None}, "没配置"), ({"home": None}, "没配置"), ({"home": "oc_group000000001"}, "不是常浩的私聊")):
+            r = self.run_script("replies", **kw)
+            self.assertEqual(r.returncode, 1, kw)
+            self.assertIn(word, r.stdout)
 
     def test_readback_mismatch_is_reported(self):
         self.open_sheet()
@@ -273,6 +321,90 @@ class Cli(unittest.TestCase):
         runs = (self.dir / "2026-11-21-1200" / "runs.jsonl").read_text(encoding="utf-8")
         self.assertIn("sent_unverified", runs)
         self.assertEqual(self.sheet()["message_id"], "om_sheet_1")        # 发过就记下，下次是更新不是再发一张
+
+    def test_update_that_keeps_the_title_is_still_checked(self):
+        self.open_sheet()
+        self.ok("push")
+        self.ok("done", "--project", "磁盘瘦身", "--text", "装好了。", now="2026-11-21T12:41:00+08:00")
+        r = self.run_script("push", now="2026-11-21T12:41:00+08:00")     # 假回读还停在 12:40 那一版：这次更新没生效
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("回读对不上", r.stdout)
+
+    def test_failed_update_does_not_swallow_the_reminder(self):
+        self.open_sheet()
+        self.ok("push")
+        self.ask(task="数字分身 · 合并官")
+        self.reply("托管流水｜还等你 2 件", patch=False)
+        r = self.run_script("push")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(self.calls("+messages-reply"), [])
+        self.assertFalse(self.sheet()["rows"][1]["notified"])
+        self.reply("托管流水｜还等你 2 件")
+        self.ok("push")                                                   # 下次推上去了，提醒补发
+        self.assertEqual(len(self.calls("+messages-reply")), 1)
+
+    def test_ask_added_right_before_end_still_gets_a_reminder(self):
+        self.open_sheet()
+        self.ok("push")
+        self.ask(task="数字分身 · 合并官")
+        self.ok("end", "--at", "12:40")
+        self.reply("托管结束｜还等你 2 件", sub="11-21 12:00 开始｜12:40 结束")
+        self.ok("push")
+        self.assertEqual(len(self.calls("+messages-reply")), 1)           # 原地更新不弹通知，这件事他否则看不到
+
+    def test_new_sheet_waits_until_the_old_one_is_ended_and_pushed(self):
+        self.open_sheet()
+        self.ok("push")
+        r = self.run_script("start", "--by", "Claude 会话「测试」", now="2026-11-21T13:00:00+08:00")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("还没结束", r.stdout)
+        self.ok("end", "--at", "12:40")
+        r = self.run_script("start", "--by", "Claude 会话「测试」", now="2026-11-21T13:00:00+08:00")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("结束状态还没推", r.stdout)                          # 不然旧卡永远显示「托管流水」
+        self.reply("托管结束｜还等你 1 件", sub="11-21 12:00 开始｜12:40 结束")
+        self.ok("push")
+        self.assertEqual(self.ok("start", "--by", "Claude 会话「测试」", now="2026-11-21T13:00:00+08:00"), "2026-11-21-1300")
+
+    def test_full_sheet_refuses_the_extra_item_and_can_still_be_ended(self):
+        self.ok("start", "--by", "Claude 会话「测试」", "--at", "12:00")
+        n = 0
+        while True:
+            r = self.run_script("ask", *[x for k, v in ASK.items() for x in ("--" + k, v)])
+            if r.returncode:
+                break
+            n += 1
+            self.assertLess(n, 40)
+        self.assertIn("装不下", r.stdout)
+        self.assertIn("这一条没记进去", r.stdout)
+        self.assertEqual(len(self.sheet()["rows"]), n)                    # 没收的那条不占编号、不留在单子里
+        self.ok("end", "--at", "12:40")                                   # 报错给的出路走得通
+        self.reply(f"托管结束｜还等你 {n} 件", sub="11-21 12:00 开始｜12:40 结束")
+        self.ok("push")
+        card = json.loads((self.dir / "2026-11-21-1200" / "card.json").read_text(encoding="utf-8"))
+        self.assertLess(A.tags(card["body"]), 199)
+
+    def test_commands_sent_in_parallel_all_land(self):
+        self.ok("start", "--by", "Claude 会话「测试」", "--at", "12:00")
+        procs = [subprocess.Popen([sys.executable, "-B", str(SCRIPT), "done", "--project", "磁盘瘦身", "--text", f"第 {i} 件。"],
+                                  env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(8)]
+        self.assertEqual([p.wait(timeout=60) for p in procs], [0] * 8)
+        for p in procs:
+            p.stdout.close()
+            p.stderr.close()
+        self.assertEqual(sorted(r["text"] for r in self.sheet()["rows"]), [f"第 {i} 件。" for i in range(8)])
+
+    def test_bad_input_is_refused_in_one_sentence(self):
+        self.open_sheet()
+        for args, word in ((("done", "--project", "磁盘瘦身", "--text", " "), "不能空着"),
+                           (("note", "--text", ""), "不能空着"),
+                           (("done", "--project", "磁盘瘦身", "--text", "x", "--at", "25:00"), "时间看不懂"),
+                           (("done", "--project", "磁盘瘦身", "--text", "x", "--at", "11:00"), "比开单"),
+                           (("resolve", "9", "--result", "x"), "没有第 9 件")):
+            r = self.run_script(*args)
+            self.assertEqual((r.returncode, r.stderr), (1, ""), args)     # 一句话，不抛栈
+            self.assertIn(word, r.stdout)
+        self.assertEqual(len(self.sheet()["rows"]), 1)
 
     def test_no_private_chat_no_send(self):
         self.open_sheet()

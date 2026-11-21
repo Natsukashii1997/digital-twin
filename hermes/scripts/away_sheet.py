@@ -23,12 +23,19 @@
   replies                          打印常浩引用这张单子（或提醒）回的话
   show                             打印这张单子现在记了什么
 
-除 start 外都对当前这张单子操作（--sheet 指定别的）。时间用 --at（HH:MM 或 ISO），不写就是现在。
-状态在 ~/Library/Application Support/DigitalTwin/away/<单号>/sheet.json，发送记录在同目录 runs.jsonl。
+除 start 外都对当前这张单子操作（要指定别的，把 --sheet <单号> 写在子命令前面）。时间用 --at（HH:MM 或 ISO），不写就是现在；
+HH:MM 比现在还晚就算昨天的。要常浩做的事不能排到已有编号的前面（编号和流水里的先后要一致）。
+改单子的命令当场检查卡片装不装得下（飞书卡片正文最多 199 个组件），装不下就不收这一条。
+同一时间只有一条命令在改（文件锁），几条命令并行发也不丢。
+状态在 ~/Library/Application Support/DigitalTwin/away/：state.json 记当前是哪张，<单号>/ 下是 sheet.json、
+runs.jsonl（每次推送一条）、card.json（最近一次推的卡片）。
+replies 只认常浩本人在他私聊里发的（open_id 和私聊号读 twin_state 的本机配置，没配置就拒绝）。
 环境变量：DT_AWAY_DIR 换目录；DT_NOW（ISO 时间）指定现在；DT_LARK_CLI 换 lark-cli。
 """
 import argparse
+import contextlib
 import datetime as dt
+import fcntl
 import json
 import os
 import re
@@ -41,9 +48,10 @@ from feishu_home import home_chat  # noqa: E402
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_TAGS = 180     # 飞书卡片正文最多 199 个组件（2026-11-21 实测：195 能发，200 报 element exceeds the limit），留余量
+END_TAGS = 195     # 结束时多一行「托管结束」：进行中每次改动都保证不超过 MAX_TAGS，所以结束状态一定推得出去
 NUMS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 ORDER = {"done": 1, "note": 2, "ask": 3}
-INNER = re.compile(r"#\d|\bPR\b|\bissue\b", re.I)
+INNER = re.compile(r"#\d|(?<![A-Za-z])(PR|issue)(?![A-Za-z])", re.I)
 ASK_FIELDS = ("task", "what", "about", "progress", "todo")
 HOW = "要回话：引用这张单子，写上编号和你的选择，可以一次回完几件。"
 HOW_ENDED = "托管已经结束，这张单子不再更新，引用它回话也没人接。还等你的事，请到 Claude 里对应的会话办。"
@@ -62,13 +70,14 @@ def iso(t):
 
 
 def when(raw, now):
-    """--at 的值：HH:MM（算今天）或 ISO；不写就是现在。"""
+    """--at 的值：HH:MM（算今天，比现在还晚就算昨天）或 ISO；不写就是现在。"""
     if not raw:
         return iso(now)
-    if re.fullmatch(r"\d{1,2}:\d{2}", raw):
-        h, m = raw.split(":")
-        return iso(now.replace(hour=int(h), minute=int(m), second=0))
     try:
+        if re.fullmatch(r"\d{1,2}:\d{2}", raw):
+            h, m = raw.split(":")
+            t = now.replace(hour=int(h), minute=int(m), second=0)
+            return iso(t - dt.timedelta(days=1) if t > now + dt.timedelta(minutes=1) else t)
         t = dt.datetime.fromisoformat(raw)
     except ValueError:
         raise Fail(f"时间看不懂：{raw}（写 HH:MM 或 ISO 时间）")
@@ -87,9 +96,18 @@ def base():
     return Path(os.environ.get("DT_AWAY_DIR", "~/Library/Application Support/DigitalTwin/away")).expanduser()
 
 
+@contextlib.contextmanager
+def locked():
+    """同一时间只有一条命令读改写（托管会话常把几条命令并行发出）。"""
+    base().mkdir(parents=True, exist_ok=True)
+    with open(base() / "lock", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
@@ -231,11 +249,11 @@ def build_card(sheet, now):
     foldable = sum(1 for r in sheet["rows"] if r["kind"] != "note" and not is_open(r))
     fold = 0
     els = elements(sheet, fold)
-    while tags(els) > MAX_TAGS:
-        if fold >= foldable:
-            raise Fail(f"单子装不下了：要你做的事和提醒太多（{tags(els)} 个组件，上限 {MAX_TAGS}）。先 end 这一张，再 start 新的一张")
+    while tags(els) > MAX_TAGS and fold < foldable:
         fold = max(fold + 1, 2)
         els = elements(sheet, fold)
+    if tags(els) > (END_TAGS if sheet.get("ended_at") else MAX_TAGS):
+        raise Fail(f"这张单子装不下了：要你做的事和提醒太多（{tags(els)} 个组件，上限 {MAX_TAGS}）")
     started = at(sheet["started_at"]).strftime("%m-%d %H:%M")
     if sheet.get("ended_at"):
         title = f"托管结束｜还等你 {waiting} 件" if waiting else "托管结束｜没有等你的事"
@@ -252,15 +270,43 @@ def build_card(sheet, now):
 # ---------- 改单子 ----------
 
 def start(by, now, raw_at=None):
+    if not (by or "").strip():
+        raise Fail("要写谁在托管（--by）")
+    try:
+        last = load()
+    except Fail:
+        last = None
+    if last and not last.get("ended_at"):
+        raise Fail(f"托管单 {last['id']} 还没结束，先 end（再 push 一次，把结束状态推到飞书）")
+    if last and last.get("message_id") and last.get("dirty"):
+        raise Fail(f"托管单 {last['id']} 的结束状态还没推到飞书，先 push")
     t = when(raw_at, now)
     sheet_id = at(t).strftime("%Y-%m-%d-%H%M")
     if (base() / sheet_id / "sheet.json").exists():
         raise Fail(f"托管单 {sheet_id} 已经有了")
-    sheet = {"version": 1, "id": sheet_id, "by": by, "started_at": t, "ended_at": None,
-             "message_id": None, "pushed_at": None, "reminders": [], "rows": [], "doing": []}
+    sheet = {"version": 1, "id": sheet_id, "by": by.strip(), "started_at": t, "ended_at": None, "message_id": None,
+             "pushed_at": None, "dirty": True, "reminders": [], "seen_replies": [], "rows": [], "doing": []}
     save(sheet)
     write_json(base() / "state.json", {"current": sheet_id})
     return sheet
+
+
+def placed(sheet, t, ask=False):
+    """一行的时间：不能早于开单；要常浩做的事不能排到已有编号的前面（编号按先后发，流水也按先后排）。"""
+    if at(t) < at(sheet["started_at"]).replace(second=0):
+        raise Fail(f"时间 {hm(t)} 比开单（{hm(sheet['started_at'])}）还早")
+    if ask:
+        latest = max([at(r["at"]) for r in sheet["rows"] if r["kind"] == "ask"], default=None)
+        if latest and at(t).replace(second=0) < latest.replace(second=0):
+            raise Fail(f"要常浩做的事不能排到已有编号的前面：最后一件是 {latest.strftime('%H:%M')}，这件写的是 {hm(t)}")
+    return t
+
+
+def add_row(sheet, kind, t, **fields):
+    empty = [k for k, v in fields.items() if not (v or "").strip()]
+    if empty:
+        raise Fail("、".join(empty) + " 不能空着")
+    sheet["rows"].append(dict({"kind": kind, "at": placed(sheet, t)}, **{k: v.strip() for k, v in fields.items()}))
 
 
 def warn_inner(fields):
@@ -275,7 +321,7 @@ def add_ask(sheet, fields, t):
         raise Fail("要常浩做的事五项都要写：" + "、".join(missing) + " 没写")
     warn_inner([fields["task"], fields["what"]])
     n = max([r["n"] for r in sheet["rows"] if r["kind"] == "ask"], default=0) + 1
-    row = {"kind": "ask", "n": n, "at": t, "done_at": None, "result": None, "notified": False}
+    row = {"kind": "ask", "n": n, "at": placed(sheet, t, ask=True), "done_at": None, "result": None, "notified": False}
     row.update({k: fields[k].strip() for k in ASK_FIELDS})
     sheet["rows"].append(row)
     return n
@@ -295,6 +341,7 @@ def update_ask(sheet, n, fields):
     changed = {k: v.strip() for k, v in fields.items() if k in ASK_FIELDS[1:] and v and v.strip()}
     if not changed:
         raise Fail("没写要改哪一项")
+    warn_inner([changed.get("what")])
     r.update(changed)
 
 
@@ -344,21 +391,25 @@ def push(sheet, now):
             lark(["im", "messages", "patch", "--message-id", sheet["message_id"],
                   "--data", json.dumps({"content": content}, ensure_ascii=False)], "更新托管单")
             rec["result"] = "patched"
-            if fresh and not sheet.get("ended_at"):
+            if fresh:                      # 原地更新不弹通知，新冒出的事（哪怕是结束时才冒出的）要另发一句
                 names = "；".join(f"{num(r['n'])} {r['task']}｜{r['what']}" for r in fresh)
                 text = f"托管单多了 {len(fresh)} 件要你做的：{names}。细节和怎么回，看上面引用的那张单子。"
                 rid = lark(["im", "+messages-reply", "--message-id", sheet["message_id"], "--text", text, "--idempotency-key",
-                            f"away-{sheet['id']}-n{'-'.join(str(r['n']) for r in fresh)}"], "发提醒").get("message_id")
+                            f"away-{sheet['id']}-r{max(r['n'] for r in fresh)}"], "发提醒").get("message_id")
+                if not rid:
+                    raise Fail("发提醒没拿到消息号")
                 sheet["reminders"].append({"message_id": rid, "at": iso(now), "asks": [r["n"] for r in fresh]})
                 rec["reminded"] = [r["n"] for r in fresh]
         for r in fresh:
             r["notified"] = True
         sheet["pushed_at"] = iso(now)
+        sheet["dirty"] = False
         rec.update(message_id=sheet["message_id"], tags=tags(card["body"]))
         save(sheet)
         write_json(base() / sheet["id"] / "card.json", card)
         m = (lark(["im", "+messages-mget", "--message-ids", sheet["message_id"]], "回读").get("messages") or [{}])[0]
-        if m.get("msg_type") != "interactive" or card["header"]["title"]["content"] not in str(m.get("content")):
+        seen = str(m.get("content"))       # 标题和副标题（带这次的更新时间）都对得上才算
+        if m.get("msg_type") != "interactive" or any(card["header"][k]["content"] not in seen for k in ("title", "subtitle")):
             rec["result"] += "_unverified"
             raise Fail(f"托管单已{'发' if rec['result'].startswith('sent') else '更新'}（{sheet['message_id']}），但回读对不上卡片内容")
         return rec
@@ -370,22 +421,47 @@ def push(sheet, now):
         log(sheet, rec)
 
 
+def owner():
+    """常浩的 open_id 和他的私聊号（twin_state 的本机配置）；没配置、或要发的不是他的私聊，都拒绝。"""
+    import twin_state as T
+    try:
+        who, home = T.owner_open_id(), T.owner_chat_id()
+    except T.StateError as e:
+        raise Fail(str(e))
+    if not who or not home:
+        raise Fail("本机没配置常浩的 open_id 或私聊号（twin_identity.py setup / setup-chat），不读回复")
+    if chat_id() != home:
+        raise Fail("FEISHU_HOME_CHANNEL 不是常浩的私聊，不读回复")
+    return who
+
+
 def replies(sheet):
-    """常浩引用这张单子（或它下面的提醒）回的话，旧的在前。只认他私聊里用户发的、引用对象是这张单子的消息；
-    私聊里的用户只有他本人。字段以 2026-11-21 实测的 lark-cli 输出为准：sender.sender_type、reply_to。"""
+    """常浩引用这张单子（或它下面的提醒）回的话，旧的在前；上次已经给过的标 new: false。
+    只认他本人（open_id 对得上）在他私聊里发的、没撤回的、引用对象是这张单子的消息。
+    字段以 2026-11-21 实测的 lark-cli 输出为准：sender.id / sender.sender_type、reply_to、deleted。"""
     if not sheet.get("message_id"):
         raise Fail("这张单子还没发")
+    who = owner()
     mine = {sheet["message_id"]} | {r["message_id"] for r in sheet.get("reminders", []) if r.get("message_id")}
     data = lark(["im", "+chat-messages-list", "--chat-id", chat_id(), "--start", sheet["started_at"],
                  "--order", "asc", "--page-size", "50", "--page-all", "--page-limit", "20"], "读私聊")
-    return [{"message_id": m.get("message_id"), "at": m.get("create_time"), "text": m.get("content")}
-            for m in data.get("messages") or []
-            if (m.get("sender") or {}).get("sender_type") == "user" and m.get("reply_to") in mine]
+    seen = set(sheet.get("seen_replies") or [])
+    out = []
+    for m in data.get("messages") or []:
+        sender = m.get("sender") or {}
+        if sender.get("sender_type") != "user" or sender.get("id") != who or m.get("deleted") or m.get("reply_to") not in mine:
+            continue
+        out.append({"message_id": m.get("message_id"), "at": m.get("create_time"), "text": m.get("content"),
+                    "new": m.get("message_id") not in seen})
+    sheet["seen_replies"] = sorted(seen | {m["message_id"] for m in out})
+    save(sheet)
+    return out
 
 
 def show(sheet):
     out = [f"托管单 {sheet['id']}｜{sheet['by']}｜" + ("已结束" if sheet.get("ended_at") else "进行中")
-           + ("｜还没发" if not sheet.get("message_id") else f"｜上次推送 {sheet['pushed_at']}")]
+           + ("｜还没发" if not sheet.get("message_id") else f"｜上次推送 {sheet['pushed_at']}")
+           + ("｜有改动还没推" if sheet.get("dirty") and sheet.get("message_id") else "")]
     for r in ordered(sheet):
         if r["kind"] == "ask":
             out.append(f"{hm(r['at'])} {num(r['n'])} {r['task']}｜{r['what']}　" + (f"办完：{r['result']}" if r["done_at"] else "等常浩"))
@@ -431,42 +507,45 @@ def main(argv=None):
     a = ap.parse_args(argv)
     now = current()
     try:
-        if a.cmd == "start":
-            print(start(a.by, now, a.at)["id"])
+        if a.cmd in ("build", "show"):                     # 只读，不用等锁
+            sheet = load(a.sheet)
+            print(json.dumps(build_card(sheet, now), ensure_ascii=False, indent=1) if a.cmd == "build" else show(sheet))
             return 0
-        sheet = load(a.sheet)
-        if a.cmd in ("ask", "update", "resolve", "done", "note", "doing", "end") and sheet.get("ended_at"):
-            raise Fail(f"托管单 {sheet['id']} 已经结束，不能再改")
-        if a.cmd == "ask":
-            print(add_ask(sheet, {k: getattr(a, k) for k in ASK_FIELDS}, when(a.at, now)))
-        elif a.cmd == "update":
-            update_ask(sheet, a.n, {k: getattr(a, k) for k in ASK_FIELDS[1:]})
-        elif a.cmd == "resolve":
-            resolve(sheet, a.n, a.result, when(a.at, now))
-        elif a.cmd == "done":
-            warn_inner([a.project])
-            sheet["rows"].append({"kind": "done", "at": when(a.at, now), "project": a.project.strip(), "text": a.text.strip()})
-        elif a.cmd == "note":
-            sheet["rows"].append({"kind": "note", "at": when(a.at, now), "text": a.text.strip()})
-        elif a.cmd == "doing":
-            set_doing(sheet, a.item)
-        elif a.cmd == "end":
-            sheet["ended_at"] = when(a.at, now)
-        elif a.cmd == "build":
-            print(json.dumps(build_card(sheet, now), ensure_ascii=False, indent=1))
+        with locked():
+            if a.cmd == "start":
+                print(start(a.by, now, a.at)["id"])
+                return 0
+            sheet = load(a.sheet)
+            if a.cmd == "push":
+                print(json.dumps(push(sheet, now), ensure_ascii=False))
+                return 0
+            if a.cmd == "replies":
+                print(json.dumps(replies(sheet), ensure_ascii=False, indent=1))
+                return 0
+            if sheet.get("ended_at"):
+                raise Fail(f"托管单 {sheet['id']} 已经结束，不能再改")
+            if a.cmd == "ask":
+                print(add_ask(sheet, {k: getattr(a, k) for k in ASK_FIELDS}, when(a.at, now)))
+            elif a.cmd == "update":
+                update_ask(sheet, a.n, {k: getattr(a, k) for k in ASK_FIELDS[1:]})
+            elif a.cmd == "resolve":
+                resolve(sheet, a.n, a.result, when(a.at, now))
+            elif a.cmd == "done":
+                warn_inner([a.project])
+                add_row(sheet, "done", when(a.at, now), project=a.project, text=a.text)
+            elif a.cmd == "note":
+                add_row(sheet, "note", when(a.at, now), text=a.text)
+            elif a.cmd == "doing":
+                set_doing(sheet, a.item)
+            elif a.cmd == "end":
+                sheet["ended_at"] = when(a.at, now)
+            try:
+                build_card(sheet, now)                     # 当场看装不装得下，装不下就不收这一条
+            except Fail as e:
+                raise Fail(f"{e}。这一条没记进去：先 end 这一张、push 一次，再 start 新的一张，把还没办完的事加到新单子上")
+            sheet["dirty"] = True
+            save(sheet)
             return 0
-        elif a.cmd == "push":
-            rec = push(sheet, now)
-            print(json.dumps(rec, ensure_ascii=False))
-            return 0
-        elif a.cmd == "replies":
-            print(json.dumps(replies(sheet), ensure_ascii=False, indent=1))
-            return 0
-        elif a.cmd == "show":
-            print(show(sheet))
-            return 0
-        save(sheet)
-        return 0
     except Fail as e:
         print(f"托管单没办成：{e}")
         return 1
