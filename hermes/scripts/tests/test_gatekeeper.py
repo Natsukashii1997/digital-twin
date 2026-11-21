@@ -505,6 +505,37 @@ class Bind(Base):
         with G.db() as con:
             self.assertEqual([r["note"] for r in con.execute("SELECT note FROM binding_log ORDER BY id")], ["首次绑定", "换绑"])
 
+    def test_rebind_refused_while_old_chat_has_unanswered_cards(self):
+        """常浩 11-20 定甲（L3 第 2 轮 P2-04）：旧私聊还有没答完的中台卡就不许换绑；读不到中台也不许；答完了才行。
+        发起换绑后旧私聊又来了卡，bind confirm 写入前再查一次、确认码不消耗。"""
+        self.bind()
+        F.deliver(dict(CARD))                                           # 卡片 7 登记在旧私聊
+        snap = {"cards": [{"id": 7, "state": "open"}], "recentCards": []}
+        import autoloop_readonly as R
+        with mock.patch.object(R, "read", lambda: snap):
+            with self.assertRaisesRegex(F.Fail, "没答完.*7"):
+                G.bind_start(open_id=OTHER, replace=True)
+        with mock.patch.object(R, "read", side_effect=OSError("连不上")):
+            with self.assertRaisesRegex(F.Fail, "读不到中台"):
+                G.bind_start(open_id=OTHER, replace=True)
+        snap["cards"], snap["recentCards"] = [], [{"id": 7, "state": "decided"}]
+        with mock.patch.object(R, "read", lambda: snap):
+            G.bind_start(open_id=OTHER, replace=True)                   # 答完了：可以换
+        nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
+        self.click_bind(nonce, "e_r", operator=OTHER, chat="oc_other_chat_01")
+        code = self.shown_code()
+        card8 = dict(CARD, id=8)
+        F.deliver(card8)                                                # 换绑途中旧私聊又来一张卡
+        snap["cards"] = [{"id": 8, "state": "open"}]
+        with mock.patch.object(R, "read", lambda: snap):
+            with self.assertRaisesRegex(F.Fail, "没答完.*8"):
+                G.bind_confirm(code)
+        self.assertEqual(G.binding()["open_id"], OWNER)
+        snap["cards"] = []
+        with mock.patch.object(R, "read", lambda: snap):
+            G.bind_confirm(code)                                        # 确认码没被消耗
+        self.assertEqual(G.binding()["open_id"], OTHER)
+
     def test_rebind_to_another_chat_tells_the_old_chat(self):
         self.bind()
         G.bind_start(open_id=OTHER, replace=True)

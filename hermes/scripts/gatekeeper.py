@@ -447,6 +447,32 @@ def bind_card(nonce, done=None, final=True):
             "body": {"elements": elements}}
 
 
+def unanswered_cards(chat):
+    """登记在这个私聊、还没答完的中台卡：中台里还开着的（cards / recentCards 里 state=open），或本人回答还在排队、在途、
+    结果不明的。换绑前查（常浩 11-20 定甲，L3 第 2 轮 P2-04：有没答完的卡就不许换绑）。读不到中台就抛 Fail，不当成没有。"""
+    import autoloop_readonly as R
+    cards_trusted()
+    with F.db() as con:
+        ids = [r[0] for r in con.execute("SELECT card_id FROM feishu_cards WHERE chat_id = ?", (chat,))]
+        pending = {r[0] for r in con.execute("SELECT card_id FROM claims WHERE who = 'owner' AND state IN "
+                                             "('queued', 'inflight', 'unknown')")}
+    if not ids:
+        return []
+    try:
+        snap = R.read()
+    except Exception as e:                       # 只读窗口的错误类型不止一种：一律算读不到
+        raise F.Fail(f"读不到中台（{type(e).__name__}），核不了旧私聊还有没有没答完的卡，先不换绑")
+    open_ids = {c.get("id") for c in snap.get("cards", []) + snap.get("recentCards", []) if c.get("state") == "open"}
+    return sorted(cid for cid in ids if cid in open_ids or cid in pending)
+
+
+def rebind_blocked(chat):
+    left = unanswered_cards(chat)
+    if left:
+        raise F.Fail(f"旧私聊还有没答完的中台卡（卡片 {', '.join(map(str, left))}）：先在旧私聊答完或在中台撤掉，再换绑"
+                     "（常浩 11-20 定：有没答完的卡就不许换绑）")
+
+
 def bind_start(email=None, open_id=None, replace=False):
     """发绑定卡。邮箱 / open_id 只用来把卡送到；登记的 open_id、私聊号只取常浩点击的那条回调。"""
     if bool(email) == bool(open_id):
@@ -455,8 +481,11 @@ def bind_start(email=None, open_id=None, replace=False):
         raise F.Fail("邮箱格式不对")
     if open_id and not OPEN_ID_RE.match(open_id):
         raise F.Fail("open_id 格式不对（门卫应用下的 ou_…）")
-    if binding() and not replace:
+    old = binding()
+    if old and not replace:
         raise F.Fail("门卫已经绑定过；要换绑加 --replace（换绑后旧的 open_id 不再认）")
+    if old:
+        rebind_blocked(old["chat_id"])
     nonce = secrets.token_hex(8)
     with db(write=True) as con:                  # 同一时间只有一张有效的绑定卡
         con.execute("DELETE FROM bind_pending")
@@ -540,6 +569,9 @@ def bind_confirm(code):
     就是能操作 dt-gate 终端的人）。输错 BIND_TRIES 次这次绑定作废；点击后 BIND_TTL 秒内有效。"""
     if not re.fullmatch(r"[0-9]{6}", code or ""):
         raise F.Fail("确认码是 6 位数字")
+    b = binding()
+    if b:                                        # 发起换绑之后旧私聊又收到了卡：写入前再查一次（确认码不消耗）
+        rebind_blocked(b["chat_id"])
     err = None
     with db(write=True) as con:                  # 输错也要把次数记上，所以出错原因放到事务提交后再抛
         p = con.execute("SELECT * FROM bind_pending WHERE cand_open_id IS NOT NULL").fetchone()
