@@ -77,7 +77,8 @@ COLOR = {mo.MERGE: "green", mo.RETURN: "orange", mo.ASK: "red"}
 CHECK_OK = {"SUCCESS", "NEUTRAL", "SKIPPED"}
 CHECK_WAIT = {"PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 NET_ERR = re.compile(r"\bEOF\b|SSL_ERROR_SYSCALL|timed? ?out|connection reset|reset by peer|no such host|"
-                     r"could not resolve host|temporary failure in name resolution|dial tcp: lookup", re.I)
+                     r"could not resolve host|temporary failure in name resolution|dial tcp: lookup|"
+                     r"client connection lost|connection refused|GOAWAY|stream error", re.I)
 RATE_ERR = re.compile(r"rate limit", re.I)
 AUTH_ERR = re.compile(r"\b401\b|bad credentials|gh auth login|not logged in|authentication", re.I)
 DENY_ERR = re.compile(r"\b403\b|permission|not accessible|forbidden", re.I)
@@ -85,14 +86,17 @@ GONE_ERR = re.compile(r"no pull requests found|could not resolve to a pullreques
 UNCHANGED = "PR 没有任何改动"
 STEP = ["核对版本"]                                    # 现在做到哪一步，失败提示开头说卡在这里
 UNSURE = "不确定合上没有"
+# GitHub 给的 HTTP 状态码只认 gh api 的「(HTTP 4xx)」写法：裸数字会认错，传输出错时 gh 的报错里带着请求地址，
+# PR 号正好是 409、429 这类数字就会被当成拒绝（#260 送审前自审）。
+HTTP_4XX = re.compile(r"\(HTTP (4\d\d)\)")
 REJECTED = re.compile(r"protected ref|rule violations|not mergeable|base branch policy|Head branch was modified|"
-                      r"Base branch was modified|rate limit|\b40[1359]\b|\b422\b|\b429\b|bad credentials|not accessible|"
+                      r"Base branch was modified|rate limit|\(HTTP 4\d\d\)|bad credentials|not accessible|"
                       r"permission", re.I)                     # GitHub 明确拒绝合并（限流也是：这次请求没被处理）
 # 明确拒绝里，过一阵可能自己好的只有这几类（限流、版本或主分支刚变、另一个合并正在进行）：下一轮巡视再试。
 # 其余一律当成等多久都不会自己好（登录、权限、要人审批、分支规则、校验失败……）：当天不再对这个版本发请求（#260-P2-13）。
 # 反过来列是有意的：漏认一种临时拒绝只是当天少试几次；漏认一种永久拒绝是每半小时撞一次。
-TRANSIENT = re.compile(r"rate limit|\b429\b|secondary|abuse|Head branch was modified|Base branch was modified|\b409\b|"
-                       r"merge already in progress", re.I)
+TRANSIENT = re.compile(r"rate limit|\(HTTP 429\)|secondary|abuse|Head branch was modified|Base branch was modified|"
+                       r"\(HTTP 409\)|merge already in progress", re.I)
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SECURITY = "/usr/bin/security"
 CUSTODY_CRED = {"Natsukashii1997/dt-sandbox": ("dt-merge-executor", "dt-sandbox")}  # 托管合并凭据（#132）：完整仓库名 → 钥匙串 (service, account)
@@ -516,7 +520,8 @@ def live_requests(grep, *needles):
 def _merge_verdict(res, reply, detail, after, head):
     """REST 合并接口（PUT pulls/{n}/merge，sha 绑定 HEAD）的结果判定，托管合并和按策略合并共用：
     merged  接口回执说本次合上了并给了合并提交号，回读已合并、HEAD 对得上、合并提交号一致；
-    failed  请求没发出去，或 GitHub 明确拒绝且回读 PR 仍开着；
+    failed  请求没发出去，或 GitHub 明确拒绝且回读 PR 仍开着；GitHub 回了 4xx 状态码（「(HTTP 4xx)」）而回读失败的
+            也算：服务端已经答复不处理这次请求，回读读不到改变不了这一点（不然限流时回读跟着失败，PR 会一直挂成结果不明）；
     unsure  其余一切：超时、断网、没归类的报错、已被别处合上、HEAD 对不上、回读失败。只做只读对账，不重发。
     「PR 现在是已合并」本身不是证据：gh pr merge 对已经被别人合上的 PR 也返回 0。"""
     if not res["launched"]:
@@ -524,6 +529,8 @@ def _merge_verdict(res, reply, detail, after, head):
     state = (after or {}).get("state")
     commit = ((after or {}).get("mergeCommit") or {}).get("oid")
     rejected = res["returncode"] not in (None, 0) and REJECTED.search(detail) and not NET_ERR.search(detail)  # 网络错误优先
+    if after is None and rejected and HTTP_4XX.search(detail):
+        return "failed"
     if after is None or after.get("headRefOid") != head:
         return "unsure"
     if res["returncode"] == 0 and reply.get("merged") is True and reply.get("sha") and state == "MERGED" and commit == reply["sha"]:
@@ -976,6 +983,8 @@ def reconcile_unsettled(repo=None, pr=None, remind=True):
             once("open", m, f"只读核对：{ref} 还开着、版本没变。那次合并请求 GitHub 到底处理没有，查不到凭据，所以一直按结果不明挂着，"
                             "不重发、不放开。要合：给这个 PR 推一个新提交（旧请求绑的是旧版本，合不了新版本），再由会话重新交出；"
                             "不要了就关掉 PR。")
+        elif not (state == "CLOSED" or (state == "OPEN" and SHA40.match(str(now_head or "")))):
+            continue                                       # 状态或版本没读全：没有依据，不结算，下一轮再核对
         else:
             MP.append({"event": "not_merged", "id": m["id"],
                        "why": f"只读核对：PR 现在是 {state}，版本 {str(now_head)[:7]}（那次请求绑的是 {str(m['head'])[:7]}）；本机已没有这次合并请求的进程"})
@@ -1113,9 +1122,11 @@ def _revert_content_why(path, main, number, head, merge_commit):
       M 是 B 的祖先，B 在 origin/<main> 上：撤回提交直接落在主分支的某个提交上，下面没有夹带别的提交；
       以 M 为基、把 M 的父提交合到 B 上得到的树（git revert M 做的就是这个三方合并），等于 head 的树。
     版本号是内容的哈希：核对过的 head 不会再变，之后的合并请求又用 sha 绑着它，所以这里核对的就是会被合进去的东西。
-    返回对不上的原因；空字符串才算对得上。任何一步做不了（对象取不到、git 太旧、倒回去有冲突）都算对不上。"""
+    返回 (原因, 能不能再试)：原因是空字符串才算对得上；对不上的原因照写，能不能再试为 False。这一次做不了的（取对象时
+    网络断了、GitHub 还没生成 refs/pull/<号>/head、git 命令出错、倒回去有冲突）原因以「暂时核对不了」开头、能不能再试为
+    True：不算对得上，也不记成对不上，下次再跑撤回命令时重新核对（#260 送审前自审：一次网络抖动不该让撤回 PR 永远不能自动合）。"""
     if not (SHA40.match(str(head)) and SHA40.match(str(merge_commit))):
-        return "撤回 PR 的版本号或原合并提交号不完整"
+        return "撤回 PR 的版本号或原合并提交号不完整", False
 
     def holds(older, newer):
         return subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", older, newer],
@@ -1125,19 +1136,19 @@ def _revert_content_why(path, main, number, head, merge_commit):
         h = git(path, "rev-list", "--parents", "-n", "1", head + "^{commit}").split()
         m = git(path, "rev-list", "--parents", "-n", "1", merge_commit + "^{commit}").split()
         if len(h) != 2:
-            return f"撤回 PR 的版本有 {len(h) - 1} 个父提交，不是单独一个撤回提交"
+            return f"撤回 PR 的版本有 {len(h) - 1} 个父提交，不是单独一个撤回提交", False
         if len(m) != 2:
-            return f"原合并提交有 {len(m) - 1} 个父提交，不是 squash 合并出来的"
+            return f"原合并提交有 {len(m) - 1} 个父提交，不是 squash 合并出来的", False
         if not holds(merge_commit, h[1]):
-            return "撤回提交没有落在包含原合并提交的提交上"
+            return "撤回提交没有落在包含原合并提交的提交上", False
         if not holds(h[1], f"origin/{main}"):
-            return f"撤回提交下面夹着不在 {main} 上的提交"
+            return f"撤回提交下面夹着不在 {main} 上的提交", False
         want = git(path, "merge-tree", "--write-tree", "--no-messages", f"--merge-base={merge_commit}", h[1], m[1]).split()[0]
         if git(path, "rev-parse", head + "^{tree}") != want:
-            return "撤回提交的内容不是正好把原合并倒回去（文件内容对不上）"
-        return ""
+            return "撤回提交的内容不是正好把原合并倒回去（文件内容对不上）", False
+        return "", False
     except (Stop, OSError, IndexError, subprocess.SubprocessError) as e:
-        return f"核对不了撤回提交的内容（{clip(getattr(e, 'why', None) or type(e).__name__)}）"
+        return f"暂时核对不了撤回提交的内容（{clip(getattr(e, 'why', None) or type(e).__name__)}）", True
 
 
 def _find_revert(repo, hit, since):
@@ -1182,7 +1193,9 @@ def _adopt_revert(repo, pr, hit, path, main, orig, again):
             raise Stop(f"上次开的撤回 PR #{found[0]} 找到了，但它已经被关掉", "在电脑上看一下是谁、为什么关的：还要撤回就把它重新打开再跑一次，"
                                                                   "或在电脑上另开；脚本不会自己重开或另开")
         if not bad:
-            why = _revert_content_why(path, main, found[0], cand["headRefOid"], hit.get("merge_commit"))
+            why, retry = _revert_content_why(path, main, found[0], cand["headRefOid"], hit.get("merge_commit"))
+            if retry:
+                raise Stop(f"找到正文带记录号的 PR #{found[0]}，身份对得上，但{why}", "过几分钟再跑一次同一条命令")
             bad = [why] if why else []
         if bad:
             raise Stop(f"找到正文带记录号的 PR #{found[0]}，但核对不上，不认它是撤回 PR：{'；'.join(bad)}",
@@ -1248,10 +1261,13 @@ def cmd_revert(ref, reason):
                 bad = _revert_mismatch(born, repo, pr, hit, main, orig, since)
             except Stop as e:
                 born, bad = {}, [f"开出后没读到它（{clip(e.why)}）"]
+            retry = False
             if not bad:
-                why = _revert_content_why(path, main, rev["revert_pr"], born["headRefOid"], hit.get("merge_commit"))
+                why, retry = _revert_content_why(path, main, rev["revert_pr"], born["headRefOid"], hit.get("merge_commit"))
                 bad = [why] if why else []
-            if bad:
+            if retry:                                      # 身份对得上、内容这次没核成：记下这个版本，下次再跑时再核
+                rev["head_pending"], rev["head_unverified"] = born["headRefOid"], bad[0]
+            elif bad:
                 rev["head_unverified"] = "；".join(bad)
             else:
                 rev["revert_head"] = born["headRefOid"]
@@ -1264,6 +1280,15 @@ def cmd_revert(ref, reason):
         rref = f"{name}#{rev['revert_pr']}"
         how = f"要合：看过它的内容后，由会话交出 merge_act.py auto {rref}，或常浩在电脑上合。"
         want = rev.get("revert_head")
+        if not want and rev.get("head_pending"):          # 开出时内容没核成：开出时读到的那个版本，现在再核一次
+            why, retry = _revert_content_why(path, main, rev["revert_pr"], rev["head_pending"], hit.get("merge_commit"))
+            if retry:
+                print(f"撤回 PR 还没合并：{why}。过一会儿再跑一次 merge_act.py revert {name}#{pr} 会接着核对、接着合。")
+                return 0
+            MP.append({"event": "revert_checked", "id": hit["id"], "repo": repo, "pr": str(pr),
+                       **({"revert_head": rev["head_pending"]} if not why else {"head_unverified": why})})
+            want = None if why else rev["head_pending"]
+            rev = {**rev, "head_unverified": why or None}
 
         def later(e):
             why = f"在『{e.step}』这一步{e.why}" if isinstance(e, Stop) else str(e)

@@ -793,6 +793,48 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual((last["event"], last["permanent"], sent), ("failed", True, 1))
         self.assertIn("今天不再重试", out)
 
+    def test_explicit_rejection_with_failed_readback_is_failed_not_unsure(self):
+        """GitHub 回了 4xx（这里是限流 429），紧跟着的回读也失败（同样被限流或断网）：服务端已经答复不处理这次请求，
+        记没合上、下一轮再试；不能记成结果不明，那样 PR 会一直挂着要人推新提交才放开（#260 送审前自审）。"""
+        self.sign()
+        (self.fake / "merge_error").write_text("gh: API rate limit exceeded for user ID 1. (HTTP 429)")
+        self.gh_fails(view_after_put={"n": 9, "msg": EOF_NET})
+        r = self.auto()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("没合上", r.stdout)
+        self.assertEqual((self.events(), self.book()[-1]["permanent"], self.mp(MP.unsettled)), (["intent", "failed"], False, []))
+        self.gh_fails(view_after_put={"n": 0, "msg": ""})
+        (self.fake / "merge_error").unlink()
+        self.scan()                                                  # 交出登记还在：下一轮巡视照常再试
+        self.assertEqual(self.state(), "MERGED")
+
+    def test_status_codes_count_only_in_gh_form(self):
+        """状态码只认 gh api 的「(HTTP 4xx)」写法。传输出错时 gh 的报错里带着请求地址，PR 号恰好是 429、422 这类数字，
+        不能当成 GitHub 明确拒绝（不然请求其实到了 GitHub 时会被记成没合上、再发一次）。"""
+        import merge_act
+        head = "a" * 40
+        opened = {"state": "OPEN", "headRefOid": head, "mergeCommit": None}
+        res = {"launched": True, "returncode": 1}
+        for n in ("401", "403", "405", "409", "422", "429"):
+            text = f'Put "https://api.github.com/repos/o/r/pulls/{n}/merge": http2: client connection lost'
+            self.assertEqual(merge_act._merge_verdict(res, {}, text, opened, head), "unsure", n)
+            self.assertEqual(merge_act._merge_verdict(res, {}, text, None, head), "unsure", n)
+            self.assertIsNone(merge_act.TRANSIENT.search(f"something about pulls/{n}/merge"), n)
+        self.assertEqual(merge_act._merge_verdict(res, {}, "gh: Validation Failed (HTTP 422)", None, head), "failed")
+        self.assertEqual(merge_act._merge_verdict(res, {}, "gh: Validation Failed (HTTP 422)", opened, head), "failed")
+        self.assertEqual(merge_act._merge_verdict(res, {}, "gh: Server Error (HTTP 502)", None, head), "unsure")
+        self.assertEqual(merge_act._merge_verdict(res, {}, "Cannot update this protected ref", None, head), "unsure")  # 没有状态码：要回读
+
+    def test_unreadable_state_is_not_settled(self):
+        """只读核对拿到的 PR 状态或版本是空的：没有依据，不结算。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")
+        self.update_pr(state=None)
+        self.scan()
+        self.update_pr(state="OPEN", headRefOid=None)
+        self.scan_at("2026-11-08T10:00:00+08:00")
+        self.assertEqual((self.events(), len(self.mp(MP.unsettled))), (["intent"], 1))
+
     def test_base_branch_modified_is_transient(self):
         out, last, sent = self.rejected_with("gh: Base branch was modified. Review and try the merge again. (HTTP 405)")
         self.assertEqual((last["event"], last["permanent"], sent), ("failed", False, 2))
@@ -964,6 +1006,58 @@ class Auto(Fixture, unittest.TestCase):
         self.assertNotEqual(sh(self.main, "rev-parse", "HEAD"), merged)
         self.assertEqual((sh(self.remote, "show", "refs/heads/main:README.md"), sh(self.remote, "show", "refs/heads/main:other.md")),
                          ("v1", "later"))
+
+    def test_revert_content_check_that_could_not_run_is_retried_next_time(self):
+        """开出撤回 PR 时内容核对这一次做不了（取对象时网络断了）：不记成对不上，记下开出时读到的版本；
+        下次再跑撤回命令时再核，核上了就接着合那个版本（#260 送审前自审）。版本之后被换掉的照样不合。"""
+        import contextlib
+        import io
+        import merge_act
+        self.modifying_pr()
+        self.sign()
+        self.auto()
+        real, calls = merge_act._revert_content_why, []
+
+        def flaky(*a):
+            calls.append(a)
+            return ("暂时核对不了撤回提交的内容（连不上 GitHub）", True) if len(calls) <= 2 else real(*a)   # 开出时、紧接着再核，都没核成
+
+        buf = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, self.env()), unittest.mock.patch.object(merge_act.mo, "GH", str(self.fake / "gh")), \
+                unittest.mock.patch.object(merge_act.mo, "RULES", self.rules), unittest.mock.patch.object(merge_act.mo, "ROSTER", self.roster), \
+                unittest.mock.patch.object(merge_act, "_revert_content_why", flaky), contextlib.redirect_stdout(buf):
+            self.assertEqual(merge_act.cmd_revert("app#5", ""), 0)
+        self.assertIn("暂时核对不了", buf.getvalue())
+        (opened,) = self.opened()
+        born = self.remote_sha("refs/pull/105/head")
+        self.assertEqual((opened.get("head_pending"), "revert_head" in opened), (born, False))
+        self.assertEqual((self.state(105), self.merges_of(105)), ("OPEN", []))
+        r = self.cli(ACT, "revert", "app#5")                         # 再跑一次：这回核得上，接着合开出时的那个版本
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("已按策略合并 app#105", r.stdout)
+        checked = [b for b in self.book() if b["event"] == "revert_checked"]
+        self.assertEqual((self.events()[-3:], [c.get("revert_head") for c in checked]), (["revert_checked", "intent", "merged"], [born]))
+        (merge,) = self.merges_of(105)
+        self.assertIn("sha=" + born, merge)
+
+    def test_revert_pending_head_replaced_by_wrong_content_is_not_merged(self):
+        """开出时内容没核成，之后撤回 PR 被换成内容不对的提交：再核的是开出时读到的版本；现在的版本不是它，不合。"""
+        import contextlib
+        import io
+        import merge_act
+        self.modifying_pr()
+        self.sign()
+        self.auto()
+        with unittest.mock.patch.dict(os.environ, self.env()), unittest.mock.patch.object(merge_act.mo, "GH", str(self.fake / "gh")), \
+                unittest.mock.patch.object(merge_act.mo, "RULES", self.rules), unittest.mock.patch.object(merge_act.mo, "ROSTER", self.roster), \
+                unittest.mock.patch.object(merge_act, "_revert_content_why", lambda *a: ("暂时核对不了撤回提交的内容（x）", True)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            merge_act.cmd_revert("app#5", "")
+        bad = self.forge("v9\n")
+        self.update_pr(105, headRefOid=bad)
+        r = self.cli(ACT, "revert", "app#5")
+        self.assertIn("在开出之后又有新提交", r.stdout)
+        self.assertEqual((self.state(105), self.merges_of(105)), ("OPEN", []))
 
     def test_lost_revert_with_wrong_content_is_not_adopted(self):
         """认领也按内容核对：回应丢了的那个撤回 PR 内容不对，不认它，也不重复开。"""
@@ -1340,6 +1434,11 @@ class Policy(unittest.TestCase):
                          ("2026-11-20T16:20:00+08:00", "2026-11-20T16:00:00+08:00", False))
         at("2026-11-20T16:21:00+08:00", event="revert_quiet")
         self.assertEqual(MP.find_merged("o/r", 1)["revert_intent"]["quiet_at"], "2026-11-20T16:21:00+08:00")
+
+    def test_intent_without_id_does_not_break_the_ledger(self):
+        MP.append({"event": "intent", "repo": "o/r", "pr": "1", "head": "h"})          # 缺记录号的坏行
+        MP.append({"event": "intent", "id": "b", "repo": "o/r", "pr": "2", "head": "h"})
+        self.assertEqual([m["id"] for m in MP.merges()], ["b"])
 
     def test_ledger_folding_and_bad_lines(self):
         MP.append({"event": "intent", "id": "a", "repo": "o/r", "pr": "1", "head": "h"})

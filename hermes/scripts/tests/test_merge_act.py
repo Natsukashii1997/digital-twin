@@ -17,7 +17,8 @@ ACT = HERE.parent / "merge_act.py"
 
 # 假 gh：PR 状态在 FAKE_DIR/prs.json（{仓库: {号: PR}}），每次调用记进 calls.jsonl。
 # FAKE_DIR/fail.json 模拟网络或 GitHub 报错：{种类: {"n": 次数, "msg": 报错}}，每次调用用掉一次；带 "skip": k 的先放过前 k 次。
-#   view：任何 pr view；view_merged：合并之后的 pr view；merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
+#   view：任何 pr view；view_merged：合并之后的 pr view；view_after_put：合并接口被调过之后的 pr view；
+#   merge：合并请求没到 GitHub；merge_lost：合上了但回应丢了；
 #   comment：留言。
 # pr view / list 没写 changedFiles 的按 files 的个数补上；FAKE_DIR/off_on_view 存在时，pr view 顺手把策略记录关掉（#257）。
 # api -X PUT repos/<仓库>/pulls/<号>/merge（按策略合并的 REST 合并接口，#260）：合上就打印 {sha, merged}；版本不对 409、
@@ -98,7 +99,8 @@ def fail(kind):
 def die(msg):
     sys.stderr.write(msg + "\n"); sys.exit(1)
 if args[:2] == ["pr", "view"]:
-    msg = fail("view") or (pr["state"] == "MERGED" and fail("view_merged")) or (pr["number"] > 100 and fail("view_revert"))
+    msg = (fail("view") or (pr["state"] == "MERGED" and fail("view_merged")) or (pr["number"] > 100 and fail("view_revert"))
+           or ((root / "put_called").exists() and fail("view_after_put")))
     if msg:
         die(msg)
 if args[:2] == ["pr", "merge"] and fail("merge"):
@@ -114,6 +116,7 @@ if args[:2] == ["pr", "view"] and (root / "label_on_view2").exists():     # 第�
         pr["labels"] = [{"name": "needs-info"}]
         (root / "prs.json").write_text(json.dumps(prs))
 if args[:2] == ["pr", "apimerge"]:
+    (root / "put_called").write_text("")
     if fail("merge"):
         die('Put "https://api.github.com/repos/x": EOF')
     if (root / "other_merges_first").exists():       # 别处抢先合了：这次请求被拒，但 PR 已合并

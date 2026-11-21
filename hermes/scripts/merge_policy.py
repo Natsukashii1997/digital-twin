@@ -26,7 +26,9 @@
                         started  合并请求的看门进程已经起来（进程号、期限秒数）；结果行里的 ended 是它怎么结束的
                       撤回（都带原合并记录的 id）：
                         revert_intent   要开撤回 PR
-                        revert_opened   撤回 PR 已开；revert_head 是开出当时核对过身份和内容的版本，只有它会被接着自动合并
+                        revert_opened   撤回 PR 已开；revert_head 是开出当时核对过身份和内容的版本，只有它会被接着自动合并；
+                                        身份对得上、内容这次没核成（网络等）的，记 head_pending（开出时读到的版本），下次再核
+                        revert_checked  对 head_pending 再核的结论：对得上记 revert_head，对不上记 head_unverified
                         revert_unsure   开撤回 PR 的请求结束了、没拿到撤回 PR 的网址（sent：请求发出去没有）
                         revert_quiet    再跑撤回时查过本机进程表，上次开撤回 PR 的请求进程已经不在
                                         （后两种的时间是重新开之前静默期的起点）
@@ -284,9 +286,11 @@ def lines(path=None):
 def merges(path=None):
     """按 id 把 intent 和结果合成一条（结果覆盖同名字段，at 留 intent 的、结果时间放 done_at）。
     还没有结果的 status 是 pending：结果不明。按 intent 的时间排序。"""
-    by, revert = {}, {}
+    by, revert, checked = {}, {}, {}
     for r in lines(path)[0]:
         if r["event"] == "intent":
+            if not r.get("id"):                                    # 缺记录号的坏行：跳过，不让整本账读不出来
+                continue
             by[r["id"]] = {**r, "status": "pending"}
         elif r["event"] in DONE and r.get("id") in by:
             by[r["id"]].update({k: v for k, v in r.items() if k not in ("at", "event")}, status=r["event"], done_at=r["at"])
@@ -294,6 +298,9 @@ def merges(path=None):
             by[r["id"]]["started"] = {k: r.get(k) for k in ("at", "pid", "limit")}
         elif r["event"] == "revert_opened":
             revert[r.get("id")] = r
+            checked.pop(r.get("id"), None)
+        elif r["event"] == "revert_checked":                       # 开出时内容没核成、后来再核的结论
+            checked[r.get("id")] = r
         elif r["event"] == "revert_intent" and r.get("id") in by:   # 又要开一次：静默期重新算；first_at 留第一次的
             first = (by[r["id"]].get("revert_intent") or {}).get("first_at") or r["at"]
             by[r["id"]]["revert_intent"] = {"at": r["at"], "first_at": first, "reason": r.get("reason")}
@@ -301,7 +308,11 @@ def merges(path=None):
             by[r["id"]]["revert_intent"]["quiet_at"] = r["at"]
     for i, r in revert.items():
         if i in by:
-            by[i]["revert"] = {k: r.get(k) for k in ("at", "revert_pr", "revert_url", "reason", "revert_head", "head_unverified")}
+            by[i]["revert"] = {k: r.get(k) for k in ("at", "revert_pr", "revert_url", "reason", "revert_head", "head_unverified",
+                                                     "head_pending", "adopted")}
+            c = checked.get(i)
+            if c:
+                by[i]["revert"].update(head_pending=None, revert_head=c.get("revert_head"), head_unverified=c.get("head_unverified"))
     return sorted(by.values(), key=lambda r: r["at"])
 
 
