@@ -28,6 +28,8 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
 
 **按「将来在 dt-gate 里运行」设计**（ADR-015）：闸的状态和出口账本在同一个库（运行账号的 DigitalTwin/autoloop/exits.db），
+另有库旁的关闸标记目录 gate-dirty.d/（L3 第 4 轮 P1-08：关闸先建标记、不靠数据库锁；有标记就当关着）——0E-2 搬进 dt-gate
+时两者要一起搬，只搬库会把只靠标记关着的闸搬成开着；
 凭证库、卡片库、中台目录、锁定版本文件都从运行账号的家目录或环境变量取，不写死主账号路径。恢复闸本身不签、不用中台钥匙
 （中台只读 /healthz 和 up.pid）；但外部回读**有认证依赖**（审查 P2-02）：回读卡片用 autoloop_answer 的只读窗口（通道钥匙），
 回读 GitHub 用运行账号的 gh 登录，回读飞书用 DT_EXITS_LARK_PROFILE 指定的机器人登录配置——0E-2 要把这些放在 dt-gate 自己名下
@@ -220,7 +222,8 @@ def ensure_open(readers=None):
 
 def admit(con, epoch):
     """在调用方领写入资格的同一个出口账本写事务里核开闸资格（审查 P1-03）：闸记的纪元正是刚核过的那个、没有待对的
-    结果不明、不在维护停写。结果不明的登记（mark_dirty）、维护停写（hold）都要这把写锁，所以和领资格有先后。"""
+    结果不明、不在维护停写、没有关闸标记。维护停写（hold）要这把写锁，和领资格有先后；关闸先建标记文件（不等锁）、
+    再在库里记一笔：标记一出现，之后的领资格都被拦，在它之前领到的等同于关闸之前领到的（L3 第 4 轮 P1-08）。"""
     r = con.execute("SELECT epoch, dirty, dirty_reason, hold FROM gate WHERE id = 1").fetchone()
     if r is None or epoch is None or r["epoch"] != json.dumps(epoch, sort_keys=True):
         raise E.Refused("恢复闸关着：纪元变了或还没对过账，要先对账")

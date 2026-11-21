@@ -29,6 +29,7 @@ HERE = Path(__file__).parent
 SCRIPTS = HERE.parent
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(HERE))
+import prod_guard  # noqa: E402  模块级隔离，见 setUpModule
 import autoloop_answer as A  # noqa: E402
 import autoloop_config as AC  # noqa: E402
 import autoloop_exits as E  # noqa: E402
@@ -87,12 +88,14 @@ BEFORE = {}
 
 
 def setUpModule():
+    prod_guard.setUpModule()                     # 中台相关路径整体指到临时目录、前后核对正式目录（AGENTS「规则」）
     BEFORE.update(real_files())
 
 
 def tearDownModule():
     after = real_files()
     changed = [k for k in set(BEFORE) | set(after) if BEFORE.get(k) != after.get(k)]
+    prod_guard.tearDownModule()
     if changed:
         raise AssertionError(f"测试改动了正式文件：{changed}")
 

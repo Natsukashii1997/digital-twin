@@ -428,16 +428,19 @@ def answer(token, option, chat, operator, version=None):
 
 
 def tell(chat, text):
-    """私聊回话。持桥接锁发、锁里先看是否在维护停写：在维护就不发（L3 第 4 轮 P1-06，常浩 11-21 选甲；回答本身的结果
-    在卡片上、维护结束后提交时会再说）。调用方不能已持桥接锁。"""
+    """私聊回话。持桥接锁发、锁里先看是否在维护停写：在维护就不发，返回 False（L3 第 4 轮 P1-06，常浩 11-21 选甲）；
+    其余返回 True（发不出去也是 True：回话发不出不影响答卷结果，结果在卡片上会更新）。调用方不能已持桥接锁。
+    维护中点卡片的那句回话也不发：选择照样排队（claim 只写本机卡片库，交中台要过闸），维护结束后对账提交时私聊说结果；
+    桥接常驻循环里被压下的对账回话留在内存里、维护结束后补发（见 autoloop_feishu.run）。"""
     from tidings_weekly import SendError, send
     with F.bridge_lock():
         if F.maintenance():
-            return
+            return False
         try:
             send(chat, "text", {"text": text}, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
         except SendError:
-            pass                                 # 回话发不出不影响答卷结果；结果在卡片上会更新
+            pass
+    return True
 
 
 def main(argv=None):

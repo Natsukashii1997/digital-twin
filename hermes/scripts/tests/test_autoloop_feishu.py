@@ -324,11 +324,54 @@ class MaintenanceQuiet(Base):
         A.tell(CHAT, "y")
         self.assertEqual([s[1] for s in self.sent], [["飞书桥接或秘书领卡正持桥接锁"]] * 2)
 
+    def test_maintenance_is_checked_inside_the_bridge_lock(self):
+        """维护恰好在拿到桥接锁之后才开始：锁里查维护的就不发（查在锁外就会漏发）。"""
+        real, point = F.bridge_lock, []
+
+        @contextlib.contextmanager
+        def lock():
+            with real():
+                Rv.hold(point[-1], Path(self.tmp.name) / "snap", "a" * 40, 0)
+                yield
+        for name, call in (("alert", lambda: F.alert("k", "x")), ("tell", lambda: A.tell(CHAT, "y"))):
+            point.append(f"p-{name}")
+            with self.subTest(name), mock.patch.object(F, "bridge_lock", lock):
+                self.assertFalse(call())
+            Rv.release(point[-1], "retired")
+        self.assertEqual(self.sent, [])
+
     def test_unreadable_gate_means_quiet(self):
+        class Stop(BaseException):
+            pass
         with mock.patch.object(Rv, "gate_row", side_effect=sqlite3.OperationalError("坏了")):
             self.assertEqual(F.maintenance(), "?")
             self.assertFalse(F.alert("k", "x"))
+            with mock.patch.object(F.time, "sleep", side_effect=Stop), contextlib.redirect_stdout(io.StringIO()) as out, \
+                    self.assertRaises(Stop):
+                F.run()
         self.assertEqual(self.sent, [])
+        self.assertIn("读不了出口账本的闸状态", out.getvalue())                   # 日志不写成「维护中（恢复点 ?）」
+        self.assertNotIn("恢复点 ?", out.getvalue())
+
+    def test_run_loop_resends_replies_held_back_when_maintenance_began_mid_round(self):
+        """对账改了回答状态之后维护才开始：这句回话不会再生成，留在内存里，维护结束后补发（预审 P2）。"""
+        class Stop(BaseException):
+            pass
+        rounds = []
+
+        def rec():
+            rounds.append(1)
+            if len(rounds) == 1:
+                self.hold()                                                     # 对账做完、回话之前维护开始
+                return [(7, "上次点击发送到一半中断了，结果不明")]
+            return []
+        with mock.patch.object(A, "reconcile", rec), mock.patch.object(F, "check_given_up", return_value=[]), \
+                mock.patch.object(F, "once", side_effect=[None, Stop()]), mock.patch.object(A, "identities", return_value=("ou", CHAT)), \
+                mock.patch.object(F.time, "sleep", lambda _: Rv.release("p1", "retired")), \
+                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Stop):
+            F.run()
+        self.assertEqual(len(rounds), 2)                                        # 维护那一轮什么都没跑
+        self.assertEqual([x[0] for x in self.sent], ["上次点击发送到一半中断了，结果不明"])
 
     def test_run_loop_does_nothing_during_maintenance(self):
         class Stop(BaseException):

@@ -611,16 +611,23 @@ def _flush(card_id):
 
 def run():
     import autoloop_answer as A
+    held_back = []                                     # 维护刚开始时被压下的对账回话：只在内存里，维护结束后补发
     while True:
         try:
             held = maintenance()
             if held:                                   # 维护停写：对账回话、放弃提醒、领卡都停（P1-06），结束后照常补上
-                print(json.dumps({"at": now(), "ok": False, "paused": f"维护中（恢复点 {held}）"}, ensure_ascii=False), flush=True)
+                why = (f"维护中（恢复点 {held}）" if held != "?"
+                       else "读不了出口账本的闸状态，当作维护中、先不发提醒（核对出口账本）")
+                print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
                 time.sleep(30)
                 continue
+            notes, held_back = held_back, []
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
-                A.tell(A.identities()[1], text)
+                notes.append((cid, text))
+            for cid, text in notes:                    # 对账改了状态之后维护才开始：这句回话不会再生成，留着下一轮补发
+                if not A.tell(A.identities()[1], text):
+                    held_back.append((cid, text))
             for cid in check_given_up():               # 中台已放弃送达的卡：每一轮放弃私聊说一次
                 print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
             out = once()

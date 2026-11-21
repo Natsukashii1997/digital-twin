@@ -161,7 +161,7 @@ M = [
     # ---------- L3 第 4 轮决策升级后（11-21，常浩「按推荐做」）----------
     ("autoloop_feishu.py", "    with bridge_lock():\n        if maintenance():\n            return False\n        return _alert(key, text, every)",
      "    return _alert(key, text, every)", "P1-06 维护中提醒不发（alert）", [FS + ".MaintenanceQuiet"]),
-    ("autoloop_answer.py", "        if F.maintenance():\n            return\n", "", "P1-06 维护中回话不发（tell）",
+    ("autoloop_answer.py", "        if F.maintenance():\n            return False\n", "", "P1-06 维护中回话不发（tell）",
      [FS + ".MaintenanceQuiet.test_alert_and_tell_are_quiet_during_maintenance_then_resume"]),
     ("autoloop_feishu.py", "            if held:                                   # 维护停写", "            if False:                                   # 维护停写",
      "P1-06 常驻循环维护中什么都不跑", [FS + ".MaintenanceQuiet.test_run_loop_does_nothing_during_maintenance"]),
@@ -188,6 +188,18 @@ M = [
      "P1-09 秘书对账不干等补发不了的事件", [SG + ".RedispatchTests"]),
     ("secretary_gate.py", '    if verdict == "none":\n        return ("unreconciled"', '    if verdict == "none":\n        return ("done"',
      "P1-09 ③ 找不到绑定事件记核不清", [SG + ".RejectTests.test_secretary_reconcile_never_takes_a_delivered_event_of_another_generation"]),
+    # ---------- 第 5 轮送审前预审 P2 ----------
+    ("autoloop_feishu.py", "    with bridge_lock():\n        if maintenance():\n            return False\n        return _alert(key, text, every)",
+     "    if maintenance():\n        return False\n    with bridge_lock():\n        return _alert(key, text, every)",
+     "P1-06 alert 锁里查维护", [FS + ".MaintenanceQuiet.test_maintenance_is_checked_inside_the_bridge_lock"]),
+    ("autoloop_answer.py", "    with F.bridge_lock():\n        if F.maintenance():\n            return False\n",
+     "    if F.maintenance():\n        return False\n    with F.bridge_lock():\n",
+     "P1-06 tell 锁里查维护", [FS + ".MaintenanceQuiet.test_maintenance_is_checked_inside_the_bridge_lock"]),
+    ("autoloop_feishu.py", "                if not A.tell(A.identities()[1], text):\n                    held_back.append((cid, text))",
+     "                A.tell(A.identities()[1], text)",
+     "维护刚开始时压下的对账回话维护后补发", [FS + ".MaintenanceQuiet"]),
+    ("autoloop_feishu.py", 'if held != "?"', 'if True', "读不了账本不写成维护中",
+     [FS + ".MaintenanceQuiet.test_unreadable_gate_means_quiet"]),
 ]
 
 
