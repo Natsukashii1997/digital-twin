@@ -216,11 +216,18 @@ class Config(Base):
             with mock.patch.object(G.sys, "flags", types.SimpleNamespace(isolated=1, no_site=0, dont_write_bytecode=1)):
                 with self.assertRaisesRegex(F.Fail, "-I -S -B"):
                     G.launch_ok()
+            entry_env = {"PATH": G.ENTRY_PATH, "LANG": "en_US.UTF-8", "SDKROOT": "/x", "__CF_USER_TEXT_ENCODING": "0x0"}
             with mock.patch.object(G.sys, "flags", flags):
-                with self.assertRaisesRegex(F.Fail, "不属 root"):            # 临时目录属本账号，不属 root
+                with self.assertRaisesRegex(F.Fail, "环境没被清空"):   # L3 第 2 轮 P1-04：没经入口的 env -i
                     G.launch_ok()
-                with mock.patch.object(G, "ROOT_UID", os.geteuid()):
-                    G.launch_ok()
+                with mock.patch.dict(os.environ, entry_env, clear=True):
+                    with self.assertRaisesRegex(F.Fail, "不属 root"):        # 临时目录属本账号，不属 root
+                        G.launch_ok()
+                    with mock.patch.object(G, "ROOT_UID", os.geteuid()):
+                        G.launch_ok()
+                    os.environ["PATH"] = "/usr/local/bin:" + G.ENTRY_PATH   # PATH 多了主账号能改的目录
+                    with self.assertRaisesRegex(F.Fail, "PATH"), mock.patch.object(G, "ROOT_UID", os.geteuid()):
+                        G.launch_ok()
             with mock.patch.object(G, "launch_ok", side_effect=F.Fail("门卫常驻要用 -I -S -B")), \
                     mock.patch.object(G.F, "run") as card_loop:
                 with self.assertRaisesRegex(F.Fail, "-I -S -B"):
@@ -357,7 +364,7 @@ class Bind(Base):
         nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
         self.click_bind(nonce, "e1")
         code, out = self.shown_code(), []
-        with mock.patch.object(G, "launch_flags", lambda: None), \
+        with mock.patch.object(G, "launch_ok", lambda: None), \
                 mock.patch("builtins.print", lambda *a, **k: out.append(" ".join(map(str, a)))):
             with mock.patch("builtins.input", return_value="no"):
                 self.assertEqual(G.main(["bind", "confirm", code]), 1)
@@ -368,6 +375,43 @@ class Bind(Base):
             with mock.patch("builtins.input", return_value="yes"):
                 self.assertEqual(G.main(["bind", "confirm", code]), 0)
         self.assertEqual(G.binding()["open_id"], OWNER)
+
+    def test_click_before_bind_card_message_id_is_registered_asks_to_retry(self):
+        """L3 第 2 轮 P2-03：绑定卡已到、发卡接口还没返回消息号时被点：不记候选，回一句请几秒后再点；再点就正常。"""
+        G.bind_start(open_id=OWNER)
+        nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
+        with G.db(write=True) as con:
+            con.execute("UPDATE bind_pending SET message_id = NULL")
+        rec = self.click_bind(nonce, "e1")
+        self.assertFalse(rec["ok"])
+        self.assertIn("再点一次", self.lark.texts()[-1])
+        with G.db() as con:
+            self.assertIsNone(con.execute("SELECT cand_open_id FROM bind_pending").fetchone()[0])
+        with G.db(write=True) as con:
+            con.execute("UPDATE bind_pending SET message_id = ?", (f"om_gate_msg_{self.lark.n - 1:04d}",))
+        G.handle_event(event({"gate_bind": nonce}, eid="e2", mid=f"om_gate_msg_{self.lark.n - 1:04d}"))
+        G.bind_confirm(self.shown_code())
+        self.assertEqual(G.binding()["open_id"], OWNER)
+
+    def test_rebind_notice_to_old_chat_is_kept_until_sent(self):
+        """L3 第 2 轮 P2-06：换绑通知旧私聊发不出去，记在库里，之后补发到送到为止。"""
+        self.bind()
+        G.bind_start(open_id=OTHER, replace=True)
+        nonce = self.lark.cards()[-1]["body"]["elements"][1]["behaviors"][0]["value"]["gate_bind"]
+        self.click_bind(nonce, "e_r", operator=OTHER, chat="oc_other_chat_01")
+        code = self.shown_code()
+        self.lark.fail.add("发消息")
+        out = G.bind_confirm(code)
+        self.assertEqual(out["notices_pending"], 1)
+        self.assertEqual(G.binding()["open_id"], OTHER)                 # 绑定照样生效
+        self.assertEqual(len(G.show()["notices_pending"]), 1)
+        self.assertEqual(G.flush_notices(), 1)                          # 刚试过：没到间隔不重发
+        self.lark.fail.discard("发消息")
+        self.assertEqual(G.flush_notices(force=True), 0)
+        old = [a for a in self.lark.calls if a[:2] == ["im", "+messages-send"] and CHAT in a]
+        self.assertIn("改绑", json.loads(old[-1][old[-1].index("--content") + 1])["text"])
+        self.assertEqual(G.flush_notices(force=True), 0)                # 送到后不再发
+        self.assertEqual(len([a for a in self.lark.calls if a[:2] == ["im", "+messages-send"] and CHAT in a]), len(old))
 
     def test_wrong_confirm_code_three_times_voids_the_bind(self):
         G.bind_start(open_id=OWNER)
@@ -735,7 +779,15 @@ class StateFiles(Base):
         with self.assertRaisesRegex(F.Fail, "卡片库"):
             G.cards_trusted()
         self.assertIn("error", G.doctor()["cards_db"])
+        with self.assertRaisesRegex(F.Fail, "卡片库"):                  # L3 第 2 轮 P2-01：show 也核
+            G.show()
         os.chmod(cards, 0o600)
+        cards.rename(cards.with_name("real.db"))
+        cards.symlink_to(cards.with_name("real.db"))
+        with self.assertRaisesRegex(F.Fail, "卡片库"):
+            G.show()
+        cards.unlink()
+        cards.with_name("real.db").rename(cards)
         os.chmod(cards.parent, 0o770)
         with self.assertRaisesRegex(F.Fail, "卡片库目录"):
             G.cards_trusted()
@@ -759,6 +811,10 @@ class Listening(Base):
             sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
             time.sleep(0.5)
             print(json.dumps({"n": 1})); sys.stdout.flush()
+            time.sleep(0.5)
+            sys.stderr.write("[source] feishu: connected\\n"); sys.stderr.flush()
+            time.sleep(0.5)
+            print(json.dumps({"n": 2})); sys.stdout.flush()
             """))
         os.chmod(exe, 0o755)
         sec = Path(os.environ["DT_GATE_SECRET_FILE"])
@@ -770,7 +826,7 @@ class Listening(Base):
         G.LISTENING.set()                                               # 上一次的残留：起新进程时先撤掉
         with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
             G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
-        self.assertEqual(seen, [(0, False), (1, True)])
+        self.assertEqual(seen, [(0, False), (1, False), (2, True)])     # 总线 ready 还不够，要飞书长连接 connected
         self.assertFalse(G.LISTENING.is_set())                          # 进程退出立刻撤掉
 
     def fake_cli(self, body):
@@ -790,6 +846,7 @@ class Listening(Base):
     def test_exited_marker_drops_listening_before_process_ends(self):
         exe = self.fake_cli("""\
             sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
+            sys.stderr.write("[source] feishu: connected\\n"); sys.stderr.flush()
             time.sleep(0.5)
             print(json.dumps({"n": 1})); sys.stdout.flush()
             time.sleep(0.5)
@@ -800,7 +857,75 @@ class Listening(Base):
         seen = []
         with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
             G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
-        self.assertEqual(seen, [(1, True), (2, False)])
+        self.assertEqual(seen[0], (1, True))                            # exited 后撤在线、结束这次 consume；已在路上的
+        self.assertFalse([n for n, on in seen[1:] if on])                # 那条照常处理（是真点击），但已不算在线
+
+    def test_feishu_disconnect_and_reconnect_follow_source_status(self):
+        """L3 第 2 轮 P1-03：总线还在、飞书长连接断了（disconnected / reconnecting）要撤；重新 connected 才恢复；
+        认不出的状态也不算在线。"""
+        exe = self.fake_cli("""\
+            def err(s):
+                sys.stderr.write(s + "\\n"); sys.stderr.flush(); time.sleep(0.4)
+            def out(n):
+                print(json.dumps({"n": n})); sys.stdout.flush(); time.sleep(0.4)
+            err("[event] ready event_key=card.action.trigger"); err("[source] feishu: connecting"); out(1)
+            err("[source] feishu: connected"); out(2)
+            err("[source] feishu: disconnected (read tcp: reset)"); out(3)
+            err("[source] feishu: reconnecting (attempt 1)"); out(4)
+            err("[source] feishu: connected"); out(5)
+            err("[source] feishu: weird_state"); out(6)
+            """)
+        seen = []
+        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
+            G.consume_once(lambda ev: seen.append((ev["n"], G.LISTENING.is_set())) or {"ok": True}, lambda line: None)
+        self.assertEqual(seen, [(1, False), (2, True), (3, False), (4, False), (5, True), (6, False)])
+
+    def test_no_connected_status_after_ready_ends_this_consume(self):
+        """总线早就在（不给新 consume 补当前状态）：ready 后等不到 connected 就结束这次 consume，run 隔一阵再起新总线。"""
+        exe = self.fake_cli("""\
+            sys.stderr.write("[event] ready event_key=card.action.trigger\\n"); sys.stderr.flush()
+            time.sleep(30)
+            """)
+        logs = []
+        import time as _t
+        t0 = _t.monotonic()
+        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}), mock.patch.object(G, "SOURCE_WAIT", 1):
+            G.consume_once(lambda ev: {"ok": True}, logs.append)
+        self.assertLess(_t.monotonic() - t0, 15)
+        self.assertIn("没看到飞书长连接 connected", "\n".join(logs))
+        self.assertFalse(G.LISTENING.is_set())
+
+    def test_event_loss_warning_fails_closed_and_tells_owner(self):
+        """L3 第 2 轮 P2-02：lark-cli 报确定丢了事件：撤在线、提醒常浩、结束这次 consume。"""
+        exe = self.fake_cli("""\
+            sys.stderr.write("[event] ready event_key=card.action.trigger\\n")
+            sys.stderr.write("[source] feishu: connected\\n"); sys.stderr.flush()
+            time.sleep(0.5)
+            print(json.dumps({"n": 1})); sys.stdout.flush()
+            time.sleep(0.5)
+            sys.stderr.write("WARN: event seq gap 3->5, missed 1 events (dropped by bus backpressure)\\n"); sys.stderr.flush()
+            time.sleep(30)
+            """)
+        seen, told = [], []
+        import time as _t
+        t0 = _t.monotonic()
+        with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
+            G.consume_once(lambda ev: seen.append(G.LISTENING.is_set()) or {"ok": True}, lambda line: None, told.append)
+        self.assertLess(_t.monotonic() - t0, 15)
+        self.assertEqual(seen, [True])
+        self.assertEqual(len(told), 1)
+        self.assertIn("seq gap", told[0])
+        self.assertFalse(G.LISTENING.is_set())
+        for line in ("WARN: consume backpressure, dropped oldest event", "WARN: event e1 (im.x) dropped: malformed payload",
+                     "WARN: sink write failed, skipping event: x", "WARN: Process error: x"):
+            self.assertTrue(G.LOSS_RE.match(line), line)
+        self.assertFalse(G.LOSS_RE.match("WARN: event e1 (im.x): malformed observed_at \"x\" ignored: y"))
+
+    def test_loss_alert_goes_to_bound_owner(self):
+        self.bind()
+        with mock.patch.object(F, "ALERT_EVERY", 0):
+            G.loss_alert("WARN: consume backpressure, dropped oldest event")
+        self.assertIn("可能漏了你刚才的点击", self.lark.texts()[-1])
 
     def test_child_holding_the_pipe_does_not_hang_after_exit(self):
         """复核 P2-2：lark-cli 退了，但它起的子进程还占着 stdout：不能卡住、就绪要撤。"""

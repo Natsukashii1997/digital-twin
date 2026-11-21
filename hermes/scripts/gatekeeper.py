@@ -20,8 +20,9 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
 状态文件（P1-02）：门卫目录、gate.db、app.json 每次用前核路径信任（含 ACL）、不认链接；卡片库 cards.db 在 run、doctor 启动时核。
 
 收点击：lark-cli event consume card.action.trigger（飞书长连接，门卫主动连出去，本机不开端口；dt-gate 是控制面，
-门卫规则不限制它）。长连接进程在 stderr 打出就绪标记之后才领中台卡片，断开、重连期间暂停领卡，领到卡、发出去之前再看一次
-（P1-03：发出去的卡点了得有人收）。每条回调核对：
+门卫规则不限制它）。本机事件总线 ready 且飞书长连接 connected 才领中台卡片；断开、重连、lark-cli 报丢事件时暂停领卡
+（丢事件还私聊提醒常浩再点），领到卡、发出去之前再看一次（L3 P1-03、第 2 轮 P2-02：发出去的卡点了得有人收）。
+点击在长连接断开期间点的，飞书会在卡片上提示失败，常浩再点一次即可。每条回调核对：
   - event_id 第一次见（gate.db 的 events 表，先记再办：同一条回调最多办一次）；host = im_message；只认按钮，不认表单；
   - 按钮值只有两种：{"autoloop": 令牌, "o": 选项号, "v": 版本号}（中台卡片）、{"gate_bind": 绑定码}（绑定卡），多一个字段都不认；
   - 中台卡片：回调必须带消息号，交给 autoloop_answer.answer 核点击人 = 绑定的 open_id、聊天 = 绑定的私聊、消息号 = 登记的
@@ -164,10 +165,20 @@ NONCE_RE = re.compile(r"^[0-9a-f]{16}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 BIND_TTL = 600                           # 秒：绑定卡有效期；点了以后确认码也是这么久
 BIND_TRIES = 3                           # bind confirm 输错几次这次绑定作废
-READY_MARK = f"[event] ready event_key={EVENT_KEY}"   # lark-cli event consume 就绪后在 stderr 打的固定一行
+READY_MARK = f"[event] ready event_key={EVENT_KEY}"   # lark-cli event consume 连上本机事件总线后在 stderr 打的固定一行
+SOURCE_RE = re.compile(r"^\[source\] ([^:]+): ([a-z_]+)")   # 飞书长连接状态（lark-cli 1.0.96 loop.go：[source] 来源: 状态 (说明)）
+LOSS_RE = re.compile(r"^WARN: (event seq gap|consume backpressure|event .* dropped|sink write failed|Process error|"
+                     r"dropping oversized frame)")       # lark-cli 1.0.96 loop.go 里确定丢了事件的几种诊断
+SOURCE_WAIT = 30                          # 秒：总线 ready 后这么久没看到飞书长连接 connected 就重启 consume
+BUS_IDLE_GRACE = 35                       # 秒：重启 consume 前至少等这么久（总线没消费者 30 秒后退出），保证起来的是新总线
+ENTRY_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+ENTRY_ENV = {"PATH", "LANG", "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING"}   # 入口 env -i 之后，
+#   /usr/bin/python3（xcrun 转发壳）自己会补后五个（本机 11-20 实测），别的变量出现就说明没经入口
 EVENT_KEEP = 30 * 86400                  # 秒：回调去重记录留这么久（飞书重投远短于这个）
 DEFAULT_LARK = "/Library/Application Support/DigitalTwin/bin/lark-cli"
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS notices (key TEXT PRIMARY KEY, chat_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0, last_try_at TEXT, last_error TEXT, sent_at TEXT);
 CREATE TABLE IF NOT EXISTS binding (id INTEGER PRIMARY KEY CHECK (id = 1), open_id TEXT NOT NULL, chat_id TEXT NOT NULL,
   bound_at TEXT NOT NULL, event_id TEXT NOT NULL, message_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bind_pending (nonce TEXT PRIMARY KEY, message_id TEXT, sent_at TEXT NOT NULL,
@@ -181,6 +192,10 @@ CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, at TEXT NOT NULL, 
 
 class Quiet(F.Fail):
     """来源不对（不是绑定的人、不是那张卡、不认的回调）：不回话，只记日志。"""
+
+
+class BindNotReady(F.Fail):
+    """绑定卡已经送到、发卡接口还没返回消息号时被点了：核不了点的是不是这张卡，不记候选，请点的人几秒后再点。"""
 
 
 # ---------- 文件与配置 ----------
@@ -313,9 +328,19 @@ def launch_flags():
                      "-I -S -B）；不要直接 python3 gatekeeper.py")
 
 
+def launch_env():
+    """环境确实被入口 env -i 清空过（L3 第 2 轮 P1-04：-I -S -B 证明不了走过入口）：PATH 正好是入口写的，
+    除入口给的 PATH、LANG 和 xcrun 转发壳自己补的几个外没有别的变量。"""
+    extra = sorted(set(os.environ) - ENTRY_ENV)
+    if os.environ.get("PATH") != ENTRY_PATH or extra:
+        raise F.Fail(f"门卫只经入口脚本跑（环境没被清空：{', '.join(extra[:5]) or 'PATH 不对'}）")
+
+
 def launch_ok():
-    """常驻服务的启动要求（P1-04）：-I -S -B 启动（launch_flags），代码属 root（root_code）。不满足抛 Fail。"""
+    """门卫每个命令的启动要求（P1-04）：-I -S -B（launch_flags）、环境清空过（launch_env）、代码属 root（root_code）。
+    这些都是加固，真正的边界是 root 装的入口和代码目录（0E-3c 安装后实测验收）。不满足抛 Fail。"""
     launch_flags()
+    launch_env()
     root_code()
 
 
@@ -479,6 +504,8 @@ def handle_bind(ev, nonce):
             raise Quiet("没有这次绑定（绑定码不对、已用过或已被新的绑定取代）")
         if A._age(p["sent_at"]) > BIND_TTL:
             raise Quiet("绑定卡已过期")
+        if p["message_id"] is None:              # 卡已到、发卡接口还没返回消息号（L3 第 2 轮 P2-03）：不记候选，请他稍后再点
+            raise BindNotReady()
         if p["message_id"] != mid:
             raise Quiet("点的不是这次发出的绑定卡")
         if p["cand_open_id"] and (p["cand_open_id"], p["cand_chat_id"]) != (operator, chat):
@@ -540,6 +567,11 @@ def bind_confirm(code):
                         "VALUES (1, ?, ?, ?, ?, ?)", (operator, chat, F.now(), p["cand_event_id"], p["message_id"]))
             con.execute("INSERT INTO binding_log (at, open_id, chat_id, event_id, note) VALUES (?, ?, ?, ?, ?)",
                         (F.now(), operator, chat, p["cand_event_id"], "换绑" if old else "首次绑定"))
+            if old and old["chat_id"] != chat:   # 换绑到别的私聊：告诉旧的那个，和登记同一个事务记下、送到为止（P2-4、L3 第 2 轮 P2-06）
+                con.execute("INSERT OR IGNORE INTO notices (key, chat_id, text, created_at) VALUES (?, ?, ?, ?)",
+                            (f"gate-rebound-{nonce}", old["chat_id"],
+                             f"门卫已改绑到另一个人（open_id 尾号 {operator[-6:]}），以后不再认你在这里点的卡片。"
+                             "不是你在 dt-gate 里发起的换绑，请马上停门卫并核查。", F.now()))
     if err:
         raise F.Fail(err)
     done = f"已绑定（open_id 尾号 {operator[-6:]}）。以后门卫只认你在这个私聊里点的卡片。"
@@ -550,13 +582,32 @@ def bind_confirm(code):
                                         ensure_ascii=False)], "改绑定卡")
     except F.SendError as e:
         notify.append(str(e)[:120])
-    if old and old["chat_id"] != chat:           # 换绑到别的私聊：告诉旧的那个（审查 P2-4，不是常浩发起的换绑他能马上看到）
+    pending = flush_notices(force=True)          # 换绑通知当场先发一次，发不出去留在库里由常驻循环补发
+    return {"ok": True, "open_id": operator, "chat_id": chat, **({"notify_error": notify} if notify else {}),
+            **({"notices_pending": pending} if pending else {})}
+
+
+def flush_notices(force=False, every=60):
+    """补发还没送到的通知（目前只有换绑告诉旧私聊）：每条发成功才记 sent_at，发不出去记次数和原因、隔 every 秒再试
+    （force 不等）。幂等键固定，飞书侧重发不会出两条。返回还没送到的条数。"""
+    with db() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM notices WHERE sent_at IS NULL ORDER BY created_at")]
+    left = 0
+    for r in rows:
+        if not force and r["last_try_at"] and A._age(r["last_try_at"]) < every:
+            left += 1
+            continue
         try:
-            GATE.send_text(old["chat_id"], f"门卫已改绑到另一个人（open_id 尾号 {operator[-6:]}），以后不再认你在这里点的卡片。"
-                           "不是你在 dt-gate 里发起的换绑，请马上停门卫并核查。", f"gate-rebound-{nonce}")
+            GATE.send_text(r["chat_id"], r["text"], r["key"])
         except F.SendError as e:
-            notify.append(str(e)[:120])
-    return {"ok": True, "open_id": operator, "chat_id": chat, **({"notify_error": notify} if notify else {})}
+            left += 1
+            with db(write=True) as con:
+                con.execute("UPDATE notices SET tries = tries + 1, last_try_at = ?, last_error = ? WHERE key = ?",
+                            (F.now(), str(e)[:200], r["key"]))
+            continue
+        with db(write=True) as con:
+            con.execute("UPDATE notices SET sent_at = ?, last_try_at = ? WHERE key = ?", (F.now(), F.now(), r["key"]))
+    return left
 
 
 # ---------- 收点击 ----------
@@ -616,6 +667,14 @@ def _handle(ev):
             return {"ok": False, "quiet": True, "why": "绑定码格式不对"}
         try:
             return handle_bind(ev, value["gate_bind"])
+        except BindNotReady:                     # 只告诉点卡的这个私聊再点一次（不登记任何东西；绑定卡只发给了常浩）
+            chat = ev.get("chat_id")
+            if CHAT_RE.match(chat or ""):
+                try:
+                    GATE.send_text(chat, "门卫绑定卡还在登记，请几秒后在卡片上再点一次「绑定」。", f"gate-retry-{secrets.token_hex(8)}")
+                except F.SendError:
+                    pass
+            return {"ok": False, "why": "绑定卡还在登记，请他稍后再点"}
         except F.SendError as e:                 # 已记成待确认，只是确认码没送到：同一个人再点一次会给新码
             return {"ok": False, "pending_confirm": True, "notify_error": str(e)[:120]}
         except F.Fail as e:
@@ -633,34 +692,59 @@ def _handle(ev):
     return {**rec, "said": bool(said)}
 
 
-LISTENING = threading.Event()                    # 长连接进程打出了就绪标记、还没退出：这时发出去的卡点了才有人收
+LISTENING = threading.Event()                    # 收点击这一端确实在线：这时发出去的卡点了才有人收
 _LISTEN_LOCK = threading.Lock()
 
 
-def consume_once(on_event=handle_event, log=print):
+def loss_alert(line):
+    """lark-cli 说确定丢了事件：可能漏了常浩的点击，私聊提醒他（限频）。"""
+    F.alert("gate-event-loss", "门卫收点击时 lark-cli 报告丢了事件，可能漏了你刚才的点击；如果点过卡片没有反应，"
+            f"请等一两分钟再点一次。（{line[:80]}）")
+
+
+def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
     """起一次长连接消费进程，逐行处理，进程退出时返回退出码。stdin 一直开着（lark-cli 遇到 stdin 关闭就退出）。
-    stderr 出现就绪标记才置 LISTENING；出现退出标记、错误信封，或进程退出（含出错），立刻撤掉（L3 第 1 轮 P1-03）。
+    LISTENING 要两个条件同时成立才置（L3 第 2 轮 P1-03）：本机事件总线 ready（[event] ready），且这次 consume 里看到飞书
+    长连接 connected（[source] …: connected）；看到 connecting / disconnected / reconnecting / 认不出的状态、[event] exited、
+    JSON 错误信封、进程退出，立刻撤。lark-cli 1.0.96 的总线只在状态变化时广播、不给新连上的 consume 补当前状态，所以
+    ready 后 SOURCE_WAIT 秒没见到 connected 就结束这次 consume（run 隔 BUS_IDLE_GRACE 秒再起，那时总线已因没消费者退出，
+    新总线会把 connecting→connected 推过来）。lark-cli 报确定丢了事件（LOSS_RE）也撤、提醒常浩、结束这次 consume（P2-02）。
     stdout 按 1 秒超时轮询读：进程退了即使有子进程还占着管道也不卡住（复核 P2-2）。"""
     LISTENING.clear()
     cmd, env = GATE.command(["event", "consume", EVENT_KEY, "--as", "bot"])
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-    alive = [True]
+    st = {"alive": True, "bus": False, "source": None, "bus_at": None, "stop": None}
 
-    def stop_listening():
+    def update(**kw):
         with _LISTEN_LOCK:
-            alive[0] = False
-            LISTENING.clear()
+            st.update(kw)
+            if st["alive"] and st["bus"] and st["source"] == "connected" and not st["stop"]:
+                LISTENING.set()
+            else:
+                LISTENING.clear()
 
-    def errors():                                # lark-cli 的就绪标记、断线、错误信封都在 stderr
-        for raw in proc.stderr:
-            line = raw.decode("utf-8", "replace").strip()
-            if line == READY_MARK:
-                with _LISTEN_LOCK:               # 退出后才读到的就绪行不算
-                    if alive[0]:
-                        LISTENING.set()
-            elif line.startswith("[event] exited") or line.startswith("{"):
-                stop_listening()                 # 退出标记、JSON 错误信封：长连接已经不在了
-            log(json.dumps({"at": F.now(), "lark_cli": line[:300]}, ensure_ascii=False))
+    def errors():                                # lark-cli 的就绪标记、来源状态、丢事件、错误信封都在 stderr
+        with proc.stderr:                        # 读完由本线程关（子进程占着 stderr 时主线程去关会卡住）
+            for raw in proc.stderr:
+                errors_line(raw)
+
+    def errors_line(raw):
+        line = raw.decode("utf-8", "replace").strip()
+        m = SOURCE_RE.match(line)
+        if line == READY_MARK:
+            update(bus=True, bus_at=time.monotonic())
+        elif m:
+            update(source=m.group(2))        # 只有 connected 算在线，别的（含认不出的）一律不算
+        elif LOSS_RE.match(line):
+            update(stop="lark-cli 报告丢了事件")
+            try:
+                on_loss(line)
+            except Exception as e:           # 提醒发不出去也照样停下这次 consume
+                log(json.dumps({"at": F.now(), "ok": False, "why": f"丢事件提醒没发出去：{type(e).__name__}"},
+                               ensure_ascii=False))
+        elif line.startswith("[event] exited") or line.startswith("{"):
+            update(stop="lark-cli 退出或报错")
+        log(json.dumps({"at": F.now(), "lark_cli": line[:300]}, ensure_ascii=False))
     t = threading.Thread(target=errors, daemon=True)
     t.start()
 
@@ -681,10 +765,18 @@ def consume_once(on_event=handle_event, log=print):
     try:
         while True:
             if proc.poll() is not None:
-                stop_listening()                 # 进程一退就撤，不等管道读完
+                update(alive=False)              # 进程一退就撤，不等管道读完
                 gone = gone or time.monotonic()
                 if time.monotonic() - gone > 5:  # 子进程占着管道还在写：不再等
                     break
+            with _LISTEN_LOCK:
+                if st["bus_at"] and st["source"] is None and time.monotonic() - st["bus_at"] > SOURCE_WAIT:
+                    st["stop"] = f"总线 ready 后 {SOURCE_WAIT} 秒没看到飞书长连接 connected"
+                    LISTENING.clear()
+                stop = st["stop"]
+            if stop:
+                log(json.dumps({"at": F.now(), "ok": False, "why": f"{stop}，结束这次长连接、稍后重起"}, ensure_ascii=False))
+                break
             if not select.select([fd], [], [], 1.0)[0]:
                 if proc.poll() is not None:
                     break
@@ -698,7 +790,7 @@ def consume_once(on_event=handle_event, log=print):
                 handle(line.decode("utf-8", "replace"))
         handle(buf.decode("utf-8", "replace"))
     finally:
-        stop_listening()
+        update(alive=False)
         if proc.poll() is None:
             proc.terminate()                     # SIGTERM：让 lark-cli 正常退订（不 kill -9）
             try:
@@ -709,8 +801,6 @@ def consume_once(on_event=handle_event, log=print):
         t.join(timeout=5)
         for fh in (proc.stdin, proc.stdout):
             fh.close()
-        if not t.is_alive():                     # 子进程还占着 stderr 时线程还在读，这时 close 会等它读完（卡住）；留给守护线程
-            proc.stderr.close()
     return proc.returncode
 
 
@@ -723,16 +813,34 @@ def not_ready():
     return None
 
 
+_NOTICE_AT = [0.0]
+
+
+def cards_ready():
+    """领卡线程每轮先问：顺手补发没送到的通知（最多 60 秒一次，出错只记日志），再看能不能领卡。"""
+    if time.monotonic() - _NOTICE_AT[0] >= 60:
+        _NOTICE_AT[0] = time.monotonic()
+        try:
+            left = flush_notices()
+            if left:
+                print(json.dumps({"at": F.now(), "ok": False, "notices_pending": left}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            print(json.dumps({"at": F.now(), "ok": False, "why": f"补发通知出错：{type(e).__name__}"}, ensure_ascii=False),
+                  flush=True)
+    return not_ready()
+
+
 def run():
-    """常驻：后台线程领中台卡片（没绑定时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟）。
+    """常驻：后台线程领中台卡片（没绑定、收点击没在线时暂停），前台收点击；长连接断了退避重连（BUS_IDLE_GRACE 秒起，
+    最多 5 分钟：至少等到旧总线因没消费者退出，新总线才会把飞书长连接状态推过来）。
     领卡线程死了就整个退出（退出码 3），交给系统服务重启，不留一个只收点击、不发卡的半死进程（审查 P2-3）。
     启动前核启动方式、代码属 root、卡片库（P1-04、P1-02），不过就不起。"""
     launch_ok()
     cards_trusted()
     F.use(GATE)
-    cards = threading.Thread(target=F.run, kwargs={"ready": not_ready}, daemon=True, name="gate-cards")
+    cards = threading.Thread(target=F.run, kwargs={"ready": cards_ready}, daemon=True, name="gate-cards")
     cards.start()
-    wait = 10
+    wait = BUS_IDLE_GRACE
     while True:
         if not cards.is_alive():
             print(json.dumps({"at": F.now(), "ok": False, "why": "领卡线程停了，退出等重启"}, ensure_ascii=False), flush=True)
@@ -745,7 +853,7 @@ def run():
             why = str(e)
         print(json.dumps({"at": F.now(), "ok": False, "why": why, "retry_in": wait}, ensure_ascii=False), flush=True)
         time.sleep(wait)
-        wait = 10 if time.monotonic() - started > 600 else min(wait * 2, 300)
+        wait = BUS_IDLE_GRACE if time.monotonic() - started > 600 else min(wait * 2, 300)
 
 
 def doctor(online=False):
@@ -774,12 +882,15 @@ def doctor(online=False):
 
 
 def show():
+    cards_trusted()                              # 读卡片库前同样核（L3 第 2 轮 P2-01）
     with db() as con:
         log = [dict(r) for r in con.execute("SELECT at, note, open_id, chat_id FROM binding_log ORDER BY id DESC LIMIT 10")]
         events = [dict(r) for r in con.execute("SELECT event_id, at, outcome FROM events ORDER BY at DESC LIMIT 20")]
+        notices = [dict(r) for r in con.execute("SELECT key, chat_id, created_at, tries, last_error FROM notices "
+                                                "WHERE sent_at IS NULL")]
     b = binding()
     return {"binding": b and {k: b[k] for k in ("open_id", "chat_id", "bound_at")}, "binding_log": log,
-            "recent_events": events, **F.show()}
+            "recent_events": events, "notices_pending": notices, **F.show()}
 
 
 def main(argv=None):
@@ -798,7 +909,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     F.use(GATE)
     try:
-        launch_flags()                           # 每个子命令都要经入口脚本（复核 P1-1）
+        launch_ok()                              # 每个子命令都要经入口脚本、代码属 root（复核 P1-1、L3 第 2 轮 P1-04）
         if a.cmd == "run":
             run()
         elif a.cmd == "setup":
