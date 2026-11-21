@@ -1046,6 +1046,38 @@ class RejectTests(Base):
         self.assertEqual(out["result"], "unknown", out["msg"])                    # 留言撤不回：不能当没做
         self.assertEqual(sorted(self.held()), [("day", "frozen"), ("task", "frozen")])
 
+    def test_partial_rework_never_matches_another_generations_event(self):
+        """L3 第 3 轮 P1-09：第 1 代 ③ 留言已发、续接没记上事件 → 结果不明；凭证换到第 2 代后有人手动续接一条 rework
+        （还没发到中台）。这条不是这次决定的事件，恢复闸照样挡着，不按时间把它认成「只差网关补发」。"""
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
+                mock.patch.object(G, "resume_dispatch", side_effect=G.Rejected("不能续接：凭证已冻结")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with G.tx() as con:
+            con.execute("UPDATE grants SET generation = 2 WHERE task_id = ?", (TASK,))
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            ev = G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        self.assertTrue(ev["event_key"].startswith(f"{TASK}:g2:rework"))
+        bad, _ = R._secretary()
+        self.assertIn(out["decision"], bad)
+
+    def test_rework_waits_on_its_own_event_even_without_event_key(self):
+        """反过来：这次决定自己的续接事件（日志里带决定号）只差补发，哪怕结果里还没记上事件号（进程在记结果前没了），
+        照样不挡闸；同一张单别的续接事件不影响。"""
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
+                mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+            G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertIsNone(R._secretary()[0])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:
+            con.execute("UPDATE secretary_decisions SET outcome = '{}' WHERE id = ?", (out["decision"],))
+        self.assertIsNone(R._secretary()[0])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:          # 记了别的事件号：对不上，挡闸
+            con.execute("UPDATE secretary_decisions SET outcome = ? WHERE id = ?",
+                        (json.dumps({"event_key": f"{TASK}:g1:rework:2"}), out["decision"]))
+        self.assertIn(out["decision"], R._secretary()[0])
+
     def test_comment_unknown_is_not_resent(self):
         bad = self.root / "badgh"
         bad.write_text(f"#!{sys.executable}\nimport json, sys\nif sys.argv[1:3] == ['pr', 'view']:\n"

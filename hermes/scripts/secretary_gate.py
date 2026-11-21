@@ -1122,12 +1122,13 @@ def deliver_ask(st, d, ctx, now):
     return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "已交给中台，但回读没对上，等对账"}
 
 
-def _resume(st, d, kind, reason, now, partial=False):
+def _resume(st, d, kind, reason, now, generation, partial=False):
     """经网关续接（② 重派、③ 返修）。按 resume_dispatch 的结果分类：凭证当场不放行（还没记事件）→ failed；
     事件已记、发出且中台给了事件号 → done；其余（发送结果不明、镜像写不成、事件还排着）→ unknown（网关以后补发，对账看它）。
-    partial：前面已经做了撤不回的一步（③ 的留言已发出），这时网关不放行也只能记结果不明，交对账、不重发。"""
+    partial：前面已经做了撤不回的一步（③ 的留言已发出），这时网关不放行也只能记结果不明，交对账、不重发。
+    续接带上决定号和前闸核过的代次（L3 第 3 轮 P1-09）：事件和这次决定绑在同一条续接日志里，凭证换了代就不续接。"""
     try:
-        out = G.resume_dispatch(d["task_id"], kind, reason, now=now)
+        out = G.resume_dispatch(d["task_id"], kind, reason, now=now, ref=d["id"], generation=generation)
     except G.Rejected as e:
         result = "unknown" if partial else "failed"
         finish(st, d["id"], result, {"error": str(e), **({"note": "留言已发出、返修没派出"} if partial else {})}, now=now)
@@ -1173,7 +1174,7 @@ def deliver_reject(st, d, ctx, now):
     if r.returncode != 0:                                    # gh 报错分不清发没发：结果不明，不重发
         finish(st, d["id"], "unknown", {"error": r.stderr.strip()[:200]}, now=now)
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "留言结果不明，等对账"}
-    return _resume(st, d, "rework", f"秘书代批 {d['id']}：审查没过，退回返修", now, partial=True)
+    return _resume(st, d, "rework", f"秘书代批 {d['id']}：审查没过，退回返修", now, ctx["row"]["generation"], partial=True)
 
 
 def recovery_open():
@@ -1236,7 +1237,7 @@ def submit(proposal, now=None):
             if cat == "ask":
                 return deliver_ask(st, d, ctx, now)
             if cat == "redispatch":
-                return _resume(st, d, "redispatch", f"秘书代批 {d['id']}：中台放弃后重派一次", now)
+                return _resume(st, d, "redispatch", f"秘书代批 {d['id']}：中台放弃后重派一次", now, ctx["row"]["generation"])
             return deliver_reject(st, d, ctx, now)
     except L.LedgerError as e:
         return {"ok": False, "result": "refused", "msg": f"账本记不了：{e}"}

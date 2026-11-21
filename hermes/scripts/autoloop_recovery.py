@@ -399,7 +399,7 @@ def _secretary():
         try:
             if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'secretary_decisions'").fetchone():
                 return None, "还没有秘书账本，跳过"
-            rows = con.execute("SELECT id, status, action, task_id, outcome, created_at FROM secretary_decisions "
+            rows = con.execute("SELECT id, status, action, task_id, outcome, target FROM secretary_decisions "
                                "WHERE action != 'handoff' AND status IN ('executing', 'unknown', 'unreconciled') "
                                "ORDER BY created_at").fetchall()
         finally:
@@ -420,26 +420,31 @@ def _waits_on_gateway(r):
     """秘书的 ② 重派、③ 返修只差网关补发：这次续接的派单事件已在凭证库记账、还没确认送到中台（sent 0 或 2）。
     这种不挡闸（第 2 轮预审 P1-A，常浩 11-20 选甲）：事件的结果由网关自己记着，中台按同一来源同一 id 去重，补发不会多派；
     而补发 send-pending 本身要过闸——挡闸就成了死循环（秘书等事件发出、事件等开闸）。开闸后补发送到，秘书对账记 done。
-    找不到事件、事件不止一条、已作废或已送达的照常挡闸，由秘书对账结掉（核不清的由常浩 secretary_gate settle 定）。"""
-    did, status, action, task_id, outcome, created = r
+    认事件只认和这次决定绑定的（L3 第 3 轮 P1-09）：凭证库里正好一条带这个决定号的续接日志（和事件同一事务记的），
+    日志里的事件就是它；事件的任务、续接种类要对上，代次要等于日志记的、也等于决定里记的（有记的话）；决定自己记了
+    事件号的也要是同一个。不按时间猜：别的代次、人工续接的事件一律不算。找不到、对不上、已作废或已送达的照常挡闸，
+    由秘书对账结掉（核不清的由常浩 secretary_gate settle 定）。"""
+    did, status, action, task_id, outcome, target = r
     if action not in ("redispatch", "reject") or status not in ("executing", "unknown") or not G.db_path().exists():
         return False
     try:
         key = (json.loads(outcome or "{}") or {}).get("event_key")
-    except ValueError:
+        gen = (json.loads(target or "{}") or {}).get("generation")
+    except (ValueError, AttributeError):
         return False
     kind = "redispatch" if action == "redispatch" else "rework"
     try:
         with G.tx() as gcon:
-            if key:
-                evs = gcon.execute("SELECT sent, at FROM hub_events WHERE event_key = ?", (key,)).fetchall()
-            else:                                        # 进程在记结果前没了：按这张单这类续接、决定之后记的事件找
-                evs = gcon.execute("SELECT sent, at FROM hub_events WHERE task_id = ? AND kind = ?",
-                                   (task_id, kind)).fetchall()
-                evs = [e for e in evs if G.parse_iso(e[1]) >= G.parse_iso(created)]
+            logs = G.resume_refs(gcon, task_id).get(did, [])
+            if len(logs) != 1 or (key and logs[0].get("event") != key):
+                return False
+            e = gcon.execute("SELECT task_id, kind, generation, sent FROM hub_events WHERE event_key = ?",
+                             (logs[0].get("event"),)).fetchone()
     except (sqlite3.Error, ValueError, TypeError):
         return False
-    return len(evs) == 1 and evs[0][0] in (0, 2)
+    if not e or (e[0], e[1]) != (task_id, kind) or e[3] not in (0, 2):
+        return False
+    return e[2] == logs[0].get("generation") and (gen is None or e[2] == gen)
 
 
 def reconcile(readers=None):

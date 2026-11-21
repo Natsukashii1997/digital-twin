@@ -88,6 +88,7 @@ MAX_HOURS = 72
 APPROVE_TEXT = re.compile(r"^派单\s*([0-9a-f]{8})$")
 UNFREEZE_TEXT = re.compile(r"^恢复\s*(t-\d{8}-[0-9a-f]{6})\s+([0-9a-f]{6})$")
 TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")
+REF = re.compile(r"^[A-Za-z0-9][\w.-]{0,63}$")              # 续接的决定号（秘书决定号 d-…）
 REPO_NAME = re.compile(r"^[\w.-]{1,100}$")
 MAX_SCOPE = 3000
 SCHEMA_VERSION = 2
@@ -593,23 +594,46 @@ def approve(message_id, now=None, path=None, post=None):
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
-def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None):
+def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=None, generation=None):
+    """续接（重派 / 返修 / 更正）：记一条派单事件再尝试发。ref = 发起这次续接的决定号（秘书代批传自己的决定号），
+    和事件号记在同一条续接日志里，恢复闸据此认「只差网关补发」的是不是这次决定的事件（L3 第 3 轮 P1-09）；
+    同一个 ref 只能续接一次。generation = 发起方认定的代次，凭证已经不是这一代就不续接。"""
     now = now or now_tz()
     if kind not in KINDS:
         raise Rejected("续接只有 redispatch、rework、correction 三种")
     if not (reason or "").strip():
         raise Rejected("续接要写原因")
+    if ref is not None and not REF.match(ref):
+        raise Rejected("续接的决定号写法不对")
     with tx(path) as con:
         row = grant_row(con, task_id)
+        if generation is not None and row["generation"] != generation:
+            raise Rejected(f"不能续接：凭证已经是第 {row['generation']} 代，不是发起时的第 {generation} 代")
         why = check_row(row, "edit", row["generation"], now, voided_of(con, task_id))
         if why:
             raise Rejected(f"不能续接：{why}")
+        if ref is not None and ref in resume_refs(con, task_id):
+            raise Rejected(f"决定 {ref} 已经续接过，不再记第二条事件")
         n = con.execute("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND generation = ? AND kind = ?",
                         (task_id, row["generation"], kind)).fetchone()[0]
         key = f"{task_id}:g{row['generation']}:{kind}:{n + 1}"
         record_event(con, row, kind, key, now)
-        log(con, task_id, "续接", now, kind=kind, reason=reason.strip()[:200], event=key)
+        log(con, task_id, "续接", now, kind=kind, reason=reason.strip()[:200], event=key, generation=row["generation"],
+            **({"ref": ref} if ref is not None else {}))
     return {"event_key": key, "send": _try_send(path, post, now)}
+
+
+def resume_refs(con, task_id):
+    """这张任务的续接日志：{决定号: [日志内容, ...]}（只收带决定号的；日志坏行跳过）。"""
+    out = {}
+    for (detail,) in con.execute("SELECT detail FROM grant_log WHERE task_id = ? AND what = '续接' ORDER BY id", (task_id,)):
+        try:
+            d = json.loads(detail)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("ref"), str):
+            out.setdefault(d["ref"], []).append(d)
+    return out
 
 
 # ---------- 收紧方向：冻结、撤销、完成（先在权威库提交，再写镜像） ----------

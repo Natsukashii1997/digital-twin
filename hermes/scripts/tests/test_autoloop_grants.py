@@ -561,6 +561,22 @@ class Resume(Base):
         with self.assertRaisesRegex(G.Rejected, "过期"):
             G.resume_dispatch(tid, "rework", "x", now=T0 + dt.timedelta(hours=13), post=self.post)
 
+    def test_resume_binds_ref_and_generation(self):
+        """L3 第 3 轮 P1-09：续接带决定号时记进同一条续接日志（同一个决定号只能续接一次）；发起方认定的代次不对就不续接。"""
+        tid = self.new_task()
+        with self.assertRaisesRegex(G.Rejected, "不是发起时的第 2 代"):
+            G.resume_dispatch(tid, "rework", "x", now=T0, post=self.post, ref="d-1", generation=2)
+        with self.assertRaisesRegex(G.Rejected, "决定号写法"):
+            G.resume_dispatch(tid, "rework", "x", now=T0, post=self.post, ref="../x")
+        out = G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post, ref="d-1", generation=1)
+        with self.assertRaisesRegex(G.Rejected, "已经续接过"):
+            G.resume_dispatch(tid, "rework", "再来", now=T0, post=self.post, ref="d-1", generation=1)
+        G.resume_dispatch(tid, "rework", "人工", now=T0, post=self.post)           # 不带决定号的照旧可以
+        with G.tx() as con:
+            refs = G.resume_refs(con, tid)
+        self.assertEqual(list(refs), ["d-1"])
+        self.assertEqual((refs["d-1"][0]["event"], refs["d-1"][0]["generation"]), (out["event_key"], 1))
+
     def test_log_is_append_only_history(self):
         tid = self.new_task()
         G.freeze(tid, "推翻", now=T0)
