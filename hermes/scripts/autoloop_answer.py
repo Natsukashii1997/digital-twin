@@ -134,6 +134,10 @@ def owner_row(con, card_id):
 def move(card_id, attempt, expect, state, note=None, pid=None):
     """把这次尝试从 expect（一个或几个状态）改成 state；不是这次尝试或状态已变就不改，返回是否改成。"""
     expect = (expect,) if isinstance(expect, str) else tuple(expect)
+    if state == "unknown":                       # 结果不明：先关恢复闸、再记（同 L3 第 3 轮 P1-08），两步之间别的写入者
+        import autoloop_exits as E               # 过不了闸；没改成（不是这次尝试）多关一次闸无害，对账照常开
+        with E.db() as econ:
+            E.mark_dirty(econ, f"卡片 {card_id} 的本人回答结果不明")
     with F.db(write=True) as con:
         cur = con.execute(f"UPDATE claims SET state = ?, at = ?, pid = ?, note = COALESCE(?, note) WHERE card_id = ? "
                           f"AND who = 'owner' AND attempt = ? AND state IN ({','.join('?' * len(expect))})",
@@ -142,10 +146,6 @@ def move(card_id, attempt, expect, state, note=None, pid=None):
             return False
         r = owner_row(con, card_id)
         F.log_claim(con, card_id, "owner", state, r["choice"], note, attempt)
-    if state == "unknown":                       # 结果不明：恢复闸关上，下一个受保护动作前先对账（批 0D）
-        import autoloop_exits as E
-        with E.db() as econ:
-            E.mark_dirty(econ, f"卡片 {card_id} 的本人回答结果不明")
     return True
 
 

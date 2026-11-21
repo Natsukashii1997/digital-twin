@@ -638,6 +638,20 @@ class Answer(Base):
         self.assertIsNone(A.flush(7))
         self.assertEqual(len(self.answers()), 1)
 
+    def test_unknown_answer_closes_the_gate_before_recording_it(self):
+        """同 L3 第 3 轮 P1-08：本人回答结果不明先关闸、再在卡片库记 unknown；记的那一刻闸已经关了。"""
+        seen, real = [], F.log_claim
+
+        def log_claim(con, card_id, who, state, *a, **kw):
+            if state == "unknown":
+                with E.db(write=False) as econ:
+                    seen.append(econ.execute("SELECT dirty FROM gate WHERE id = 1").fetchone())
+            return real(con, card_id, who, state, *a, **kw)
+        with mock.patch.object(F, "log_claim", log_claim):
+            self.unknown_claim()
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0] and seen[0][0])
+
     def test_unknown_answer_closes_the_gate_and_gate_reconcile_skips_queued(self):
         def dirty():
             with E.db(write=False) as con:
