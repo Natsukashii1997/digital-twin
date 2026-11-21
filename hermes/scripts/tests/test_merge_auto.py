@@ -526,15 +526,53 @@ class Auto(Fixture, unittest.TestCase):
         r = self.auto("app#5")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("没合上", r.stdout)
-        self.assertIn("写明版本号再交出", r.stdout)
+        self.assertIn("写明版本号", r.stdout)
         self.assertEqual((self.events(), self.handoffs(), self.merges_called(), self.state()),
                          (["intent", "not_merged"], [], [], "OPEN"))
         self.assertEqual(self.scan_at("2026-11-07T10:20:00+08:00"), "")           # 巡视也不合
         self.assertEqual(self.merges_called(), [])
-        r = self.auto("app#5")                                       # 旧请求已经结清：再交出就是一次普通的交出
+        r = self.auto("app#5")                                       # 旧请求已经结清，再跑一次同样的命令：照样停下（第 6 轮）
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("写明版本号", r.stdout)
+        self.assertEqual((self.merges_called(), self.handoffs(), self.events()), ([], [], ["intent", "not_merged"]))
+        r = self.auto(f"app#5@{new_head[:7]}")                       # 写明看过的版本：才合
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         (merge,) = self.merges_called()
         self.assertIn(f"sha={new_head}", merge)
+
+    def test_patrol_settles_first_then_handoff_without_version_still_stops(self):
+        """#260-P1-01 第 6 轮：巡视先把旧请求结清（PR 换了版本），会话之后才重跑没写版本号的交出命令。
+        这时已经没有结果不明的记录，也不能把这条命令当成对新版本的授权：停下，不新增要合、不登记、不发请求。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")
+        new_head = self.pr_commit(5, {"docs/a.md": "someone else pushed\n"})
+        self.update_pr(headRefOid=new_head)
+        self.assertIn("没合上", self.scan_at("2026-11-07T10:20:00+08:00"))     # 巡视先结清
+        self.assertEqual((self.mp(MP.unsettled), self.events()), ([], ["intent", "not_merged"]))
+        r = self.auto("app#5", env={"DT_NOW": "2026-11-07T10:30:00+08:00"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("换了版本", r.stdout)
+        self.assertIn("写明版本号", r.stdout)
+        self.assertEqual((self.events(), self.handoffs(), self.merges_called(), self.state()),
+                         (["intent", "not_merged"], [], [], "OPEN"))
+        r = self.auto(f"app#5@{new_head[:7]}", env={"DT_NOW": "2026-11-07T10:35:00+08:00"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        (merge,) = self.merges_called()
+        self.assertIn(f"sha={new_head}", merge)
+
+    def test_settled_because_closed_says_closed(self):
+        """#260-P2-17：旧请求是因为 PR 被关掉才结清的，提示要说 PR 已关闭，不说换了版本。"""
+        self.sign()
+        self.intent("2026-11-07T09:00:00+08:00")
+        self.update_pr(state="CLOSED")
+        self.scan_at("2026-11-07T10:20:00+08:00")
+        self.assertEqual(self.book()[-1]["state_now"], "CLOSED")
+        self.update_pr(state="OPEN")                                 # 有人重新打开
+        r = self.auto("app#5", env={"DT_NOW": "2026-11-07T10:30:00+08:00"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("PR 已关闭", r.stdout)
+        self.assertNotIn("换了版本", r.stdout)
+        self.assertEqual(self.merges_called(), [])
 
     def test_unsettled_is_never_resent_by_patrol(self):
         """#260-P1-01：交出登记还在、检查全过、上一次请求结果不明。巡视只读核对，不管过多久都不自己重发，也不放开重新交出。"""

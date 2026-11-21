@@ -38,8 +38,8 @@
   merge_act.py button merge|return <仓库#PR@HEAD前缀> --chat <chat_id>
                                              卡片按钮（#78）：Hermes 的 /card 插件在后台调用；进度和结果直接发到常浩私聊
   merge_act.py auto <仓库#PR[@HEAD前缀]> [--by 谁]
-                                             按策略合并（#257）：交出这个 PR 现在的版本并当场试合（这个 PR 上一次按策略合并
-                                             结果不明、刚被核对结清时，必须写 @版本前缀）。退出码：0 已合并；2 已登记、
+                                             按策略合并（#257）：交出这个 PR 现在的版本并当场试合（这个 PR 有过结果不明、
+                                             后来结清为没合上的按策略合并时，必须写 @版本前缀）。退出码：0 已合并；2 已登记、
                                              现在还不能合（合并官巡视时再试）；3 不归策略管，仍要常浩决定（例外、策略没生效、
                                              仓库没覆盖）；1 其他（结果不明、被上限拦下、出错）
   merge_act.py revert <仓库#PR> [原因]        撤回一个按策略合并的 PR：开撤回 PR，记进账本
@@ -989,10 +989,10 @@ def reconcile_unsettled(repo=None, pr=None, remind=True):
         elif not (state == "CLOSED" or (state == "OPEN" and SHA40.match(str(now_head or "")))):
             continue                                       # 状态或版本没读全：没有依据，不结算，下一轮再核对
         else:
-            MP.append({"event": "not_merged", "id": m["id"],
+            MP.append({"event": "not_merged", "id": m["id"], "state_now": state, "head_now": now_head,
                        "why": f"只读核对：PR 现在是 {state}，版本 {str(now_head)[:7]}（那次请求绑的是 {str(m['head'])[:7]}）；本机已没有这次合并请求的进程"})
             MP.drop_handoff(m["repo"], m["pr"])
-            said.append(f"只读核对：{ref} 没合上（PR 现在是 {state}，版本 {str(now_head)[:7]}）。不会自动重试：还要合的话，请开 PR 的会话重新交出。")
+            said.append(f"只读核对：{ref} 没合上（PR 现在是 {state}，版本 {str(now_head)[:7]}）。不会自动重试：还要合的话，请开 PR 的会话看过现在的版本后，写明版本号重新交出（merge_act.py auto 仓库#号@版本前缀）。")
     return said
 
 
@@ -1076,13 +1076,18 @@ def cmd_auto(ref, by):
             now = {m["id"]: m["status"] for m in MP.merges()}
             if now.get(pending[-1]["id"]) == "merged_unknown":
                 return 1                                   # 核对出来已经合并了（来源不明）：没有可合的
-            if not want and now.get(pending[-1]["id"]) == "not_merged":
-                # 刚结清的旧请求说明 PR 换了版本；没写版本号的交出命令可能是会话异常恢复后重跑的旧命令，
-                # 不能拿它给没人看过的新版本建立授权（#260-P1-01，第 5 轮）。要合得写明现在的版本号再交出。
-                print(f"{name}#{pr} 没合并：上一次按策略合并结果不明，刚核对结清（PR 换了版本）。这次交出没写版本号，"
-                      f"不知道交出的是不是现在这个版本，所以不登记、不合并。看过现在的版本后，写明版本号再交出："
-                      f"merge_act.py auto {name}#{pr}@<版本前缀>")
-                return 1
+        settled = [m for m in MP.merges() if (m["repo"], str(m["pr"])) == (repo, str(pr)) and m["status"] == "not_merged"]
+        if not want and settled:
+            # 这个 PR 有过「结果不明、后来结清为没合上」的按策略合并：从此交出它都要写明版本号（#260-P1-01，第 5、6 轮）。
+            # 没写版本号的交出命令分不清是看过新版本后的重新交出，还是会话异常恢复后重跑的旧命令；不管旧请求是
+            # 这次当场结清的、还是巡视先结清的，都不能拿它给没人看过的版本建立授权。
+            closed = settled[-1].get("state_now") == "CLOSED"
+            why = ("核对时 PR 已关闭（关着的 PR 不能合；重新打开后要看过现在的版本再交出）" if closed
+                   else "核对时 PR 已经换了版本")
+            print(f"{name}#{pr} 没合并：这个 PR 有过一次按策略合并结果不明、后来结清为没合上（{why}）。"
+                  f"从此交出它都要写明版本号：这次没写，不知道交出的是不是现在这个版本，所以不登记、不合并。"
+                  f"看过现在的版本后再交出：merge_act.py auto {name}#{pr}@<版本前缀>")
+            return 1
         res = auto_try(repo, pr, by, mo.load_rules(), want=want, register=True)
     print(res["text"])
     return AUTO_EXIT.get(res["status"], 1)
