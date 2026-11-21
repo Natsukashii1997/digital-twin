@@ -105,14 +105,15 @@ def db_path():
 
 
 @contextlib.contextmanager
-def db(write=True):
-    """write=True：BEGIN IMMEDIATE，判定和写入之间没有空隙。库不存在就新建（700 目录、600 文件）。"""
+def db(write=True, timeout=30):
+    """write=True：BEGIN IMMEDIATE，判定和写入之间没有空隙。库不存在就新建（700 目录、600 文件）。
+    timeout：等别的写入者放锁最多几秒（对账开闸那一步持着凭证库写锁，只等几秒，等不到就不开闸）。"""
     p = db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(p.parent, 0o700)
     if not p.exists():
         os.close(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-    con = sqlite3.connect(p, isolation_level=None, timeout=30)
+    con = sqlite3.connect(p, isolation_level=None, timeout=timeout)
     con.row_factory = sqlite3.Row
     try:
         con.execute("BEGIN IMMEDIATE" if write else "BEGIN")

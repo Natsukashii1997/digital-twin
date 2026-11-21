@@ -25,7 +25,7 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
      例外（常浩 11-20 选甲）：② 重派 / ③ 返修只差网关补发派单事件的不挡（补发要过闸，挡了就是死循环；中台按 id 去重，
      补发不会多派）；
   5. 结算开闸：先持凭证库写锁（重判秘书只差网关补发，冻结、撤销进不来）、再持出口账本写锁，再看一遍——对账期间又出现结果不明、还有已开始没记结果的受保护动作（出口账本 executing、
-     本人回答 inflight、秘书代批 executing，第 4 步认定只差网关补发的秘书 ② / ③ 除外，L3 第 5 轮 P1-08）就不开。
+     本人回答 inflight、秘书代批 executing，第 5 步在凭证库锁里重判只差网关补发的秘书 ② / ③ 除外，L3 第 5 轮 P1-08）就不开。
      都过了才记下纪元和报告。仍冻结的范围（结果不明、核不清）
      各自继续拒绝，别的照常放行。
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
@@ -318,8 +318,9 @@ def _started(con, waits=()):
     本人回答 inflight、秘书代批 executing（不论多久）。它们结果不明时先关闸再记，关闸那笔可能正等着出口账本这把写锁
     （标记文件又没写成）；这时开闸，抢到锁的新入口就会先于关闸登记被放行。闸关着时新动作领不到资格，所以这里只是等手上
     已开始的做完。在出口账本写事务里调用：这期间没有新的领资格。读不了一律算有（不开）。
-    waits 是第 4 步认定「只差网关补发」的秘书 ② / ③（11-20 选甲：结果不明也不挡闸，挡了就死锁——补发要过闸）：
-    不算进来。这里不重新判定：判定要拿凭证库写锁，而锁顺序是「凭证库 → 出口账本」，持着出口账本写锁不能去等它。"""
+    waits 是「只差网关补发」的秘书 ② / ③（11-20 选甲：结果不明也不挡闸，挡了就死锁——补发要过闸），不算进来。
+    它由第 5 步在凭证库写锁里重新算（续审第 1 轮），凭证库锁一直持到开闸提交，这期间冻结、撤销、续接进不来；
+    凭证库不在时就是第 4 步算的（那时根本没有可补发的事件，名单是空的）。"""
     return ([f"出口 {r[0]}" for r in con.execute("SELECT key FROM exits WHERE state = 'executing'")]
             + [f"本人回答 卡片 {c}" for c in _owner_inflight()]
             + [f"秘书代批 {d}" for d in _secretary_sending(fresh_only=False) if d not in waits])
@@ -533,17 +534,24 @@ def reconcile(readers=None):
     with contextlib.ExitStack() as locks:                                 # 5 结算开闸
         # 先拿凭证库写锁、再拿出口账本写锁（锁顺序「凭证库 → 出口账本」）：第 4 步认定的「只差网关补发」在这里重新判一次，
         # 判完到开闸提交之间冻结、撤销、续接都进不来；凭证自然过期按此刻的时间判（续审第 1 轮 P1-08）。凭证库还不在就没有可补发的。
+        # 已经知道不开闸就不拿凭证库锁（不白挡冻结、撤销）。拿着凭证库锁时出口账本只等 5 秒：等不到就这次不开闸，
+        # 不让冻结、撤销跟着干等（它们自己最多等 30 秒）。
         gcon = None
-        if G.db_path().exists():
+        if why is None and G.db_path().exists():
             try:
                 gcon = locks.enter_context(G.tx())
             except sqlite3.Error as e:
-                why = why or f"凭证库这会儿打不开（{type(e).__name__}），不开闸"
+                why = f"凭证库这会儿打不开（{type(e).__name__}），不开闸"
         if gcon is not None:
             waits = []
             sec_bad, _ = _secretary(waits, gcon)
             why = why or sec_bad
-        con = locks.enter_context(E.db())
+        try:
+            con = locks.enter_context(E.db(timeout=5 if gcon is not None else 30))
+        except sqlite3.OperationalError as e:
+            locks.close()
+            return {"open": False, "why": f"出口账本这会儿被别的写入者占着（{e}），这次不开闸，下次再对", "frozen": [],
+                    "steps": steps, "epoch": epoch}
         frozen = E.frozen_scopes(con)
         report = {"steps": steps, "frozen": frozen}
         now_dirty = (con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone() or [0])[0]

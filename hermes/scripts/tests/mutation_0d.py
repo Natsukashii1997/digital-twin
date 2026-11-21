@@ -226,6 +226,10 @@ M = [
     ("autoloop_recovery.py", 'return e["sent"] == 2 and G.now_tz() - G.parse_iso(e["claimed_at"]) >= G.STALE',
      'return e["sent"] == 2', "刚领走在发的事件也算只差补发",
      [SG + ".RedispatchTests.test_fresh_claim_is_a_send_in_progress_not_a_resend"]),
+    ("autoloop_recovery.py", "        try:\n            con = locks.enter_context(E.db(timeout=",
+     "        locks.close()\n        try:\n            con = locks.enter_context(E.db(timeout=",
+     "重判完先放凭证库锁再开闸（冻结能插进来）",
+     [SG + ".RedispatchTests.test_freeze_waits_until_the_gate_decision_is_committed"]),
 ]
 
 

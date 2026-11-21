@@ -971,6 +971,7 @@ class RedispatchTests(Base):
             self.assertEqual([r[0] for r in con.execute("SELECT sent FROM hub_events WHERE task_id = ? AND kind = 'redispatch'",
                                                         (TASK,))], [-1])
         self.assertFalse(rep["open"])
+        self.assertIsNotNone(rep["why"])
         self.assertIn(did, rep["why"])
 
     def test_grant_expiring_between_step4_and_open_keeps_the_gate_closed(self):
@@ -981,7 +982,43 @@ class RedispatchTests(Base):
             clock[0] = T + dt.timedelta(hours=13)               # 凭证 12 小时有效
         rep = self._reconcile_with_change_between_step4_and_step5(expire, clock)
         self.assertFalse(rep["open"])
+        self.assertIsNotNone(rep["why"])
         self.assertIn(did, rep["why"])
+
+    def test_freeze_waits_until_the_gate_decision_is_committed(self):
+        """续审第 1 轮预审 P2：第 5 步重判完到开闸提交之间凭证库锁不能放——这时发起的冻结要卡到开闸提交之后才进去。"""
+        import threading
+        import time
+        did = self._stuck_redispatch_with_unsent_event()
+        froze = threading.Event()
+        errors = []
+
+        def freeze():
+            try:
+                G.freeze(TASK, "推翻", now=T + dt.timedelta(minutes=2))
+                froze.set()
+            except Exception as e:                             # pragma: no cover - 失败时给断言看
+                errors.append(e)
+        t = threading.Thread(target=freeze)
+        real, seen = E.frozen_scopes, []
+
+        def in_final_tx(con):                                   # 第 5 步：已持凭证库锁、出口账本锁，重判过
+            t.start()
+            time.sleep(0.5)
+            seen.append(froze.is_set())
+            return real(con)
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40), \
+                mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=2)), \
+                mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx):
+            rep = R.reconcile()
+            t.join(35)
+        self.assertEqual(errors, [])
+        self.assertEqual(seen, [False])                         # 开闸提交之前冻结进不去
+        self.assertTrue(froze.is_set())                         # 提交之后进去了
+        self.assertTrue(rep["open"], rep["why"])                # 判的那一刻只差补发：开闸
+        self.assertTrue(did)
 
     def test_fresh_claim_is_a_send_in_progress_not_a_resend(self):
         """续审第 1 轮：sent=2 刚领走不到 60 秒是一次正在进行的发送，不算只差补发（挡闸）；过了 60 秒才算（不挡）。"""
@@ -990,7 +1027,9 @@ class RedispatchTests(Base):
             con.execute("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE task_id = ? AND kind = 'redispatch'",
                         (G.iso(T + dt.timedelta(minutes=2)), TASK))
         with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=2, seconds=30)):
-            self.assertIn(did, R._secretary()[0])
+            bad = R._secretary()[0]
+            self.assertIsNotNone(bad)
+            self.assertIn(did, bad)
         with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=3, seconds=1)):
             self.assertIsNone(R._secretary()[0])
 
