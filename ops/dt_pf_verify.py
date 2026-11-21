@@ -150,7 +150,7 @@ def probe(targets):
 
 def probe_stress(targets, seconds):
     """连续 seconds 秒轮流去连每个靶子；连上了先拿着 HOLD 秒。返回每个靶子的尝试次数、各种结果的计数、每次连上的时间和本地端口。"""
-    out = [{"n": 0, "got": {}, "opens": []} for _ in targets]
+    out = [{"n": 0, "got": {}, "opens": [], "log": []} for _ in targets]
     end = time.time() + seconds
     while time.time() < end:
         for i, t in enumerate(targets):
@@ -160,6 +160,7 @@ def probe_stress(targets, seconds):
             row = out[i]
             row["n"] += 1
             row["got"][key] = row["got"].get(key, 0) + 1
+            row["log"].append([round(at, 3), key])   # 每次尝试的时间和结果：事后和重新加载的时刻对照（11-21 真机）
             if reached(g):
                 row["opens"].append({"at": at, "lport": int(g.split(":", 1)[1]) if ":" in g else None})
     return out
@@ -825,6 +826,22 @@ def judge_stress(users, ts, outs, reload_times):
     return leaks, incomplete, rows
 
 
+def suspects(rows, reload_times):
+    """疑似漏过（11-21 真机）：同一个靶子绝大多数是「被拒」（门卫 block return 当场回绝），偶尔一次「超时」——
+    多半是包出去了、回来的包被入站拒绝挡掉（TCP 握手完不成，root 靶子记不到）。逐个列出时间和离最近一次重新加载几毫秒。"""
+    out = []
+    for u, rs in rows.items():
+        for r in rs if isinstance(rs, list) else []:
+            got = r.get("got", {})
+            if got.get("refused", 0) * 2 <= r.get("n", 0):
+                continue
+            for at, key in r.get("log", []):
+                if key != "refused":
+                    out.append({"user": u, "kind": r["kind"], "host": r["host"], "port": r["port"], "at": at, "got": key,
+                                "ms_from_reload": nearest_reload(at, reload_times)})
+    return out
+
+
 def control_targets(ts, own):
     """压力模式对照组（root、dt-gate）连的目标：本机已有的监听和公网（11-19 两次漏过时 root 和 dt-gate 也在连这些），
     不连 root 自己的靶子（靶子收到的连接都当漏过）。另返回端口撞上自己靶子的目标：不该有（system_targets 已排除），
@@ -875,8 +892,9 @@ def stress(seconds, interval=1.0):
             print(f"靶子 {len(ts)} 个（root 连不上、不算数的 {len(report['skipped'])} 个），{'、'.join(users)} 同时连 {seconds} 秒，"
                   f"dt-gate 和 root 同时连其中 {len(others)} 个本机已有监听和公网作对照，每 {interval:g} 秒强制重新加载一次规则……")
             own.armed = True
-            rel = Reloader(interval)
-            rel.start()
+            rel = Reloader(interval) if interval > 0 else None   # 间隔 0：不强制重新加载，看平时会不会漏
+            if rel:
+                rel.start()
             started = time.time()
             procs = {u: run_as(u, ts, "probe-stress", seconds, popen=True) for u in users}
             procs["dt-gate"] = run_as("dt-gate", others, "probe-stress", seconds, popen=True)
@@ -888,20 +906,26 @@ def stress(seconds, interval=1.0):
             outs = collect(procs, counts, seconds + 600, on_open)
             root_th.join(seconds + 600)
             ended = time.time()
-            rel.stop.set()
-            rel.join(RELOAD_TIMEOUT + 5)
+            if rel:
+                rel.stop.set()
+                rel.join(RELOAD_TIMEOUT + 5)
             own.armed = False
-            report["reloads"] = {"count": len(rel.times), "errors": rel.errors, "problems": rel.problems}
+            times = rel.times if rel else []
+            report["reloads"] = ({"count": len(rel.times), "errors": rel.errors, "problems": rel.problems} if rel
+                                 else {"count": 0, "mode": "不强制重新加载"})
             report["anchor_after"] = pfctl("-a", ANCHOR, "-vsr")
             gate = outs.pop("dt-gate")
-            leaks, incomplete, report["accounts"] = judge_stress(users, ts, outs, rel.times)
+            leaks, incomplete, report["accounts"] = judge_stress(users, ts, outs, times)
+            report["suspects"] = suspects(report["accounts"], times)
             report["control"] = {"dt-gate": gate if isinstance(gate, list) else str(gate)[:500], "root": root_rows.get("rows")}
             incomplete += control_incomplete(others, gate, root_rows.get("rows"))
             for h in own.hits:
-                h["ms_from_reload"] = nearest_reload(h["at"], rel.times)
+                h["ms_from_reload"] = nearest_reload(h["at"], times)
             for x in live:
-                x["ms_from_reload"] = nearest_reload(x["at"], rel.times)
-            incomplete += reload_coverage(rel, started, ended)
+                x["ms_from_reload"] = nearest_reload(x["at"], times)
+            if rel:
+                incomplete += reload_coverage(rel, started, ended)
+            report["started"], report["ended"] = started, ended
             if not rules_intact():
                 incomplete.append("测试后加载上的规则和规则文件不一致")
     finally:
@@ -913,10 +937,16 @@ def stress(seconds, interval=1.0):
         for row in rows if isinstance(rows, list) else []:
             k = sum(v for g, v in row["got"].items() if g in REACHED)
             print(f"  {row['what']} {row['host']}:{row['port']}：试了 {row['n']} 次，连上 {k} 次（{row['got']}）")
-    print(f"重新加载 {report.get('reloads', {}).get('count', 0)} 次")
-    if leaks or own.hits or live:
-        print(f"有漏过：账号报告 {len(leaks)} 次，root 靶子收到 {len(own.hits)} 次，当场抓到现场 {len(live)} 次（现场在记录里）；"
-              f"记录在 {path}")
+    rl = report.get("reloads", {})
+    print(f"重新加载 {rl.get('count', 0)} 次" + (f"（{rl['mode']}）" if rl.get("mode") else ""))
+    sus = report.get("suspects", [])
+    for h in own.hits:
+        print(f"  root 靶子收到：{h['kind']} {h['host']}:{h['port']} ← {h['peer']}，离最近一次重新加载 {h.get('ms_from_reload')} 毫秒")
+    for x in sus:
+        print(f"  疑似漏过：{x['user']} → {x['kind']} {x['host']}:{x['port']} {x['got']}，离最近一次重新加载 {x['ms_from_reload']} 毫秒")
+    if leaks or own.hits or live or sus:
+        print(f"有漏过：账号报告 {len(leaks)} 次，root 靶子收到 {len(own.hits)} 次，当场抓到现场 {len(live)} 次，"
+              f"疑似（本该被拒却超时）{len(sus)} 次；记录在 {path}")
         return 1
     if incomplete:
         print("测试不完整：" + "；".join(incomplete[:5]) + f"；记录在 {path}")
@@ -954,7 +984,8 @@ def main():
         return 1
     try:
         if len(sys.argv) >= 2 and sys.argv[1] == "stress":
-            return stress(int(sys.argv[2]) if len(sys.argv) >= 3 else 600)
+            return stress(int(sys.argv[2]) if len(sys.argv) >= 3 else 600,
+                          float(sys.argv[3]) if len(sys.argv) >= 4 else 1.0)
         return verify()
     except Incomplete as e:
         print(f"测试不完整：{e}")

@@ -20,6 +20,7 @@
 #   sudo bash ops/dt_worker_pf.sh verify      真机越权测试：以各账号身份去连，证明真挡住了（ops/dt_pf_verify.py）
 #   sudo bash ops/dt_worker_pf.sh verify stress 600  诊断：两个账号连续 600 秒不停去连，同时反复强制重新加载规则，
 #                                                   看重新加载那一刻会不会漏过（漏过时当场抓 pf 的现场）
+#   sudo bash ops/dt_worker_pf.sh verify stress 600 0  同样连 600 秒，但不强制重新加载：看平时会不会漏
 #   bash ops/dt_worker_pf.sh rules dt-worker [dt-secretary]   只打印规则，不用 sudo（测试用）
 # apply 由开机任务调用，不用手动运行；每次按本机现有账号重新生成规则，dt-secretary 建好后 5 分钟内自动管上。
 # 实际加载的规则和应有的一模一样时不重新加载（L3 第 3 轮 P1-02：11-19 两次偶发漏过都在重新加载附近，平时不再重载）。
@@ -276,6 +277,8 @@ apply() {
   reloaded=no
   if [ "$loaded" != "$expected" ]; then
     write_status "state=applying"           # 只在真要重新加载时写：平时每 5 分钟一次的核对不让工人撞上「进行中」（审查第 4 轮 P2-1）
+    # 加载前也先清一遍：11-21 压力测试在强制重新加载附近抓到一次漏过，加载那一刻两个账号最好没有进程在联网
+    left=$(trap - ERR; kill_accounts) || fail "重新加载前没清掉受管账号的进程：$left"
     /sbin/pfctl -q -a "$ANCHOR" -f "$RULES" || fail "规则没加载上（pf 保留了旧规则）"
     reloaded=yes
     left=$(trap - ERR; kill_accounts) || fail "重新加载后没清掉受管账号的进程：$left"   # 旧规则下建好的连接不过新规则

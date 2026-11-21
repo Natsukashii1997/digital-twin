@@ -713,8 +713,8 @@ exit 1
         self.assertEqual(f["reloaded"], "yes")
         self.assertRegex(f["boot"], r"^\d+$")      # 记本次开机时间（审查第 4 轮 P2-2）
         self.assertIn("state=applying", at_load)  # 加载前先写「进行中」
-        # 重新加载过：两个账号的进程全部结束（旧规则下的连接不过新规则，审查第 4 轮 P2-4）
-        self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
+        # 重新加载前后各结束一遍两个账号的进程（旧规则下的连接不过新规则，审查第 4 轮 P2-4；加载那一刻不留进程，11-21 真机）
+        self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * 2)
 
     def test_unchanged_not_reloaded(self):
         """L3 第 3 轮 P1-02：实际加载的和应有的一样，就不重新加载（两次偶发漏过都在重新加载附近）；被改了才重新加载。"""
@@ -774,7 +774,8 @@ exit 1
                 self.assertEqual(self.kills, [], scenario)
                 self.assertIn("查不清_dt-worker_在不在", f["reason"])
             elif scenario not in ("kill_stuck", "pgrep_err"):
-                self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * (1 + (scenario in ("partial", "dup", "tampered"))), scenario)
+                n = {"partial": 3, "dup": 3, "tampered": 3, "load_fail": 2}.get(scenario, 1)   # 加载前、加载后、判 failed 各一遍
+                self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * n, scenario)
 
     def test_directory_unclear_keeps_rules(self):
         """审查第 4 轮 P1-1：目录服务一时查不清，不能当成「没有秘书」把秘书从规则里删掉；短暂查不清时重试后照常。"""
@@ -796,7 +797,8 @@ exit 1
         状态文件写不成时照样结束进程（原来 set -e 下写状态失败，后面的清进程就跳过了）。"""
         r, f, _ = self.apply("kill_stuck")
         self.assertEqual((r.returncode, f["state"]), (1, "failed"))
-        self.assertEqual(self.kills.count("-KILL -u dt-worker"), 20)   # 重新加载后 10 次、判 failed 后又 10 次
+        self.assertEqual(self.kills.count("-KILL -u dt-worker"), 20)   # 重新加载前 10 次、判 failed 后又 10 次
+        self.assertEqual(self.loads, 0)                                  # 清不掉就不加载
         d = self.setup_dir()
         script = (d / "pf.sh").read_text().replace('> "$STATUS.tmp"', '> "$DIR/no-such-dir/x"', 1)
         (d / "pf.sh").write_text(script)
@@ -1136,6 +1138,19 @@ class Verify(unittest.TestCase):
         stuck.times, stuck.is_alive = [[0.5, 0.6]], lambda: True
         self.assertTrue(any("没停下" in b for b in self.v.reload_coverage(stuck, 0.0, 1.0)))
         self.assertIn("reload_coverage(rel, started, ended)", VERIFY.read_text())
+
+    def test_suspects(self):
+        """11-21 真机：同一个靶子绝大多数「被拒」、偶尔一次「超时」，多半是包出去了、回包被入站拒绝挡掉：列成疑似漏过，
+        带离最近一次重新加载几毫秒；本来就全是超时的靶子不算。"""
+        rows = {"dt-secretary": [
+            {"kind": "udp", "host": "192.168.1.16", "port": 1, "n": 4, "got": {"refused": 3, "timeout": 1},
+             "log": [[10.0, "refused"], [10.5, "timeout"], [11.0, "refused"], [11.5, "refused"]]},
+            {"kind": "tcp", "host": "192.168.1.16", "port": 2, "n": 2, "got": {"timeout": 2},
+             "log": [[10.0, "timeout"], [10.5, "timeout"]]}]}
+        sus = self.v.suspects(rows, [[10.4, 10.45]])
+        self.assertEqual([(x["port"], x["got"], x["ms_from_reload"]) for x in sus], [(1, "timeout", 50)])
+        self.assertIn("or sus", VERIFY.read_text())      # 疑似漏过也算退出码 1
+        self.assertIn("Reloader(interval) if interval > 0 else None", VERIFY.read_text())   # 间隔 0：不强制重新加载
 
     def test_inbound_judge(self):
         ts = [{"kind": "tcp", "host": "127.0.0.1", "port": 1, "takeover": False},
