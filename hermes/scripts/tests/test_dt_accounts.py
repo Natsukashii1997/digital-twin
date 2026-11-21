@@ -966,7 +966,7 @@ class Verify(unittest.TestCase):
         """root 自己的靶子先开、后枚举本机监听，lsof 会把它们也列出来；不能再当「本机已有监听」进靶子，
         否则压力模式的对照组（root、dt-gate）会去连它们、被记成漏过（11-21 stress 的 28 条误报：::1 上的 60363）。"""
         self.v.listening = lambda: {("127.0.0.1", 5000), ("127.0.0.1", 60362), ("::1", 5000), ("::1", 60363),
-                                    ("192.168.1.16", 60366)}
+                                    ("192.168.1.16", 60366), ("*", 60366)}   # 别的服务和靶子同端口、监听在全网卡
         self.v.local_addrs = lambda: ["192.168.1.16"]
 
         class Own:
@@ -980,6 +980,13 @@ class Verify(unittest.TestCase):
             self.assertEqual([t for t in others if t["port"] in own_ports], [])
             self.assertIn(("::1", 5000), {(t["host"], t["port"]) for t in others})
             self.assertEqual(len([t for t in ts if t.get("own") and t["host"] == "::1" and t["kind"] == "tcp"]), 1)
+            self.assertEqual(self.v.control_targets(ts, Own())[1], [])
+        # 按端口排除、不按「地址 + 端口」：否则全网卡的 60366 会生成「192.168.1.16:60366」，连过去落到 root 靶子上
+        self.assertNotIn(("192.168.1.16", 60366), {(t["host"], t["port"]) for t in self.v.targets(Own()) if not t.get("own")})
+        # 不变量：对照组名单里混进靶子端口时报出来（测试不完整），不连
+        bad = [{"kind": "tcp", "what": "本机回环 IPv6", "host": "::1", "port": 60363}, {"kind": "tcp", "host": "x", "port": 443}]
+        others, clash = self.v.control_targets(bad, Own())
+        self.assertEqual(([t["port"] for t in others], [t["port"] for t in clash]), ([443], [60363]))
 
     def test_runs_accounts_from_stdin(self):
         src = VERIFY.read_text()

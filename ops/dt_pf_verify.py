@@ -553,6 +553,15 @@ def judge_stress(users, ts, outs, reload_times):
     return leaks, incomplete, rows
 
 
+def control_targets(ts, own):
+    """压力模式对照组（root、dt-gate）连的目标：本机已有的监听和公网（11-19 两次漏过时 root 和 dt-gate 也在连这些），
+    不连 root 自己的靶子（靶子收到的连接都当漏过）。另返回端口撞上自己靶子的目标：不该有（system_targets 已排除），
+    有就是测试本身出了问题，按不完整报，不让它变成误报的「漏过」（11-21 stress 的 28 条）。"""
+    ports = {t["port"] for t in own.specs()}
+    others = [t for t in ts if not t.get("own")]
+    return [t for t in others if t["port"] not in ports], [t for t in others if t["port"] in ports]
+
+
 def stress(seconds, interval=1.0):
     if not os.path.exists(RULES) or not rules_intact():
         print("门卫规则没装好（规则文件不在，或加载上的和规则文件不一致），先 sudo bash ops/dt_worker_pf.sh install")
@@ -577,11 +586,12 @@ def stress(seconds, interval=1.0):
         ts = [t for t, c in zip(cands, ctrl) if reached(c)]
         report["targets"] = ts
         report["skipped"] = [{**t, "root": c} for t, c in zip(cands, ctrl) if not reached(c)]
-        # 对照组只连「本机已有的监听、公网」（11-19 两次漏过时 root 和 dt-gate 也在连这些），不连 root 自己的靶子
-        # （那些靶子收到的连接都当漏过）
-        others = [t for t in ts if not t.get("own")]
+        others, clash = control_targets(ts, own)
         if [t for t in report["skipped"] if t.get("own")]:
             incomplete.append("root 自己的靶子 root 连不上")
+        elif clash:
+            incomplete.append("对照组要连的目标里混进了 root 自己靶子的端口（" +
+                              "、".join(f"{t['host']}:{t['port']}" for t in clash[:3]) + "），测试本身有问题")
         elif not account_exists("dt-gate"):
             incomplete.append("没有 dt-gate 账号，没有对照组")
         else:
