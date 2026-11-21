@@ -133,10 +133,10 @@ def later_runs(d, night_root=None):
     return sorted(runs.values(), key=lambda r: r.get("created_at") or ""), problems
 
 
-def descendants(store, decision_id):
-    """规则 4：账本里依据它（cites）的决定，顺着往下找；返回 (决定, 经由哪个决定)。"""
+def descendants(store, decision_id, use=L.CUSTODY):
+    """规则 4：账本里依据它（cites）的决定，顺着往下找；返回 (决定, 经由哪个决定)。use 是哪本账（秘书推翻 0B-5 用秘书账本）。"""
     out, seen, todo = [], {decision_id}, [decision_id]
-    rows = L.decisions(store)
+    rows = L.decisions(store, use=use)
     while todo:
         cur = todo.pop(0)
         for x in rows:
@@ -147,8 +147,8 @@ def descendants(store, decision_id):
     return out
 
 
-def impacts(store, d, gh=None, night_root=None):
-    """返回 {"items": [{rule, what, ref, url}], "gaps": [{rule, why}]}。"""
+def impacts(store, d, gh=None, night_root=None, use=L.CUSTODY):
+    """返回 {"items": [{rule, what, ref, url}], "gaps": [{rule, why}]}。use 是哪本账（规则 4 顺着它的依据找）。"""
     gh = gh or GitHub()
     items, gaps = [], []
 
@@ -217,7 +217,7 @@ def impacts(store, d, gh=None, night_root=None):
                         add(3, f"{'PR' if x['is_pr'] else 'issue'} #{x['number']} 引用了 #{n}", f"{repo}#{x['number']}", x["url"])
             except (Unavailable, KeyError, TypeError) as e:
                 gaps.append({"rule": 3, "why": f"GitHub 没查全引用 #{n} 的 issue / PR（{e}）"})
-    for x, via in descendants(store, d["id"]):
+    for x, via in descendants(store, d["id"], use):
         add(4, f"「{x['context'] or L.describe_target(x)}」：{x['summary'] or '没替你定'}（{x['id']}）", x["id"])
     return {"items": items, "gaps": gaps}
 
