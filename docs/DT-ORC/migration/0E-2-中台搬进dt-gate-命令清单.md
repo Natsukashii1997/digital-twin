@@ -14,12 +14,22 @@ ADR-015 批 0E-2。脚本是 `ops/dt_gate_hub.py`（root 跑）和 `ops/dt_gate_
 | 只读窗口 3352 | 没装 | 系统服务 `cn.digital-twin.gate.readonly`（dt-gate），主账号拿令牌副本 |
 | 秘书窄窗口 3353 | 没有 | 系统服务 `cn.digital-twin.gate.intake`（dt-gate），只收秘书提议、关秘书、撤销单三件事 |
 | 主账号原来的中台 | — | 改名为 `~/.agent-autoloop.moved-to-gate-<时间>` 留着（里面的钥匙已作废），回滚用；原位置放一个说明文件 |
-| 凭证库、飞书桥接登记、秘书开关与账本、托管账本 | 主账号 DigitalTwin/ 下（都还没装、没在用） | 不搬：dt-gate 里从空的新库开始（0E-3、0E-5 装的时候直接装在 dt-gate 里） |
+| 凭证库、出口账本和关闸标记、飞书桥接登记、秘书开关与账本、托管账本 | 主账号 DigitalTwin/ 下（11-22 首单「先跑后搬」起凭证库、出口账本在用） | 不搬：dt-gate 里从空的新库开始。搬之前主账号这边必须收尾干净（preflight 硬核对，见「开始前」）；主账号的账本原样留在原处，不删不动 |
+| 0D 恢复闸 | 主账号的（闸的状态在出口账本里） | 主账号控制面停写（恢复点 `gate-migrate-<时间>`），搬完保持停写、回滚时结束；dt-gate 的闸从新账本开始、关着，锁定中台版本并对账后才开（见「以后要用到的」） |
+| 工人侧启动脚本 | `/Users/Shared/dt-autoloop/bin/dt-worktree-*`（首单装的 main 版，读 `/Users/Shared/dt-autoloop/` 的镜像） | 换成本 PR 之后的版本（读 `/Users/Shared/dt-gate/`），搬之前换（见「开始前」）；位置不变，中台 Agent 的 program 不用改 |
 
 ## 开始前
 
 - PR #210（0E-1）和本 PR 都已合并；门卫规则已装（`sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install` 那次），里面已经放行 dt-secretary 连 3352、3353。
-- 中台里没有在跑的轮次、没有没答完的卡片；两条派单规则是暂停的（preflight 会核）。
+- 中台里没有在跑的轮次、没有没答完的卡片；两条派单规则是暂停的（首单收尾时重新暂停；preflight 会核）。
+- **首单（以及之后在主账号布局里跑的单）全部收尾**：PR 已人工发布、合并，凭证已 `complete`（或撤销）；凭证库里没有还有效或冻结着的凭证、没有没送达的派单事件；出口账本、本人点击、秘书代批里没有结果不明、核不清、还在送、排着队的；没有关闸标记。preflight 的「主账号控制面账本里没有没结清的东西」一条一条列出来，有任何一样都不搬：dt-gate 里是新账本，搬过去就忘了。
+- **换工人启动脚本**（拉完 main 之后，在主账号终端；换完以后它读 `/Users/Shared/dt-gate/`，搬好之前派单规则保持暂停）：
+
+```bash
+install -m 755 ops/dt_worktree.py /Users/Shared/dt-autoloop/bin/dt-worktree-claude && install -m 755 ops/dt_worktree.py /Users/Shared/dt-autoloop/bin/dt-worktree-codex
+```
+
+  preflight 会核装着的启动脚本和副本里的 `ops/dt_worktree.py` 逐字节一样。回滚到主账号中台后还要接着派单的，启动脚本读的目录要另行处理（回 Claude 会话说）。
 - 在主账号终端，仓库主目录切到 main 并拉到最新：
 
 ```bash
@@ -56,7 +66,7 @@ sudo "$GATE" preflight
 sudo "$GATE" migrate --confirm
 ```
 
-会依次打印 1～6 步，最后一行「搬好了：中台以 dt-gate 身份运行」。中途任何一步出错会自动退回：dt-gate 这边停掉、改名留证，主账号中台放回去重新启用。中途被打断（关了终端、进程被杀）也不怕：每一步都记在 `gate/migrating.json`，跑一次「回滚」那条命令就照记录收拾好。
+会依次打印 0～6 步（第 0 步是主账号控制面停写、等在途的写做完、再核一遍没结清的，最多 2 分钟），最后一行「搬好了：中台以 dt-gate 身份运行」。中途任何一步出错会自动退回：dt-gate 这边停掉、改名留证，主账号中台放回去重新启用。中途被打断（关了终端、进程被杀）也不怕：每一步都记在 `gate/migrating.json`，跑一次「回滚」那条命令就照记录收拾好。
 
 最后一步「核对和搬家前一致」如果说对不上、并提到定时项，是停机那几十秒里有到期的定时任务在新中台补跑了；脚本已自动退回，再跑一次 migrate 即可。
 
@@ -96,6 +106,13 @@ sudo "$GATE" run agent-autoloop status
 sudo "$GATE" run autoloop_config install --confirm --target /Users/dt-gate/.agent-autoloop
 ```
 
+- dt-gate 的 0D 恢复闸从新账本开始、关着：锁定中台版本（填第 1 步的引擎提交，你说了才跑）再对一次账，才会放行受保护的写：
+
+```bash
+sudo "$GATE" run autoloop_recovery pin --commit abc8d41efdc97efe4c25bac8376460424baec726 --confirm
+sudo "$GATE" run autoloop_recovery reconcile
+```
+
 - hermes 来源钥匙搬家时作废了，派单网关要用时在 dt-gate 里重签（ADR：搬家期间不签新钥匙；你说了才签）。
 - 名册、控制面脚本、引擎有更新：用入口重跑第 1 步（`sudo "$GATE" stage …`，换 `--repo-commit` / `--engine-commit`），再跑下面这条；新副本起不来会自动退回上一份：
 
@@ -120,5 +137,5 @@ sudo "$GATE" rollback --confirm
 - **主账号的「试一下」规则和本机接单程序停用**：它们的钥匙作废了（符合 ADR 第 3.4 节：主账号不再接 AI 的活）。主账号的 `agent-autoloop` 命令行（链接到搬走的 app）不能再用，改用上面的 `run`；原位置放了说明文件，别的副本的命令行也不会悄悄新建一个空中台。
 - **工人侧启动脚本还没装**：`/Users/Shared/dt-autoloop/bin/dt-worktree-*` 现在不存在；以后装 0C 启动脚本时用本 PR 之后的版本（默认读 `/Users/Shared/dt-gate/`）。旧的 `/Users/Shared/dt-autoloop/` 下没有 grants、tasks，不用清理。
 - **名册副本只在重装时更新**：主账号改 `projects.json` 扩不了派单范围，这是有意的；要改就重跑第 1 步和 `update`。
-- **0D 恢复门还没合并**：合并以后，搬家前要先「停写 → 排空」（`autoloop_recovery.py hold`），这一步会补进 preflight / migrate。
+- **主账号控制面搬完保持停写**：主账号不再做受保护的写（ADR-015 第 3.4 节）。回滚时用同一个恢复点结束（release rolled_back）；恢复闸核对不过（快照之后发过卡片）会保持停写，脚本打印手工命令，交 Claude 会话看。
 - **过滤代理 8090 没人登录时不在**：0E-1 发现的；它转发到的加速器 8086 也是主账号登录后才有，单把 8090 改成开机服务不够，另议。

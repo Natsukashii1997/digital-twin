@@ -588,6 +588,28 @@ class ChecksTest(unittest.TestCase):
                 self.assertEqual(arch.get("owner_hold_left"), left)
                 self.assertEqual(run.state["hold"], left)
 
+    def test_worker_launchers_must_match_the_staged_copy(self):
+        """搬家后凭证镜像在 /Users/Shared/dt-gate/：装着的工人启动脚本要换成副本里的新版；没装的不拦。"""
+        (self.d / "ops").mkdir()
+        (self.d / "ops/dt_worktree.py").write_text("new")
+        bin_ = self.d / "launchers"
+        bin_.mkdir()
+        with mock.patch.dict(os.environ, {"DT_GATE_LAUNCHERS": str(bin_)}):
+            r = self.run_checks(self.snap())
+            self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])          # 都没装
+            (bin_ / "dt-worktree-claude").write_text("new")
+            (bin_ / "dt-worktree-codex").write_text("old")                                 # 今晚装的 main 版
+            bad = [m for m, ok in self.run_checks(self.snap()).items() if not ok]
+            self.assertEqual(len(bad), 1, bad)
+            self.assertIn("dt-worktree-codex", bad[0])
+            (bin_ / "dt-worktree-codex").unlink()
+            (bin_ / "dt-worktree-codex").symlink_to(self.d / "ops/dt_worktree.py")       # 链接不算
+            self.assertEqual(len([m for m, ok in self.run_checks(self.snap()).items() if not ok]), 1)
+            (bin_ / "dt-worktree-codex").unlink()
+            (bin_ / "dt-worktree-codex").write_text("new")
+            r = self.run_checks(self.snap())
+            self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])
+
     def test_live_run_card_and_unpaused_dispatch_block(self):
         r = self.run_checks(self.snap(live_runs=1, live_cards=2, pauses=[]))
         bad = [m for m, ok in r.items() if not ok]

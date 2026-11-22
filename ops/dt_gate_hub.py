@@ -81,7 +81,7 @@ LABEL = {"hub": "cn.digital-twin.gate.hub", "readonly": "cn.digital-twin.gate.re
          "intake": "cn.digital-twin.gate.intake"}
 HUB_FILES = ("hub.db", "master.key", "config.json", "rules.json", "secrets.env")   # engine backup 的全部内容
 NEEDED = ("hub.db", "master.key", "config.json", "rules.json")
-REPO_FILES = ("projects.json", "ops/dt_gate_user.py", "ops/dt_gate_hub.py", "ops/dt_root_guard.sh")
+REPO_FILES = ("projects.json", "ops/dt_gate_user.py", "ops/dt_gate_hub.py", "ops/dt_root_guard.sh", "ops/dt_worktree.py")
 # run 子命令能以 dt-gate 身份跑的控制面工具（都在副本的 hermes/scripts 下）
 TOOLS = ("autoloop_grants", "autoloop_config", "autoloop_readonly", "autoloop_feishu", "autoloop_answer",
          "autoloop_publish", "autoloop_recovery", "autoloop_exits", "secretary", "secretary_ledger", "secretary_gate",
@@ -107,6 +107,11 @@ def env_path(name, default):
 
 def gate_root():
     return env_path("DT_GATE_ROOT", "/Library/Application Support/DigitalTwin/gate")
+
+
+def launchers():
+    """工人侧启动脚本装在哪（中台 Agent dt-claude / dt-codex 的 program 指到这里，0C）。"""
+    return env_path("DT_GATE_LAUNCHERS", "/Users/Shared/dt-autoloop/bin")
 
 
 def shared():
@@ -670,7 +675,24 @@ def checks(host, a, migrating=True):
         ledger_checks(host, current, a.owner_account, check)
     except Stop as e:
         check(False, f"读主账号 0D 恢复闸：{e}")
+    launcher_checks(current, check)
     return out
+
+
+def launcher_checks(current, check):
+    """工人侧启动脚本要换成这份副本里的版本（读 /Users/Shared/dt-gate/ 的凭证镜像和任务单）：搬家后 dt-gate 写的是新位置，
+    旧版读的还是主账号那份。装着的每一个都要和副本里的 ops/dt_worktree.py 逐字节一样；没装的不拦（工人开不了工，不会出错）。"""
+    want = Path(current["repo"]["dir"]) / "ops/dt_worktree.py"
+    for name in ("dt-worktree-claude", "dt-worktree-codex"):
+        f = launchers() / name
+        if not os.path.lexists(f):
+            check(True, f"工人启动脚本 {f} 没装（装的时候用副本里的 ops/dt_worktree.py）")
+            continue
+        try:
+            same = f.is_file() and not f.is_symlink() and f.read_bytes() == want.read_bytes()
+        except OSError:
+            same = False
+        check(same, f"工人启动脚本 {f} 是这份副本里的版本（读 {shared()}；不是就先换：命令清单「开始前」）")
 
 
 def print_checks(results):
