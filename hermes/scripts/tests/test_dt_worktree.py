@@ -93,14 +93,16 @@ if os.environ["FAKE_MODEL_LOG"] == "claude":     # ~/.claude/projects/<目录名
              {"type": "assistant", "timestamp": _now, "cwd": _here, "message": {"model": "<synthetic>"}},
              {"type": "user", "timestamp": _now, "cwd": _here, "message": {"model": "user-row"}},
              "这一行不是 JSON",
-             {"type": "assistant", "timestamp": _now, "cwd": _here, "message": {"model": _model}}]
+             *[{"type": "assistant", "timestamp": _now, "cwd": _here, "message": {"model": _m}} for _m in _model.split("|")]]
     with (_d / (_sid + ".jsonl")).open("a") as _f:
         for _r in _rows:
             _f.write((_r if isinstance(_r, str) else json.dumps(_r)) + "\n")
 else:                                            # ~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl 里的 turn_context
-    _d = _home / ".codex/sessions" / time.strftime("%Y/%m/%d")
+    _d = _home / ".codex/sessions" / os.environ.get("FAKE_CODEX_DAY", time.strftime("%Y/%m/%d"))
     _d.mkdir(parents=True, exist_ok=True)
-    (_d / "rollout-mine.jsonl").write_text("\n".join(json.dumps(x) for x in [
+    _a = sys.argv[1:]
+    _thread = _a[-2] if "resume" in _a[:2] else "mine"
+    (_d / ("rollout-x-" + _thread + ".jsonl")).write_text("\n".join(json.dumps(x) for x in [
         {"type": "session_meta", "timestamp": _now, "payload": {"cwd": _here, "id": "x"}},
         {"type": "turn_context", "timestamp": _now, "payload": {"cwd": _here, "model": _model}}]) + "\n")
     (_d / "rollout-other.jsonl").write_text(json.dumps(
@@ -340,11 +342,73 @@ class WorkerModel(WorkerBase):
         self.run_turn([self.dispatch_event(other, executor="codex")], executor="codex", args=("exec", "--json", "做事"))
         self.assertEqual((self.handoff(other)["model"], self.handoff(other)["model_from"]), (None, None))   # 不猜
 
+    def test_resumed_sessions_and_several_models(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)], args=("-p", "做事", "--resume", "s-9"),
+                      **self.with_model_log("claude", "m1|m2|m3|m4"))
+        self.assertEqual((self.handoff(tid)["model"], self.handoff(tid)["model_from"]), ("m1,m2,m3", "transcript"))
+        self.assertIn("只记了前 3 个", (self.work / ".state" / f"{tid}.log").read_text())
+        other = self.new_live_task(executor="codex")                 # Codex 续接：写回会话开始那天的旧文件
+        self.run_turn([self.dispatch_event(other, executor="codex")], executor="codex",
+                      args=("exec", "resume", "--json", "th-123", "做事"),
+                      **self.with_model_log("codex", "gpt-6.1-sol"), FAKE_CODEX_DAY="2026/05/28")
+        self.assertEqual((self.handoff(other)["model"], self.handoff(other)["model_from"]), ("gpt-6.1-sol", "transcript"))
+
     def test_odd_model_names_are_not_recorded(self):
         tid = self.new_live_task()
         r, _ = self.run_turn([self.dispatch_event(tid)], **self.with_model_log("claude", "x; rm -rf / `whoami`"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((self.handoff(tid)["model"], self.handoff(tid)["model_from"]), (None, None))
+
+
+class ModelReading(unittest.TestCase):
+    """读会话记录本身：工人侧的文件只当资料，管道、链接、超长行、超大文件都不能卡住或撑爆收尾。"""
+
+    def setUp(self):
+        import importlib.util
+        import tempfile
+        tmp = tempfile.TemporaryDirectory(prefix="dt-model-read-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        spec = importlib.util.spec_from_file_location("dt_worktree_models", SCRIPT)
+        self.w = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.w)
+        self.place = self.root / "wt"
+        self.place.mkdir()
+        self.logs = self.root / "claude/projects/-x"
+        self.logs.mkdir(parents=True)
+        p = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.root / "claude")})
+        p.start()
+        self.addCleanup(p.stop)
+        self.since = time.time()
+
+    def row(self, model, cwd=None):
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        return json.dumps({"type": "assistant", "timestamp": now, "cwd": str(cwd or self.place), "message": {"model": model}})
+
+    def used(self):
+        return self.w.model_used("claude", ["-p", "x", "--session-id", "s-1", "--model", "fallback"], str(self.place), self.since)
+
+    def test_fifo_and_symlink_are_skipped_without_hanging(self):
+        os.mkfifo(self.logs / "s-1.jsonl")
+        t = time.time()
+        self.assertEqual(self.used(), ("fallback", "args"))
+        self.assertLess(time.time() - t, 2)
+        os.unlink(self.logs / "s-1.jsonl")
+        real = self.root / "real.jsonl"
+        real.write_text(self.row("linked") + "\n")
+        os.symlink(real, self.logs / "s-1.jsonl")
+        self.assertEqual(self.used(), ("fallback", "args"))
+
+    def test_subfolder_long_lines_and_only_the_tail(self):
+        sub = self.place / "pkg"
+        sub.mkdir()
+        f = self.logs / "s-1.jsonl"
+        f.write_text(self.row("early") + "\n" + "x" * 5000 + "\n" + self.row("late", sub) + "\n")
+        with mock.patch.object(self.w, "LOG_LINE", 1024):
+            self.assertEqual(self.used(), ("early,late", "transcript"))       # 超长行跳过；子目录里的也算
+        with mock.patch.object(self.w, "LOG_TAIL", 600):
+            self.assertEqual(self.used(), ("late", "transcript"))             # 只读最后一段
 
 
 class ScopeDoesNotGrow(WorkerBase):
@@ -504,6 +568,7 @@ class CancelAndProcessTree(WorkerBase):
         proc.communicate(timeout=30)
         self.assertFalse(self.alive(cli_pid))
         self.assertIsNone(self.handoff(tid))
+        self.assertNotIn("这一轮用的模型", (self.work / ".state" / f"{tid}.log").read_text())   # 取消的轮次不读模型
         self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))
         state = json.loads((self.work / ".state" / f"{tid}.json").read_text())
         self.assertEqual((state["turns"][-1]["outcome"], state["turns"][-1]["clean"]), ("cancelled", True))

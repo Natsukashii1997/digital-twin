@@ -174,7 +174,7 @@ def valid_model(model, source):
     """工人侧自报的模型：要么两个都是 null（未记录），要么是 1～3 个合格式的名字（逗号隔开）加一种已知来源。"""
     if model is None or source is None:
         return model is None and source is None
-    if not isinstance(model, str) or source not in MODEL_FROM:
+    if not isinstance(model, str) or not isinstance(source, str) or source not in MODEL_FROM:
         return False
     names = model.split(",")
     return len(names) <= MAX_MODELS and all(MODEL_NAME.match(n) for n in names) and len(set(names)) == len(names)
@@ -184,7 +184,7 @@ def model_line(m):
     """PR 正文里的模型一行（P-13）：照实写来源，写明是工人侧自报、控制面没核实。"""
     if m["model"] is None:
         return "模型：未记录（工人侧没读到这一轮用的模型）"
-    return f"模型：{m['model']}（{MODEL_FROM[m['model_from']]}，控制面没核实）"
+    return f"模型：`{m['model']}`（{MODEL_FROM[m['model_from']]}，控制面没核实）"   # 放进行内代码：名字里的网址不会变成链接
 
 
 # ---------- git ----------

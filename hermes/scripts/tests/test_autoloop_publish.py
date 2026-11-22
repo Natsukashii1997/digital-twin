@@ -193,7 +193,7 @@ class ModelInPr(PublishBase):
         self.assertEqual((out["model"], out["model_from"]), ("claude-opus-5-5", "transcript"))
         body = self.body()
         self.assertIn("执行方：claude\n接入：本机 CLI（经中台，工人账号 dt-worker）\n"
-                      "模型：claude-opus-5-5（工人侧从 CLI 自己的会话记录读出，控制面没核实）\n", body)
+                      "模型：`claude-opus-5-5`（工人侧从 CLI 自己的会话记录读出，控制面没核实）\n", body)
         log = [json.loads(x) for x in (self.root / "publish.jsonl").read_text().splitlines()]
         self.assertEqual(log[-1]["model"], "claude-opus-5-5")
 
@@ -220,6 +220,8 @@ class ModelInPr(PublishBase):
                               ({"model": None, "model_from": "args"}, "内容不合格式"),
                               ({"model": "gpt-6", "model_from": None}, "内容不合格式"),
                               ({"model": 5, "model_from": "args"}, "内容不合格式"),
+                              ({"model": "gpt-6", "model_from": ["args"]}, "内容不合格式"),
+                              ({"model": "gpt-6", "model_from": {"a": 1}}, "内容不合格式"),
                               ({"schema": True}, "字段不对"), ({"schema": 3}, "字段不对")):
             with self.subTest(fields=fields):
                 self.rewrite_manifest(tid, **{"model": None, "model_from": None, "schema": 2, **fields})
