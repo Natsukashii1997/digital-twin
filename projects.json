@@ -148,6 +148,24 @@
       "github": "Natsukashii1997/digital-twin"
     },
     {
+      "id": "hermes-agent",
+      "name": "Hermes 本体（本地补丁）",
+      "type": "infrastructure",
+      "aliases": [
+        "hermes-agent",
+        "Hermes 本体"
+      ],
+      "path": "~/.hermes/hermes-agent",
+      "main": "local/patches",
+      "agents": "AGENTS.md",
+      "card": null,
+      "test": "LEFTHOOK=0 ~/.hermes/cache/ha-test-venv/bin/python -m pytest -q -p no:cacheprovider tests/agent/test_background_review_summary.py tests/agent/test_background_review.py tests/tools/test_skill_manager_tool.py",
+      "default_worker": null,
+      "write_allowed": true,
+      "notes": "2026-11-19 常浩定（B2 按推荐）登记。origin 是 NousResearch 官方仓库，故意不填 github：派单不得往官方仓库建 issue、推分支、开 PR。本地补丁分支 local/patches 以 v0.22.2 为底（9eca695 保存 10-22 的通知补丁）。车间只改到本单分支；合并进 local/patches、切换运行中的本体、重启网关各自单独问常浩。测试环境 ~/.hermes/cache/ha-test-venv（uv sync --group dev）。",
+      "category": "活跃"
+    },
+    {
       "id": "carvomoto",
       "name": "CarvoMOTO-汽配",
       "type": "product",

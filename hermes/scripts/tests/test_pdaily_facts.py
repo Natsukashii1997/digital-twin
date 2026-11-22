@@ -20,6 +20,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 import actions  # noqa: E402
 import fake_gh  # noqa: E402
+import openloop  # noqa: E402
 import pdaily_data as pd  # noqa: E402
 import pdaily_facts as pf  # noqa: E402
 import progress_data  # noqa: E402
@@ -398,6 +399,7 @@ class ObservationTests(Base):
                      self.row("2026-10-20T10:00:00+08:00", pr="7"),                 # 14 天以前
                      self.row("2026-11-08T10:00:00+08:00", pr="8", source="replay"),
                      self.row("2026-11-08T10:00:00+08:00", pr="9", agree="是"),
+                     self.row("2026-11-08T10:00:00+08:00", pr="11", owner="策略合并"),   # 按策略合并的不算被推翻（#257）
                      self.row("2026-11-08T10:00:00+08:00", pr="10", tier="L2")])
         out = pf.officer_misses((W[1] - pf.LOOKBACK, W[1]))
         got = {x["what"]: (x["count"], x["threshold_met"], x["evidence"]) for x in out}
@@ -568,6 +570,90 @@ class BuildTests(Base):
         files = sorted(p.name for p in (self.root / "daily").iterdir())
         self.assertEqual(files, ["2026-11-08.facts.json"])               # 没留下 .tmp
         self.assertEqual(json.loads((self.root / "daily" / files[0]).read_text())["projects"][0]["project_id"], "skills")
+
+
+# ---------- 未闭环账本来的候选（#288，5a-3b） ----------
+
+def loop_row(id_, what, state="等你", word="等你决定", at="2026-11-05T09:00:00+08:00", project="my-skills", refs=(), source="session",
+             stalled=False, blocked=None, gone=False):
+    ev = openloop.SAID.format(word) + "：做到一半" + (openloop.GONE_NOTE if gone else "")
+    return {"id": id_, "what": what, "state": state, "source": source, "owner": "常浩", "project": project, "next": "回「按推荐」",
+            "evidence": ev, "evidence_at": at, "since": at, "refs": list(refs), "links": [], "stalled": stalled, "blocked": blocked}
+
+
+class LedgerTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.book = self.root / "openloop"
+        p = mock.patch.dict(os.environ, {"DT_OPENLOOP_DIR": str(self.book)})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def snapshot(self, rows, day="2026-11-08"):
+        (self.book / "history").mkdir(parents=True, exist_ok=True)
+        (self.book / "history" / f"{day}.json").write_text(json.dumps(
+            {"version": 1, "generated_at": f"{day}T21:00:00+08:00", "rows": rows}, ensure_ascii=False), encoding="utf-8")
+
+    def from_ledger(self, dec=()):
+        return pf.from_ledger(D, W, list(dec), ROSTER, self.notes)
+
+    def test_not_installed_is_silent_but_a_missing_day_is_said(self):
+        self.assertEqual(self.from_ledger(), ([], []))                 # 账本目录都没有：还没装，不算缺口
+        self.assertEqual(self.notes, [])
+        self.snapshot([loop_row("session:a", "甲")], day="2026-11-07")   # 装了，但统计日那天没扫成
+        cands, risks = self.from_ledger()
+        self.assertEqual(cands, [])
+        self.assertEqual([(r["category"], r["project_id"], r["item"]) for r in risks], [("运行风险", "hermes", "未闭环账本这天没更新")])
+        self.assertIn("2026-11-08 这天没有账本快照", self.notes[0])
+
+    def test_at_most_five_waiting_decisions_oldest_first(self):
+        rows = [loop_row(f"session:{i}", f"第 {i} 件", at=f"2026-11-{i:02d}T09:00:00+08:00") for i in range(1, 8)]
+        rows += [loop_row("session:hands", "要他亲手做的", word="等你操作"), loop_row("session:gone", "过期的", gone=True, at="2026-10-01T09:00:00+08:00"),
+                 loop_row("pr:my-skills#9", "等合并", source="pr"), loop_row("session:busy", "在做的", state="在做"),
+                 loop_row("session:other", "名册外的项目", project="别处", at="2026-11-01T08:00:00+08:00")]
+        self.snapshot(rows)
+        cands, _ = self.from_ledger()
+        self.assertEqual([c["item"] for c in cands], ["名册外的项目", "第 1 件", "第 2 件", "第 3 件", "第 4 件"])
+        self.assertEqual({c["kind"] for c in cands}, {"openloop"})
+        self.assertEqual([c["project_id"] for c in cands][:2], ["hermes", "skills"])        # 账本用仓库名，日报用名册 id；对不上的归 hermes
+        self.assertEqual((cands[1]["source"], cands[1]["since"], cands[1]["status"]), ("未闭环账本 session:1", "2026-11-01T09:00:00+08:00", "待你决定"))
+        self.assertIn("下一步：回「按推荐」", cands[1]["evidence"])
+        self.assertTrue(any("另有 3 件等常浩拍板没列" in n for n in self.notes), self.notes)
+
+    def test_same_pr_already_listed_is_not_repeated(self):
+        self.snapshot([loop_row("session:a", "合不合 74", refs=["pr:my-skills#74"]), loop_row("session:b", "别的仓库的 74", project="niuma-home", refs=["pr:niuma-home#74"])])
+        have = [pf.cand("merge", "skills", "o/my-skills#74 做甲", "合并官判「问常浩」", "shadow/agreement.csv")]
+        cands, _ = self.from_ledger(have)
+        self.assertEqual([c["item"] for c in cands], ["别的仓库的 74"])
+        self.assertTrue(any("1 件和别的来源是同一个 PR" in n for n in self.notes), self.notes)
+
+    def test_mainline_item_carries_its_mainline_name(self):
+        self.snapshot([loop_row("mainline:my-skills/风格库/常浩决定", "常浩决定", source="mainline")])
+        self.assertEqual([c["item"] for c in self.from_ledger()[0]], ["风格库：常浩决定"])
+
+    def test_stuck_and_stalled_become_one_risk_row(self):
+        rows = [loop_row(f"pr:my-skills#{i}", f"卡住的第 {i} 个", state="卡住", source="pr", stalled=i % 2 == 0, blocked="CI 失败：test",
+                         at=f"2026-11-{i:02d}T09:00:00+08:00") for i in range(1, 8)]
+        rows += [loop_row("session:w", "等你但停了", stalled=True), loop_row("session:ok", "在做", state="在做")]
+        self.snapshot(rows)
+        _, risks = self.from_ledger()
+        (r,) = risks
+        self.assertEqual((r["category"], r["project_id"], r["item"]), ("协作阻塞", "hermes", "未闭环账本：卡住 7 件、到点没动静（停了）4 件"))
+        self.assertEqual(len(r["evidence"]), pf.LEDGER_EXAMPLES + 1)
+        self.assertEqual(r["evidence"][0], "my-skills｜卡住的第 1 个｜卡在：CI 失败：test")       # 挂得最久的在前
+        self.assertIn("2026-11-08T21:00:00+08:00 扫描", r["evidence"][-1])
+        self.snapshot([loop_row("session:ok", "在做", state="在做")])
+        self.assertEqual(self.from_ledger()[1], [])                                           # 没有卡住和停了的：不出这一行
+
+    def test_build_carries_ledger_items_into_the_facts(self):
+        self.sources()
+        BuildTests.fake_collect(self, [rec("skills")], [])
+        self.snapshot([loop_row("session:a", "选哪条路"), loop_row("pr:my-skills#3", "红的", state="卡住", source="pr", blocked="CI 失败")])
+        f = pf.build(D, ROSTER)
+        self.assertEqual([(c["kind"], c["item"]) for c in f["decisions"]], [("openloop", "选哪条路")])
+        self.assertEqual([r["item"] for r in f["risks"] if r["category"] == "协作阻塞"], ["未闭环账本：卡住 1 件、到点没动静（停了）0 件"])
+        self.assertEqual((f["counts"]["decision_candidates"], f["counts"]["non_project_risks"]), (1, 1))
+        self.assertEqual(f["coverage"]["failed_parts"], [])
 
 
 if __name__ == "__main__":

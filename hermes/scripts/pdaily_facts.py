@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import actions  # noqa: E402
+import openloop  # noqa: E402  未闭环账本：读某天的快照、分「等你拍板」的行（5a-3b）
 import pdaily_data  # noqa: E402
 import progress_data  # noqa: E402
 
@@ -32,6 +33,8 @@ LOOKBACK = dt.timedelta(days=14)    # 观察池往回看多久
 OPEN_PR_DAYS = 2                    # PR 开着超过这么多天算协作阻塞候选
 IDLE_DAYS = 7                       # 活跃项目这么多天没有动作算管理失真（4.4）
 DIRTY_MANY = 10                     # 主目录未提交文件到这么多，列「待识别」（4.5：先识别性质，不直接算高风险）
+LEDGER_DECISIONS = 5                # 未闭环账本来的拍板候选每天最多几件（常浩 2026-11-21 定）
+LEDGER_EXAMPLES = 5                 # 账本那一行风险带几件卡得最久的当例子
 EPOCH = dt.datetime(2000, 1, 1, tzinfo=TZ)
 ENTRY = re.compile(r"^\+## [LG]-\d+ ")
 DROP = re.compile(r"^-## ([LG]-\d+) ")
@@ -176,6 +179,53 @@ def risks(w, recs, acts, coverage):
     return out
 
 
+# ---------- 未闭环账本来的候选（#288，批 5a-3b；规格 docs/未闭环账本-规格.md 第 8 节） ----------
+
+def from_ledger(day, w, dec, projects, notes):
+    """读统计日那天的账本快照（openloop.py 写的 history/<日期>.json），返回（拍板候选，风险）。常浩 2026-11-21 定：
+    拍板候选每天最多 LEDGER_DECISIONS 件，挂得久的先；别的来源已经列了同一个 PR 的不重复；其余只在 notes 里说还有几件。
+    风险不逐件放：卡住和到点没动静的合成一行，带最久的几件当例子。
+    账本目录都没有 = 还没装，不算缺口；装了但这天没有快照 = 扫描没跑成，要说出来（规格第 14 节）。"""
+    folder = openloop.out_dir()
+    if not folder.exists():
+        return [], []
+    led = openloop.day_ledger(day)
+    if led is None:
+        notes.append(f"未闭环账本：{day} 这天没有账本快照（扫描没跑成），账本来的候选这次没有")
+        return [], [risk("运行风险", "hermes", "未闭环账本这天没更新", [f"{folder / 'history' / f'{day}.json'} 不存在或读不了"])]
+    ids = {openloop.key_of(p): p["id"] for p in projects}      # 账本里项目用仓库名，日报用名册 id
+    listed = {(c.get("project_id"), n) for c in dec or []
+              for n in re.findall(r"#(\d+)", " ".join(str(x) for x in (c.get("item"), c.get("source"), *(c.get("evidence") or []))))}
+
+    def repeated(r):
+        for ref in r.get("refs") or []:
+            m = re.match(r"pr:(.+)#(\d+)$", str(ref))
+            if m and (ids.get(m.group(1)), m.group(2)) in listed:
+                return True
+        return False
+
+    def title(r):   # 主线清单的项常常只有几个字（「常浩决定」），带上是哪条主线
+        m = re.match(r"mainline:[^/]+/([^/]+)/", str(r.get("id") or ""))
+        return f"{m.group(1)}：{r.get('what')}" if m else r.get("what")
+    decide = openloop.waiting(led)[1]
+    fresh = sorted((r for r in decide if not repeated(r)), key=lambda r: r.get("evidence_at") or "")
+    cands = [cand("openloop", ids.get(r.get("project")) or "hermes", title(r), "账本里等常浩拍板（会话停在〔等你决定〕，或主线清单的 ❓）",
+                  f"未闭环账本 {r.get('id')}", [r.get("evidence") or "", f"下一步：{r.get('next') or ''}"], since=r.get("evidence_at"))
+             for r in fresh[:LEDGER_DECISIONS]]
+    if len(decide) > len(fresh):
+        notes.append(f"拍板候选：未闭环账本里有 {len(decide) - len(fresh)} 件和别的来源是同一个 PR，没重复列")
+    if len(fresh) > LEDGER_DECISIONS:
+        notes.append(f"拍板候选：未闭环账本另有 {len(fresh) - LEDGER_DECISIONS} 件等常浩拍板没列（每天最多 {LEDGER_DECISIONS} 件，挂得久的先）")
+    rows = led.get("rows") or []
+    stuck, stalled = [r for r in rows if r.get("state") == "卡住"], [r for r in rows if r.get("stalled")]
+    if not stuck and not stalled:
+        return cands, []
+    worst = sorted(stuck, key=lambda r: r.get("evidence_at") or "")[:LEDGER_EXAMPLES]
+    return cands, [risk("协作阻塞", "hermes", f"未闭环账本：卡住 {len(stuck)} 件、到点没动静（停了）{len(stalled)} 件",
+                        [f"{r.get('project') or '—'}｜{openloop.clip(r.get('what'), 40)}｜卡在：{openloop.clip(r.get('blocked'), 60) or '没写'}" for r in worst]
+                        + [f"账本 {led.get('generated_at')} 扫描；明细：openloop.py show"])]
+
+
 # ---------- 跨项目引用（4.5：只认明文） ----------
 
 def snippet(line, m, n=100):
@@ -315,7 +365,8 @@ def new_lessons(span, projects, notes):
 
 
 def officer_misses(span):
-    """合并官判断和真实结局对不上的（agreement.csv 的 agree=否），按「判了什么 → 结局」归类计数；够 2 次标可升提案。"""
+    """合并官判断和真实结局对不上的（agreement.csv 的 agree=否），按「判了什么 → 结局」归类计数；够 2 次标可升提案。
+    按策略合并的（owner=策略合并，#257）不算：合并官判「退回」的第一版不拦，那个结局是策略自己促成的，不是常浩推翻了判断。"""
     f = actions.SHADOW / "agreement.csv"
     if not f.exists():
         return []
@@ -323,7 +374,8 @@ def officer_misses(span):
     groups = {}
     with f.open(encoding="utf-8", errors="replace", newline="") as fh:
         for r in csv.DictReader(fh):
-            if r.get("agree") != "否" or r.get("source") != "live" or not r.get("outcome_at"):
+            if (r.get("agree") != "否" or r.get("source") != "live" or not r.get("outcome_at")
+                    or r.get("owner") == actions.POLICY_OWNER):
                 continue
             try:
                 r["outcome_at"] = actions.stamp(r["outcome_at"])     # 统一成北京时间，first / last 才能直接比
@@ -376,8 +428,14 @@ def build(day, projects, gh_wait=0):
                 "not_connected": NOT_CONNECTED, "failed_parts": failed}
     dec = part("拍板候选", decisions, w, recs, acts, notes)
     rsk = part("风险", risks, w, recs, acts, coverage)
+    loop = part("未闭环账本", from_ledger, day, w, dec, projects, notes)   # 账本来的拍板候选和一条风险（5a-3b）
+    if loop and dec is not None:
+        dec.extend(loop[0])
+    if loop and rsk is not None:
+        rsk.extend(loop[1])
     refs = part("跨项目引用", cross_refs, w, recs, projects)
     obs = part("观察池", observations, w, projects, notes)
+    auto = part("按策略合并", actions.policy_book, w)     # 「替你合并了什么」的原料（#257）；账本还没有时三样都是空的
     ids = {r["project_id"] for r in recs}
     yd = lambda r, k: r["yesterday_delta"].get(k)
     unknown = [r["project_id"] for r in recs if any(yd(r, k) is None for k in ("merged_prs", "closed_issues", "commits"))]
@@ -397,6 +455,7 @@ def build(day, projects, gh_wait=0):
         "projects": recs,
         "actions": acts, "other_actions": others,
         "decisions": dec, "risks": rsk, "cross_refs": refs, "observations": obs,
+        "auto_merges": auto,
         "counts": {   # 开头三个数的原料（4.1）：「实质推进」要不要算，由 Hermes 看成果判断
             "projects_with_delta": delta,
             "projects_delta_unknown": unknown,      # 增量有一项取不到的项目：不当成「没有新动作」
