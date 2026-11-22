@@ -49,18 +49,18 @@ class FakeRun:
         if cmd == "docs +fetch":
             return {"document": {"content": self.doc_xml if "xml" in args else self.doc_md}}
         if cmd == "im +messages-search":
-            return {"messages": self.search}
+            return {"messages": self.search, "has_more": False}
         if cmd == "contact +get-user":
             return {"user": {} if args[3] == "ou_bot" else {"name": "杭添"}}
         if cmd == "im +chat-messages-list":
-            return {"messages": self.white}
+            return {"messages": self.white, "has_more": False}
         if cmd in ("vc +search", "minutes +search"):
-            return {"items": []}
+            return {"items": [], "has_more": False, "page_token": "end"}   # 真的 lark-cli 读完了也带 page_token
         if cmd == "calendar +agenda":
             return [{"summary": "舀水群每周同频共识会", "start_time": {"datetime": "2026-11-10T18:00:00+08:00"},
                      "end_time": {"datetime": "2026-11-10T19:00:00+08:00"}}]
         if cmd == "task +get-related-tasks":
-            return {"items": []}
+            return {"items": [], "has_more": False, "page_token": "end"}
         if cmd == "docs +update":
             content = Path(kw["cwd"], args[args.index("--content") + 1][1:]).read_text(encoding="utf-8")
             self.doc_xml = "<title>记忆日报</title>" + content + self.doc_xml.replace("<title>记忆日报</title>", "")
@@ -89,7 +89,7 @@ class PagedRun(FakeRun):
         if cmd == "task +get-related-tasks":
             data = {"items": self.tasks}
         key = next((k for k in ("messages", "items") if isinstance(data, dict) and k in data), None)
-        if not key or cmd in ("im +messages-send", "api GET"):
+        if not key or cmd in ("im +messages-send", "api GET", "docs +fetch"):
             return data
         start = int(args[args.index("--page-token") + 1]) if "--page-token" in args else 0
         page = {key: data[key][start:start + self.per], "has_more": start + self.per < len(data[key])}

@@ -180,6 +180,8 @@ def daily(d):
         print(f"SKIP：{wd(d)} 是周末，常浩没有发言、没有会议，不生成（不算断档）")
         return
 
+    related = listing("读任务", "task", "+get-related-tasks", "--include-complete=false", key="items")   # 先取完再输出：读不全时不留半截材料（PR #335 审查）
+
     print(f"# 日报材料：{wd(d)}\n")
     print("## 前一篇的台账\n")
     if prev:
@@ -219,7 +221,7 @@ def daily(d):
     print()
 
     tasks = []   # 只要常浩是负责人、当天新建或截止在 D-7～D+14 的；只关注的、远期的不算
-    for t in listing("读任务", "task", "+get-related-tasks", "--include-complete=false", key="items"):
+    for t in related:
         if not any(x.get("id") == ME and x.get("role") == "assignee" for x in t.get("members") or []):
             continue
         due = (t.get("due") or {}).get("timestamp")

@@ -400,11 +400,11 @@ class Readers(Base):
         card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
         msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
                "body": {"content": json.dumps(card)}}
-        with mock.patch.object(E, "lark_read", return_value={"messages": [msg]}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg], "has_more": False}):
             self.assertEqual(E.read_send(t, row, now), ("done", {"message_id": "om_1"}))
-        with mock.patch.object(E, "lark_read", return_value={"messages": [msg, msg]}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg, msg], "has_more": False}):
             self.assertIsNone(E.read_send(t, row, now)[0])
-        with mock.patch.object(E, "lark_read", return_value={"messages": []}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [], "has_more": False}):
             self.assertIsNone(E.read_send(t, row, now)[0])         # 审查 P1-05：查不到 ≠ 没发，交常浩，不给重发资格
             with self.assertRaises(E.Unreachable):                 # 刚发不久：列表可能滞后，先保持不明
                 E.read_send(t, {"started_at": E.iso(now)}, now)
@@ -419,13 +419,26 @@ class Readers(Base):
         card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
         msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
                "body": {"content": json.dumps(card)}}
-        pages = [{"messages": [msg], "has_more": True, "page_token": "t2"}, {"messages": [{**msg, "message_id": "om_2"}]}]
+        pages = [{"messages": [msg], "has_more": True, "page_token": "t2"}, {"messages": [{**msg, "message_id": "om_2"}], "has_more": False}]
         with mock.patch.object(E, "lark_read", side_effect=pages) as m:
             self.assertEqual(E.read_send(t, row, now), (None, {"hits": 2}))
         self.assertEqual([c[0][0][-2:] == ["--page-token", "t2"] for c in m.call_args_list], [False, True])
         with mock.patch.object(E, "lark_read", return_value={"messages": [msg], "has_more": True}):
             with self.assertRaisesRegex(E.Unreachable, "对账：还有下一页，但飞书没给翻页标记，没读全"):   # 保持不明，不记成做成
                 E.read_send(t, row, now)
+
+    def test_read_send_needs_proof_that_the_list_is_complete(self):
+        """PR #335 审查 P1-01：返回里没有 has_more（或是 null）时没法证明读全了。正好看到一条也不能记成做成，保持不明。"""
+        now = E.now_tz()
+        row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
+        msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
+               "body": {"content": json.dumps(card)}}
+        for partial in ({"messages": [msg]}, {"messages": [msg], "has_more": None}, {"messages": None, "has_more": False}, {}, None):
+            with self.subTest(partial=partial), mock.patch.object(E, "lark_read", return_value=partial):
+                with self.assertRaisesRegex(E.Unreachable, "对账：.*没法确认读没读全"):
+                    E.read_send(t, row, now)
 
     def test_only_the_real_message_counts(self):
         """审查 P1-05：机器人发的、类型对、有消息号、令牌在按钮回调值里，才算这条；只在文字里搜到令牌不算。"""

@@ -59,20 +59,52 @@ class ReadAll(unittest.TestCase):
             lp.read_all(fetch, "读", Boom, rounds=5)
         self.assertEqual(len(calls), 5)
 
-    def test_several_keys_and_missing_keys(self):
-        pages = {(): {"users": ["a"], "truncations": [], "has_more": True, "page_token": "t"},
-                 ("--page-token", "t"): {"users": ["b"], "truncations": ["users"]}}
-        got = lp.read_all(lambda extra: pages[tuple(extra)], "读群成员", keys=("users", "truncations", "bots"))
-        self.assertEqual(got, {"users": ["a", "b"], "truncations": ["users"], "bots": []})
+    def test_empty_result_with_has_more_false_is_complete(self):
+        """空结果：真的 lark-cli 也带 has_more=false 和空列表（2026-11-22 实测六个命令），算读完。"""
+        self.assertEqual(lp.read_all(lambda extra: {"messages": [], "has_more": False, "page_token": ""}, "读"), {"messages": []})
 
-    def test_none_is_empty_and_other_shapes_are_errors(self):
-        self.assertEqual(lp.read_all(lambda extra: None, "读"), {"messages": []})
-        with self.assertRaisesRegex(Boom, "不是预想的样子"):
-            lp.read_all(lambda extra: [1, 2], "读", Boom)
+    def test_missing_or_invalid_has_more_is_an_error(self):
+        """PR #335 审查 P1-01：has_more 没有、是 null、是 0 这类「假值」都不能证明读完，原来被当成读完直接返回半截列表。"""
+        for bad in ({}, {"has_more": None}, {"has_more": 0}, {"has_more": 1}, {"has_more": "false"}, {"has_more": "true"}, {"has_more": []}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(Boom, "读群消息：返回里没有有效的 has_more，没法确认读没读全"):
+                lp.read_all(lambda extra: {"messages": [{"message_id": "om_1"}], **bad}, "读群消息", Boom)
+
+    def test_invalid_has_more_on_a_later_round_is_an_error(self):
+        pages = {(): {"messages": [1], "has_more": True, "page_token": "t"}, ("--page-token", "t"): {"messages": [2]}}
+        with self.assertRaisesRegex(Boom, "没有有效的 has_more"):
+            lp.read_all(lambda extra: pages[tuple(extra)], "读", Boom)
+
+    def test_required_list_must_be_a_list_every_round(self):
+        for bad in ({}, {"messages": None}, {"messages": {}}, {"messages": "x"}, {"items": [1]}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(Boom, "读群消息：返回里没有 messages 列表，没法确认读没读全"):
+                lp.read_all(lambda extra: {"has_more": False, **bad}, "读群消息", Boom)
+        pages = {(): {"messages": [1], "has_more": True, "page_token": "t"}, ("--page-token", "t"): {"has_more": False}}
+        with self.assertRaisesRegex(Boom, "没有 messages 列表"):
+            lp.read_all(lambda extra: pages[tuple(extra)], "读", Boom)
+
+    def test_optional_list_may_be_absent_but_must_be_a_list(self):
+        pages = {(): {"users": ["a"], "truncations": [], "has_more": True, "page_token": "t"},
+                 ("--page-token", "t"): {"users": ["b"], "truncations": ["users"], "has_more": False}}
+        got = lp.read_all(lambda extra: pages[tuple(extra)], "读群成员", keys=("users",), optional=("truncations", "bots"))
+        self.assertEqual(got, {"users": ["a", "b"], "truncations": ["users"], "bots": []})
+        self.assertEqual(lp.read_all(lambda extra: {"users": [], "truncations": None, "has_more": False}, "读", keys=("users",), optional=("truncations",)),
+                         {"users": [], "truncations": []})
+        with self.assertRaisesRegex(Boom, "读群成员：返回里的 truncations 不是列表"):
+            lp.read_all(lambda extra: {"users": [], "truncations": "users", "has_more": False}, "读群成员", Boom, ("users",), ("truncations",))
+
+    def test_page_token_must_be_a_non_empty_string(self):
+        for bad in ({}, {"page_token": ""}, {"page_token": None}, {"page_token": 123}, {"page_token": ["t"]}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(Boom, "还有下一页，但飞书没给翻页标记"):
+                lp.read_all(lambda extra: {"messages": [1], "has_more": True, **bad}, "读", Boom)
+
+    def test_none_and_other_shapes_are_errors(self):
+        for bad in (None, [1, 2], "x", 0):
+            with self.subTest(bad=bad), self.assertRaisesRegex(Boom, "不是预想的样子"):
+                lp.read_all(lambda extra: bad, "读", Boom)
 
     def test_default_error_type(self):
         with self.assertRaises(lp.Incomplete):
-            lp.read_all(lambda extra: {"has_more": True}, "读")
+            lp.read_all(lambda extra: {"messages": [], "has_more": True}, "读")
 
     def test_fetch_errors_pass_through(self):
         def fetch(extra):

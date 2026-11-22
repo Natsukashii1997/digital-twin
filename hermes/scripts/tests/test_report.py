@@ -186,6 +186,17 @@ class DailyData(Base):
         self.assertIn("读当天消息：还有下一页，但飞书没给翻页标记，没读全", r.stdout)
         self.assertNotIn("第0条私聊", r.stdout)   # 不拿半截材料出稿
 
+    def test_task_list_failure_leaves_no_partial_material(self):
+        """PR #335 审查：任务在开始输出之前就取完，读不全时不留前半截材料。"""
+        mine = [{"id": ME, "role": "assignee"}]
+        self.state({"page": 2, "lose_token": "task +get-related-tasks",
+                    "im": [msg("oc_p0", "p2p", "ou_0", "私聊内容", partner="ou_0")],
+                    "tasks": [{"summary": f"任务{i}", "members": mine, "created_at": "2026-10-27 09:00"} for i in range(5)]})
+        r = self.run_py(DATA, "daily", "--date", "2026-10-27")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stdout.startswith("取数失败：读任务：还有下一页，但飞书没给翻页标记，没读全"), r.stdout)
+        self.assertNotIn("日报材料", r.stdout)
+
     def test_lark_failure_exit_1(self):
         self.env["DT_LARK_CLI"] = "false"
         r = self.run_py(DATA, "daily", "--date", "2026-10-27")

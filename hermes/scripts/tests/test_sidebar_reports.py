@@ -37,7 +37,7 @@ class FakeRun:
         if verb == "+messages-mget":
             return {"messages": [{"content": self.content, "mentions": [{"id": i} for i in (self.mentions or [])]}]}
         if verb == "+chat-members-list":
-            return {"users": [{"member_id": i} for i in self.members]}
+            return {"users": [{"member_id": i} for i in self.members], "has_more": False, "truncations": []}
         if verb == "+chat-messages-list":
             if isinstance(self.group, Exception):
                 raise self.group
@@ -317,6 +317,16 @@ class TestGroupMembersReadToTheEnd(Base):
             sr.fb_group("2026-11-18", run=run)
         self.assertNotIn("+messages-send", run.verbs())
 
+    def test_member_list_without_has_more_does_not_send(self):
+        class NoFlag(FakeRun):
+            def __call__(self, *args, **kw):
+                data = super().__call__(*args, **kw)
+                return {"users": data["users"]} if args[1] == "+chat-members-list" else data
+        run = NoFlag(members=self.ids)
+        with self.assertRaisesRegex(sr.md.Fail, "读群成员：返回里没有有效的 has_more，没法确认读没读全"):
+            sr.fb_group("2026-11-18", run=run)
+        self.assertNotIn("+messages-send", run.verbs())
+
     def test_untruncated_list_still_reports_missing_member(self):
         run = PagedRun(10, truncations=[], members=self.everyone[:-1])
         with self.assertRaises(sr.Invalid):
@@ -410,6 +420,17 @@ class TestPreviousFromGroup(Base):
         chatter = [{"message_id": f"om_c{i}", "msg_type": "text", "content": "闲聊", "sender": {"id": "ou_someone"}} for i in range(12)]
         with self.assertRaisesRegex(sr.md.Fail, "读群里上一期：还有下一页，但飞书没给翻页标记，没读全"):   # 不退回私聊存档
             sr.fb_status(dt.date(2026, 11, 20), run=PagedRun(5, lose_token=True, group=chatter + [self.msg]))
+
+    def test_group_read_without_has_more_fails_closed(self):
+        """PR #335 审查 P1-01：返回里没有 has_more 时没法证明读全了，不能当成「群里没找到」退回私聊存档。"""
+        import datetime as dt
+
+        class NoFlag(FakeRun):
+            def __call__(self, *args, **kw):
+                data = super().__call__(*args, **kw)
+                return {"messages": data["messages"]} if args[1] == "+chat-messages-list" else data
+        with self.assertRaisesRegex(sr.md.Fail, "读群里上一期：返回里没有有效的 has_more，没法确认读没读全"):
+            sr.fb_status(dt.date(2026, 11, 20), run=NoFlag(group=[]))
 
     def test_group_read_failure_fails_closed(self):
         with self.assertRaises(sr.md.Fail):

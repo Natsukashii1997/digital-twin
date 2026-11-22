@@ -90,7 +90,7 @@ class Base(unittest.TestCase):
         self.vault.mkdir()
         (self.vault / "关于我.md").write_text("---\nsensitivity: 受限\n---\n常浩，一个人推进十几个个人项目。", encoding="utf-8")
         (self.tmp / "CLAUDE.md").write_text("# 规则\n## 0. 回复语言\n## 2. Simplicity First\n", encoding="utf-8")
-        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": raw_msgs()}},
+        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": raw_msgs(), "has_more": False}},
                     "docs +create": {"ok": True, "data": {"document": {"url": "https://x.feishu.cn/docx/abc"}}},
                     "+messages-send": {"ok": True, "data": {"message_id": "om_sent"}},
                     "+messages-mget": {"ok": True, "data": {"messages": [{"msg_type": "interactive",
@@ -319,7 +319,7 @@ class Build(Base):
         self.assertEqual(meta["degraded"], "模型没写成")
 
     def test_没有消息的日子不调模型(self):
-        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": []}}})
+        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": [], "has_more": False}}})
         self.collected()
         with mock.patch.object(gd, "generate") as g:
             meta = gd.build(gd.dt.date.fromisoformat(DAY))

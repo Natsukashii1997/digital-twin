@@ -272,7 +272,7 @@ def fb_group(date=None, run=md.lark):
     if draft.get("group_message_id"):
         raise Invalid([f"{draft['date']} 已经发过群（{draft['group_message_id']}），不重复发"])
     members = lark_pages.read_all(lambda extra: run("im", "+chat-members-list", "--chat-id", GROUP, "--page-all", *extra),
-                                  "读群成员", md.Fail, ("users", "truncations"))   # 翻到底，翻不完报错（#312）
+                                  "读群成员", md.Fail, ("users",), ("truncations",))   # 翻到底，翻不完报错（#312）
     if members["truncations"]:
         raise md.Fail("读群成员：飞书按安全设置截断了名单，没读全，不拿半截名单判断谁不在群里")
     ids = {u.get("member_id") or u.get("open_id") for u in members["users"]}

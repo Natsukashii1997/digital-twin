@@ -7,10 +7,12 @@
 - vc +search、minutes +search、task +get-related-tasks 不带 --page-all 时只回一页（会议、妙记每页 15 条）。
 调用方只取 messages / items 就会悄悄少读，日报、学习报告、对账都不知道。
 
-做法：read_all 反复调 fetch，把上一轮给的 page_token 用 --page-token 传回去接着读，直到 has_more 为假。
+做法：read_all 反复调 fetch，把上一轮给的 page_token 用 --page-token 传回去接着读，直到 has_more 是 False。
 带 --page-token 接着读和一口气读完逐条一致（同一批证据；+messages-search 每次返回的顺序本来就不固定，集合一致）。
-还有下一页却没给翻页标记、翻页标记重复、翻了 ROUNDS 轮还没到底，都报错，不拿半截列表往下用。
-只看 has_more：有的命令读完了也带着 page_token（task +get-related-tasks 实测如此）。
+只有「返回里明写着 has_more=false，要的列表字段也都是列表」才算读完；别的一律报错，不拿没法证明读全的列表往下用（PR #335 审查 P1-01）：
+返回不是对象、要的列表字段没有或不是列表、has_more 没有或不是布尔值、还有下一页却没给翻页标记（或标记不是非空字符串）、
+翻页标记重复、翻了 ROUNDS 轮还没到底。上面六个命令在空结果时也都带 has_more=false 和空列表（实测，claude-08），所以空结果不会被误判。
+只看 has_more，不看有没有 page_token：有的命令读完了也带着 page_token（vc +search、minutes +search、task +get-related-tasks 实测如此）。
 
 托管单 away_sheet.py 自带同样的写法（不依赖别的模块，按最小环境跑），不走这里。"""
 
@@ -21,24 +23,33 @@ class Incomplete(Exception):
     pass
 
 
-def read_all(fetch, what, error=Incomplete, keys=("messages",), rounds=ROUNDS):
+def read_all(fetch, what, error=Incomplete, keys=("messages",), optional=(), rounds=ROUNDS):
     """把一个列表读全，返回 {键: [全部条目]}。
 
     fetch(extra)：跑一次 lark-cli 读命令并返回它的 data；extra 是要追加的参数（第一轮是 []，之后是 ["--page-token", 标记]）。
-    what：报错时说在读什么。error：没读全时抛哪种异常（各脚本传自己的 Fail，沿用它们已有的失败处理）。
-    keys：data 里要攒起来的列表字段。"""
-    out, token, seen = {k: [] for k in keys}, None, set()
+    what：报错时说在读什么。error：没法证明读全时抛哪种异常（各脚本传自己的 Fail，沿用它们已有的失败处理）。
+    keys：data 里要攒起来的列表字段，每一轮都必须有、必须是列表。
+    optional：可以没有（或是 null）的列表字段，有就必须是列表（群成员的 truncations）。"""
+    out, token, seen = {k: [] for k in (*keys, *optional)}, None, set()
     for _ in range(rounds):
         data = fetch(["--page-token", token] if token else [])
-        data = {} if data is None else data
         if not isinstance(data, dict):
-            raise error(f"{what}：lark-cli 返回的不是预想的样子，没法判断读没读全")
+            raise error(f"{what}：lark-cli 返回的不是预想的样子，没法确认读没读全")
         for k in keys:
+            if not isinstance(data.get(k), list):
+                raise error(f"{what}：返回里没有 {k} 列表，没法确认读没读全")
+            out[k] += data[k]
+        for k in optional:
+            if data.get(k) is not None and not isinstance(data[k], list):
+                raise error(f"{what}：返回里的 {k} 不是列表，没法确认读没读全")
             out[k] += data.get(k) or []
-        if not data.get("has_more"):
+        more = data.get("has_more")
+        if more is False:
             return out
+        if more is not True:
+            raise error(f"{what}：返回里没有有效的 has_more，没法确认读没读全")
         token = data.get("page_token")
-        if not token:
+        if not isinstance(token, str) or not token:
             raise error(f"{what}：还有下一页，但飞书没给翻页标记，没读全")
         if token in seen:
             raise error(f"{what}：翻页标记和前面重复，没读全")
