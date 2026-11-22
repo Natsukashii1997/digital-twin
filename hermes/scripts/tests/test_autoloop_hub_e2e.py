@@ -260,7 +260,7 @@ class StopRunsEndToEnd(HubFixture):
         self.assertNotIn("runs_stop_error", got)
         self.assertEqual(runs(a)[run_a], "cancelled")         # 排队的直接取消
         self.assertEqual(runs(b)[run_b], "queued")            # 另一张单不受影响
-        self.assertEqual(G.stop_runs(a), {"stopped": [], "failed": {}})      # 再停一次：已经没有活着的轮次
+        self.assertEqual(G.stop_runs(a), {"stopped": [], "finished": [], "failed": {}, "in_transit": 0})      # 再停一次：已经没有活着的轮次
 
 
 if __name__ == "__main__":

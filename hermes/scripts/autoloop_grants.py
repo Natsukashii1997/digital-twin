@@ -803,6 +803,7 @@ def revoke(task_id, reason="常浩撤销", now=None, path=None):
 
 RUN_LIVE = ("queued", "claimed")             # 中台的取消接口只认这两种（引擎 kernel/decide.ts 的 cancel）
 RUN_UNSURE = "unknown"                       # 接单程序 5 分钟没报：可能还在跑，但中台不让取消，只能报出来
+RUN_OVER = ("done", "nothing", "cancelled")  # 已经结束
 
 
 def stop_runs(task_id, now=None, path=None):
@@ -811,8 +812,11 @@ def stop_runs(task_id, now=None, path=None):
     生效，再来停轮次；凭证还有效的单不经这里停。
     轮次按中台库里「事项 = 单号、规则 = 凭证里记的规则」找（只读打开中台库，和秘书控制面 hub_runs 同一个查法），取消走中台的
     本人接口 POST /v1/runs/<号>/cancel：排队的直接取消；在跑的由接单程序停掉整个进程组后才算停下，这里不等它。
-    状态是 unknown 的（接单程序 5 分钟没报，可能还在跑）中台不让取消，记进 failed 交人看。
-    返回 {"stopped": [已发出取消的轮次号], "failed": {轮次号: 原因}}；中台库读不了抛 Rejected。停不成不影响已经生效的停单。"""
+    状态是 unknown 的（接单程序 5 分钟没报，可能还在跑）中台不让取消，记进 failed 交人看；取消被拒时再读一次这一轮，
+    已经自己结束了的记进 finished，不算停不成。停单生效时别的进程正在发的派单事件（hub_events 里 sent 为 2 / -2）
+    可能稍后才进中台、排出新的一轮，查不到也停不了，只报条数（工人侧准入看镜像会把它挡成「停下了」）。
+    返回 {"stopped": [已发出取消的], "finished": [取消前已结束的], "failed": {轮次号: 原因}, "in_transit": 条数}，
+    记日志出错时多一项 log_error；中台库读不了抛 Rejected（也记一笔日志）。停不成不影响已经生效的停单。"""
     import autoloop_config as C            # 这两个脚本都 import 本脚本，所以在这里才导入
     import autoloop_publish as P
     now = now or now_tz()
@@ -821,6 +825,8 @@ def stop_runs(task_id, now=None, path=None):
         if check_row(row, None, row["generation"], now, voided_of(con, task_id)) is None:
             raise Rejected(f"{task_id} 的凭证还有效，不停它的轮次；要停先撤销或冻结")
         rule = row["rule"]
+        in_transit = con.execute("SELECT count(*) FROM hub_events WHERE task_id = ? AND sent IN (2, -2)",
+                                 (task_id,)).fetchone()[0]
     try:
         hub = P._hub()
         try:
@@ -830,8 +836,11 @@ def stop_runs(task_id, now=None, path=None):
         finally:
             hub.close()
     except sqlite3.Error as e:
-        raise Rejected(f"中台库读不了（{type(e).__name__}），没查到要停的轮次")
-    out = {"stopped": [], "failed": {}}
+        why = f"中台库读不了（{type(e).__name__}），没查到要停的轮次"
+        with tx(path) as con:
+            log(con, task_id, "停轮次", now, error=why)
+        raise Rejected(why)
+    out = {"stopped": [], "finished": [], "failed": {}, "in_transit": in_transit}
     for rid, state in found:
         if state == RUN_UNSURE:
             out["failed"][str(rid)] = "接单程序 5 分钟没报这一轮，可能还在跑，中台不让取消：要在电脑上看工人的进程"
@@ -840,24 +849,42 @@ def stop_runs(task_id, now=None, path=None):
             C.hub("POST", f"/v1/runs/{rid}/cancel", {})
             out["stopped"].append(rid)
         except C.Rejected as e:
-            out["failed"][str(rid)] = str(e)
-    if found:
-        with tx(path) as con:
-            log(con, task_id, "停轮次", now, stopped=out["stopped"], failed=sorted(out["failed"]))
+            now_state = (P.hub_run(rid) or {}).get("state")
+            if now_state in RUN_OVER:                     # 查的时候还活着，取消前自己结束了
+                out["finished"].append(rid)
+            else:
+                out["failed"][str(rid)] = str(e)
+    if found or in_transit:
+        try:
+            with tx(path) as con:
+                log(con, task_id, "停轮次", now, **{k: out[k] for k in ("stopped", "finished", "failed", "in_transit")})
+        except sqlite3.Error as e:                        # 取消已经发出去了：结果照样交回，只说日志没记上
+            out["log_error"] = f"凭证库日志没记上（{type(e).__name__}）"
     return out
 
 
 def _stop_after(out, task_id):
-    """命令行的冻结、撤销做完之后接着停轮次，结果并进输出：runs_stopped（已发出取消的轮次号）；停不成写 runs_stop_error，
-    不改退出码（停单本身已经生效）。库函数 freeze / revoke 不自动停：推翻流程要自己分步做（规格 §8 第 1、2 步）。"""
+    """命令行的冻结、撤销做完之后接着停轮次，结果并进输出：runs_stopped（已发出取消的轮次号）、runs_finished（取消前已结束，
+    有才写）；停不成、有在途事件、日志没记上写 runs_stop_error。任何错都只写进输出、不改退出码，停单本身的结果（含冻结码）
+    照样打出来。库函数 freeze / revoke 不自动停：推翻流程要自己分步做（规格 §8 第 1、2 步）。"""
     try:
         r = stop_runs(task_id)
-    except Rejected as e:
-        out["runs_stop_error"] = str(e)
+    except Exception as e:                       # noqa: BLE001  停单已生效，停轮次出什么错都不能吞掉上面的结果
+        out["runs_stop_error"] = str(e) if isinstance(e, Rejected) else f"停轮次出错（{type(e).__name__}）"
         return out
     out["runs_stopped"] = r["stopped"]
-    if r["failed"]:
-        out["runs_stop_error"] = "；".join(f"轮次 {k}：{v}" for k, v in sorted(r["failed"].items()))
+    if r["finished"]:
+        out["runs_finished"] = r["finished"]
+    notes = [f"轮次 {k}：{v}" for k, v in sorted(r["failed"].items(), key=lambda kv: int(kv[0]))]
+    if notes:
+        notes.append("没停成的可在电脑上用 agent-autoloop stop <轮次号> 停")
+    if r["in_transit"]:
+        notes.append(f"还有 {r['in_transit']} 个派单事件发出后没确认送到中台，可能稍后排出新的一轮"
+                     "（工人侧准入会挡下、不会开工）")
+    if r.get("log_error"):
+        notes.append(r["log_error"])
+    if notes:
+        out["runs_stop_error"] = "；".join(notes)
     return out
 
 

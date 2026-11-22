@@ -215,7 +215,10 @@ def hub_config():
 
 
 def hub(method, path, body=None):
-    url, owner = hub_config()
+    try:
+        url, owner = hub_config()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:   # 没装、读不了、缺字段：一律说人话，不抛原始异常
+        raise Rejected(f"中台配置读不了（{type(e).__name__}，{home() / 'config.json'}）")
     req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {owner}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
