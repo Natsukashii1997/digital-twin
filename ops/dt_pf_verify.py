@@ -48,6 +48,8 @@ ANCHOR = "com.apple/dt-worker"
 REACHED = ("open", "answer", "200")
 HOLD = 2.0          # 压力模式里连上了先拿着连接这么久，让 root 抓现场
 ON_OPEN = None      # 压力模式里账号这边一连上就调它（往标准错误报一行），root 实时读到就抓现场（审查第 4 轮 P2-7）
+LAST_TCP = None     # 最近一次 TCP 尝试的（本地端口, 时间）：root 拿它去全机连接表里找有没有对应的半连接（L3 第 5 轮 P1-07）
+ON_LPORT = None     # verify 以账号身份跑时：每次 TCP 尝试报一行「LPORT 第几个靶子 端口 时间」
 GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dt_root_guard.sh")
 ECHO = b"dt-verify"
 DNS_Q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x06feishu\x02cn\x00" + b"\x00\x01\x00\x01"
@@ -72,9 +74,15 @@ def family(host):
 # ---------- 以账号身份运行的部分：逐项去连，只报结果 ----------
 
 def try_tcp(host, port, timeout=3, hold=0.0):
+    global LAST_TCP
     s = socket.socket(family(host), socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
+        # 先绑本地端口再连：连不上（超时、出错）时也知道这次用的是哪个端口，root 才能在连接表里找对方有没有收到 SYN
+        s.bind(("::" if family(host) == socket.AF_INET6 else "0.0.0.0", 0))
+        LAST_TCP = (s.getsockname()[1], round(time.time(), 3))
+        if ON_LPORT:
+            ON_LPORT(*LAST_TCP)
         s.connect((host, port))
         lport = s.getsockname()[1]   # 带上本地端口：漏过时拿它去 pf 连接表里找
         if ON_OPEN:
@@ -145,7 +153,15 @@ def probe_one(t, timeout=3, hold=0.0):
 
 
 def probe(targets):
-    return [probe_one(t) for t in targets]
+    global CUR
+    out = []
+    for i, t in enumerate(targets):
+        CUR = i
+        out.append(probe_one(t))
+    return out
+
+
+CUR = None          # probe 正在连第几个靶子（ON_LPORT 报端口时带上）
 
 
 def probe_stress(targets, seconds):
@@ -160,7 +176,8 @@ def probe_stress(targets, seconds):
             row = out[i]
             row["n"] += 1
             row["got"][key] = row["got"].get(key, 0) + 1
-            row["log"].append([round(at, 3), key])   # 每次尝试的时间和结果：事后和重新加载的时刻对照（11-21 真机）
+            # 每次尝试的时间、结果、TCP 的本地端口：事后和重新加载的时刻、全机连接表对照（11-21 真机，L3 第 5 轮 P1-07）
+            row["log"].append([round(at, 3), key, LAST_TCP[0] if t["kind"] == "tcp" and LAST_TCP and LAST_TCP[1] >= at - 0.01 else None])
             if reached(g):
                 row["opens"].append({"at": at, "lport": int(g.split(":", 1)[1]) if ":" in g else None})
     return out
@@ -237,6 +254,84 @@ class Targets:
             s.close()
 
 
+def port_of(addr):
+    a, _, p = addr.rpartition(".")
+    return int(p) if a and p.isdigit() else None
+
+
+class ConnWatch(threading.Thread):
+    """root 每 0.2 秒读一次全机 TCP 连接表（netstat），记下关心的本地端口上出现过的非 LISTEN 连接（含半连接）和第一次
+    看到的时间（L3 第 5 轮 P1-07、P1-08）。TCP 握手没完成时，客户端只看到超时或报错、服务端 accept 不到，但服务端内核
+    已经为收到的 SYN 建了半连接（SYN_RCVD），它会在表里待上几秒——这是 SYN 已经越过门卫的直接证据。
+    netstat 会截短 IPv6 地址，端口号完整，所以按「协议族 + 本地端口 + 对端端口」认。"""
+
+    def __init__(self, ports, interval=0.2):
+        super().__init__(daemon=True)
+        self.ports, self.interval = set(ports), interval
+        self.seen = {}                       # (tcp4/tcp6, 本地端口, 对端端口, 状态) → 第一次看到的时间
+        self.polls, self.errors, self.worst_gap, self.last = 0, [], 0.0, None
+        self.stop = threading.Event()
+
+    def poll(self):
+        try:
+            r = subprocess.run(["netstat", "-anW", "-p", "tcp"], capture_output=True, text=True, timeout=10)
+        except Exception as e:
+            self.errors.append(repr(e)[:200])
+            return
+        if r.returncode != 0 or "Proto" not in r.stdout:
+            self.errors.append(f"netstat 退出码 {r.returncode}：{r.stderr.strip()[:200]}")
+            return
+        now = time.time()
+        if self.last is not None:
+            self.worst_gap = max(self.worst_gap, now - self.last)
+        self.last, self.polls = now, self.polls + 1
+        for line in r.stdout.splitlines():
+            f = line.split()
+            if len(f) < 6 or not f[0].startswith("tcp") or f[5] == "LISTEN":
+                continue
+            lp, rp = port_of(f[3]), port_of(f[4])
+            if lp in self.ports:
+                self.seen.setdefault(("tcp6" if "6" in f[0] else "tcp4", lp, rp, f[5]), now)
+
+    def run(self):
+        self.poll()
+        while not self.stop.wait(self.interval):
+            self.poll()
+
+    def finish(self):
+        self.stop.set()
+        self.join(15)
+        self.poll()                          # 停下时再看一眼
+        bad = list(self.errors)
+        if self.is_alive():
+            bad.append("连接表监视线程没停下")
+        if self.polls < 2 or self.worst_gap > 1.5:
+            bad.append(f"连接表只读了 {self.polls} 次、最长隔 {self.worst_gap:.1f} 秒，看不全半连接")
+        return bad
+
+    def entries(self, lport, fam=None):
+        return [(k, t) for k, t in self.seen.items() if k[1] == lport and (fam is None or k[0] == fam)]
+
+
+def fam_of(host):
+    return "tcp6" if ":" in host and not host.startswith("::ffff:") else "tcp4"
+
+
+def half_open(watch, attempts, slack=0.3, tail=10.0):
+    """attempts：[(账号, 靶子, 本地端口, 时间)]。服务端（靶子端口）上出现过、对端端口正是这次尝试的本地端口、而且在这次
+    尝试之后才第一次看到的连接，就是这次的 SYN 过了门卫（哪怕握手没完成）。返回命中的明细。"""
+    idx = {}
+    for (fam, lp, rp, state), first in watch.seen.items():
+        idx.setdefault((lp, rp), []).append((first, state, fam))
+    hits = []
+    for user, t, lport, at in attempts:
+        for first, state, fam in idx.get((t["port"], lport), []):
+            if at - slack <= first <= at + tail:
+                hits.append({"user": user, "kind": "tcp", "host": t["host"], "port": t["port"], "lport": lport,
+                             "at": at, "seen": round(first, 3), "state": state})
+    return hits
+
+
 def settle():
     """靶子线程每 0.2 秒收一次连接：TCP 握手在内核里就完成了，探测那边已经返回，靶子可能还没 accept。
     布防前等一会儿，别把 root 自己对照的晚到连接记成账号连进来的（CI 偶发 1≠2、本机偶发 3≠2）。"""
@@ -293,7 +388,10 @@ def own_addrs():
 def system_targets(n_v4=6, own_ports=()):
     """本机已有的 TCP 监听：准连的端口（应该通）、监听在所有网卡（*）上的、再挑几个只在回环上的（应该挡）。
     own_ports 是 root 自己靶子的端口：靶子先开，lsof 也会列出它们，不能再当「本机已有监听」（11-21 stress 误报）。"""
-    socks = {(a, p) for a, p in listening() if p not in own_ports}
+    found = listening()
+    if own_ports and not set(own_ports) <= {p for _, p in found}:   # root 自己的靶子都没列出来：枚举本身不可信（L3 第 5 轮 P2-08）
+        raise Incomplete(f"lsof 没列出 root 自己的靶子端口 {sorted(set(own_ports) - {p for _, p in found})}，本机监听枚举不可信")
+    socks = {(a, p) for a, p in found if p not in own_ports}
     v4_ports = sorted({p for a, p in socks if a in ("127.0.0.1", "*")})
     v6_ports = sorted({p for a, p in socks if a in ("::1", "*")})
     any_ports = sorted({p for a, p in socks if a == "*"})
@@ -348,7 +446,13 @@ def run_as(user, ts, mode="probe", n=None, popen=False, extra=None):
         p.stdin = None   # 脚本已经写完：communicate() 不能再碰这个管道，3.9 会去 flush 已关闭的管道而报错（11-20 真机）
         return p
     r = subprocess.run(cmd, input=src, capture_output=True, timeout=1800, cwd="/")
+    LPORTS[user] = [tuple(float(x) if "." in x else int(x) for x in line.split()[1:4])
+                    for line in r.stderr.decode(errors="replace").splitlines()
+                    if line.startswith("LPORT ") and len(line.split()) == 4]
     return parse_result(r.returncode, r.stdout, r.stderr, len(ts))
+
+
+LPORTS = {}         # verify：每个账号每次 TCP 尝试的（第几个靶子, 本地端口, 时间）
 
 
 def collect(procs, counts, timeout, on_open=None):
@@ -427,7 +531,44 @@ def judge(user, t, got, ctrl):
 
 
 def account_exists(u):
-    return subprocess.run(["id", u], capture_output=True).returncode == 0
+    """账号在不在。id 查得到就在；查不到时再看目录服务的账号清单：清单读得出且没有它才算不在，读不出算查不清（抛 Incomplete，
+    不能当成「账号不存在」把它跳过，L3 第 5 轮 P2-08）。"""
+    if subprocess.run(["id", u], capture_output=True).returncode == 0:
+        return True
+    r = subprocess.run(["dscl", ".", "-list", "/Users"], capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise Incomplete(f"查不清账号 {u} 在不在（id 查不到，目录服务清单也读不出）")
+    return u in r.stdout.split()
+
+
+def managed_required():
+    """门卫状态里记着管上了谁（root 写的），这些账号必须都测到：少一个就是测试不完整，不能静默跳过（L3 第 5 轮 P2-08）。"""
+    try:
+        with open(DIR + "/pf-dt-worker.status") as f:
+            fields = dict(kv.split("=", 1) for kv in f.read().split() if "=" in kv)
+    except OSError as e:
+        raise Incomplete(f"读不出门卫状态文件：{e}")
+    users = [u for u in fields.get("users", "").split(",") if u]
+    if fields.get("state") != "ok" or "dt-worker" not in users:
+        raise Incomplete(f"门卫状态不是 ok 或没管上 dt-worker（{fields.get('state')}，users={fields.get('users')}），先装好门卫规则")
+    return users
+
+
+def managed_accounts():
+    need = managed_required()
+    users = [u for u in ALLOWED if account_exists(u)]
+    missing = [u for u in need if u not in users]
+    if missing:
+        raise Incomplete(f"门卫管着的账号找不到：{'、'.join(missing)}")
+    return users
+
+
+def local_hosts():
+    return set(own_addrs()) | {"::ffff:127.0.0.1"}
+
+
+def local_tcp(t, hosts):
+    return t["kind"] == "tcp" and t["host"] in hosts
 
 
 def pfctl(*args):
@@ -693,20 +834,23 @@ def inbound():
 
 
 def verify():
+    users = managed_accounts()                  # 门卫管着的账号都要在，查不清就是不完整（L3 第 5 轮 P2-08）
     own = Targets(own_addrs())
+    watch = None
     try:
         ts = targets(own)
+        hosts = local_hosts()
+        # 全机连接表监视：受管账号的 SYN 只要到了本机任何一个靶子，靶子那边就会出现半连接（L3 第 5 轮 P1-07）
+        watch = ConnWatch({t["port"] for t in ts if local_tcp(t, hosts)})
+        watch.start()
         ctrl = probe(ts)
         settle()                                # root 对照的 TCP 连接可能还没被靶子线程收下，等它们收完再布防
         own.armed = True                        # 之后收到的都是账号连进来的（dt-gate 对照也会连进来）
         report = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "targets": ts, "root": ctrl, "accounts": {}}
         worst = 0
-        if not account_exists("dt-worker"):
-            print("== dt-worker：账号不存在，测试不完整")
-            worst = 2
-        for u in list(ALLOWED) + list(CONTROL_ACCOUNTS):
-            if not account_exists(u):
-                print(f"== {u}：账号不存在，跳过")
+        for u in users + list(CONTROL_ACCOUNTS):
+            if u in CONTROL_ACCOUNTS and not account_exists(u):
+                print(f"== {u}：账号不存在，没有对照")
                 continue
             try:
                 got = run_as(u, ts)
@@ -731,6 +875,9 @@ def verify():
                     worst = 2
             report["accounts"][u] = rows
         worst = max(worst, control_problems(report, ts, ctrl)) if worst != 1 else 1
+        w = half_open_verdict(report, ts, ctrl, users, watch, hosts)
+        watch = None
+        worst = 1 if 1 in (worst, w) else max(worst, w)
         report.update(own_bind_errors=own.bind_errors, own_vanished=own.vanished)
         if own.bind_errors:
             print("== 测试不完整：有地址开不了 root 自己的靶子：" +
@@ -747,11 +894,45 @@ def verify():
         report["hits_on_own_targets"] = own.hits
     finally:
         own.close()
+        if watch:
+            watch.stop.set()
     path = write_report("", report)
     print({0: "全部符合", 1: "有该挡没挡住或该通不通", 2: "测试不完整（见上面「没法判断」「没跑完」）"}[worst] + f"；记录在 {path}")
     print("不在承诺里的已知风险（常浩 11-20 接受）：ICMP（ping）、系统解析器代发的 DNS 查询，pf 按账号认不出")
     print("另：每秒强制重新加载的压力测试里偶发漏过（常浩 11-21 接受）；验收用 verify stress 600 0（不重载）零漏过")
     return worst
+
+
+def half_open_verdict(report, ts, ctrl, users, watch, hosts):
+    """verify 的出站半连接证据：受管账号每次连本机 TCP 靶子用的本地端口，到连接表里找靶子那边有没有对应的连接
+    （有 = SYN 过了门卫，哪怕它自己只看到超时或报错）。监视本身要证明有效：root 对照连得上的自己的靶子，连接表里必须
+    看得到。返回 0 / 1 / 2。"""
+    problems = watch.finish()
+    attempts = []
+    for u in users:
+        if not isinstance(report["accounts"].get(u), list):
+            continue
+        recs = LPORTS.get(u, [])
+        seen_idx = {int(i) for i, _, _ in recs}
+        missing = [i for i, t in enumerate(ts) if local_tcp(t, hosts) and i not in seen_idx]
+        if missing:
+            problems.append(f"{u} 有 {len(missing)} 个本机 TCP 靶子没报本地端口")
+        attempts += [(u, ts[int(i)], int(lp), at) for i, lp, at in recs
+                     if int(i) < len(ts) and local_tcp(ts[int(i)], hosts)]
+    hits = half_open(watch, attempts, tail=4.0)
+    blind = [f"{t['host']}:{t['port']}" for t, c in zip(ts, ctrl)
+             if local_tcp(t, hosts) and t.get("own") and reached(c) and not watch.entries(t["port"])]
+    if blind:
+        problems.append(f"连接表里没看到 root 对照连到自己靶子的连接（{'、'.join(blind[:3])}），监视本身可能没起作用")
+    report["half_open"], report["watch_problems"] = hits, problems
+    for h in hits:
+        print(f"  [没挡住] {h['user']} → tcp {h['host']}:{h['port']}：自己没连上，但靶子那边出现了连接（{h['state']}），SYN 过了门卫")
+        for row in report["accounts"].get(h["user"], []):
+            if row.get("host") == h["host"] and row.get("port") == h["port"] and row.get("kind") == "tcp":
+                row["verdict"] = "没挡住"
+    if problems:
+        print("== 半连接证据不完整：" + "；".join(problems[:3]))
+    return 1 if hits else (2 if problems else 0)
 
 
 class Reloader(threading.Thread):
@@ -979,6 +1160,8 @@ def control_incomplete(others, gate, root_rows):
 
 def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "probe":   # 以账号身份跑的那一半
+        global ON_LPORT
+        ON_LPORT = lambda port, at: (sys.stderr.write(f"LPORT {CUR} {port} {at}\n"), sys.stderr.flush())
         print(json.dumps(probe(json.loads(sys.argv[2]))))
         return 0
     if len(sys.argv) >= 4 and sys.argv[1] == "probe-stress":

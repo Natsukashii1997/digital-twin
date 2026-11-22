@@ -32,7 +32,8 @@
 # 每个账号的 uid 大于 0、只对应这一个账号；主规则集里真的挂着 com.apple/* 锚点、锚点前面只有 scrub 类规则，
 # com.apple 下别的锚点里没有 quick 放行（出站、入站都算），门卫自己的锚点里没有地址转换规则和子锚点，没有网卡被 pf 跳过
 # （set skip），没有带 pass 的地址转换规则（否则数据包轮不到门卫规则）；实际加载的规则和规则文件解析出来的一模一样。
-# 要重新加载、或 pf 被关过要重新打开时，先把状态写成 state=applying，再结束两个账号的全部进程并确认清干净了。
+# 要重新加载、或 pf 被关过要重新打开时，先把状态写成 state=applying，确认规则对了，清空 pf 的连接状态表，再打开 pf、
+# 结束两个账号的全部进程并确认清干净了（清空状态表影响整台机器已有的连接，只在这两种少见情况下做）。
 # 保证的是「最近一次核对（每 5 分钟一次，工人只认 10 分钟内的）时规则在生效」，不是开工那一刻实时查的：
 # 工人账号读不了 pf，关掉 pf 要 root 权限，root 被攻破不在这道门防的范围里（L3 第 4 轮 P1-03）。
 # 全部对上才写 state=ok，中途任何一步出错都写 state=failed 和原因（所有人可读）。状态里记本次开机时间 boot=。
@@ -119,18 +120,27 @@ write_status() {
 
 # 判定不在生效：先写 failed（工人看到就不再开工），再结束两个受管账号的全部进程。清进程不依赖状态写没写成
 # （L3 第 4 轮 P1-03：原来 set -e 下状态写失败，后面的清进程就跳过了）；没清干净的，原因补进状态。
+# pf 关着就顺手打开（只会更严，L3 第 5 轮 P1-03）。状态写不进去时删掉旧的状态文件，再不行就清空它：不能让工人拿着
+# 旧的 state=ok 在 10 分钟有效期里照样开工（L3 第 5 轮 P1-03 C）。
 fail() {
   local why=$1 left
   trap - ERR
   set +e
-  write_status "state=failed enabled=$(pf_enabled) reason=${why// /_}"
+  [ "$(pf_enabled)" = yes ] || /sbin/pfctl -q -E 2>/dev/null
+  mark_failed "$why"
   left=$(kill_accounts)
   if [ -n "$left" ]; then
     why="${why}；${left}"
-    write_status "state=failed enabled=$(pf_enabled) reason=${why// /_}"
+    mark_failed "$why"
   fi
   cat "$STATUS" 2>/dev/null
   exit 1
+}
+
+mark_failed() {
+  write_status "state=failed enabled=$(pf_enabled) reason=${1// /_}" 2>/dev/null && return 0
+  rm -f "$STATUS" 2>/dev/null && return 0
+  : > "$STATUS" 2>/dev/null
 }
 
 # 本次开机的时间（秒），写进状态：重启后旧的 state=ok 不算数（审查第 4 轮 P2-2）。读不出就是空，工人那边当不过。
@@ -142,7 +152,7 @@ boot_sec() { /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = 
 # pgrep 出错（查不清）都打印原因、返回 1。账号确实不在（目录服务说清了）就不用清；目录服务查不清不当成不在。
 # 结果靠打印和返回码；在命令替换里调时先关 ERR 陷阱。
 kill_accounts() {
-  local u names rc i old p left bad=""
+  local u names rc i old p left unclear out prc bad=""
   for u in "$WORKER" "$SECRETARY"; do
     if ! id "$u" >/dev/null 2>&1; then
       names=$(user_list) || { bad="${bad}；查不清 $u 在不在，没法确认它的进程清了"; continue; }
@@ -158,14 +168,27 @@ kill_accounts() {
     esac
     for i in 1 2 3 4 5 6 7 8 9 10; do
       /usr/bin/pkill -KILL -u "$u" 2>/dev/null || true
-      left=""
+      left="" unclear=""
       for p in $old; do
-        [ "$(/bin/ps -o user= -p "$p" 2>/dev/null | tr -d ' ')" = "$u" ] && left="$left $p"
+        # ps 只有两种结果算数：返回 0 且属于这个账号（还活着；号被别的账号复用了不算）、返回 1 且没有输出（没了）；
+        # 别的一律查不清，不能当成已经结束（L3 第 5 轮 P1-03 B）
+        out=$(/bin/ps -o user= -p "$p" 2>/dev/null) && prc=0 || prc=$?
+        out=$(printf '%s' "$out" | tr -d ' \n')
+        case $prc in
+          0) [ "$out" = "$u" ] && left="$left $p" ;;
+          1) [ -z "$out" ] || unclear="ps 返回 1 却有输出" ;;
+          *) unclear="ps 返回 ${prc}" ;;
+        esac
       done
+      [ -z "$unclear" ] || break
       [ -n "$left" ] || break
       sleep 0.5
     done
-    [ -z "$left" ] || bad="${bad}；$u 的进程结束不掉（${left# }）"
+    if [ -n "$unclear" ]; then
+      bad="${bad}；查不清 $u 的进程清没清（${unclear}）"
+    elif [ -n "$left" ]; then
+      bad="${bad}；$u 的进程结束不掉（${left# }）"
+    fi
   done
   [ -z "$bad" ] || { echo "${bad#；}"; return 1; }
 }
@@ -202,8 +225,9 @@ order_ok() {
 # pass 也算数；子 agent 审查第 4 轮）
 quick_hit() { printf '%s\n' "$1" | grep -E '^(pass|anchor)[[:space:]]' | grep -E '[[:space:]]quick([[:space:]]|$)' | head -1 || true; }
 # 一段地址转换规则里的：带 pass 的转换（命中的包不过过滤规则）、带 quick 的转换锚点
+# 保守写法：哪一行出现单独的 pass 都算（含 no nat / no rdr / no binat pass，L3 第 5 轮 P1-09）
 nat_hit() {
-  printf '%s\n' "$1" | grep -E '^(nat|rdr|binat)[[:space:]].*[[:space:]]pass([[:space:]]|$)|^(nat|rdr|binat)[[:space:]]+pass[[:space:]]|^(nat|rdr|binat)-anchor[[:space:]].*[[:space:]]quick([[:space:]]|$)' \
+  printf '%s\n' "$1" | grep -E '(^|[[:space:]])pass([[:space:]]|$)|^(nat|rdr|binat)-anchor[[:space:]].*[[:space:]]quick([[:space:]]|$)' \
     | head -1 || true
 }
 
@@ -264,33 +288,35 @@ apply() {
   # 实际加载的规则必须和规则文件解析出来的一模一样（同一个 pfctl 打印，按 uid 展开）；一样就不重新加载
   expected=$(/sbin/pfctl -nvf "$RULES" 2>/dev/null)
   [ -n "$expected" ] || fail "规则文件解析不出来"
-  # pf 被关过（L3 第 4 轮 P1-03）：关着的这段时间两个账号随便联网。先写「进行中」（工人不再开工），马上打开 pf，
-  # 再结束两个账号的全部进程。先开后清：清进程出问题时 pf 也已经开着（不会因为清不干净一直关着，子 agent 审查第 4 轮）；
-  # 关着时建的连接在 pf 里没有状态记录，打开后它们的包照样过门卫规则，结束进程再把它们彻底断掉
+  # 两种情况要动手（L3 第 4、5 轮 P1-03）：pf 被关过，或实际加载的规则和应有的不一样。先写「进行中」（工人不再开工）；
+  # 规则不对就先清进程再加载；打开 pf 之前先确认门卫规则已经是对的（关着时规则可能被删改）；再清空 pf 的连接状态表
+  # （旧规则下、或关掉之前留下的状态，后来的包会凭它直接放行，不过新规则）；然后打开 pf、结束两个账号的全部进程。
+  # 中途任何一步不过都走 fail，fail 里 pf 关着就先打开（只会更严）。
   reenabled=no
-  if [ "$(pf_enabled)" != yes ]; then
-    write_status "state=applying"
-    /sbin/pfctl -q -E 2>/dev/null || true
-    [ "$(pf_enabled)" = yes ] || fail "pf 没开"
-    reenabled=yes
-    left=$(trap - ERR; kill_accounts) || fail "pf 关过，重新打开后没清掉受管账号的进程：$left"
-  fi
-  loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
   reloaded=no
+  [ "$(pf_enabled)" = yes ] || reenabled=yes
+  loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
+  if [ "$reenabled" = yes ] || [ "$loaded" != "$expected" ]; then
+    write_status "state=applying"           # 只在真要动手时写：平时每 5 分钟一次的核对不让工人撞上「进行中」（审查第 4 轮 P2-1）
+  fi
   if [ "$loaded" != "$expected" ]; then
-    write_status "state=applying"           # 只在真要重新加载时写：平时每 5 分钟一次的核对不让工人撞上「进行中」（审查第 4 轮 P2-1）
-    # 加载前也先清一遍：11-21 压力测试在强制重新加载附近抓到一次漏过，加载那一刻两个账号最好没有进程在联网
+    # 加载前先清一遍：11-21 压力测试在强制重新加载期间抓到偶发漏过，加载时两个账号最好没有进程在联网
     left=$(trap - ERR; kill_accounts) || fail "重新加载前没清掉受管账号的进程：$left"
     /sbin/pfctl -q -a "$ANCHOR" -f "$RULES" || fail "规则没加载上（pf 保留了旧规则）"
     reloaded=yes
-    left=$(trap - ERR; kill_accounts) || fail "重新加载后没清掉受管账号的进程：$left"   # 旧规则下建好的连接不过新规则
     loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
   fi
-  [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   [ "$loaded" = "$expected" ] || {
     diff <(echo "$expected") <(echo "$loaded") | head -20 >&2 || true
     fail "加载上的规则和应有的不一致"
   }
+  if [ "$reenabled" = yes ] || [ "$reloaded" = yes ]; then
+    /sbin/pfctl -q -F states 2>/dev/null || fail "清不掉 pf 的连接状态表"
+    [ "$reenabled" = no ] || /sbin/pfctl -q -E 2>/dev/null || true
+    [ "$(pf_enabled)" = yes ] || fail "pf 没开"
+    left=$(trap - ERR; kill_accounts) || fail "规则生效后没清掉受管账号的进程：$left"
+  fi
+  [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   trap - ERR
   write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded reenabled=$reenabled"
 }

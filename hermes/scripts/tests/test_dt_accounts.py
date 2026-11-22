@@ -574,10 +574,16 @@ class PfApply(unittest.TestCase):
     FAKE = r"""#!/bin/bash
 S=$FAKE_DIR; sc=$SCENARIO
 case "$*" in
-  "-s info") if [ "$sc" = disabled ] || { [ "$sc" = reenable ] && [ ! -e "$S/enabled" ]; }; then echo "Status: Disabled"
-             else echo "Status: Enabled"; fi ;;
-  "-q -E") [ "$sc" = disabled ] && exit 1
-           cp "$STATUS_PATH" "$S/status_at_enable"; cp "$S/kills" "$S/kills_at_enable" 2>/dev/null; : > "$S/enabled"; exit 0 ;;
+  "-s info") case $sc in
+               disabled) echo "Status: Disabled" ;;
+               reenable*) [ -e "$S/enabled" ] && echo "Status: Enabled" || echo "Status: Disabled" ;;
+               *) echo "Status: Enabled" ;;
+             esac ;;
+  "-q -E") echo x >> "$S/enables"; [ "$sc" = disabled ] && exit 1
+           cp "$STATUS_PATH" "$S/status_at_enable" 2>/dev/null; cp "$S/kills" "$S/kills_at_enable" 2>/dev/null
+           cp "$S/flushes" "$S/flushes_at_enable" 2>/dev/null; cp "$S/loads" "$S/loads_at_enable" 2>/dev/null
+           : > "$S/enabled"; exit 0 ;;
+  "-q -F states") echo x >> "$S/flushes"; [ "$sc" = flush_fail ] && exit 1; exit 0 ;;
   "-s rules")
     case $sc in
       no_anchor) ;;
@@ -588,7 +594,13 @@ case "$*" in
   "-s nat") echo 'nat-anchor "com.apple/*" all'; echo 'rdr-anchor "com.apple/*" all'
             [ "$sc" = nat_pass ] && echo 'nat pass on en0 from 192.168.2.0/24 to any -> (en0)'
             [ "$sc" = other_nat_anchor ] && echo 'nat-anchor "vpn/*" all'; exit 0 ;;
-  "-a com.apple/250.ApplicationFirewall -s nat") [ "$sc" = sibling_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
+  "-a com.apple/250.ApplicationFirewall -s nat")
+    case $sc in
+      sibling_nat_pass) echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999' ;;
+      no_nat_pass) echo 'no nat pass on en0 from 192.168.2.0/24 to any' ;;
+      no_rdr_pass) echo 'no rdr pass on lo0 proto tcp from any to any port 3350' ;;
+      no_binat_pass) echo 'no binat pass on en0 from 10.0.0.1 to any' ;;
+    esac; exit 0 ;;
   "-a com.apple/dt-worker -s nat") [ "$sc" = own_nat_pass ] && echo 'rdr pass on lo0 proto tcp to port 3350 -> 127.0.0.1 port 9999'; exit 0 ;;
   "-a com.apple/dt-worker -s Anchors") [ "$sc" = own_sub_anchor ] && echo "  com.apple/dt-worker/x"; exit 0 ;;
   "-a com.apple -s rules") echo 'anchor "200.AirDrop/*" all'; echo 'anchor "250.ApplicationFirewall/*" all'
@@ -611,7 +623,7 @@ case "$*" in
   "-q -f /etc/pf.conf") exit 0 ;;
   "-q -a com.apple/dt-worker -f "*) cp "${@: -1}" "$S/loaded.rules"; cp "$STATUS_PATH" "$S/status_at_load"
                                     echo x >> "$S/loads"
-                                    [ "$sc" = load_fail ] && exit 1; exit 0 ;;
+                                    case $sc in *load_fail) exit 1 ;; esac; exit 0 ;;
   "-nvf "*) /sbin/pfctl -nvf "${@: -1}" 2>/dev/null ;;
   "-a com.apple/dt-worker -s rules")
     out=$(/sbin/pfctl -nvf "$S/loaded.rules" 2>/dev/null)
@@ -654,8 +666,11 @@ echo 4242
     # ps -o user= -p <pid>：只认动手前就在的 4242；kill_stuck 里它一直活着，其余场景里 pkill 后就没了
     # （真机上 pgrep 再查可能看到系统新拉起的进程，那些生在新规则下，不算残留）
     PS = """#!/bin/bash
-[ "$SCENARIO:${@: -1}" = kill_stuck:4242 ] && echo " dt-worker"
-exit 0
+case "$SCENARIO:${@: -1}" in
+  kill_stuck:4242) echo " dt-worker"; exit 0 ;;
+  ps_err:4242) exit 70 ;;
+esac
+exit 1
 """
     # 账号在不在：本机可能真有 dt-worker，id 不能用真的（目录服务查不清时 id 也查不到）
     ID = """#!/bin/bash
@@ -750,6 +765,11 @@ exit 1
                               ("own_sub_anchor", "com.apple/dt-worker_下有子锚点：com.apple/dt-worker/x"),
                               ("kill_stuck", "dt-worker_的进程结束不掉（4242）"),
                               ("pgrep_err", "查不清_dt-worker_还有没有进程（pgrep_返回_3）"),
+                              ("ps_err", "查不清_dt-worker_的进程清没清（ps_返回_70）"),
+                              ("flush_fail", "清不掉_pf_的连接状态表"),
+                              ("no_nat_pass", "com.apple/250.ApplicationFirewall_的地址转换里有：no_nat_pass"),
+                              ("no_rdr_pass", "com.apple/250.ApplicationFirewall_的地址转换里有：no_rdr_pass"),
+                              ("no_binat_pass", "com.apple/250.ApplicationFirewall_的地址转换里有：no_binat_pass"),
                               ("skip_iface", "有网卡被_pf_跳过：lo0_(skip)"),
                               ("nat_pass", "主规则集的地址转换里有：nat_pass"),
                               ("other_nat_anchor", "主规则集的地址转换里有：nat-anchor_\"vpn/*\""),
@@ -767,14 +787,15 @@ exit 1
             status = (Path(self.last_dir) / "pf-dt-worker.status").read_text()
             self.assertEqual(len(status.splitlines()), 1, status)   # 状态只有一行：原因里没混进子 shell 里陷阱写的东西
             self.assertNotIn("行出错", status, scenario)
-            if scenario not in ("load_fail", "partial", "dup", "tampered", "kill_stuck", "pgrep_err"):
+            if scenario not in ("load_fail", "partial", "dup", "tampered", "kill_stuck", "pgrep_err", "ps_err", "disabled", "flush_fail"):
                 self.assertEqual(self.loads, 0, scenario)   # 前面的核对不过，根本不加载
             # 判定不在生效：两个账号正在跑的进程一律结束（审查第 4 轮 P2-5）；目录服务查不清时不知道账号在不在，只报不清
             if scenario == "ds_fail":
                 self.assertEqual(self.kills, [], scenario)
                 self.assertIn("查不清_dt-worker_在不在", f["reason"])
-            elif scenario not in ("kill_stuck", "pgrep_err"):
-                n = {"partial": 3, "dup": 3, "tampered": 3, "load_fail": 2}.get(scenario, 1)   # 加载前、加载后、判 failed 各一遍
+            elif scenario not in ("kill_stuck", "pgrep_err", "ps_err"):
+                # 加载前清一遍、判 failed 再清一遍；flush_fail 在规则生效前停下
+                n = {"partial": 2, "dup": 2, "tampered": 2, "load_fail": 2, "disabled": 2, "flush_fail": 2}.get(scenario, 1)
                 self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * n, scenario)
 
     def test_directory_unclear_keeps_rules(self):
@@ -818,6 +839,40 @@ exit 1
         # 先开 pf 再清进程（清不干净时 pf 也已经开着）
         self.assertFalse((d / "kills_at_enable").exists())
         self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"])
+        self.assertTrue((d / "flushes_at_enable").exists())                      # 打开前清空连接状态表
+
+    def test_failed_never_leaves_old_ok(self):
+        """L3 第 5 轮 P1-03 C：状态写不进去时，旧的 state=ok 不能留着让工人在有效期里照样开工：删掉旧状态文件。"""
+        d = self.setup_dir()
+        self.apply("ok", d)
+        self.assertIn("state=ok", (d / "pf-dt-worker.status").read_text())
+        script = (d / "pf.sh").read_text().replace('> "$STATUS.tmp"', '> "$DIR/no-such-dir/x"', 1)
+        (d / "pf.sh").write_text(script)
+        r, f, _ = self.apply("no_anchor", d)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse((d / "pf-dt-worker.status").exists())
+
+    def test_fail_turns_pf_on(self):
+        """L3 第 5 轮 P1-03：pf 关着、中途核对不过，fail 里先把 pf 打开（只会更严），不让它一直关着。"""
+        r, f, _ = self.apply("reenable_load_fail")
+        self.assertEqual((r.returncode, f["state"]), (1, "failed"))
+        self.assertTrue((self.last_dir / "enabled").exists())
+        self.assertEqual(f["enabled"], "yes")
+
+    def test_reenable_fixes_rules_before_enabling(self):
+        """L3 第 5 轮 P1-03 A：pf 关着时门卫规则被改了，先把规则加载对、清空连接状态表，再打开 pf。"""
+        d = self.setup_dir()
+        self.apply("ok", d)
+        (d / "loaded.rules").write_text("# 关着时被人清空了\n")
+        for x in ("kills", "loads", "flushes"):
+            if (d / x).exists():
+                (d / x).unlink()
+        r, f, _ = self.apply("reenable", d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((f["state"], f["reloaded"], f["reenabled"]), ("ok", "yes", "yes"))
+        self.assertEqual((d / "loads_at_enable").read_text().split(), ["x"])       # 打开前已经重新加载
+        self.assertEqual((d / "flushes_at_enable").read_text().split(), ["x"])     # 打开前已经清空状态表
+        self.assertIn("state=applying", (d / "status_at_enable").read_text())
 
     def test_no_processes_nothing_to_kill(self):
         r, f, _ = self.apply("no_procs")
@@ -1025,7 +1080,8 @@ class Verify(unittest.TestCase):
         self.assertIsNone(self.v.nearest_reload(10.0, []))
 
     def test_targets_cover_every_path(self):
-        self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 8086), ("*", 5433), ("::1", 7000)}
+        self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 8086), ("*", 5433), ("::1", 7000),
+                                    ("127.0.0.1", 40000)}   # root 自己的靶子也在 lsof 里
         self.v.local_addrs = lambda: ["192.168.1.16", "10.8.0.2", "2409::1"]
 
         class Own:
@@ -1048,7 +1104,7 @@ class Verify(unittest.TestCase):
 
     def test_stress_targets_only_blocked(self):
         """压力模式只连该挡的靶子（准连的端口不在里面）。"""
-        self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 5178), ("*", 5000)}
+        self.v.listening = lambda: {("127.0.0.1", 3350), ("127.0.0.1", 8090), ("127.0.0.1", 5178), ("*", 5000), ("127.0.0.1", 40000)}
         self.v.local_addrs = lambda: ["192.168.1.16"]
 
         class Own:
@@ -1101,6 +1157,32 @@ class Verify(unittest.TestCase):
         with self.assertRaises(self.v.Incomplete):
             self.v.local_addrs()                 # 连回环都没列出来：输出不对
         self.assertIn("except Incomplete", VERIFY.read_text())   # main 里接住，退出码 2（不会当成 1「漏过」或 0）
+
+    def test_lsof_missing_own_targets_is_incomplete(self):
+        """L3 第 5 轮 P2-08：lsof 返回 0 却没列出 root 自己刚开的靶子，说明枚举不可信，算不完整（原来静默当成没有监听）。"""
+        self.v.listening = lambda: set()
+
+        class Own:
+            def specs(self):
+                return [{"kind": "tcp", "what": "x", "host": "127.0.0.1", "port": 40000, "own": True}]
+        with self.assertRaises(self.v.Incomplete):
+            self.v.targets(Own())
+
+    def test_account_unclear_is_incomplete(self):
+        """L3 第 5 轮 P2-08：id 查不到时，目录服务清单读得出且没有它才算不在；读不出算查不清，不能跳过。"""
+        real = self.v.subprocess.run
+        self.addCleanup(setattr, self.v.subprocess, "run", real)
+        def fake(out, rc):
+            return lambda c, *a, **kw: subprocess.CompletedProcess(c, 1 if c[0] == "id" else rc, out, "")
+        self.v.subprocess.run = fake("root\nnat\n", 0)
+        self.assertFalse(self.v.account_exists("dt-secretary"))
+        self.v.subprocess.run = fake("", 1)
+        with self.assertRaises(self.v.Incomplete):
+            self.v.account_exists("dt-secretary")
+        self.v.managed_required = lambda: ["dt-worker", "dt-secretary"]
+        self.v.account_exists = lambda u: u == "dt-worker"
+        with self.assertRaises(self.v.Incomplete):     # 门卫管着秘书，却找不到秘书：不完整，不是跳过
+            self.v.managed_accounts()
 
     def test_bind_errors_recorded(self):
         """L3 第 4 轮 P2-08：开不了靶子的地址不再静默跳过。地址不在本机（EADDRNOTAVAIL）记下跳过，别的错算测试不完整。"""
