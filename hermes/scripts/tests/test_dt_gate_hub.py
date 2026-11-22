@@ -126,6 +126,21 @@ class FakeHost(H.Host):
             return (0, f"state = running\n\tpid = {p.pid}") if p and p.poll() is None else (113, "not found")
         return 0, ""                            # enable / disable
 
+    def boot_sec(self):
+        return "1795000000"
+
+    def pf_apply(self, script):
+        """假门卫（#313 新版）：按标记在不在写状态 guard=yes / no；pf_fail 里还有次数就写 failed（模拟和定时 apply 撞车）。"""
+        d = Path(script).parent
+        self.calls.append(("pf_apply", str(script)))
+        if getattr(self, "pf_fail", 0):
+            self.pf_fail -= 1
+            (d / "pf-dt-worker.status").write_text("at=x state=failed reason=对不上 boot=1795000000\n")
+            return 1
+        guard = "yes" if os.path.lexists(d / "hub-in-gate") else "no"
+        (d / "pf-dt-worker.status").write_text(f"at=x state=ok enabled=yes boot=1795000000 guard={guard}\n")
+        return 0
+
     def stop_all(self):
         for label in list(self.procs):
             self.launchctl("bootout", f"system/{label}")
@@ -291,8 +306,9 @@ class ChecksTest(unittest.TestCase):
         root.mkdir()
         (root / "current.json").write_text(json.dumps({"node": str(self.d), "cli": str(self.d), "engine": {"commit": "e" * 40},
                                                        "repo": {"commit": "r" * 40, "dir": str(self.d)}}))
+        (self.d / "pf").mkdir()
         for k, v in {"DT_GATE_ROOT": root, "DT_GATE_SHARED": self.d / "shared/dt-gate", "DT_GATE_USERS": self.d / "users",
-                     "DT_GATE_ANY_COPY": "1"}.items():
+                     "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": self.d / "pf"}.items():
             p = mock.patch.dict(os.environ, {k: str(v)})
             p.start()
             self.addCleanup(p.stop)
@@ -610,6 +626,94 @@ class ChecksTest(unittest.TestCase):
             r = self.run_checks(self.snap())
             self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])
 
+    # ---------- 门卫监听者规则（#313） ----------
+    def pf(self, line, age=0):
+        f = Path(os.environ["DT_PF_DIR"]) / "pf-dt-worker.status"
+        f.write_text(line)
+        if age:
+            t0 = time.time() - age
+            os.utime(f, (t0, t0))
+
+    def test_guard_problem_judges_state_guard_freshness_and_boot(self):
+        ok = "at=x state=ok enabled=yes boot=1795000000 guard=yes\n"
+        self.pf(ok)
+        self.assertIsNone(H.pf_guard_problem(self.host, "yes"))
+        self.assertIn("guard=yes", H.pf_guard_problem(self.host, "no"))
+        for line, age, word in (("at=x state=failed boot=1795000000 guard=yes", 0, "不在生效"),
+                                (ok, 11 * 60, "没刷新"),
+                                ("at=x state=ok boot=1700000000 guard=yes", 0, "本次开机"),
+                                ("at=x state=ok guard=yes", 0, "本次开机"),
+                                ("at=x state=ok boot=1795000000", 0, "#313")):
+            with self.subTest(line=line):
+                self.pf(line, age)
+                self.assertIn(word, H.pf_guard_problem(self.host, "yes"))
+        self.pf("at=x state=ok enabled=yes boot=1795000000\n")                       # 旧版门卫不认标记：算关着
+        self.assertIsNone(H.pf_guard_problem(self.host, "no"))
+        (Path(os.environ["DT_PF_DIR"]) / "pf-dt-worker.status").unlink()
+        self.assertIn("读不到", H.pf_guard_problem(self.host, "no"))
+
+    def test_guard_on_writes_root_mark_and_retries_apply(self):
+        self.host.pf_fail = 2                                                         # 前两次和定时 apply 撞车
+        H.guard_on(self.host, "S")
+        mark = H.hub_mark()
+        self.assertEqual(mark.read_text(), "dt-gate S\n")
+        self.assertEqual(mark.stat().st_mode & 0o777, 0o644)
+        self.assertIn(str(mark), self.host.chowns)
+        self.assertEqual(len([c for c in self.host.calls if c[0] == "pf_apply"]), 3)
+        self.assertTrue(H.guard_off(self.host))
+        self.assertFalse(os.path.lexists(mark))
+        self.host.pf_fail = 3                                                         # 三次都撞：失败
+        with self.assertRaisesRegex(H.Stop, "guard=yes"):
+            H.guard_on(self.host, "S")
+        self.host.guard_fail.add(("root_path", os.environ["DT_PF_DIR"]))
+        with self.assertRaisesRegex(H.Stop, "只有 root 能改"):
+            H.guard_on(self.host, "S")
+
+    def test_guard_off_removes_a_symlink_itself_and_reports_failure(self):
+        target = self.d / "elsewhere"
+        target.write_text("keep")
+        H.hub_mark().symlink_to(target)
+        self.assertTrue(H.guard_off(self.host))
+        self.assertTrue(target.exists())
+        self.host.pf_fail = 3
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertFalse(H.guard_off(self.host))
+        self.assertIn("先不启用", out.getvalue())
+
+    def test_leftover_mark_blocks_preflight(self):
+        H.hub_mark().write_text("dt-gate old\n")
+        r = self.run_checks(self.snap())
+        self.assertEqual([m for m, ok in r.items() if not ok], [m for m in r if "门卫标记" in m])
+
+    def test_undo_turns_guard_off_before_starting_owner_hub(self):
+        """第 4b 步之后出错：先关监听者规则再启用主账号中台；关不掉就不启用。"""
+        order = []
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
+        H.hub_mark().write_text("dt-gate S\n")
+        real_apply = self.host.pf_apply
+        self.host.pf_apply = lambda script: (order.append("pf_apply"), real_apply(script))[1]
+        with mock.patch.object(H, "start_owner_agent", lambda *a: order.append("start")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertTrue(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S",
+                                   {"stopped": True, "guard_on": True}))
+            self.assertEqual(order, ["pf_apply", "start"])
+            order.clear()
+            H.hub_mark().write_text("dt-gate S\n")
+            self.host.pf_fail = 3
+            self.assertFalse(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S",
+                                    {"stopped": True, "guard_on": True}))
+            self.assertNotIn("start", order)
+
+    def test_rotate_worker_needs_guard_loaded_not_just_the_rule_line(self):
+        pfd = Path(os.environ["DT_PF_DIR"])
+        (pfd / "pf-dt-worker.rules").write_text("block return in quick proto tcp from any to 127.0.0.1 port 3350 user != dt-gate\n")
+        self.pf("at=x state=ok enabled=yes boot=1795000000 guard=no\n")
+        with self.assertRaisesRegex(H.Stop, "没在生效"):
+            H.pf_listener_rule(self.host)
+        self.pf("at=x state=ok enabled=yes boot=1795000000 guard=yes\n")
+        H.pf_listener_rule(self.host)
+
     def test_live_run_card_and_unpaused_dispatch_block(self):
         r = self.run_checks(self.snap(live_runs=1, live_cards=2, pauses=[]))
         bad = [m for m, ok in r.items() if not ok]
@@ -711,8 +815,10 @@ class MigrateEndToEndTest(unittest.TestCase):
         env = {"DT_GATE_ROOT": d / "Library/DigitalTwin/gate", "DT_GATE_SHARED": d / "Shared/dt-gate",
                "DT_GATE_LOGS": d / "Library/Logs/DigitalTwin/gate", "DT_GATE_DAEMONS": d / "LaunchDaemons",
                "DT_GATE_READONLY_PORT": self.ports["ro"], "DT_GATE_INTAKE_PORT": self.ports["in"],
-               "DT_GATE_USERS": d / "Users", "DT_GATE_ANY_COPY": "1"}
+               "DT_GATE_USERS": d / "Users", "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": d / "pf",
+               "DT_GATE_LAUNCHERS": d / "launchers"}
         (d / "Library/DigitalTwin").mkdir(parents=True)
+        (d / "pf").mkdir()
         (d / "Library/Logs").mkdir(parents=True)
         p = mock.patch.dict(os.environ, {k: str(v) for k, v in env.items()})
         p.start()
@@ -891,10 +997,10 @@ class MigrateEndToEndTest(unittest.TestCase):
         wcfg.write_text(json.dumps({"url": self.url, "worker": {"name": "dt-worker", "key": "old"}}))
         old_hash = self.keys(ghub)["worker:dt-worker"]
         pf = self.d / "pf"
-        pf.mkdir()
-        (pf / "pf-dt-worker.status").write_text("at=x state=ok enabled=yes\n")
+        self.assertTrue((pf / "hub-in-gate").exists())                              # 搬家第 4b 步打开了监听者规则
+        self.assertIn("guard=yes", (pf / "pf-dt-worker.status").read_text())
         (pf / "pf-dt-worker.rules").write_text("pass out quick inet proto tcp from any to 127.0.0.1 port { 3350 } user dt-worker\n")
-        with mock.patch.dict(os.environ, {"DT_PF_DIR": str(pf)}):
+        if True:
             self.assertEqual(self.main("rotate-worker", "--confirm"), 1)            # 门卫还没按监听账号保护 3350：不换
             self.assertIn("监听账号", self.out.getvalue())
             self.assertEqual(self.keys(ghub)["worker:dt-worker"], old_hash)
@@ -915,6 +1021,8 @@ class MigrateEndToEndTest(unittest.TestCase):
 
         # 回滚
         self.assertEqual(self.main("rollback", "--confirm"), 0, self.out.getvalue())
+        self.assertFalse(os.path.lexists(self.d / "pf/hub-in-gate"))                 # 先关门卫监听者规则再放回
+        self.assertIn("guard=no", (self.d / "pf/pf-dt-worker.status").read_text())
         for label in H.LABEL.values():
             self.assertNotIn(label, self.host.procs)
             self.assertFalse((H.daemons() / f"{label}.plist").exists())

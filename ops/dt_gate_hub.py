@@ -198,6 +198,23 @@ class Host:
     def sleep(self, s):
         time.sleep(s)
 
+    def boot_sec(self):
+        """本次开机时间（kern.boottime 的秒），读不到返回 None。"""
+        try:
+            out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                                 timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        m = re.search(r"\bsec\s*=\s*(\d+)", out)
+        return m.group(1) if m else None
+
+    def pf_apply(self, script):
+        """跑 root 副本的门卫脚本 apply（0E-1 dt_worker_pf.sh）；返回退出码，结果以状态文件为准。"""
+        try:
+            return subprocess.run(["/bin/bash", str(script), "apply"], capture_output=True, timeout=120).returncode
+        except (OSError, subprocess.SubprocessError):
+            return 127
+
 
 # ---------- 小工具 ----------
 def write_root_file(path, data, mode=0o644):
@@ -654,6 +671,7 @@ def checks(host, a, migrating=True):
     check(not (gate_root() / "migrating.json").exists(), "没有搬到一半的记录（有的话先跑 rollback --confirm 收拾）")
     check(load_state() is None, "还没搬过（gate/state.json 不存在）")
     check(not exists_as(host, gate, gate_paths(host)["hub"]), f"{gate} 里还没有中台目录")
+    check(not os.path.lexists(hub_mark()), f"没有上次留下的门卫标记 {hub_mark()}（有就是上次没收干净，先 rollback --confirm）")
     hub = owner_hub(host, a.owner_account)
     check(exists_as(host, a.owner_account, owner_agent_plist(host, a.owner_account)),
           f"主账号的中台 LaunchAgent（{OWNER_AGENT}.plist）在")
@@ -865,7 +883,8 @@ class Progress:
     def __init__(self, stamp, owner_account):
         self.f = gate_root() / "migrating.json"
         self.data = {"stamp": stamp, "owner_account": owner_account,
-                     "done": {"held": False, "stopped": False, "gate_hub": False, "daemon": False, "moved": False}}
+                     "done": {"held": False, "stopped": False, "gate_hub": False, "daemon": False, "guard_on": False,
+                              "moved": False}}
         write_json(self.f, self.data)
 
     def mark(self, step):
@@ -978,6 +997,10 @@ def cmd_migrate(host, a):
         if diff:
             raise Stop(f"搬过去以后对不上：{diff}（有到期的定时项被补跑时会这样，退回后再搬一次）")
 
+        say("4b. 打开门卫监听者规则（3350 / 3352 / 3353 只放行 dt-gate 在听的）")
+        prog.mark("guard_on")                            # 先记：标记写了还没来得及记，退回时照样删
+        guard_on(host, stamp)
+
         say("5. 删掉主账号见过的钥匙")
         keep = [f"owner:{owner_name}"]
         if f"worker:{worker_account()}" in after["keys"]:
@@ -1043,7 +1066,10 @@ def undo(host, current, owner_account, stamp, done):
         state = gate_root() / "state.json"
         if state.exists():
             os.replace(state, gate_root() / f"state.undone-{stamp}.json")
-    if done.get("stopped"):
+    guard_ok = True
+    if done.get("guard_on"):                             # 先关门卫监听者规则，再启用主账号中台（#313）
+        guard_ok = guard_off(host)
+    if done.get("stopped") and guard_ok:
         start_owner_agent(host, owner_account)
     # 核结果（复核 P2-c）：主账号中台目录回来了、dt-gate 的中台目录已挪开、服务卸了
     ok = True
@@ -1056,6 +1082,7 @@ def undo(host, current, owner_account, stamp, done):
     if done.get("daemon") and installed("hub"):
         say(f"  {LABEL['hub']} 没有卸掉")
         ok = False
+    ok = ok and guard_ok
     if done.get("held"):                                 # 别的都放回去了才结束停写；没放回的保持停写，rollback 再收拾
         if not ok:
             say("  主账号控制面保持停写，等上面的收拾好再结束（rollback --confirm）")
@@ -1105,28 +1132,99 @@ def cmd_windows(host, a):
     return 0
 
 
-def pf_listener_rule():
-    """换工人钥匙的前提：门卫规则已按监听账号放行 3350（只有 dt-gate 在听的才收），否则中台重启的空档里新钥匙照样
-    能被抢绑端口的冒充者拿走（复核：pf 规则要和换钥匙、恢复派单定好先后）。规则由 0E-1 的 dt_worker_pf.sh 生成。"""
-    d = Path(os.environ.get("DT_PF_DIR") or "/Library/Application Support/DigitalTwin")
+# ---------- 门卫监听者规则（0E-1 #313：3350 / 3352 / 3353 只放行 dt-gate 在听的） ----------
+# 规则由 root 写的标记 hub-in-gate 控制：中台搬进 dt-gate 之后才打开（标记在 → apply 加上规则、状态写 guard=yes），
+# 回滚时先关（删标记 → apply、guard=no）再启用主账号中台，反过来主账号中台起来后谁都连不上它。pf 认的是建套接字时的
+# 身份：三个端口都由 dt-gate 的进程自己绑（本脚本装的服务都是 UserName dt-gate、不用 launchd 的 Sockets）。
+PF_STALE_SECONDS = 10 * 60
+PF_APPLY_TRIES = 3
+
+
+def pf_dir():
+    return env_path("DT_PF_DIR", "/Library/Application Support/DigitalTwin")
+
+
+def hub_mark():
+    return pf_dir() / "hub-in-gate"
+
+
+def pf_guard_problem(host, want):
+    """门卫状态不是「state=ok、guard=<want>、10 分钟内写的、本次开机写的」就返回原因，是就返回 None。"""
+    f = pf_dir() / "pf-dt-worker.status"
     try:
-        status = (d / "pf-dt-worker.status").read_text(encoding="utf-8")
-        rules = (d / "pf-dt-worker.rules").read_text(encoding="utf-8")
+        text = f.read_text(encoding="utf-8")
+        age = time.time() - f.stat().st_mtime
     except OSError:
-        raise Stop("读不到门卫规则（pf-dt-worker.status / .rules）")
-    if "state=ok" not in status.split():
-        raise Stop("门卫规则不在生效（状态不是 state=ok）")
+        return "读不到门卫状态（pf-dt-worker.status）"
+    fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
+    if fields.get("state") != "ok":
+        return f"门卫规则不在生效（state={fields.get('state') or '?'}）"
+    if fields.get("guard") != want and not (want == "no" and "guard" not in fields):   # 旧版门卫不认标记，等于关着
+        return f"门卫监听者规则是 guard={fields.get('guard') or '没有'}，要 guard={want}（门卫是不是还没装 #313 的新版）"
+    if not 0 <= age <= PF_STALE_SECONDS:
+        return f"门卫状态 {int(age // 60)} 分钟没刷新"
+    boot = host.boot_sec()
+    if not boot or fields.get("boot") != boot:
+        return "门卫状态不是本次开机写的（或读不到开机时间）"
+    return None
+
+
+def pf_apply(host, want):
+    """让门卫按现在的标记重新加载，直到状态是 guard=<want>；和定时 apply 撞上会判 failed，隔 2 秒再来，最多 3 次。"""
+    prob = None
+    for i in range(PF_APPLY_TRIES):
+        host.pf_apply(pf_dir() / "dt_worker_pf.sh")
+        prob = pf_guard_problem(host, want)
+        if prob is None:
+            return
+        if i < PF_APPLY_TRIES - 1:
+            host.sleep(2)
+    raise Stop(f"门卫监听者规则没切到 guard={want}：{prob}")
+
+
+def guard_on(host, stamp):
+    """写标记（root:wheel 644，同目录临时文件 O_EXCL|O_NOFOLLOW 再改名）、apply，核 guard=yes。"""
+    if host.guard("root_path", str(pf_dir())) != 0:
+        raise Stop(f"{pf_dir()} 不是从 / 起只有 root 能改的目录，不写门卫标记")
+    write_root_file(hub_mark(), f"{gate_account()} {stamp}\n".encode(), 0o644)
+    host.chown(hub_mark(), 0, 0)
+    pf_apply(host, "yes")
+
+
+def guard_off(host):
+    """删标记（不在也算成功；是链接就删链接本身）、apply，核 guard=no。成功返回 True，失败说清原因返回 False。"""
+    try:
+        if os.path.lexists(hub_mark()):
+            os.unlink(hub_mark())
+        pf_apply(host, "no")
+        return True
+    except (OSError, Stop) as e:
+        say(f"  门卫监听者规则没关掉：{e}；关掉之前主账号中台起来也没人连得上，先不启用它")
+        return False
+
+
+def pf_listener_rule(host):
+    """换工人钥匙的前提：门卫规则已按监听账号放行 3350（只有 dt-gate 在听的才收），否则中台重启的空档里新钥匙照样
+    能被抢绑端口的冒充者拿走（复核：pf 规则要和换钥匙、恢复派单定好先后）。规则文件里有这一行不等于已经加载生效：
+    再核状态 guard=yes、够新、本次开机写的（#313）。"""
+    try:
+        rules = (pf_dir() / "pf-dt-worker.rules").read_text(encoding="utf-8")
+    except OSError:
+        raise Stop("读不到门卫规则（pf-dt-worker.rules）")
     pat = re.compile(rf"^\s*(pass|block)\b.*\bin\b.*\b3350\b.*\buser\b.*{re.escape(gate_account())}", re.M)
     if not pat.search(rules):
         raise Stop("门卫规则还没按监听账号保护 3350（要 0E-1 的 dt_worker_pf.sh 加上「3350 只收 dt-gate 在听的」）；"
                    "装上之前换工人钥匙没用，先不换")
+    prob = pf_guard_problem(host, "yes")
+    if prob:
+        raise Stop(f"门卫监听者规则没在生效：{prob}；先不换")
 
 
 def cmd_rotate_worker(host, a):
     if not a.confirm:
         raise Stop("换钥匙后 dt-worker 的接单程序要重启才接得上：确认后加 --confirm")
     s, current = need_state(), load_current()
-    pf_listener_rule()
+    pf_listener_rule(host)
     gp = gate_paths(host)
     w = host.account(worker_account())
     cfg = Path(w["home"]) / ".agent-autoloop/config.json"
@@ -1261,9 +1359,11 @@ def cmd_rollback(host, a):
             run_cli(host, current, gate, gp["hub"], ["backup", str(gp["home"] / f".agent-autoloop-rollback-{stamp}")])
         except Stop as e:
             say(f"  备份没做成（{e}），继续回滚；dt-gate 的中台目录整个改名留着")
-    say("2. 停掉 dt-gate 的三个服务")
+    say("2. 停掉 dt-gate 的三个服务，关掉门卫监听者规则")
     for which in ("intake", "readonly", "hub"):
         remove_daemon(host, which)
+    if not guard_off(host):                              # 关掉之前不动目录、不启用主账号中台；再跑一次 rollback 接着来
+        raise Stop("门卫监听者规则没关掉（见上），没有放回主账号中台；看清原因后再跑一次 rollback --confirm")
     host.as_user(gate, ["/bin/mv", "-n", str(gp["hub"]), str(gp["hub"]) + f".rolled-back-{stamp}"])
     say("3. 主账号的中台放回去、重新启用")
     code, _, err = host.as_user(s["owner_account"], ["/bin/mv", "-n", s["owner_moved"], s["owner_hub"]])
