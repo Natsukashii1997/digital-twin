@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
+import contextlib
 import datetime as dt
+import io
 import json
 import os
 import pwd
@@ -599,29 +601,39 @@ class Cli(unittest.TestCase):
         self.assertIn("托管单 2026-11-21-1300 结束了，可是一次都没发到飞书", r.stdout)
         self.assertEqual(len(self.calls("+messages-send")), 1)
 
-    def test_sheet_with_a_missing_or_wrong_field_is_not_treated_as_clean(self):
-        # L3 审查第 4 轮 P1-07：sheet.json 是合法 JSON、version 也对，但少了 dirty / sending 这类字段：
-        # 以前补成「没改动」「没在发」就放行了。缺了、类型不对、单号和目录对不上，都拒绝，不补默认值
+    def ended_clean(self):
+        """一张干干净净结束、本来可以开下一张的单子（两件要他做的事、一批提醒、一条正在办、一句记过的回话）。
+        返回 sheet.json 的路径、内容，和一个检查：把文件改成这样，开下一张（every=True 时别的命令也）必须拒绝、不抛栈。"""
         self.open_sheet()
         self.ok("push")
         self.ask(task="数字分身 · 合并官")
         self.ok("doing", "--item", "磁盘瘦身 · 第三批｜清工作目录｜在核对")
         self.ok("push", now=LATER)
+        self.say("om_a", "① 删掉")
+        version = json.loads(self.ok("replies"))[0]["version"]
+        self.ok("ack", "om_a", "--version", version, "--result", "已删掉")
         self.ok("end", now="2026-11-21T12:50:00+08:00")
-        self.ok("push", now="2026-11-21T12:50:00+08:00")                  # 上一张干干净净结束了，本来可以开下一张
+        self.ok("push", now="2026-11-21T12:50:00+08:00")
         path = self.dir / "2026-11-21-1200" / "sheet.json"
         good = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(sorted(good), sorted(list(A.SHAPE) + ["version"]))   # 脚本自己写出来的正好是这些字段
-        self.assertEqual((good["dirty"], good["sending"], len(good["reminders"])), (False, None, 1))
+        self.assertEqual((good["dirty"], good["sending"], len(good["reminders"]), list(good["acks"])), (False, None, 1, ["om_a"]))
 
         def refused(broken, word, every=False):
             path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
-            more = [self.run_script("show"), self.run_script("push", now=LATER)] if every else []   # 别的命令也不认这张单子
+            more = [self.run_script(c, now=LATER) for c in ("show", "push", "replies", "build")] if every else []
             for r in [self.next_sheet()] + more:
                 self.assertEqual((r.returncode, r.stderr), (1, ""), word)
                 self.assertIn("缺字段或者不对", r.stdout)
                 self.assertIn(f"（{word}" if word in A.SHAPE else word, r.stdout)
+            self.assertEqual(sorted(d.name for d in self.dir.iterdir() if d.is_dir()), ["2026-11-21-1200"])   # 一张都没多开
 
+        return path, good, refused
+
+    def test_sheet_with_a_missing_or_wrong_field_is_not_treated_as_clean(self):
+        # L3 审查第 4 轮 P1-07：sheet.json 是合法 JSON、version 也对，但少了 dirty / sending 这类字段：
+        # 以前补成「没改动」「没在发」就放行了。缺了、类型不对、单号和目录对不上，都拒绝，不补默认值
+        path, good, refused = self.ended_clean()
         for key in A.SHAPE:                                               # 每个字段缺了都不行
             refused({k: v for k, v in good.items() if k != key}, key, every=key in ("dirty", "sending"))
         for key, value in (("dirty", None), ("dirty", 0), ("rev", True), ("rev", "3"), ("sending", False), ("reminders", {}),
@@ -641,7 +653,83 @@ class Cli(unittest.TestCase):
         refused(dict(good, rows=["一行字"]), "rows[0].（不是一条记录）")
         refused(dict(good, reminders=[{k: v for k, v in good["reminders"][0].items() if k != "message_id"}]), "reminders[0].message_id")
         refused(dict(good, doing=[{"task": "x"}]), "doing[0].about")
-        self.assertEqual(sorted(d.name for d in self.dir.iterdir() if d.is_dir()), ["2026-11-21-1200"])   # 一张都没多开
+        path.write_text(json.dumps(good, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
+
+    def test_state_whose_values_do_not_add_up_is_refused(self):
+        # L3 审查第 5 轮 P1-07 问题 3、P2-11：字段都在、类型也对，可这些值合在一起不是脚本会写出来的状态
+        # （写着已推到却没有消息号、提醒标成「不用发」可事还没办完、办完时间是一串乱字……）。
+        # 开单的门、认领、对账、读回话都会把这些值当真，所以读单子时就拒绝，所有命令一句话报错、不抛栈
+        path, good, refused = self.ended_clean()
+
+        def row(i, **change):
+            return dict(good, rows=[dict(r, **change) if j == i else r for j, r in enumerate(good["rows"])])
+
+        def batch(**change):
+            return dict(good, reminders=[dict(good["reminders"][0], **change)])
+
+        def ack(**change):
+            return dict(good, acks={"om_a": dict(good["acks"]["om_a"], **change)})
+
+        r = self.run_script("show")                                        # 对照：没动过的时候读得了
+        self.assertEqual(r.returncode, 0, r.stdout)
+        path.write_text(json.dumps(dict(good, version=True), ensure_ascii=False), encoding="utf-8")
+        self.assertIn("不是这个脚本写的格式", self.next_sheet().stdout)      # True == 1，也不算第 1 版
+        # 「已推到飞书」必须真有消息号、推送时间、版本号
+        refused(dict(good, message_id=None, reminders=[], rows=[dict(x, notified=False) for x in good["rows"]]),
+                "写着已经推到飞书", every=True)
+        refused(dict(good, pushed_at=None), "写着已经推到飞书")
+        refused(dict(good, rev=0), "写着已经推到飞书")
+        for bad_id in ("", "abc", "om_"):
+            refused(dict(good, message_id=bad_id), "message_id")
+        refused(dict(good, chat_id="x"), "chat_id")
+        refused(dict(good, pushed_at="刚才"), "pushed_at")
+        refused(dict(good, rev=-1), "rev")
+        # 提醒：「不用发」只能是 true / false，而且那批的事得真的都办完了；消息号、编号、时间都得是正经的值
+        refused(batch(message_id=None, dropped="false"), "reminders[0].dropped", every=True)
+        done = row(1, done_at="2026-11-21T12:46:00+08:00", result="办了")       # 那批的事真办完了，"false" 也不是正经的标记
+        refused(dict(done, reminders=[dict(good["reminders"][0], message_id=None, dropped="false")]), "reminders[0].dropped")
+        refused(batch(message_id=None, dropped=True), "这批的事还没办完，不能标成不用发")
+        refused(batch(dropped=True), "发到了又标成不用发")
+        for bad_id in ("sent", ""):
+            refused(batch(message_id=bad_id), "reminders[0].message_id")
+        for bad_asks in ([True], [], ["2"], [0]):
+            refused(batch(asks=bad_asks), "reminders[0].asks")
+        refused(batch(asks=[9]), "没有第 9 件")
+        refused(batch(tried="刚才"), "reminders[0].tried", every=True)
+        refused(batch(also="om_x"), "reminders[0].also", every=True)
+        refused(batch(also=["x"]), "reminders[0].also")
+        refused(batch(message_id=None, also=["om_x"]), "却记着重复的那几句")
+        refused(batch(batch=5), "批次号和先后对不上")
+        refused(row(1, notified=False), "这批的事没标成提醒过")
+        # 要他做的事：办完时间得是时间，和结果要么都有要么都没有；编号是正整数、不重复
+        refused(row(0, done_at="not-a-time"), "rows[0].done_at", every=True)
+        refused(row(0, done_at="not-a-time", result="办了"), "rows[0].done_at")   # 有结果也不行：随便一串字不能把事算成办完
+        refused(row(0, done_at="2026-11-21T12:45:00+08:00"), "办完时间和结果要么都有")
+        refused(row(0, result="已删掉"), "办完时间和结果要么都有")
+        refused(row(0, n=True), "rows[0].n")
+        refused(row(0, n=0), "rows[0].n")
+        refused(row(1, n=1), "编号重了")
+        # 发送意图里的编号
+        send = {"first": NOON, "last": NOON, "asks": [1], "tries": 1}
+        unsent = dict(good, message_id=None, dirty=True, pushed_at=None, reminders=[], acks={},
+                      rows=[dict(x, notified=False) for x in good["rows"]])
+        refused(dict(unsent, sending=dict(send, asks=[True])), "sending.asks")
+        refused(dict(unsent, sending=dict(send, asks=[7])), "记着的编号单子上没有")
+        refused(dict(unsent, sending=dict(send, tries=0)), "sending.tries")
+        refused(dict(unsent, rows=[dict(good["rows"][0], notified=True)]), "单子还没发出去，却写着提醒过了")
+        refused(dict(unsent, reminders=good["reminders"]), "单子还没发出去，却有提醒")
+        # 回话的处理记录（P2-11）：每条都得是完整的一条
+        refused(dict(good, acks={"om_a": "已办"}), "acks[om_a].（不是一条记录）", every=True)
+        refused(dict(good, acks={"om_a": {k: v for k, v in good["acks"]["om_a"].items() if k != "version"}}), "acks[om_a].version", every=True)
+        refused(ack(version="abc"), "acks[om_a].version")
+        refused(ack(how="yes"), "acks[om_a].how")
+        refused(ack(was="不知道"), "acks[om_a].was")
+        refused(ack(at="刚才"), "acks[om_a].at")
+        refused(ack(result=" "), "acks[om_a].result")
+        refused(ack(was="edited"), "照办了的只能是")
+        refused(ack(version="missing"), "读不到的那句只能记成 dismiss")
+        refused(dict(good, acks={"x": good["acks"]["om_a"]}), "消息号不对")
         path.write_text(json.dumps(good, ensure_ascii=False), encoding="utf-8")
         self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
 
@@ -1094,6 +1182,150 @@ class Cli(unittest.TestCase):
         self.assertIn("**⏳ 正在办，不用你管**\n- **数字分身 · 秘书代批**（你不在时替你批小事的那套）：在审。\n- **数字分身 · 0D 恢复门**：在修。", seen)
         self.ok("doing")
         self.assertFalse(any("正在办" in s for s in texts(json.loads(self.ok("build")))))
+
+
+class Stop(BaseException):
+    """模拟进程在这里被杀掉：不是 Fail、也不是 Exception，脚本里哪个 except 都接不住。"""
+
+
+class Power(unittest.TestCase):
+    """程序断在两次存盘之间（L3 审查第 5 轮 P1-07）。别的测试注入的都是「命令失败」，这里是「前一步成功了、后一步没来得及」：
+    在同一个进程里跑脚本，轮到第 N 次写文件之前抛 Stop；N 从 1 试到这条命令写完为止，每个存盘点都断一次。
+    假飞书不去重（dedup=False）：断了以后再推，只要重发就真的多出一条，看得出来。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="dt-away-power-"))
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)], check=False)
+        self.who = self.tmp / "who"
+        self.who.mkdir()
+        for name, value in (("owner_open_id", OWNER), ("owner_chat_id", CHAT)):
+            (self.who / name).write_text(value + "\n", encoding="utf-8")
+            (self.who / name).chmod(0o600)
+        self.rounds = 0
+        self.fresh()
+        for name, value in (("OWNER_DIR", self.who), ("PAGE_MAX", 200)):
+            patch = mock.patch.object(A, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        for name in ("AWAY_DIR", "LARK", "NOW"):                          # fresh() 和 at() 里直接改，测完还原
+            self.addCleanup(setattr, A, name, getattr(A, name))
+
+    def fresh(self):
+        """换一套空的账本和空的假飞书。"""
+        self.rounds += 1
+        self.fake = self.tmp / f"fake-{self.rounds}"
+        self.fake.mkdir()
+        (self.fake / "lark-cli").write_text(FAKE, encoding="utf-8")
+        (self.fake / "lark-cli").chmod(0o755)
+        (self.fake / "ctl.json").write_text(json.dumps({"dedup": False}), encoding="utf-8")
+        self.dir = self.tmp / f"away-{self.rounds}"
+        A.AWAY_DIR, A.LARK = self.dir, str(self.fake / "lark-cli")
+
+    def at(self, hhmm, *args, cut=None):
+        """在 hhmm 这个时刻跑一条命令，返回（退出码，输出）。cut=N：轮到它第 N 次写文件之前断掉，断了返回（None, None）。"""
+        real, count, out = A.write_json, [0], io.StringIO()
+
+        def write(path, data):
+            count[0] += 1
+            if count[0] == cut:
+                raise Stop()
+            real(path, data)
+
+        A.NOW = f"2026-11-21T{hhmm}:00+08:00"
+        with mock.patch.object(A, "write_json", write), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                return A.main(list(args)), out.getvalue()
+            except Stop:
+                return None, None
+
+    def ok(self, hhmm, *args):
+        code, out = self.at(hhmm, *args)
+        self.assertEqual(code, 0, out)
+        return out.strip()
+
+    def chat(self):
+        p = self.fake / "chat.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+    def sheets(self):
+        return sorted(p.parent.name for p in self.dir.glob("*/sheet.json"))
+
+    def never_sent(self):
+        self.ok("12:00", "start", "--by", "Claude 会话「测试」")
+        self.ok("12:05", "ask", *[x for k, v in ASK.items() for x in ("--" + k, v)])
+        self.ok("12:30", "end")
+
+    def card_then_one_more(self):
+        self.ok("12:00", "start", "--by", "Claude 会话「测试」")
+        self.ok("12:05", "ask", *[x for k, v in ASK.items() for x in ("--" + k, v)])
+        self.ok("12:10", "push")                                          # ① 随卡片到了
+        self.ok("12:20", "ask", *[x for k, v in dict(ASK, task="数字分身 · 合并官").items() for x in ("--" + k, v)])
+        self.ok("12:30", "end")                                           # ② 是卡片发出之后冒出来的，要另发一句提醒
+
+    def test_push_cut_at_any_save_never_unlocks_the_next_sheet_and_recovers_without_repeats(self):
+        for case, prepare, reminders, waiting in (("一次都没发过", self.never_sent, 0, 1), ("卡片在，又冒出一件", self.card_then_one_more, 1, 2)):
+            n = 0
+            while True:
+                n += 1
+                self.fresh()
+                prepare()
+                if self.at("12:40", "push", cut=n)[0] is not None:        # 这条命令没写到第 n 次就做完了：存盘点都试过了
+                    break
+                with self.subTest(case=case, cut=n):
+                    self.assertIn("已结束", self.ok("12:41", "show"))      # 断在哪一步留下的状态，脚本自己都读得了
+                    code, out = self.at("12:41", "start", "--by", "下一张")
+                    self.assertEqual(code, 1, out)                        # 没完整送到，不开下一张
+                    self.assertIn("先 push", out)
+                    self.assertEqual(self.sheets(), ["2026-11-21-1200"])
+                    self.ok("12:50", "push")                              # 出路就是再 push：对账、补推、补提醒
+                    cards = [m for m in self.chat() if m["msg_type"] == "interactive"]
+                    said = [m for m in self.chat() if m["msg_type"] == "text"]
+                    self.assertEqual((len(cards), len(said)), (1, reminders))            # 卡片只有一张，提醒不多不少
+                    self.assertIn(f'<card title="托管结束｜还等你 {waiting} 件"', cards[0]["content"])
+                    self.assertTrue(cards[0]["content"].rstrip("</card>").rstrip().endswith("版"))
+                    if reminders:
+                        self.assertIn("②", said[0]["content"])
+                        self.assertEqual(said[0]["reply_to"], cards[0]["message_id"])
+                    self.assertEqual(self.ok("13:00", "start", "--by", "下一张"), "2026-11-21-1300")
+            self.assertGreaterEqual(n - 1, 5, case)                       # 确实切到了每个存盘点，不是一个都没切到
+
+    def test_start_cut_between_its_two_writes_stops_until_someone_checks(self):
+        # 开单先改 state.json、再写单子：断在中间，下次什么命令都读不到这张，start 也不再开，等人核对。
+        # 反过来写（先单子后指针）断了会留下一张没人管的单子，下次 start 看不见它、再开一张
+        self.never_sent()
+        self.ok("12:40", "push")
+        self.assertEqual(self.at("13:00", "start", "--by", "下一张", cut=1), (None, None))     # 一个字都没写就断了：和没跑一样
+        self.assertEqual((self.sheets(), json.loads((self.dir / "state.json").read_text())), (["2026-11-21-1200"], {"current": "2026-11-21-1200"}))
+        self.assertEqual(self.at("13:00", "start", "--by", "下一张", cut=2), (None, None))     # 改了指针、单子没写
+        self.assertEqual((self.sheets(), json.loads((self.dir / "state.json").read_text())), (["2026-11-21-1200"], {"current": "2026-11-21-1300"}))
+        code, out = self.at("13:05", "start", "--by", "下一张")
+        self.assertEqual(code, 1)
+        self.assertIn("没有 sheet.json", out)
+        self.assertIn("目录里最后一张是 2026-11-21-1200", out)             # 告诉人怎么恢复
+        for cmd in (["show"], ["push"], ["ask", *[x for k, v in ASK.items() for x in ("--" + k, v)]]):
+            code, out = self.at("13:05", *cmd)
+            self.assertEqual(code, 1, cmd)
+            self.assertIn("读不了", out)
+        self.assertEqual(self.sheets(), ["2026-11-21-1200"])
+        A.write_json(self.dir / "state.json", {"current": "2026-11-21-1200"})                   # 人核对过，改回上一张
+        self.assertEqual(self.ok("13:10", "start", "--by", "下一张"), "2026-11-21-1310")
+
+    def test_a_sheet_nobody_points_at_still_blocks_the_next_one(self):
+        # 账本里有一张没送达的单子、state.json 却指着别的（按旧的先后写单子时断了，或者指针被改回去了）：
+        # 开单看的是账本里的每一张，不只是指针指的那张
+        self.never_sent()
+        self.ok("12:40", "push")
+        self.ok("12:50", "start", "--by", "第二张")
+        self.ok("12:55", "ask", *[x for k, v in ASK.items() for x in ("--" + k, v)])
+        A.write_json(self.dir / "state.json", {"current": "2026-11-21-1200"})                   # 指针回到上一张，第二张没人管了
+        code, out = self.at("13:00", "start", "--by", "第三张")
+        self.assertEqual(code, 1)
+        self.assertIn("托管单 2026-11-21-1250 还没结束", out)
+        self.assertEqual(self.sheets(), ["2026-11-21-1200", "2026-11-21-1250"])
+        (self.dir / "2026-11-21-1250" / "sheet.json").write_text("{", encoding="utf-8")         # 那张读不了也一样不开
+        code, out = self.at("13:00", "start", "--by", "第三张")
+        self.assertEqual(code, 1)
+        self.assertIn("托管单 2026-11-21-1250 读不了", out)
 
 
 if __name__ == "__main__":

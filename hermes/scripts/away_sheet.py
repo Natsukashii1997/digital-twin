@@ -42,10 +42,16 @@ owner_open_id、owner_chat_id（twin_identity.py setup / setup-chat 写的）和
 和本项目其他脚本一样，真隔离要等独立账号（ADR-015）。
 
 开单（P1-07）：只有从没开过单（state.json 不存在、目录里也没有以前的单子）才算第一张；state.json 或上一张单子
-读不了、格式不对，都拒绝开新的。上一张没结束、发卡片结果不明、结束状态没推到（一次都没发出去过的也算：
-哪怕是张空单，也要 push 一次让他收到「托管结束」）、还有提醒没确认发到，也都不开，出路都是先 push。
-读单子时逐项核这一版该有的字段和类型（SHAPE 等），单号要和所在目录一致；缺了、不对都拒绝，不补默认值
-（缺 dirty 补成「没改动」、缺 sending 补成「没在发」就等于放行）。
+读不了、格式不对，都拒绝开新的。开下一张只问一个判定 undelivered()：账本里每一张单子（不只 state.json 指的那张）
+都要完整送到他手里——结束了、卡片发出去了而且回读确认是最后一版（一次都没发出去过的也算没送到：哪怕是张空单，
+也要 push 一次让他收到「托管结束」）、新冒出的事都记了提醒、每批提醒都确认发到了；差哪一样都不开，出路都是先 push。
+这几条对着 push 里每次存盘之后可能断掉的地方：程序断在哪两步之间，都有一条拦得住（测试里每个存盘点都断过一次）。
+开单自己是先改 state.json、再写单子：断在中间，所有命令都读不到这张、start 也拒绝，等人核对后把 state.json 改回去；
+反过来写会留下一张没人管的单子。
+读单子时分两层核（flaws）：先逐项核这一版该有的字段和类型（SHAPE 等，含每行、每批提醒、每条回话记录），单号要和
+所在目录一致，时间、消息号、编号是正经的值；再核这些值合在一起是不是脚本真会写出来的状态（写着已推到就得有消息号、
+推送时间和版本号；提醒标成「不用发」得那批的事真办完了；办完时间和结果要么都有要么都没有……）。缺了、不对、
+讲不通都拒绝，不补默认值、不自动修（缺 dirty 补成「没改动」、缺 sending 补成「没在发」就等于放行）。
 
 发卡片（P1-02）：发之前先把「要发」记进单子；发了却没拿到消息号算结果不明，这张单子冻结：不能开下一张，
 下次 push 先去飞书找（机器人发的卡片，标题是「托管流水｜」或「托管结束｜」开头，最后一行带这张单子的单号；
@@ -120,6 +126,9 @@ DOING = {"task": str, "about": str, "text": str}
 ROW = {"done": {"at": str, "project": str, "text": str}, "note": {"at": str, "text": str},
        "ask": dict({"at": str, "n": int, "done_at": (str, NONE), "result": (str, NONE), "notified": bool},
                    **{k: str for k in ASK_FIELDS})}
+ACK = {"version": str, "at": str, "result": str, "how": str, "was": str}       # acks 里每句话的处理记录（settle 写的）
+WAS = ("pending", "edited", "recalled", "other_type", "edited_after_ack", "recalled_after_ack", "missing_after_ack")
+VERSION = re.compile(r"[0-9a-f]{12}")                # look() 给的版本指纹
 TITLE = re.compile(r'<card title="托管(流水|结束)｜')      # 飞书回读里托管单的开头：build_card 只出这两种标题
 HOW = "要回话：引用这张单子，写上编号和你的选择，可以一次回完几件。"
 HOW_ENDED = "托管已经结束，这张单子不再更新，引用它回话也没人接。还等你的事，请到 Claude 里对应的会话办。"
@@ -207,7 +216,7 @@ def load(sheet_id=None):
         sheet = json.loads((base() / sheet_id / "sheet.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise Fail(f"托管单 {sheet_id} 读不了")
-    if not isinstance(sheet, dict) or sheet.get("version") != 1:
+    if not isinstance(sheet, dict) or type(sheet.get("version")) is not int or sheet["version"] != 1:
         raise Fail(f"托管单 {sheet_id} 不是这个脚本写的格式")
     bad = flaws(sheet, sheet_id)
     if bad:                                # 缺了的不补默认值：补成「没在发、没改动」就等于放行（L3 审查 P1-07）
@@ -222,34 +231,131 @@ def wrong(d, shape):
 
 def is_time(s):
     try:
-        return at(s) is not None
+        return isinstance(s, str) and at(s) is not None
     except (TypeError, ValueError):
         return False
 
 
+def is_mid(s):
+    return isinstance(s, str) and MESSAGE_ID.fullmatch(s) is not None
+
+
+def numbers(x):
+    """是不是一串正整数编号（True 不算 1）。"""
+    return isinstance(x, list) and all(type(n) is int and n > 0 for n in x)
+
+
 def flaws(sheet, sheet_id):
-    """这张单子哪里不完整、不对；没有就是空的。单号要和所在目录（也就是 state.json 指的那张）一致。"""
+    """这张单子哪里不完整、讲不通；没有就是空的（L3 审查 P1-07、P2-11）。分两层：
+    先核每个字段在不在、类型对不对；都对了再核这些值合在一起是不是脚本真的会写出来的状态
+    （写着「已推到」却没有消息号、提醒标了「不用发」可那批的事还没办完，这类单看类型看不出来）。
+    下面每一条都对着一处会把它当真的代码：开单的门、认领、对账、读回话。脚本自己的每一步存盘都过得了这里。"""
     bad = wrong(sheet, SHAPE)
     if bad:
         return bad
     if sheet["id"] != sheet_id:
         return ["id（和所在目录的单号不一样）"]
-    times = [("started_at", sheet["started_at"])] + ([("ended_at", sheet["ended_at"])] if sheet["ended_at"] is not None else [])
-    if sheet["sending"] is not None:
-        bad += [f"sending.{k}" for k in wrong(sheet["sending"], SENDING)]
-        times += [(f"sending.{k}", sheet["sending"].get(k)) for k in ("first", "last")]
-        if sheet["message_id"]:
-            bad.append("sending（已经有消息号了，还记着要发）")
-    if (sheet["message_id"] or sheet["sending"] is not None) and not sheet["chat_id"]:
+    bad = shapes(sheet)
+    return bad or sense(sheet)
+
+
+def shapes(sheet):
+    """第一层：嵌套的每一条记录字段齐、类型对、时间看得懂、消息号和编号是正经的值。"""
+    bad = [k for k in ("started_at", "ended_at", "pushed_at") if sheet[k] is not None and not is_time(sheet[k])]
+    bad += [k for k in ("message_id",) if sheet[k] is not None and not is_mid(sheet[k])]
+    if sheet["chat_id"] is not None and not sheet["chat_id"].startswith("oc_"):
+        bad.append("chat_id")
+    if sheet["rev"] < 0:
+        bad.append("rev")
+    send = sheet["sending"]
+    if send is not None:
+        bad += [f"sending.{k}" for k in wrong(send, SENDING)
+                or [k for k in ("first", "last") if not is_time(send[k])]
+                + ([] if numbers(send["asks"]) else ["asks"]) + ([] if send["tries"] >= 1 else ["tries"])]
+    for i, r in enumerate(sheet["rows"]):
+        shape = ROW.get(r.get("kind")) if isinstance(r, dict) and isinstance(r.get("kind"), str) else None
+        if not shape:
+            bad.append(f"rows[{i}].kind" if isinstance(r, dict) else f"rows[{i}].（不是一条记录）")
+            continue
+        miss = wrong(r, shape) or ([] if is_time(r["at"]) else ["at"])
+        if not miss and r["kind"] == "ask":
+            miss = ([] if r["n"] > 0 else ["n"]) + ([] if r["done_at"] is None or is_time(r["done_at"]) else ["done_at"])
+        bad += [f"rows[{i}].{k}" for k in miss]
+    for i, b in enumerate(sheet["reminders"]):
+        if not isinstance(b, dict):
+            bad.append(f"reminders[{i}].（不是一条记录）")
+            continue
+        miss = wrong(b, BATCH)
+        if not miss:
+            miss = ([] if is_time(b["at"]) else ["at"]) + ([] if numbers(b["asks"]) and b["asks"] else ["asks"]) \
+                + ([] if b["tried"] is None or is_time(b["tried"]) else ["tried"]) \
+                + ([] if b["message_id"] is None or is_mid(b["message_id"]) else ["message_id"]) \
+                + ([] if type(b.get("dropped", False)) is bool else ["dropped"]) \
+                + ([] if "also" not in b or (isinstance(b["also"], list) and b["also"] and all(is_mid(x) for x in b["also"])) else ["also"])
+        bad += [f"reminders[{i}].{k}" for k in miss]
+    for i, d in enumerate(sheet["doing"]):
+        bad += [f"doing[{i}].{k}" for k in (wrong(d, DOING) if isinstance(d, dict) else ["（不是一条记录）"])]
+    for mid, rec in sheet["acks"].items():
+        if not isinstance(rec, dict):
+            bad.append(f"acks[{mid}].（不是一条记录）")
+            continue
+        miss = wrong(rec, ACK)
+        if not miss:
+            miss = ([] if is_mid(mid) else ["（消息号不对）"]) + ([] if is_time(rec["at"]) else ["at"]) \
+                + ([] if rec["how"] in ("ack", "dismiss") else ["how"]) + ([] if rec["was"] in WAS else ["was"]) \
+                + ([] if rec["version"] == "missing" or VERSION.fullmatch(rec["version"]) else ["version"])
+        bad += [f"acks[{mid}].{k}" for k in miss]
+    return bad
+
+
+def sense(sheet):
+    """第二层：值合在一起讲不讲得通。"""
+    bad = []
+    sent = sheet["message_id"] is not None
+    if sheet["sending"] is not None and sent:
+        bad.append("sending（已经有消息号了，还记着要发）")
+    if (sent or sheet["sending"] is not None) and not sheet["chat_id"]:
         bad.append("chat_id（发过或者要发，却没记发到哪个会话）")
-    for name, pick in (("reminders", lambda x: BATCH), ("doing", lambda x: DOING),
-                       ("rows", lambda x: ROW.get(x.get("kind")) if isinstance(x.get("kind"), str) else None)):
-        for i, x in enumerate(sheet[name]):
-            shape = pick(x) if isinstance(x, dict) else None
-            bad += [f"{name}[{i}].{k}" for k in (wrong(x, shape) if shape else ["kind" if isinstance(x, dict) else "（不是一条记录）"])]
-            if shape and "at" in shape:
-                times.append((f"{name}[{i}].at", x.get("at")))
-    return bad + [k for k, v in times if k not in bad and not is_time(v)]
+    if not sheet["dirty"] and not (sent and sheet["pushed_at"] and sheet["rev"] >= 1):
+        bad.append("dirty（写着已经推到飞书，却没有消息号、推送时间或版本号）")
+    asks = {}
+    for i, r in enumerate(sheet["rows"]):
+        if r["kind"] != "ask":
+            continue
+        if r["n"] in asks:
+            bad.append(f"rows[{i}].n（编号重了）")
+        asks[r["n"]] = r
+        if (r["done_at"] is None) != (r["result"] is None) or (r["result"] is not None and not r["result"].strip()):
+            bad.append(f"rows[{i}].done_at（办完时间和结果要么都有、要么都没有）")
+        if r["notified"] and not sent:
+            bad.append(f"rows[{i}].notified（单子还没发出去，却写着提醒过了）")
+    if sheet["reminders"] and not sent:
+        bad.append("reminders（单子还没发出去，却有提醒）")
+    for i, b in enumerate(sheet["reminders"]):
+        if b["batch"] != i + 1:
+            bad.append(f"reminders[{i}].batch（批次号和先后对不上）")
+        gone = [n for n in b["asks"] if n not in asks]
+        if gone:
+            bad.append(f"reminders[{i}].asks（没有第 {gone[0]} 件）")
+        elif not all(asks[n]["notified"] for n in b["asks"]):
+            bad.append(f"reminders[{i}].asks（这批的事没标成提醒过）")
+        elif b.get("dropped") and any(is_open(asks[n]) for n in b["asks"]):
+            bad.append(f"reminders[{i}].dropped（这批的事还没办完，不能标成不用发）")
+        if b.get("dropped") and b["message_id"]:
+            bad.append(f"reminders[{i}].dropped（发到了又标成不用发）")
+        if "also" in b and not b["message_id"]:
+            bad.append(f"reminders[{i}].also（没有消息号，却记着重复的那几句）")
+    send = sheet["sending"]
+    if send is not None and [n for n in send["asks"] if n not in asks]:
+        bad.append("sending.asks（记着的编号单子上没有）")
+    for mid, rec in sheet["acks"].items():
+        if rec["how"] == "ack" and rec["was"] != "pending":
+            bad.append(f"acks[{mid}].was（照办了的只能是当时还没办、没改过的原话）")
+        if rec["version"] == "missing" and rec["how"] != "dismiss":
+            bad.append(f"acks[{mid}].version（读不到的那句只能记成 dismiss）")
+        if not rec["result"].strip():
+            bad.append(f"acks[{mid}].result")
+    return bad
 
 
 def save(sheet):
@@ -403,19 +509,18 @@ def start(by, now, raw_at=None):
     if not (by or "").strip():
         raise Fail("要写谁在托管（--by）")
     sheet_id = current_id()
-    if sheet_id is None and any(base().glob("*/sheet.json")):
+    known = sorted(p.parent.name for p in base().glob("*/sheet.json"))
+    if sheet_id is None and known:
         raise Fail("状态文件 state.json 不见了，可目录里有以前的单子：不知道上一张是哪张、推没推完，不开新的；"
                    "人工核对后把 state.json 恢复成 {\"current\": \"<单号>\"}")
-    last = load(sheet_id) if sheet_id else None    # 上一张读不了、格式不对都报错：状态不明不等于没有
-    if last and not last.get("ended_at"):
-        raise Fail(f"托管单 {last['id']} 还没结束，先 end（再 push 一次，把结束状态推到飞书）")
-    if last and last.get("sending"):       # 发了却没拿到消息号：飞书上可能已经有那张单子，先对清楚
-        raise Fail(f"托管单 {last['id']} 上次发卡片结果不明（飞书上可能已经有这张单子），先 push 对账")
-    if last and last["dirty"]:             # 一次都没发出去过的也算（P1-07）：不然结束了、常浩却没收到的那张就被悄悄丢下
-        raise Fail(f"托管单 {last['id']} " + ("的结束状态还没推到飞书" if last["message_id"] else "结束了，可是一次都没发到飞书")
-                   + "，先 push")
-    if last and any(not b.get("message_id") and not b.get("dropped") for b in last["reminders"]):
-        raise Fail(f"托管单 {last['id']} 还有提醒没确认发到，先 push")
+    if sheet_id and sheet_id not in known:     # 开单是先改 state.json 再写单子：断在中间就是这个样子（也可能是文件丢了）
+        raise Fail(f"state.json 指着托管单 {sheet_id}，可它没有 sheet.json：多半是上次开单写到一半断了，也可能是文件丢了，不开新的；"
+                   + (f"人工核对后把 state.json 改回上一张的单号（目录里最后一张是 {known[-1]}）" if known
+                      else "人工确认从没开过单后删掉 state.json") + "，再 start")
+    for one in ([sheet_id] if sheet_id else []) + [k for k in known if k != sheet_id]:
+        why = undelivered(load(one))       # 读不了、状态讲不通都报错：状态不明不等于没有。账本里每一张都要送达，不只当前这张
+        if why:
+            raise Fail(f"托管单 {one} {why}")
     t = when(raw_at, now)
     sheet_id = at(t).strftime("%Y-%m-%d-%H%M")
     if (base() / sheet_id / "sheet.json").exists():
@@ -423,9 +528,38 @@ def start(by, now, raw_at=None):
     sheet = {"version": 1, "id": sheet_id, "by": by.strip(), "started_at": t, "ended_at": None, "message_id": None,
              "chat_id": None, "sending": None, "rev": 0, "pushed_at": None, "dirty": True, "reminders": [], "acks": {},
              "rows": [], "doing": []}
-    save(sheet)
+    # 先改「当前是哪张」，再写单子：断在两步中间，下次所有命令都读不到这张、start 也拒绝，等人核对；
+    # 反过来写（先单子后指针）断了会留下一张没人管的单子，下次还悄悄再开一张（L3 审查第 5 轮 P1-07）
     write_json(base() / "state.json", {"current": sheet_id})
+    save(sheet)
     return sheet
+
+
+def waiting(b):
+    """这批提醒还没确认发到（发到了有消息号；那批的事都办完了就标 dropped，不用发）。"""
+    return not b["message_id"] and not b.get("dropped")
+
+
+def unnotified(sheet):
+    """卡片上有、他却还没被提醒到的事：新冒出要他做的，提醒还没记账。"""
+    return [r for r in sheet["rows"] if is_open(r) and not r["notified"]]
+
+
+def undelivered(sheet):
+    """这张单子还差什么才算完整送到常浩手里；None 就是都到了。开下一张只问这一个判定（P1-07）：
+    结束了、卡片发出去了而且回读确认是最后一版、新冒出的事都记了提醒、每批提醒都确认发到了。
+    每一条都对着 push 里一次存盘之后可能断掉的地方：断在哪一步，这里都有一条拦得住。"""
+    if not sheet["ended_at"]:
+        return "还没结束，先 end（再 push 一次，把结束状态推到飞书）"
+    if sheet["sending"]:                   # 发了却没拿到消息号：飞书上可能已经有那张单子，先对清楚
+        return "上次发卡片结果不明（飞书上可能已经有这张单子），先 push 对账"
+    if sheet["dirty"]:                     # 一次都没发出去过的也算：不然结束了、常浩却没收到的那张就被悄悄丢下
+        return ("的结束状态还没推到飞书" if sheet["message_id"] else "结束了，可是一次都没发到飞书") + "，先 push"
+    if unnotified(sheet):                  # 卡片回读对上了、提醒还没记账就断了：只看提醒批次看不出来
+        return "还有新冒出要他做的事没提醒到，先 push"
+    if any(waiting(b) for b in sheet["reminders"]):
+        return "还有提醒没确认发到，先 push"
+    return None
 
 
 def placed(sheet, t, ask=False):
@@ -649,7 +783,7 @@ def first_send(sheet, now, content, rec):
 
 def remind(sheet, now, rec, problems):
     """原地更新不弹通知，新冒出要他做的事（哪怕是结束时才冒出的）另发一句。按批记账：先记再发，结果不明的下次先对账。"""
-    fresh = [r for r in sheet["rows"] if is_open(r) and not r["notified"]]
+    fresh = unnotified(sheet)
     if fresh:
         names = "；".join(f"{num(r['n'])} {r['task']}｜{r['what']}" for r in fresh)
         sheet["reminders"].append({"batch": len(sheet["reminders"]) + 1, "asks": [r["n"] for r in fresh], "at": iso(now),
@@ -658,7 +792,7 @@ def remind(sheet, now, rec, problems):
         for r in fresh:
             r["notified"] = True
         save(sheet)
-    todo = [b for b in sheet["reminders"] if not b.get("message_id") and not b.get("dropped")]
+    todo = [b for b in sheet["reminders"] if waiting(b)]
     if not todo:
         return
     how = []
@@ -735,8 +869,7 @@ def push(sheet, now):
             sheet["dirty"] = False
             save(sheet)
             remind(sheet, now, rec, problems)      # 卡片确实是这一版了才提醒：不然他点回卡片看不到新加的事（P2-09）
-        elif any((is_open(r) and not r["notified"]) for r in sheet["rows"]) or any(
-                not b.get("message_id") and not b.get("dropped") for b in sheet["reminders"]):
+        elif unnotified(sheet) or any(waiting(b) for b in sheet["reminders"]):
             rec["remind"] = "held"         # 有提醒要发，但卡片没确认更新上去，先不发
         if problems:
             raise Fail(f"托管单已{'发' if rec['card'] == 'sent' else '更新'}（{sheet['message_id']}），但" + "；".join(problems))
@@ -874,8 +1007,8 @@ def show(sheet):
            + ("｜还没发" if not sheet.get("message_id") else f"｜上次推送 {sheet['pushed_at']}")
            + ("｜有改动还没推" if sheet.get("dirty") and sheet.get("message_id") else "")
            + ("｜上次发卡片结果不明，先 push 对账" if sheet.get("sending") else "")
-           + ("｜有提醒还没确认发到，再 push 一次" if any(
-               not b.get("message_id") and not b.get("dropped") for b in sheet["reminders"]) else "")]
+           + ("｜有新冒出的事还没提醒到，再 push 一次" if unnotified(sheet) and not sheet["dirty"] else "")
+           + ("｜有提醒还没确认发到，再 push 一次" if any(waiting(b) for b in sheet["reminders"]) else "")]
     for r in ordered(sheet):
         if r["kind"] == "ask":
             out.append(f"{hm(r['at'])} {num(r['n'])} {r['task']}｜{r['what']}　" + (f"办完：{r['result']}" if r["done_at"] else "等常浩"))
