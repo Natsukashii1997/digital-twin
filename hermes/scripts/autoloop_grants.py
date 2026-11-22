@@ -49,6 +49,7 @@
   autoloop_grants.py approve --message-id om_xxx          常浩回了「派单 <确认码>」后由猛鬼兽调用
   autoloop_grants.py resume-dispatch --task T --kind redispatch|rework|correction --reason 原因
   autoloop_grants.py freeze --task T --reason 原因 | revoke --task T [--reason] | complete --task T
+      命令行的 freeze / revoke 生效之后接着把中台里这张单排队、在跑的轮次取消（stop_runs；输出 runs_stopped / runs_stop_error）
   autoloop_grants.py unfreeze --message-id om_xxx        常浩私聊「恢复 <单号> <冻结码>」（要先记过更正）
   autoloop_grants.py check --task T --action edit --generation 1
   autoloop_grants.py show [--task T] | send-pending
@@ -800,6 +801,61 @@ def revoke(task_id, reason="常浩撤销", now=None, path=None):
     return _tighten(task_id, "revoked", "撤销", reason, now or now_tz(), path)
 
 
+RUN_LIVE = ("queued", "claimed")
+
+
+def stop_runs(task_id, now=None, path=None):
+    """停单之后，把中台里这张单还在排队、在跑的轮次取消（方案 5.1 第 4 条「撤销 … 并停掉正在跑的轮次」；规格 §8 推翻第 2 步
+    「网关取消正在跑的轮次」的前半，确认停下由调用方回读）。只对已经不能用的凭证做（冻结、撤销、完成、过期）：停单先在凭证库
+    生效，再来停轮次；凭证还有效的单不经这里停。
+    轮次按中台库里「事项 = 单号、规则 = 凭证里记的规则」找（只读打开中台库，和秘书控制面 hub_runs 同一个查法），取消走中台的
+    本人接口 POST /v1/runs/<号>/cancel：排队的直接取消；在跑的由接单程序停掉整个进程组后才算停下，这里不等它。
+    返回 {"stopped": [已发出取消的轮次号], "failed": {轮次号: 原因}}；中台库读不了抛 Rejected。停不成不影响已经生效的停单。"""
+    import autoloop_config as C            # 这两个脚本都 import 本脚本，所以在这里才导入
+    import autoloop_publish as P
+    now = now or now_tz()
+    with tx(path) as con:
+        row = grant_row(con, task_id)
+        if check_row(row, None, row["generation"], now, voided_of(con, task_id)) is None:
+            raise Rejected(f"{task_id} 的凭证还有效，不停它的轮次；要停先撤销或冻结")
+        rule = row["rule"]
+    try:
+        hub = P._hub()
+        try:
+            marks = ",".join("?" * len(RUN_LIVE))
+            ids = [r[0] for r in hub.execute(f"SELECT id FROM runs WHERE lane = ? AND rule = ? AND state IN ({marks}) "
+                                             "ORDER BY id", (task_id, rule, *RUN_LIVE))]
+        finally:
+            hub.close()
+    except sqlite3.Error as e:
+        raise Rejected(f"中台库读不了（{type(e).__name__}），没查到要停的轮次")
+    out = {"stopped": [], "failed": {}}
+    for rid in ids:
+        try:
+            C.hub("POST", f"/v1/runs/{rid}/cancel", {})
+            out["stopped"].append(rid)
+        except C.Rejected as e:
+            out["failed"][str(rid)] = str(e)
+    if ids:
+        with tx(path) as con:
+            log(con, task_id, "停轮次", now, stopped=out["stopped"], failed=sorted(out["failed"]))
+    return out
+
+
+def _stop_after(out, task_id):
+    """命令行的冻结、撤销做完之后接着停轮次，结果并进输出：runs_stopped（已发出取消的轮次号）；停不成写 runs_stop_error，
+    不改退出码（停单本身已经生效）。库函数 freeze / revoke 不自动停：推翻流程要自己分步做（规格 §8 第 1、2 步）。"""
+    try:
+        r = stop_runs(task_id)
+    except Rejected as e:
+        out["runs_stop_error"] = str(e)
+        return out
+    out["runs_stopped"] = r["stopped"]
+    if r["failed"]:
+        out["runs_stop_error"] = "；".join(f"轮次 {k}：{v}" for k, v in sorted(r["failed"].items()))
+    return out
+
+
 def complete(task_id, now=None, path=None):
     return _tighten(task_id, "done", "完成", "任务完成", now or now_tz(), path)
 
@@ -903,9 +959,9 @@ def main(argv=None):
         elif a.cmd == "resume-dispatch":
             out = resume_dispatch(a.task, a.kind, a.reason)
         elif a.cmd == "freeze":
-            out = freeze(a.task, a.reason)
+            out = _stop_after(freeze(a.task, a.reason), a.task)
         elif a.cmd == "revoke":
-            out = revoke(a.task, a.reason)
+            out = _stop_after(revoke(a.task, a.reason), a.task)
         elif a.cmd == "complete":
             out = complete(a.task)
         elif a.cmd == "check":
