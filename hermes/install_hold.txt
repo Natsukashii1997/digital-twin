@@ -16,6 +16,7 @@ hermes/scripts/custody.py @648658c0e795e1a6043abb4f85686051f84904e5  # 托管开
 hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_ledger.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_report.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
+hermes/scripts/openloop_ask_job.py  # 追问基线每周入口（#266 5a-4），合并后装、建定时任务时删掉这一行
 hermes/scripts/secretary.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_gate.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
 hermes/scripts/secretary_ledger.py  # 秘书代批（#195 0B-4），未签代批清单、未生效
