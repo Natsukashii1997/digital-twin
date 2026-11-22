@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).parent))
+from card_parts import grey, hr, md, panel, table  # noqa: E402  卡片零件（#333）：表格同个人项目日报速览表的写法
 import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 from feishu_home import home_chat  # noqa: E402
 
@@ -677,10 +678,6 @@ def refs_md(refs, links):
     return " ".join(f"[{r}]({links[r]})" if links.get(r) else r for r in refs)
 
 
-def md(content, **kw):
-    return {"tag": "markdown", "content": content, **kw}
-
-
 def title_of(day):
     return f"🧭 AI 前沿群学习报告 · {short_day(day)}"
 
@@ -715,14 +712,6 @@ def inline_code(snippet):
 def owner_tag(r):
     return ("<text_tag color='indigo'>Claude</text_tag>" if r.get("owner") == "claude"
             else "<text_tag color='neutral'>你</text_tag>")
-
-
-def table(cols, rows):
-    """飞书卡片表格（同个人项目日报速览表的写法）。cols = [(键, 列名, 宽度)]。"""
-    return {"tag": "table", "page_size": 10, "row_height": "auto", "row_max_height": "999px",
-            "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey", "bold": True, "lines": 1},
-            "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": w, "vertical_align": "top"}
-                        for k, n, w in cols], "rows": rows}
 
 
 ORIG_REFS = 3       # 每条信息的「原文与译文」面板最多放几条出处
@@ -770,12 +759,7 @@ def orig_panel(refs, mat, n):
     blocks = [b for b in (original_md(r, mat, n) for r in picked[:ORIG_REFS]) if b]
     if not blocks:
         return None
-    return {"tag": "collapsible_panel", "expanded": False, "background_color": "grey-50",
-            "border": {"color": "grey", "corner_radius": "6px"}, "padding": "4px 10px 8px 10px", "vertical_spacing": "8px",
-            "header": {"title": {"tag": "plain_text", "content": "原文与译文 · 展开"}, "width": "fill", "vertical_align": "center",
-                       "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "color": "grey", "size": "16px 16px"},
-                       "icon_position": "right", "icon_expanded_angle": -180},
-            "elements": [md(b) for b in blocks]}
+    return panel("原文与译文 · 展开", [md(b) for b in blocks])
 
 
 def dispatch_ask(mine):
@@ -808,17 +792,17 @@ def body(f, links, degraded=None, mat=None, orig=ORIG_CLIP):
             tag = " <text_tag color='green'>值得精读</text_tag>" if r.get("read") else ""
             # 常浩 11-16：去掉原话后要紧凑些。标题和正文放进同一列、行距 4px，出处接在正文末尾，条与条之间只留卡片默认间距
             # 常浩 11-17：每条下面放「原文与译文 · 展开」折叠面板，后面再跟原地址跳转
-            panel = orig_panel(r["refs"], mat, orig) if mat else None
+            folded = orig_panel(r["refs"], mat, orig) if mat else None   # 不叫 panel：那是 card_parts 的折叠面板零件
             parts = [md(f"<number_tag background_color='{COLOR['info']}' font_color='white'>{n}</number_tag> **{esc(r['title'])}**{tag}",
                         text_size="heading-4"), md(esc(r["detail"]))]
-            if panel:
-                parts.append(panel)
+            if folded:
+                parts.append(folded)
             parts.append(md(f"<font color='grey'>原地址</font> {refs_md(r['refs'], links)}", text_size="notation"))
             els.append({"tag": "column_set", "flex_mode": "none", "columns": [
                 {"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "4px", "elements": parts}]})
     # 常浩 11-17：思考采纳建议放在今日行动清单前面，派单提问放到卡片最后、要一眼看出是在问他
     if f["consider"] or f["todo"]:
-        els.append({"tag": "hr"})
+        els.append(hr())
     if f["consider"]:
         els += [head("🤔", "思考采纳建议", ADOPT_NOTE, COLOR["consider"]),
                 table([("i", "建议采纳", "36%"), ("y", "为什么", "24%"), ("q", "先想清楚", "24%"), ("w", "放哪", "16%")],
@@ -826,7 +810,7 @@ def body(f, links, degraded=None, mat=None, orig=ORIG_CLIP):
                         "q": f"*{esc(r['question'])}*", "w": esc(r["where"])} for r in f["consider"]])]
     if f["todo"]:
         if f["consider"]:
-            els.append({"tag": "hr"})   # 常浩 11-17：思考和行动之间也要分割线
+            els.append(hr())   # 常浩 11-17：思考和行动之间也要分割线
         els += [head("✅", "今日行动清单", "学完就能动手", COLOR["todo"]),
                 table([("t", "做什么", "42%"), ("w", "谁做 · 在哪", "18%"), ("m", "时长", "12%"), ("d", "做到什么算完", "28%")],
                       [{"t": f"**{n}. {esc(r['task'])}** {refs_md(r['refs'], links)}" + (f"\n{inline_code(r['snippet'])}" if r.get("snippet") else ""),
@@ -852,7 +836,7 @@ def build_card(day, fields, meta, mat, doc_url=None, doc_error=None, title=None)
     elif doc_error:
         els.append(md(f"<font color='red'>完整报告没建成：{esc(clip(doc_error, 80))}，本地在 DigitalTwin/groupdigest/{day}.report.md</font>"))
     foot = f"读了 {c['messages']} 条消息、{c['sources_ok']}/{c['sources']} 个源头｜{meta['trace']}"
-    els += [{"tag": "hr"}, md(f"<font color='grey'>{esc(foot)}</font>", text_size="notation")]
+    els += [hr(), grey(esc(foot))]
     title = title or title_of(day)
     return {"schema": "2.0", "config": {"update_multi": True, "summary": {"content": title}},
             "header": {"title": {"tag": "plain_text", "content": title},
