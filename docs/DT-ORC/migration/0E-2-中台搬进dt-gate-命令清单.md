@@ -100,6 +100,7 @@ sudo bash "/Library/Application Support/DigitalTwin/dt_worker_pf.sh" verify
 
 ## 以后要用到的
 
+- 主账号 `~/.hermes/scripts/autoloop_grants.py` 在 `hermes/install_hold.txt` 里钉在首单装的那一版（镜像和任务单还在 `/Users/Shared/dt-autoloop/`），本 PR 合并后工程自检不会催着重装它；搬完以后网关只在 dt-gate 的副本里跑，回 Claude 会话删掉 install_hold 里这一行。搬之前别单独重装它：会和装着的工人启动脚本读的目录对不上，派单停下。
 - 以 dt-gate 身份跑控制面工具（只认白名单里的；中台命令行只放行看和停的子命令，签钥匙、备份、恢复不经这里，免得钥匙打到终端上）：
 
 ```bash
