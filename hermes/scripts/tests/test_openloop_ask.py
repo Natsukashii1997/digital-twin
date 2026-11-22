@@ -18,7 +18,7 @@ import openloop_ask as oa  # noqa: E402
 
 SCRIPT = SCRIPTS / "openloop_ask.py"
 TZ = ol.TZ
-PROJECTS = [{"id": "dt", "github": "o/digital-twin", "category": "活跃", "path": "/x/digital-twin"}]
+PROJECTS = [{"id": "dt", "name": "数字分身", "github": "o/digital-twin", "category": "活跃", "path": "/x/digital-twin"}]
 
 
 def at(text):
@@ -128,6 +128,24 @@ class Judge(Base):
         self.assertEqual([x["where"] for x in got["reported"]], ["日报 2026-11-20（拍板 3）"])
         self.assertEqual(self.verdict("pr:digital-twin#21", "2026-11-21T11:00:00+08:00")["verdict"], "漏收")
 
+    def test_daily_card_text_with_project_name_and_number_counts(self):
+        # 11-22 实测：日报风险「PR 开着超过 2 天：数字分身 #173 #187 #210 #211」报过 #211，第一版没认出来
+        when = "2026-11-21T11:00:00+08:00"   # 日报 10:03 发了，午间单还没发
+        self.assertEqual(self.verdict("pr:digital-twin#211", when)["verdict"], "追问")
+        self.write(self.daily / "2026-11-20.card.sent.json", {"body": {"elements": [{"tag": "markdown",
+                   "content": "**PR 开着超过 2 天**：数字分身 #173 #187 #210 #211｜自建技能库 #81 #109｜驿窗 #442"}]}})
+        got = self.verdict("pr:digital-twin#211", when)
+        self.assertEqual([x["where"] for x in got["reported"]], ["日报 2026-11-20（卡片提到）"])
+        self.assertEqual(self.verdict("pr:digital-twin#21", when)["verdict"], "漏收")
+        self.assertEqual(self.verdict("pr:digital-twin#81", when)["verdict"], "漏收")      # #81 是自建技能库的，不算数字分身的
+
+    def test_card_mentions_and_names(self):
+        self.assertTrue(oa.card_mentions("数字分身 #173 #211", {"数字分身"}, "211"))
+        self.assertFalse(oa.card_mentions("数字分身 #173｜驿窗 #211", {"数字分身"}, "211"))
+        self.assertFalse(oa.card_mentions("数字分身 #2110", {"数字分身"}, "211"))
+        self.assertEqual(oa.names_of({"name": "个人 AI 工作台（数码世界）", "github": "o/digiworld"}),
+                         {"个人 AI 工作台（数码世界）", "个人 AI 工作台", "数码世界", "digiworld"})
+
     def test_only_things_sent_before_the_ask_count(self):
         got = self.verdict(SLIPPED["id"], "2026-11-20T21:00:30+08:00")   # 用的是 11-20 21:00 那份账本，单子 21:00:05 已发
         self.assertEqual(got["verdict"], "已报过")
@@ -176,6 +194,29 @@ class Record(Base):
         self.assertNotIn(PR["id"], r.stdout)
         self.assertIn("没找到", self.run_script("find", "不存在的事").stdout)
         self.assertIn(PR["id"], self.run_script("find", "local_s1").stdout)   # 并进来的会话号也能找到那一行
+
+
+class Recheck(Base):
+    run_script = Record.run_script
+
+    def test_recheck_appends_a_correction_and_week_counts_the_latest(self):
+        r = self.run_script("record", "--question", "0D 怎么样了", "--pr", "digital-twin#211", "--at", "2026-11-21T11:00:00+08:00")
+        self.assertIn("记了：追问", r.stdout)
+        self.assertIn("重判：0 条", self.run_script("recheck").stdout)
+        self.write(self.daily / "2026-11-20.card.sent.json", {"body": {"elements": [{"tag": "markdown", "content": "数字分身 #210 #211"}]}})
+        r = self.run_script("recheck", "--dry-run")
+        self.assertIn("追问 → 已报过", r.stdout)
+        self.assertEqual(len(self.asks()), 1)                       # dry-run 不写
+        r = self.run_script("recheck")
+        self.assertIn("重判：1 条结论变了", r.stdout)
+        a = self.asks()
+        self.assertEqual([x["verdict"] for x in a], ["追问", "已报过"])   # 原来那行不动，追加一行更正
+        self.assertEqual(a[1]["supersedes"], oa.rec_key(a[0]))
+        self.assertEqual([x["verdict"] for x in oa.live(a)], ["已报过"])
+        self.assertIn("重判：0 条", self.run_script("recheck").stdout)   # 再跑不重复更正
+        with mock.patch.object(oa, "evidence_coverage", return_value={"done": 0, "with_evidence": 0, "rate": None, "projects": {}, "failed": {}}):
+            w = oa.week(dt.date(2026, 11, 21), PROJECTS)
+        self.assertEqual((w["metrics"]["你主动追问率"]["defects"], w["asks"]["确认"]["已报过"]), (0, 1))
 
 
 class FakeInbox(types.SimpleNamespace):
