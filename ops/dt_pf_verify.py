@@ -39,6 +39,7 @@ import errno
 import json
 import os
 import ipaddress
+import pwd
 import random
 import re
 import signal
@@ -805,7 +806,128 @@ def parse_result(code, out, err, n):
 def should_reach(user, t):
     if t["kind"] == "proxy":
         return True
+    if t.get("guarded") and not t.get("listener_gate"):   # 监听者规则开着、监听者不是 dt-gate：准连的端口也该被拒
+        return False
     return t["kind"] == "tcp" and t["host"] in ("127.0.0.1", "::ffff:127.0.0.1") and t["port"] in ALLOWED[user]
+
+
+# ---------- 监听者规则（0E-2 搬家后生效）：3350 / 3352 / 3353 只收监听者是 dt-gate 的连接 ----------
+
+GUARDED = (3350, 3352, 3353)
+GATE = "dt-gate"
+
+
+def listener_owners(host, port):
+    """这个地址、端口上在听的进程属于哪些 uid（监听在 * 上的也算）；没人在听返回空集合，查不清算测试不完整。"""
+    r = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "un"], capture_output=True, text=True)
+    if r.returncode not in (0, 1) or (r.returncode == 1 and r.stdout.strip()):
+        raise Incomplete(f"lsof 查不清 {port} 上谁在听（退出码 {r.returncode}）：{r.stderr.strip()[:200]}")
+    owners, uid = set(), None
+    for line in r.stdout.splitlines():
+        if line.startswith("u") and line[1:].isdigit():
+            uid = int(line[1:])
+        elif line.startswith("n"):
+            addr, _, p = line[1:].rpartition(":")
+            if p == str(port) and addr.strip("[]") in (host, "*") and uid is not None:
+                owners.add(uid)
+    return owners
+
+
+def gate_uid():
+    try:
+        return pwd.getpwnam(GATE).pw_uid
+    except KeyError:
+        raise Incomplete(f"监听者规则开着，但查不到 {GATE} 账号")
+
+
+def mark_guarded(ts):
+    """监听者规则开着时，给本机回环上 3350 / 3352 / 3353 的靶子记下监听者是不是 dt-gate（should_reach 据此判该不该通）。"""
+    g = gate_uid()
+    for t in ts:
+        if t["kind"] == "tcp" and t["port"] in GUARDED and t["host"] in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            host = "127.0.0.1" if t["host"] == "::ffff:127.0.0.1" else t["host"]
+            t["guarded"], t["listener_gate"] = True, listener_owners(host, t["port"]) == {g}
+
+
+def guard_check():
+    """监听者规则真起作用：
+    1. 有人在听的：监听者是 dt-gate，root 要连得上；不是 dt-gate，root 要被拒（pf 回的 RST）；
+    2. 空着的：root 自己开监听冒充，自己去连，必须被拒（root 不受账号规则管，挡它的只能是监听者规则）；
+    3. 对照：空着的端口换 dt-gate 开监听（127.0.0.1），root 去连必须连得上（规则没把 dt-gate 也挡了）。
+    返回（0 / 1 / 2, 明细）。"""
+    g, rows, worst, free = gate_uid(), [], 0, []
+    for port in GUARDED:
+        for host in ("127.0.0.1", "::1"):
+            owners = listener_owners(host, port)
+            if not owners:
+                free.append((host, port))
+                continue
+            got = try_tcp(host, port, 3, lrange=CTRL_LPORTS)
+            want = "通" if owners == {g} else "被拒"
+            ok = reached(got) if want == "通" else got == "refused"
+            rows.append({"host": host, "port": port, "listener": sorted(owners), "want": want, "got": got, "ok": ok})
+            worst = worst if ok else 1
+    for host, port in free:
+        s = socket.socket(family(host), socket.SOCK_STREAM)
+        try:
+            if family(host) == socket.AF_INET6:
+                s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+            s.listen(4)
+        except OSError as e:
+            s.close()
+            rows.append({"host": host, "port": port, "listener": "root 冒充", "want": "被拒", "got": f"没测成：{e.errno}", "ok": None})
+            continue
+        got = try_tcp(host, port, 3, lrange=CTRL_LPORTS)
+        s.close()
+        ok = got == "refused"
+        rows.append({"host": host, "port": port, "listener": "root 冒充", "want": "被拒", "got": got, "ok": ok})
+        worst = worst if ok else 1
+    ports = sorted({p for h, p in free if h == "127.0.0.1"})
+    if ports:
+        w, ctrl = gate_listen_control(ports)
+        rows += ctrl
+        worst = 1 if 1 in (worst, w) else max(worst, w)
+    if not [r for r in rows if r["ok"] is not None and r["want"] == "被拒"]:
+        print("== 监听者规则：没有一项「该被拒」测成（端口都被 dt-gate 占着、或开不了冒充的监听），冒充这一面没测到")
+        worst = max(worst, 2) if worst != 1 else 1
+    print("== 监听者规则（3350 / 3352 / 3353 只收 dt-gate 在听的）")
+    for r in rows:
+        v = {True: "符合", False: "没挡住" if r["want"] == "被拒" else "该通不通", None: "没测成"}[r["ok"]]
+        print(f"  [{v}] root → {r['host']}:{r['port']}（监听者：{r['listener']}）应{r['want']} → {r['got']}")
+    return worst, rows
+
+
+def gate_listen_control(ports):
+    """对照：dt-gate 在空着的端口上开监听（127.0.0.1），root 去连必须连得上。开不起来、连不上算不完整。"""
+    p = run_as(GATE, [], "serve", 120, popen=True, extra=[json.dumps(ports)])
+    rows, worst = [], 0
+    try:
+        import select
+        ready = select.select([p.stdout], [], [], 60)[0]
+        first = p.stdout.readline() if ready else b""
+        try:
+            listeners = json.loads(first) if first.strip() else None
+        except ValueError:
+            listeners = None
+        if not isinstance(listeners, list):
+            return 2, [{"host": "127.0.0.1", "port": ports, "listener": GATE, "want": "通", "got": "dt-gate 的监听没开起来", "ok": False}]
+        for l in listeners:
+            if l["kind"] != "tcp":
+                continue
+            if "error" in l:
+                rows.append({"host": l["host"], "port": l["port"], "listener": GATE, "want": "通", "got": f"没开起来：{l['error']}", "ok": False})
+                worst = max(worst, 2)
+                continue
+            got = try_tcp("127.0.0.1", l["port"], 3, lrange=CTRL_LPORTS)
+            ok = reached(got)
+            rows.append({"host": "127.0.0.1", "port": l["port"], "listener": GATE, "want": "通", "got": got, "ok": ok})
+            worst = worst if ok else max(worst, 2)
+    finally:
+        p.kill()
+        p.wait()
+    return worst, rows
 
 
 def judge(user, t, got, ctrl):
@@ -829,13 +951,22 @@ def account_exists(u):
     return u in r.stdout.split()
 
 
-def managed_required():
-    """门卫状态里记着管上了谁（root 写的），这些账号必须都测到：少一个就是测试不完整，不能静默跳过（L3 第 5 轮 P2-08）。"""
+def status_fields():
     try:
         with open(DIR + "/pf-dt-worker.status") as f:
-            fields = dict(kv.split("=", 1) for kv in f.read().split() if "=" in kv)
+            return dict(kv.split("=", 1) for kv in f.read().split() if "=" in kv)
     except OSError as e:
         raise Incomplete(f"读不出门卫状态文件：{e}")
+
+
+def guard_on():
+    """监听者规则开着没有（0E-2 搬家后，门卫状态里 guard=yes）。"""
+    return status_fields().get("guard") == "yes"
+
+
+def managed_required():
+    """门卫状态里记着管上了谁（root 写的），这些账号必须都测到：少一个就是测试不完整，不能静默跳过（L3 第 5 轮 P2-08）。"""
+    fields = status_fields()
     users = [u for u in fields.get("users", "").split(",") if u]
     if fields.get("state") != "ok" or "dt-worker" not in users:
         raise Incomplete(f"门卫状态不是 ok 或没管上 dt-worker（{fields.get('state')}，users={fields.get('users')}），先装好门卫规则")
@@ -1184,6 +1315,9 @@ def verify():
     watch = None
     try:
         ts = targets(own)
+        guard = guard_on()
+        if guard:                               # 监听者规则开着：准连的 3350 / 3352 / 3353 要看监听者是不是 dt-gate
+            mark_guarded(ts)
         hosts = local_hosts()
         # 出站包证据：受管账号的 SYN / UDP 包只要过了门卫，网卡上就抓得到（L3 第 5 轮 P1-07）
         watch = out_watch(ts, hosts)
@@ -1238,6 +1372,13 @@ def verify():
             worst = worst or 2
         if own.vanished:
             print("== 这些地址测试时已不在本机，没开靶子：" + "、".join(b["host"] for b in own.vanished[:5]))
+        if guard:
+            try:
+                w, report["listener_guard"] = guard_check()
+            except Exception as e:
+                print(f"== 监听者规则：测试没跑完：{e!r}"[:300])
+                w, report["listener_guard"] = 2, {"error": repr(e)[:500]}
+            worst = 1 if 1 in (worst, w) else max(worst, w)
         try:
             w, report["inbound"] = inbound()
         except Exception as e:           # 入站这一段出错不能把出站已经判出的结果（尤其是 1）冲掉，也不能不写记录

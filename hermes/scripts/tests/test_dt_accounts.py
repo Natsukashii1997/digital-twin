@@ -54,6 +54,14 @@ class PfRules(unittest.TestCase):
         # 审查第 4 轮 P2-8：入站一律拒绝，账号不能占住别人准连的端口冒充服务
         self.assertEqual(lines[2], f"block return in quick proto {{ tcp, udp }} from any to any user {user}")
 
+    def test_listener_guard_only_with_flag(self):
+        """监听者规则只在 --guard（apply 里是有搬家标记）时生成，排在最前。"""
+        self.assertNotIn("user != dt-gate", rules("dt-worker").stdout)
+        r = subprocess.run(["bash", str(PF), "rules", "--guard", "dt-worker"], capture_output=True, text=True)
+        body = [l for l in r.stdout.splitlines() if not l.startswith("#")]
+        self.assertEqual(body[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353 } user != dt-gate")
+        self.assertEqual(allowed_ports(r.stdout, "dt-worker"), {3350, 8090})
+
     def test_worker_only(self):
         r = rules("dt-worker")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -654,7 +662,7 @@ esac
 
     GUARD_STUB = """root_dir() { return 0; }
 root_path() { [ "$SCENARIO" != dir_bad ]; }
-uid_ok() { [ "$SCENARIO" != uid_bad ]; }
+uid_ok() { [ "$SCENARIO" != uid_bad ] && { [ "$SCENARIO" != guard_nogate ] || [ "$1" != dt-gate ]; }; }
 user_list() {
   case $SCENARIO in
     ds_fail) return 1 ;;
@@ -746,6 +754,38 @@ exit 1
         self.assertIn("state=applying", at_load)  # 加载前先写「进行中」
         # 重新加载前后各结束一遍两个账号的进程（旧规则下的连接不过新规则，审查第 4 轮 P2-4；加载那一刻不留进程，11-21 真机）
         self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * 2)
+
+    def guard_dir(self, owner="0", link=False):
+        d = self.setup_dir()
+        pf = d / "pf.sh"
+        pf.write_text(pf.read_text().replace('file_owner() { stat -f %u "$1"; }', f'file_owner() {{ echo {owner}; }}'))
+        if link:
+            (d / "hub-in-gate").symlink_to(d / "elsewhere")
+            (d / "elsewhere").write_text("x")
+        else:
+            (d / "hub-in-gate").write_text("dt-gate\n")
+        return d
+
+    def test_listener_guard(self):
+        """0E-2 搬家标记在（root 的普通文件）：规则多一条「3350 / 3352 / 3353 只收 dt-gate 在听的」排在最前，状态 guard=yes；
+        标记不在：没有这条、guard=no；标记是链接、不归 root、或查不到 dt-gate：判 failed，不生成规则。"""
+        r, f, _ = self.apply("ok")
+        self.assertEqual(f["guard"], "no")
+        self.assertNotIn("user != dt-gate", (Path(self.last_dir) / "pf-dt-worker.rules").read_text())
+        r, f, _ = self.apply("ok", self.guard_dir())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((f["state"], f["guard"]), ("ok", "yes"))
+        lines = [l for l in (Path(self.last_dir) / "pf-dt-worker.rules").read_text().splitlines() if not l.startswith("#")]
+        self.assertEqual(lines[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353 } user != dt-gate")
+        # 0E-2 换工人钥匙前的核对（#268 ops/dt_gate_hub.py pf_listener_rule）认的就是这种写法
+        self.assertRegex("\n".join(lines), r"(?m)^\s*(pass|block)\b.*\bin\b.*\b3350\b.*\buser\b.*dt-gate")
+        for d, why in ((self.guard_dir(owner="501"), "不是_root_的普通文件"), (self.guard_dir(link=True), "不是_root_的普通文件")):
+            r, f, _ = self.apply("ok", d)
+            self.assertEqual(f["state"], "failed")
+            self.assertIn(why, f["reason"])
+        r, f, _ = self.apply("guard_nogate", self.guard_dir())
+        self.assertEqual(f["state"], "failed")
+        self.assertIn("有搬家标记，但_dt-gate", f["reason"])
 
     def test_unchanged_not_reloaded(self):
         """L3 第 3 轮 P1-02：实际加载的和应有的一样，就不重新加载（两次偶发漏过都在重新加载附近）；被改了才重新加载。"""
@@ -1467,6 +1507,77 @@ while :; do sleep 0.05; done
         self.assertRegex(got, r"^answer:\d+$")
         self.assertTrue(20000 <= int(got.split(":")[1]) < 40000)
         self.assertEqual(self.v.LAST_LPORT[0], int(got.split(":")[1]))
+
+    def test_listener_owners_and_should_reach(self):
+        """监听者规则开着时：lsof 认出 3350 上谁在听（* 也算）；监听者不是 dt-gate，准连的端口也判该被拒。"""
+        real = self.v.subprocess.run
+        self.addCleanup(setattr, self.v.subprocess, "run", real)
+        out = "p100\nu503\nf5\nn127.0.0.1:3350\np200\nu501\nf6\nn*:3352\nf7\nn[::1]:3353\n"
+        self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 0, out, "")
+        self.assertEqual(self.v.listener_owners("127.0.0.1", 3350), {503})
+        self.assertEqual(self.v.listener_owners("127.0.0.1", 3352), {501})
+        self.assertEqual(self.v.listener_owners("::1", 3353), {501})
+        self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 1, "", "")
+        self.assertEqual(self.v.listener_owners("127.0.0.1", 3350), set())          # 没人在听
+        self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 2, "", "boom")
+        with self.assertRaises(self.v.Incomplete):
+            self.v.listener_owners("127.0.0.1", 3350)
+        self.v.gate_uid = lambda: 503
+        self.v.listener_owners = lambda host, port: {503} if port == 3350 else {501}
+        ts = [self.t("127.0.0.1", 3350), self.t("::ffff:127.0.0.1", 3352), self.t("127.0.0.1", 8090)]
+        self.v.mark_guarded(ts)
+        self.assertTrue(self.v.should_reach("dt-worker", ts[0]))        # 监听者是 dt-gate
+        self.assertFalse(self.v.should_reach("dt-secretary", ts[1]))    # 监听者不是 dt-gate：准连也该被拒
+        self.assertTrue(self.v.should_reach("dt-worker", ts[2]))        # 8090 不归监听者规则管
+
+    def test_guard_check(self):
+        """监听者规则的真机检查：dt-gate 在听的 root 要连得上、别人在听的要被拒；空着的端口 root 冒充、自己去连要被拒；
+        dt-gate 在空端口开监听 root 要连得上（对照）。被拒没拒 → 1；对照不通 → 2；一项「该被拒」都没测成 → 2。"""
+        v = self.v
+        v.gate_uid = lambda: 503
+        owners = {("127.0.0.1", 3350): {503}, ("::1", 3350): {503}, ("127.0.0.1", 3352): {501}}
+        v.listener_owners = lambda host, port: owners.get((host, port), set())
+        got = {}
+        v.try_tcp = lambda host, port, timeout=3, hold=0.0, lrange=None: got.get((host, port), "refused")
+        got[("127.0.0.1", 3350)] = got[("::1", 3350)] = "open:30001"
+        bound = []
+        real_sock = v.socket.socket
+
+        class FakeSock:
+            def __init__(self, *a):
+                pass
+
+            def setsockopt(self, *a):
+                pass
+
+            def bind(self, addr):
+                bound.append(addr)
+
+            def listen(self, n):
+                pass
+
+            def close(self):
+                pass
+        v.socket.socket = FakeSock
+        self.addCleanup(setattr, v.socket, "socket", real_sock)
+        v.gate_listen_control = lambda ports: (0, [{"host": "127.0.0.1", "port": p, "listener": "dt-gate", "want": "通",
+                                                    "got": "open:1", "ok": True} for p in ports])
+        with contextlib.redirect_stdout(io.StringIO()):
+            w, rows = v.guard_check()
+        self.assertEqual(w, 0, rows)
+        self.assertIn(("127.0.0.1", 3353), bound)                      # 空着的端口 root 开监听冒充
+        self.assertEqual({r["port"] for r in rows if r["listener"] == "dt-gate"}, {3353})
+        got[("127.0.0.1", 3352)] = "open:30002"                         # 别人在听的 3352 居然连上了
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(v.guard_check()[0], 1)
+        got[("127.0.0.1", 3352)] = "refused"
+        got[("::1", 3353)] = "timeout"                                  # 冒充的监听没被 pf 回绝（超时不算被拒）
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(v.guard_check()[0], 1)
+        got[("::1", 3353)] = "refused"
+        v.gate_listen_control = lambda ports: (2, [])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(v.guard_check()[0], 2)
 
     def test_inbound_half_open_attribution(self):
         """入站：受管账号监听端口上新出现的连接一律列出（SYN 进来了），对得上的写是谁连的，对不上的写空。"""
