@@ -42,10 +42,14 @@ owner_open_id、owner_chat_id（twin_identity.py setup / setup-chat 写的）和
 和本项目其他脚本一样，真隔离要等独立账号（ADR-015）。
 
 开单（P1-07）：只有从没开过单（state.json 不存在、目录里也没有以前的单子）才算第一张；state.json 或上一张单子
-读不了、格式不对，都拒绝开新的。上一张没结束、发卡片结果不明、结束状态没推到、还有提醒没确认发到，也都不开，出路都是先 push。
+读不了、格式不对，都拒绝开新的。上一张没结束、发卡片结果不明、结束状态没推到（一次都没发出去过的也算：
+哪怕是张空单，也要 push 一次让他收到「托管结束」）、还有提醒没确认发到，也都不开，出路都是先 push。
+读单子时逐项核这一版该有的字段和类型（SHAPE 等），单号要和所在目录一致；缺了、不对都拒绝，不补默认值
+（缺 dirty 补成「没改动」、缺 sending 补成「没在发」就等于放行）。
 
 发卡片（P1-02）：发之前先把「要发」记进单子；发了却没拿到消息号算结果不明，这张单子冻结：不能开下一张，
-下次 push 先去飞书找（机器人发的、页脚带这张单子单号的卡片）：找到一张就认领、接着原地更新；一张都没有，
+下次 push 先去飞书找（机器人发的卡片，标题是「托管流水｜」或「托管结束｜」开头，最后一行带这张单子的单号；
+P2-10：两样都要对上，别的卡片碰巧带了单号不认）：找到一张就认领、接着原地更新；一张都没有，
 要离上次发满 120 秒才重发；不止一张就停下，用 adopt 指定。每次 push 版本号加一，写在页脚「单号 … · 第 N 版」，
 回读要对上标题和卡片最后一行的这一版才算推到了（P2-01；最后一行是脚本写的，托管会话填的文字到不了那里）。
 提醒按批记账（P2-02）：每批先记再发，结果不明的下次先对账（机器人发的、引用这张卡、文字相同；文字里有这批的编号，
@@ -105,6 +109,18 @@ NUMS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 ORDER = {"done": 1, "note": 2, "ask": 3}
 INNER = re.compile(r"#\d|(?<![A-Za-z])(PR|issue)(?![A-Za-z])", re.I)
 ASK_FIELDS = ("task", "what", "about", "progress", "todo")
+NONE = type(None)
+# 这一版（version 1）的单子必须有的字段和类型；load 逐项核，缺了、类型不对都拒绝，不补默认值（L3 审查 P1-07）
+SHAPE = {"id": str, "by": str, "started_at": str, "ended_at": (str, NONE), "message_id": (str, NONE), "chat_id": (str, NONE),
+         "sending": (dict, NONE), "rev": int, "pushed_at": (str, NONE), "dirty": bool, "reminders": list, "acks": dict,
+         "rows": list, "doing": list}
+SENDING = {"first": str, "last": str, "asks": list, "tries": int}
+BATCH = {"batch": int, "asks": list, "at": str, "text": str, "tried": (str, NONE), "message_id": (str, NONE)}
+DOING = {"task": str, "about": str, "text": str}
+ROW = {"done": {"at": str, "project": str, "text": str}, "note": {"at": str, "text": str},
+       "ask": dict({"at": str, "n": int, "done_at": (str, NONE), "result": (str, NONE), "notified": bool},
+                   **{k: str for k in ASK_FIELDS})}
+TITLE = re.compile(r'<card title="托管(流水|结束)｜')      # 飞书回读里托管单的开头：build_card 只出这两种标题
 HOW = "要回话：引用这张单子，写上编号和你的选择，可以一次回完几件。"
 HOW_ENDED = "托管已经结束，这张单子不再更新，引用它回话也没人接。还等你的事，请到 Claude 里对应的会话办。"
 FOOT = "单子只有这一张，有进展就在原地更新；只有新冒出要你做的事才另发一句提醒。办完的事是灰字，要你做的是黑字加红字。"
@@ -193,9 +209,47 @@ def load(sheet_id=None):
         raise Fail(f"托管单 {sheet_id} 读不了")
     if not isinstance(sheet, dict) or sheet.get("version") != 1:
         raise Fail(f"托管单 {sheet_id} 不是这个脚本写的格式")
-    for k, v in (("rev", 0), ("sending", None), ("chat_id", None), ("acks", {})):
-        sheet.setdefault(k, v)
+    bad = flaws(sheet, sheet_id)
+    if bad:                                # 缺了的不补默认值：补成「没在发、没改动」就等于放行（L3 审查 P1-07）
+        raise Fail(f"托管单 {sheet_id} 的状态文件缺字段或者不对（{'、'.join(bad[:5])}），不当成没事；人工核对 sheet.json")
     return sheet
+
+
+def wrong(d, shape):
+    """d 里缺了的、类型不对的字段名（True / False 不算整数）。"""
+    return [k for k, t in shape.items() if k not in d or not isinstance(d[k], t) or (t is int and isinstance(d[k], bool))]
+
+
+def is_time(s):
+    try:
+        return at(s) is not None
+    except (TypeError, ValueError):
+        return False
+
+
+def flaws(sheet, sheet_id):
+    """这张单子哪里不完整、不对；没有就是空的。单号要和所在目录（也就是 state.json 指的那张）一致。"""
+    bad = wrong(sheet, SHAPE)
+    if bad:
+        return bad
+    if sheet["id"] != sheet_id:
+        return ["id（和所在目录的单号不一样）"]
+    times = [("started_at", sheet["started_at"])] + ([("ended_at", sheet["ended_at"])] if sheet["ended_at"] is not None else [])
+    if sheet["sending"] is not None:
+        bad += [f"sending.{k}" for k in wrong(sheet["sending"], SENDING)]
+        times += [(f"sending.{k}", sheet["sending"].get(k)) for k in ("first", "last")]
+        if sheet["message_id"]:
+            bad.append("sending（已经有消息号了，还记着要发）")
+    if (sheet["message_id"] or sheet["sending"] is not None) and not sheet["chat_id"]:
+        bad.append("chat_id（发过或者要发，却没记发到哪个会话）")
+    for name, pick in (("reminders", lambda x: BATCH), ("doing", lambda x: DOING),
+                       ("rows", lambda x: ROW.get(x.get("kind")) if isinstance(x.get("kind"), str) else None)):
+        for i, x in enumerate(sheet[name]):
+            shape = pick(x) if isinstance(x, dict) else None
+            bad += [f"{name}[{i}].{k}" for k in (wrong(x, shape) if shape else ["kind" if isinstance(x, dict) else "（不是一条记录）"])]
+            if shape and "at" in shape:
+                times.append((f"{name}[{i}].at", x.get("at")))
+    return bad + [k for k, v in times if k not in bad and not is_time(v)]
 
 
 def save(sheet):
@@ -357,8 +411,9 @@ def start(by, now, raw_at=None):
         raise Fail(f"托管单 {last['id']} 还没结束，先 end（再 push 一次，把结束状态推到飞书）")
     if last and last.get("sending"):       # 发了却没拿到消息号：飞书上可能已经有那张单子，先对清楚
         raise Fail(f"托管单 {last['id']} 上次发卡片结果不明（飞书上可能已经有这张单子），先 push 对账")
-    if last and last.get("message_id") and last.get("dirty"):
-        raise Fail(f"托管单 {last['id']} 的结束状态还没推到飞书，先 push")
+    if last and last["dirty"]:             # 一次都没发出去过的也算（P1-07）：不然结束了、常浩却没收到的那张就被悄悄丢下
+        raise Fail(f"托管单 {last['id']} " + ("的结束状态还没推到飞书" if last["message_id"] else "结束了，可是一次都没发到飞书")
+                   + "，先 push")
     if last and any(not b.get("message_id") and not b.get("dropped") for b in last["reminders"]):
         raise Fail(f"托管单 {last['id']} 还有提醒没确认发到，先 push")
     t = when(raw_at, now)
@@ -543,8 +598,11 @@ def last_line(content):
 
 
 def is_card(sheet, m):
-    return (m.get("msg_type") == "interactive" and from_bot(m)
-            and re.search(rf"｜单号 {re.escape(sheet['id'])} · 第 \d+ 版$", last_line(m.get("content"))) is not None)
+    """是不是这张单子的卡片：机器人发的卡片，标题是托管单的标题，最后一行是这张单子的单号（P2-10：只看最后一行，
+    别的工作流的卡片碰巧对上就会被认领、被原地覆盖）。"""
+    text = str(m.get("content"))
+    return (m.get("msg_type") == "interactive" and from_bot(m) and TITLE.match(text) is not None
+            and re.search(rf"｜单号 {re.escape(sheet['id'])} · 第 \d+ 版$", last_line(text)) is not None)
 
 
 # ---------- 推送 ----------
@@ -704,7 +762,7 @@ def adopt(sheet, mid, now):
     chat = private_chat()[1]
     m = one_message(mid, "读这条消息")
     if m.get("chat_id") != chat or chat != sheet["chat_id"] or not is_card(sheet, m):
-        raise Fail("这条消息不是这张单子的卡片（要是机器人发在常浩私聊里的卡片，页脚带这张单子的单号）")
+        raise Fail("这条消息不是这张单子的卡片（要是机器人发在常浩私聊里的托管单卡片，标题和页脚的单号都对得上）")
     claim(sheet, mid)
     sheet["dirty"] = True
     save(sheet)

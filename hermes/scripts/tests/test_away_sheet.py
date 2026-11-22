@@ -574,6 +574,77 @@ class Cli(unittest.TestCase):
         state.write_text(good_state, encoding="utf-8")
         self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
 
+    def test_ended_sheet_that_never_reached_him_keeps_the_next_one_closed(self):
+        # L3 审查第 4 轮 P1-07：第一次 push 就没发成（私聊没配好，连「要发」都没记下），接着 end：
+        # 消息号是空的、也没有结果不明，可这张单子他一次都没收到，不能悄悄丢下去开下一张
+        self.open_sheet()
+        chat_file = self.who / "owner_chat_id"
+        chat_file.unlink()
+        self.bad("没配置", "push")
+        s = self.sheet()
+        self.assertEqual((s["message_id"], s["sending"], s["dirty"]), (None, None, True))
+        self.ok("end", "--at", "12:40")
+        r = self.next_sheet()
+        self.assertEqual((r.returncode, r.stderr), (1, ""))
+        self.assertIn("一次都没发到飞书，先 push", r.stdout)
+        self.assertEqual(sorted(d.name for d in self.dir.iterdir() if d.is_dir()), ["2026-11-21-1200"])
+        chat_file.write_text(CHAT + "\n", encoding="utf-8")
+        chat_file.chmod(0o600)
+        self.ok("push")                                                   # 出路：配好了再 push，他收到的是结束状态
+        self.assertIn("托管结束｜还等你 1 件", self.chat()[0]["content"])
+        self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
+        self.ok("end", now="2026-11-21T13:10:00+08:00")                   # 第二张开了就结束，什么都没记：同样要先 push
+        r = self.run_script("start", "--by", "Claude 会话「测试」", now="2026-11-21T14:00:00+08:00")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("托管单 2026-11-21-1300 结束了，可是一次都没发到飞书", r.stdout)
+        self.assertEqual(len(self.calls("+messages-send")), 1)
+
+    def test_sheet_with_a_missing_or_wrong_field_is_not_treated_as_clean(self):
+        # L3 审查第 4 轮 P1-07：sheet.json 是合法 JSON、version 也对，但少了 dirty / sending 这类字段：
+        # 以前补成「没改动」「没在发」就放行了。缺了、类型不对、单号和目录对不上，都拒绝，不补默认值
+        self.open_sheet()
+        self.ok("push")
+        self.ask(task="数字分身 · 合并官")
+        self.ok("doing", "--item", "磁盘瘦身 · 第三批｜清工作目录｜在核对")
+        self.ok("push", now=LATER)
+        self.ok("end", now="2026-11-21T12:50:00+08:00")
+        self.ok("push", now="2026-11-21T12:50:00+08:00")                  # 上一张干干净净结束了，本来可以开下一张
+        path = self.dir / "2026-11-21-1200" / "sheet.json"
+        good = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(good), sorted(list(A.SHAPE) + ["version"]))   # 脚本自己写出来的正好是这些字段
+        self.assertEqual((good["dirty"], good["sending"], len(good["reminders"])), (False, None, 1))
+
+        def refused(broken, word, every=False):
+            path.write_text(json.dumps(broken, ensure_ascii=False), encoding="utf-8")
+            more = [self.run_script("show"), self.run_script("push", now=LATER)] if every else []   # 别的命令也不认这张单子
+            for r in [self.next_sheet()] + more:
+                self.assertEqual((r.returncode, r.stderr), (1, ""), word)
+                self.assertIn("缺字段或者不对", r.stdout)
+                self.assertIn(f"（{word}" if word in A.SHAPE else word, r.stdout)
+
+        for key in A.SHAPE:                                               # 每个字段缺了都不行
+            refused({k: v for k, v in good.items() if k != key}, key, every=key in ("dirty", "sending"))
+        for key, value in (("dirty", None), ("dirty", 0), ("rev", True), ("rev", "3"), ("sending", False), ("reminders", {}),
+                           ("message_id", 7), ("started_at", "中午"), ("ended_at", "12:50"), ("acks", [])):
+            refused(dict(good, **{key: value}), key)
+        refused(dict(good, id="2026-11-21-1201"), "和所在目录的单号不一样")
+        sending = {"first": NOON, "last": NOON, "asks": [1], "tries": 1}
+        refused(dict(good, sending=sending), "已经有消息号了，还记着要发")
+        refused(dict(good, message_id=None, sending={"first": NOON}), "sending.last")
+        refused(dict(good, message_id=None, sending=dict(sending, last="刚才")), "sending.last")
+        refused(dict(good, chat_id=None), "却没记发到哪个会话")
+        first, ask = good["rows"][0], dict(good["rows"][0])
+        del ask["notified"]
+        refused(dict(good, rows=[ask] + good["rows"][1:]), "rows[0].notified")
+        refused(dict(good, rows=[dict(first, kind="别的")]), "rows[0].kind")
+        refused(dict(good, rows=[dict(first, at="刚才")]), "rows[0].at")
+        refused(dict(good, rows=["一行字"]), "rows[0].（不是一条记录）")
+        refused(dict(good, reminders=[{k: v for k, v in good["reminders"][0].items() if k != "message_id"}]), "reminders[0].message_id")
+        refused(dict(good, doing=[{"task": "x"}]), "doing[0].about")
+        self.assertEqual(sorted(d.name for d in self.dir.iterdir() if d.is_dir()), ["2026-11-21-1200"])   # 一张都没多开
+        path.write_text(json.dumps(good, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
+
     def test_unconfirmed_reminder_keeps_the_next_sheet_closed(self):
         self.open_sheet()
         self.ok("push")
@@ -647,8 +718,9 @@ class Cli(unittest.TestCase):
         self.ctl(**{"+messages-send": "lost"})
         self.bad("没拿到消息号", "push")
         self.put(self.chat() + [dict(self.chat()[0], message_id="om_sheet_dup")])     # 超过一小时去重期又发出过一张
-        self.say("om_note", '<card title="别的卡片" subtitle="x">\n正文里提到｜单号 2026-11-21-1200 · 第 1 版\n别的页脚\n</card>',
-                 quote=None, who="app", sender="cli_bot", id_type="app_id", msg_type="interactive")      # 只是正文里提到，不是这张单子
+        self.say("om_note", '<card title="托管结束｜没有等你的事" subtitle="x">\n正文里提到｜单号 2026-11-21-1200 · 第 1 版\n'
+                 '单子只有这一张｜单号 2026-11-20-0900 · 第 4 版\n</card>',
+                 quote=None, who="app", sender="cli_bot", id_type="app_id", msg_type="interactive")      # 以前那张托管单，只是正文里提到这张的单号
         self.ctl()
         out = self.bad("adopt --message-id", "push", now=LATER)
         self.assertIn("om_sheet_1、om_sheet_dup", out)
@@ -659,6 +731,30 @@ class Cli(unittest.TestCase):
         self.bad("已经有消息号", "adopt", "--message-id", "om_sheet_dup")
         self.ok("push", now=LATER)
         self.assertIn("第 3 版", self.chat()[0]["content"])
+
+    def test_another_card_with_the_same_last_line_is_not_adopted_or_overwritten(self):
+        # L3 审查第 4 轮 P2-10：首发结果不明时，私聊里有一张别的工作流的卡片，最后一行和这张单子的页脚一模一样、
+        # 标题不是托管单：只看最后一行就会认领它，下一步把它原地改成托管单
+        self.open_sheet()
+        self.ctl(**{"+messages-send": "fail"})
+        self.bad("发托管单失败", "push")                                   # 没发出去，飞书上没有这张单子
+        other = ('<card title="GitHub 周榜" subtitle="本周">\n榜单正文\n单子只有这一张｜单号 2026-11-21-1200 · 第 1 版\n</card>')
+        self.say("om_other", other, quote=None, who="app", sender="cli_bot", id_type="app_id", msg_type="interactive")
+        self.assertTrue(A.is_card({"id": "2026-11-21-1200"}, dict(self.chat()[0], content=other.replace("GitHub 周榜", "托管流水｜还等你 1 件"))))
+        self.assertFalse(A.is_card({"id": "2026-11-21-1200"}, self.chat()[0]))
+        self.ctl()
+        self.bad("不是这张单子的卡片", "adopt", "--message-id", "om_other")   # 人工指定也不认
+        self.ok("push", now=LATER)                                        # 对账没找到自己的卡，等够了重发一张新的
+        self.assertEqual(len(self.calls("+messages-send")), 2)
+        self.assertEqual(self.calls("im messages patch"), [])
+        s = self.sheet()
+        self.assertEqual((s["message_id"], s["sending"]), ("om_sheet_2", None))
+        self.assertNotIn("adopted", self.runs()[-1])
+        self.assertEqual(self.chat()[0]["content"], other)                 # 那张别的卡片一个字没动
+        self.ok("resolve", "1", "--result", "已删掉", now=LATER)
+        self.ok("push", now=LATER)
+        self.assertEqual(self.chat()[0]["content"], other)
+        self.assertIn("托管流水｜现在没有等你的事", self.chat()[1]["content"])
 
     def test_adopt_is_only_for_a_send_with_unknown_outcome(self):
         self.open_sheet()
