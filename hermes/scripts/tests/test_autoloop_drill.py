@@ -70,7 +70,7 @@ class Drill(HubFixture):
                 "DT_AUTOLOOP_CHANNEL_KEY_DIR": str(a), "DT_AUTOLOOP_LOCK": str(a / "config.lock"),
                 "DT_OWNER_CHAT_ID": CHAT, "DT_GH": str(GH), "DRILL_GH_STATE": str(self.gh_state),
                 "DRILL_GH_MODE": str(self.gh_mode)}),
-                  mock.patch.object(C.G, "ROSTER", self.roster)):
+                  mock.patch.object(C.G, "ROSTER", self.roster), mock.patch.object(E, "TEST_GH", str(GH))):
             p.start()
             self.addCleanup(p.stop)
         R.pin(R.healthz(), confirm=True)

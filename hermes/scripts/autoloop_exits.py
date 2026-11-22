@@ -38,7 +38,8 @@ executing 先落盘 → 这个动作已经开始（撤不回），冻结的输�
 
   autoloop_exits.py show [--json]                       只读：账本、冻结的范围
   autoloop_exits.py settle --key K --result done|failed --note 说明 --confirm   常浩核实后手动结算一条核不清的
-环境变量：DT_EXITS_DB、DT_GH、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置）。不调用 AI。
+环境变量：DT_EXITS_DB、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置）。对账读 GitHub 一律用
+dt-gate 的最小环境和 root 装的 gh 副本（gate_github.py，没配好记连不上），不从环境变量换 gh（测试在进程内换 TEST_GH）。不调用 AI。
 """
 import argparse
 import contextlib
@@ -59,6 +60,7 @@ KINDS = ("push_branch", "open_pr", "send_feishu", "merge")
 KEY = re.compile(r"^(push_branch|open_pr|send_feishu|merge):[\w./@:+-]{1,300}$")
 SCOPE = re.compile(r"^(task|repo|card|chat):[\w./@:+-]{1,200}$")
 UNSETTLED = ("executing", "unknown", "unreconciled")
+TEST_GH = None                              # 测试、演练在进程内换成假 gh 的路径；不经环境变量（0E-4 审查 P2-1）
 HARD_STALE = dt.timedelta(minutes=30)       # executing 超过这么久还活着：报「疑似卡住」，继续冻结，不改状态
 SEND_SETTLE = dt.timedelta(minutes=5)       # 飞书消息列表可能滞后：这么久以后还找不到，记核不清交常浩（不判没发）
 SCHEMA_VERSION = 1
@@ -387,13 +389,15 @@ def in_flight(scope):
 
 
 # ---------- 对账（只读外部系统） ----------
-def _run(cmd, timeout=60):
+def _run(cmd, timeout=60, env=None):
+    import gate_github as GG
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env,
+                           cwd=env["HOME"] if env else None)       # 最小环境用 dt-gate 的空家目录当工作目录
     except (OSError, subprocess.SubprocessError) as e:
         raise Unreachable(f"{Path(cmd[0]).name} 跑不起来或超时（{type(e).__name__}）")
     if r.returncode != 0:
-        raise Unreachable(f"{Path(cmd[0]).name} 失败：{(r.stderr or r.stdout).strip()[:200]}")
+        raise Unreachable(f"{Path(cmd[0]).name} 失败：{GG.mask(r.stderr or r.stdout).strip()[:200]}")
     return r.stdout
 
 
@@ -401,7 +405,8 @@ def read_push(t, row, now):
     """远端分支正好是这次的头提交 → 做成；其余一律核不清，交常浩 settle（L3 第 3 轮 P1-10）。
     远端还是推之前的样子（target 的 before：没有这条分支，或续推前的旧提交）也不判没做成：推上去之后分支被删、被重置回
     旧提交，看起来和没推过一样，git 远端给不出「这次推送没到过」的可靠证据，凭当前提交授权重推可能推第二次。"""
-    out = _run(["git", "-c", "core.hooksPath=/dev/null", "ls-remote", t["remote"], f"refs/heads/{t['branch']}"])
+    env = None if str(t["remote"]).startswith("file://") else _readback_env(False)  # 本地裸仓库只在测试、演练里出现；读不带令牌
+    out = _run(["git", "-c", "core.hooksPath=/dev/null", "ls-remote", t["remote"], f"refs/heads/{t['branch']}"], env=env)
     sha = out.split()[0] if out.split() else None
     if sha == t["head"]:
         return "done", {"remote_head": sha}
@@ -411,8 +416,23 @@ def read_push(t, row, now):
     return None, ev
 
 
+def _readback_env(auth):
+    """对账读真 GitHub 用 dt-gate 的最小环境（gate_github.readback_env，0E-4；代理照开关文件，关了开关也能读）：
+    auth=True 带令牌给 gh。没配好 → 连不上，保持结果不明。"""
+    import gate_github as GG
+    try:
+        return GG.readback_env(auth)
+    except GG.NotReady as e:
+        raise Unreachable(f"发布凭据没就绪：{e}")
+
+
 def _gh():
-    return os.environ.get("DT_GH", "gh")
+    """(gh 路径, 环境)：测试、演练在进程内注入的假 gh（TEST_GH）继承当前环境；否则一律用 root 装的 gh 副本和发布凭据，
+    不看环境变量（和受信发布「远端和 gh 都不从环境变量取」一致，0E-4 审查 P2-1）。"""
+    if TEST_GH:
+        return TEST_GH, None
+    import gate_github as GG
+    return GG.GH, _readback_env(True)
 
 
 def read_pr(t, row, now):
@@ -420,8 +440,9 @@ def read_pr(t, row, now):
     头提交一致，L3 第 3 轮 P2-04——同名分支的 fork PR 不算）→ 做成；一个也没有 → 没做成（GitHub 的 PR 删不掉，
     --state all 看得到关掉的）；多个或对不上 → 核不清。"""
     import autoloop_publish as P                 # 放函数里：受信发布导入本模块
-    prs = json.loads(_run([_gh(), "pr", "list", "-R", t["github"], "--head", t["branch"], "--state", "all",
-                           "--json", P.PR_FIELDS]) or "[]")
+    gh, env = _gh()
+    prs = json.loads(_run([gh, "pr", "list", "-R", t["github"], "--head", t["branch"], "--state", "all",
+                           "--json", P.PR_FIELDS], env=env) or "[]")
     ours = [p for p in prs if P.pr_is_ours(p, t["github"], t["branch"], t["head"])]
     if len(ours) == 1 and len(prs) == 1:
         return "done", {"pr": ours[0].get("url"), "number": ours[0].get("number")}
@@ -432,8 +453,9 @@ def read_pr(t, row, now):
 
 def read_merge(t, row, now):
     """PR 已合并且合并时的头提交是这次的 → 做成（记合并提交）；还开着、头提交没变 → 没做成；其他 → 核不清。"""
-    p = json.loads(_run([_gh(), "pr", "view", str(t["number"]), "-R", t["github"], "--json",
-                         "state,headRefOid,mergeCommit"]) or "{}")
+    gh, env = _gh()
+    p = json.loads(_run([gh, "pr", "view", str(t["number"]), "-R", t["github"], "--json",
+                         "state,headRefOid,mergeCommit"], env=env) or "{}")
     if p.get("state") == "MERGED" and p.get("headRefOid") == t["head"] and (p.get("mergeCommit") or {}).get("oid"):
         return "done", {"merge_commit": p["mergeCommit"]["oid"]}
     if p.get("state") == "OPEN" and p.get("headRefOid") == t["head"]:

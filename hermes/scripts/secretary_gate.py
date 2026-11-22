@@ -160,7 +160,7 @@ CONTEXT_MARKERS = ("# Project Context", "MEMORY (your personal notes)", "USER PR
 REAL_ASK = False        # ① 真送达：整体关闭（PR #218 第 2 轮 P1-01，常浩 11-19 选甲）。中台已能按版本核对、请求已带版本（#278），
 #                         但打开要专项复核属实后常浩单独点头（docs/DECIDED.md 11-20 第 3 条），不随别的改动打开
 TEST_ASK = False        # 测试在进程内打开 ① 的送达；不经环境变量
-REAL_COMMENT = False    # ③ 机器账号留言：0E-4 在 dt-gate 配机器账号令牌之前整体关闭（同 autoloop_publish.REAL_PUBLISH）
+REAL_COMMENT = False    # ③ 机器账号留言：整体关闭；0E-4 最小版只接了受信发布（gate_github.py），留言接凭据在完整版
 TEST_GH = None          # 测试在进程内换成假 gh 的路径；不经环境变量
 REVIEW_SOURCE = None    # ③ 审查记录的可信来源（见 review_record）；现在没有，测试在进程内注入
 
