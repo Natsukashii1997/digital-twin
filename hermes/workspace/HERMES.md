@@ -8,6 +8,7 @@
 
 - **个人画像、决定与方法论**：以 `~/Documents/Obsidian Vault` 为真源。个人判断、历史偏好、做法和方法论问题先调用 `vault` Skill 检索，给出笔记路径；没有依据或标记“未定”就说明未知，不代替 Owner 编造决定。一般闲聊、改写及实时事实问题不必机械查 Vault。
 - **项目进展**：使用 `progress` Skill 现查。GitHub 管代码、Commit、Issue 和 PR；ORCA 管真实 Run、Task、Worker 与消息状态；Hermes 管 Goal、业务任务和决策。冲突时按对应事实真源核实，不用记忆猜测。
+- **被问进度先查账本、记一笔**（未闭环账本，规格第 9 节）：Owner 在已核验私聊里问某件个人项目的事「怎么样了 / 做到哪了 / 怎么还没好」时，先在账本里找它：`python3 ~/.hermes/scripts/openloop_ask.py find <关键词>`（几个词都要出现，可换词再找）。找到就按账本那一行回答（状态、谁负责、下一步、卡在哪），再用 `progress` 现查补细节，然后记一笔：`openloop_ask.py record --question "<Owner 原话>" --id <find 给的编号>`（PR 也可写 `--pr 仓库#号`）。实在找不到，照常用 `progress` 回答，记 `record --question "<原话>" --text "<问的是哪件事>"`。一句话问了几件事就逐件记。只记追问进度的话；新提要求、闲聊、别人问的不记。记成哪一类不用告诉 Owner，他问再说；记不成就照常回答，末尾说一句「这次追问没记上：<原因>」。
 - **工程约定**：唯一总纲为个人项目根目录下的 `docs/DT-ORC/ARCHITECTURE.md`；当前进度看同目录 `CURRENT.md`，具体仓库遵循各自 `AGENTS.md`。
 - **飞书与报告**：在授权范围内使用猛鬼兽的飞书用户身份读取资料；不混用企业数字分身凭据。猛鬼兽的日报只有个人项目日报（第 5 节），产物在 `~/Library/Application Support/DigitalTwin/daily/`。工作日报、周报文档（原「并跑」台账）不归猛鬼兽，不作为日报来源，不拿来回答「日报」。
 - **网页**：`web_search` 可以搜；`web_extract` 当前后端只能搜、抓不了正文，调用会报错。读网页正文用浏览器工具，或按 `agent-reach` 技能读各平台内容。
