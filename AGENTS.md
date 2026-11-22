@@ -110,7 +110,7 @@ ops/
   dt_worker_pf.sh      工人账号的门卫规则（#190）：pf 规则挂在 com.apple/dt-worker 锚点，dt-worker 只准连本机 3350（中台）和 8090（过滤代理），本机其他端口、局域网一律拒绝；常浩用 `sudo bash /Users/Shared/dt-autoloop/dt_worker_pf.sh install` 装，开机和每 5 分钟由 LaunchDaemon cn.digital-twin.pf-dt-worker 重新加载并写状态文件 /Library/Application Support/DigitalTwin/pf-dt-worker.status；health_check.py 每天查过滤代理拦不拦本机、门卫状态文件新不新
   autoloop_drill.py    中台升级、回滚、搬家演练（#195 批 0D）：从本机中台程序只读克隆两个版本到临时目录，临时中台（随机端口、不装服务；拒绝用 ~/.agent-autoloop 和 3350），按「快照 → 停旧 → 起新 → 核对挂起的卡片和轮次 → 通过留新版 / 不通过用旧版程序恢复快照」演练，另演练搬到另一个目录；run [--out 证据目录]；测试 hermes/scripts/tests/test_autoloop_drill.py（同时演练断网、超时、强杀）
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
-scripts/hooks/         提交检查（复盘 P4，常浩 2026-11-20 批）：commit-msg 拦正文没写「同类：」的修复类提交，照抄 my-skills 骨架 project-starter 0.5.0、不改规则；测试 hermes/scripts/tests/test_commit_hooks.py；不装 pre-push（全量要好几分钟，靠 CI 和合并前跑）
+scripts/hooks/         提交检查（复盘 N2：把 P4 的提交检查装进本仓库，常浩 2026-11-20 批）：commit-msg 拦正文没写「同类：」的修复类提交，照抄 my-skills 骨架 project-starter、不改规则（commit-msg 自 0.5.0 起未变，2026-11-22 核对到 0.5.2）；测试 hermes/scripts/tests/test_commit_hooks.py；不装 pre-push（全量要好几分钟，靠 CI 和合并前跑；常浩 2026-11-20 回分批计划「其他按推荐」，见 docs/DECIDED.md 同日条目）
 ```
 
 ## AI 接入
