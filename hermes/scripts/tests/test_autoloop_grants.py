@@ -591,7 +591,9 @@ class StopRuns(Base):
         self.assertEqual(self.cancelled, [])
         G.revoke(a, now=T0)                                    # 库函数只收紧凭证，不自动停轮次
         self.assertEqual(self.cancelled, [])
-        self.assertEqual(G.stop_runs(a, now=T0), {"stopped": [2, 3], "failed": {}})
+        got = G.stop_runs(a, now=T0)
+        self.assertEqual((got["stopped"], list(got["failed"])), ([2, 3], ["7"]))
+        self.assertIn("中台不让取消", got["failed"]["7"])       # unknown：可能还在跑，中台的取消接口不收，报出来
         self.assertEqual(self.cancelled, [2, 3])               # 别的单、别的规则、已结束的都不碰
         self.assertEqual(self.sql("SELECT what FROM grant_log WHERE task_id = ? ORDER BY id", (a,))[-1][0], "停轮次")
         self.assertEqual(G.show(b)[0]["status"], "active")
@@ -734,6 +736,7 @@ class Resume(Base):
         finally:
             child.stdin.close()
             child.wait(10)
+            child.stdout.close()                               # 不关会留一个 ResourceWarning: unclosed file
         with G.task_lock(tid) as mine:
             out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
         self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")

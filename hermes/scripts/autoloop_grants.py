@@ -801,7 +801,8 @@ def revoke(task_id, reason="常浩撤销", now=None, path=None):
     return _tighten(task_id, "revoked", "撤销", reason, now or now_tz(), path)
 
 
-RUN_LIVE = ("queued", "claimed")
+RUN_LIVE = ("queued", "claimed")             # 中台的取消接口只认这两种（引擎 kernel/decide.ts 的 cancel）
+RUN_UNSURE = "unknown"                       # 接单程序 5 分钟没报：可能还在跑，但中台不让取消，只能报出来
 
 
 def stop_runs(task_id, now=None, path=None):
@@ -810,6 +811,7 @@ def stop_runs(task_id, now=None, path=None):
     生效，再来停轮次；凭证还有效的单不经这里停。
     轮次按中台库里「事项 = 单号、规则 = 凭证里记的规则」找（只读打开中台库，和秘书控制面 hub_runs 同一个查法），取消走中台的
     本人接口 POST /v1/runs/<号>/cancel：排队的直接取消；在跑的由接单程序停掉整个进程组后才算停下，这里不等它。
+    状态是 unknown 的（接单程序 5 分钟没报，可能还在跑）中台不让取消，记进 failed 交人看。
     返回 {"stopped": [已发出取消的轮次号], "failed": {轮次号: 原因}}；中台库读不了抛 Rejected。停不成不影响已经生效的停单。"""
     import autoloop_config as C            # 这两个脚本都 import 本脚本，所以在这里才导入
     import autoloop_publish as P
@@ -822,21 +824,24 @@ def stop_runs(task_id, now=None, path=None):
     try:
         hub = P._hub()
         try:
-            marks = ",".join("?" * len(RUN_LIVE))
-            ids = [r[0] for r in hub.execute(f"SELECT id FROM runs WHERE lane = ? AND rule = ? AND state IN ({marks}) "
-                                             "ORDER BY id", (task_id, rule, *RUN_LIVE))]
+            states = (*RUN_LIVE, RUN_UNSURE)
+            found = [tuple(r) for r in hub.execute(f"SELECT id, state FROM runs WHERE lane = ? AND rule = ? AND state IN "
+                                                   f"({','.join('?' * len(states))}) ORDER BY id", (task_id, rule, *states))]
         finally:
             hub.close()
     except sqlite3.Error as e:
         raise Rejected(f"中台库读不了（{type(e).__name__}），没查到要停的轮次")
     out = {"stopped": [], "failed": {}}
-    for rid in ids:
+    for rid, state in found:
+        if state == RUN_UNSURE:
+            out["failed"][str(rid)] = "接单程序 5 分钟没报这一轮，可能还在跑，中台不让取消：要在电脑上看工人的进程"
+            continue
         try:
             C.hub("POST", f"/v1/runs/{rid}/cancel", {})
             out["stopped"].append(rid)
         except C.Rejected as e:
             out["failed"][str(rid)] = str(e)
-    if ids:
+    if found:
         with tx(path) as con:
             log(con, task_id, "停轮次", now, stopped=out["stopped"], failed=sorted(out["failed"]))
     return out
