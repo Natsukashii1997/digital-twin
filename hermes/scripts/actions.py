@@ -1,19 +1,19 @@
-"""代理行动记录（#110 批 1b）：actions.jsonl 的结构、记录函数，以及把现有六个来源转成同一结构的适配器（只读、只用标准库）。
+"""代理行动记录（#110 批 1b）：actions.jsonl 的结构、记录函数，以及把现有七个来源转成同一结构的适配器（只读、只用标准库）。
 
 规格：docs/个人项目日报-V2-设计.md 5.4（结构，定稿后不再改）、第 2 节和 docs/常设授权清单.md（授权档位）、第 6 节（证据）。
 用法：
   python3 actions.py [--date 统计日]     打印统计日（D 04:00 到 D+1 04:00，Asia/Shanghai）内的行动，JSON
   python3 actions.py record '<JSON>'      往 actions.jsonl 追加一条行动记录，打印写下的那条
 约定（常浩 2026-11-09 定）：
-  - 历史不迁移：六个来源每次取数时现读现转，不写进 actions.jsonl；actions.jsonl 只放以后各脚本用 record() 直接写的记录。
+  - 历史不迁移：七个来源每次取数时现读现转，不写进 actions.jsonl；actions.jsonl 只放以后各脚本用 record() 直接写的记录。
   - 自由文字不下结论：裁决文件（evidence/**/hermes-*.md）的 decision、result 记「不明」，只摘首段原文；
     只有结构化来源（派单单子和回执、合并官记录的 owner 列）才记「拒绝」「执行」「升级给常浩」。
   - 安装（kind=install）只认 record() 写下的记录，不从证据目录、CURRENT 的文字里猜。
 授权档位（auth_gap）：执行了、但档位低于这类动作应有的档位，或档位不知道，就标出来。应有档位按授权清单：
-  卡片合并 B；安装、新建或修改定时任务、写入类派单 D（清单第 4 节：写入派单降到 C 还没开始）；夜跑 C。
+  卡片合并 B；按策略合并 A（#257，ADR-016：授权来源是策略记录）；安装、新建或修改定时任务、写入类派单 D（清单第 4 节：写入派单降到 C 还没开始）；夜跑 C。
   C 档授权文件逐项写明的 D 档动作（清单 5.1），记 auth_tier=D、auth_source 写到「文件路径 第几条」；只写了 C 文件的照样标。
 action_id 约定（以后脚本直接写同一个动作时用同样的号，actions.jsonl 的那条为准，适配器那条不再列）：
-  shadow:<仓库>#<PR>@<版本前 12 位>、shadow-backfill:<统计日>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、merge-run:<目录名>、
+  shadow:<仓库>#<PR>@<版本前 12 位>、shadow-backfill:<统计日>、owner:<仓库>#<PR>@<版本前 12 位>:<合并|退回>、policy:<仓库>#<PR>@<版本前 12 位>、merge-run:<目录名>、
   dispatch:<单号>:open（开单）、dispatch:<单号>:queued（写入单确认后排队、还没开跑）、dispatch:<单号>（开跑）、  cron:<执行号>、cron-job:<任务号>、cron-incident:<故障单号>:<日期>、night:<夜跑>:<行号>、ruling:<证据目录下的路径>。
 取不到的来源在 coverage 里记 ok=false、count=null 和原因，不当成 0；来源里个别坏行跳过并写进 notes，不拖垮整个来源。
 """
@@ -39,6 +39,7 @@ DT_HOME = "~/Library/Application Support/DigitalTwin"
 ACTIONS = Path(os.environ.get("DT_ACTIONS", f"{DT_HOME}/actions.jsonl")).expanduser()
 SHADOW = Path(os.environ.get("DT_SHADOW_DIR", f"{DT_HOME}/shadow")).expanduser()
 MERGE_RUNS = Path(os.environ.get("DT_MERGE_RUNS", f"{DT_HOME}/merge-runs")).expanduser()
+MERGE_BOOK = Path(os.environ.get("DT_MERGE_DIR", f"{DT_HOME}/merge")).expanduser() / "auto-merges.jsonl"   # 按策略合并的账本（#257）
 NIGHT_ROOT = Path(os.environ.get("DT_NIGHT_ROOT", f"{DT_HOME}/runs")).expanduser()
 EVIDENCE = Path(os.environ.get("DT_EVIDENCE", f"{DT_HOME}/evidence")).expanduser()
 CRON = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser() / "cron"
@@ -234,8 +235,9 @@ def merge_officer(w, notes):
             if pr not in latest or r["_at"] >= latest[pr][0]:
                 latest[pr] = (r["_at"], key[2])
         if r.get("owner") and r.get("owner_at"):
-            owners.setdefault(key + (r["owner"],), r)
             decided.add(key)
+            if r["owner"] != POLICY_OWNER:           # 按策略合并的在 policy_merges 里记（账本更全），这里不重复
+                owners.setdefault(key + (r["owner"],), r)
     for (repo, pr, sha), rs in versions.items():
         rs.sort(key=lambda r: r["_at"])
         first, last = rs[0], rs[-1]
@@ -280,6 +282,68 @@ def merge_officer(w, notes):
             actor="Hermes", auth_tier="B", auth_source=f"PR 卡片 {repo}#{pr}@{sha[:7]}（agreement.csv owner 列）",
             decision="执行", result="业务已验证" if merge else "调用成功", verification=proof),
             REQUIRED["merge"] if merge else None))
+    return out
+
+
+POLICY_OWNER = "策略合并"      # agreement.csv 的 owner 列：merge_act 按策略合并的（同 merge_officer.POLICY_OWNER）
+
+
+def policy_book(w):
+    """按策略合并的账本（merge/auto-merges.jsonl，#257）在统计日内的三样，给行动记录和日报「替你合并了什么」用：
+    merged：合上的（时间取记结果的那一行）；unsettled：发了合并命令、结果还不明的；
+    bypass：PR 已合并、账本里却没有合并执行器记录的（会话或网页上直接合的），按合并官发现的时间算；
+    只认合并时间在策略签署之后的（记录带 policy_signed_at）。没带这一项的是 #322 之前的旧版记的，
+    会把签字之前合的 PR 也算进来，不报。"""
+    import merge_policy as MP            # 只用它读账本；装了日报没装它时，这个来源记「取不到」，别的来源照常
+    out = {"merged": [], "unsettled": [], "bypass": []}
+    for m in MP.merges(MERGE_BOOK):
+        name = m["repo"].split("/")[-1]
+        base = {"repo": m["repo"], "pr": str(m["pr"]), "title": m.get("title"), "url": m.get("url"), "head": m.get("head"),
+                "tier": m.get("tier"), "suggestion": m.get("suggestion"), "reasons": m.get("reasons") or "",
+                "ready_by": (m.get("ready") or {}).get("by"), "id": m["id"], "auth": m.get("auth") or {}}
+        if m["status"] == "merged" and inside(stamp(m["done_at"]), w):
+            out["merged"].append({**base, "at": stamp(m["done_at"]), "merge_commit": m.get("merge_commit"),
+                                  "revert_cmd": f"撤回 {name}#{m['pr']}", "revert": m.get("revert")})
+        elif m["status"] in ("pending", "unsure") and pdaily_data.parse_ts(stamp(m["at"])) < w[1]:
+            out["unsettled"].append({**base, "at": stamp(m["at"])})
+        elif m["status"] == "merged_unknown" and inside(stamp(m["done_at"]), w):     # 已合并、证明不了是这次合的：只在核对那天报
+            out["unsettled"].append({**base, "at": stamp(m["done_at"]), "unknown_merge": True})
+    for r in MP.lines(MERGE_BOOK)[0]:
+        if (r["event"] == "bypass" and inside(stamp(r["at"]), w)
+                and r.get("policy_signed_at") and MP.merged_since(r.get("merged_at"), r["policy_signed_at"])):
+            out["bypass"].append({k: r.get(k) for k in ("repo", "pr", "title", "head", "tier", "suggestion", "merged_at")}
+                                 | {"at": stamp(r["at"])})
+    return out
+
+
+def policy_merges(w, notes):
+    """按策略合并（#257，A 档：做完在日报里报；授权来源是策略记录 owner_approved_policy，不是逐张卡片）：
+    合上的各一条 merge、「业务已验证」（合并执行器回读到已合并才记）；结果不明的一条 merge、结果「不明」，带后续。
+    没合上的不算行动；没经合并执行器的合并不是 Hermes 的动作，不记在这里（在事实快照的 auto_merges.bypass）。"""
+    if not MERGE_BOOK.exists():
+        return []
+    ids, out = roster_ids(), []
+    book = policy_book(w)
+    for m, done in [(m, True) for m in book["merged"]] + [(m, False) for m in book["unsettled"]]:
+        auth = m["auth"]
+        source = (f"合并策略记录 owner_approved_policy（范围 {str(auth.get('scope_sha256'))[:12]}，"
+                  f"{str(auth.get('signed_at'))[:10]} 签，消息 {auth.get('message_id')}）")
+        judged = f"合并官判定 {m['tier']} {m['suggestion']}" + (f"（{m['reasons']}）" if m["reasons"] else "")
+        ref = f"{m['repo']}#{m['pr']}@{str(m['head'])[:7]}"
+        if done:
+            proof = (f"回读已合并，合并提交 {str(m['merge_commit'])[:7]}；{judged}；{m['ready_by'] or '未注明'}交出；"
+                     f"审查结论未核实；撤回口令「{m['revert_cmd']}」")
+            if m["revert"]:
+                proof += f"；已开撤回 PR {m['revert'].get('revert_url')}"
+        elif m.get("unknown_merge"):
+            proof = f"合并请求发出后没拿到确定结果；事后只读核对 PR 已合并，证明不了是这次合的（记为来源不明，不能用撤回口令）；{judged}"
+        else:
+            proof = f"合并请求已发出，没拿到确定结果；{judged}"
+        out.append((act(
+            action_id=f"policy:{m['repo']}#{m['pr']}@{str(m['head'])[:12]}", ts=m["at"], project_id=ids.get(m["repo"], m["repo"]),
+            kind="merge", request=f"按策略合并 {ref}：{m['title']}", actor="Hermes", auth_tier="A", auth_source=source,
+            decision="执行", result="业务已验证" if done else "不明", verification=proof,
+            follow_up=None if done else ("要撤回在电脑上处理" if m.get("unknown_merge") else "合并官下一轮巡视只读核对，不重发")), "A"))
     return out
 
 
@@ -604,7 +668,7 @@ def rulings(w, notes):
     return out
 
 
-SOURCES = (("合并官", merge_officer), ("merge-runs", merge_runs), ("派单台账", dispatch),
+SOURCES = (("合并官", merge_officer), ("按策略合并", policy_merges), ("merge-runs", merge_runs), ("派单台账", dispatch),
            ("定时任务库", cron), ("夜跑", night), ("裁决文件", rulings))
 
 
@@ -647,7 +711,7 @@ def main():
             print(f"没写：{e}")
             raise SystemExit(1)
         return
-    p = argparse.ArgumentParser(description="代理行动记录：统计日内的行动（actions.jsonl + 六个来源现读现转）")
+    p = argparse.ArgumentParser(description="代理行动记录：统计日内的行动（actions.jsonl + 七个来源现读现转）")
     p.add_argument("--date", help="统计日 YYYY-MM-DD（D 04:00 到 D+1 04:00），默认最近一个已经结束的统计日")
     a = p.parse_args()
     try:

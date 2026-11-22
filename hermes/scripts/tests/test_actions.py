@@ -37,6 +37,7 @@ class Base(unittest.TestCase):
         patches = [mock.patch.object(actions, "ACTIONS", self.actions_file),
                    mock.patch.object(actions, "SHADOW", self.p["shadow"]),
                    mock.patch.object(actions, "MERGE_RUNS", self.p["merge-runs"]),
+                   mock.patch.object(actions, "MERGE_BOOK", self.root / "merge" / "auto-merges.jsonl"),
                    mock.patch.object(actions, "NIGHT_ROOT", self.p["runs"]),
                    mock.patch.object(actions, "EVIDENCE", self.p["evidence"]),
                    mock.patch.object(actions, "CRON", self.p["cron"]),
@@ -257,6 +258,80 @@ class MergeOfficerTests(Base):
         self.assertIn("找不到", out["coverage"]["合并官"]["error"])
         self.assertEqual(out["coverage"]["actions.jsonl"]["count"], 1)
         self.assertTrue(out["coverage"]["派单台账"]["ok"])
+
+
+class PolicyMergeTests(Base):
+    """按策略合并的账本（#257）：合上的记 A 档 merge，结果不明的带后续，绕过的只进事实快照。"""
+
+    def book(self, *recs):
+        f = actions.MERGE_BOOK
+        f.parent.mkdir(exist_ok=True)
+        f.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs), encoding="utf-8")
+
+    def intent(self, mid, at, **kw):
+        return {"event": "intent", "id": mid, "at": at, "repo": "o/digital-twin", "pr": "7", "title": "改文档", "head": SHA,
+                "tier": "L1", "suggestion": "退回", "reasons": "正文没有 Closes #号", "ready": {"by": "会话"},
+                "auth": {"type": "owner_approved_policy", "scope_sha256": "ab" * 32, "message_id": "om_x",
+                         "signed_at": "2026-11-07T09:00:00+08:00"}, **kw}
+
+    def test_merged_is_tier_a_without_gap(self):
+        self.book(self.intent("m1", "2026-11-08T10:00:00+08:00"),
+                  {"event": "merged", "id": "m1", "at": "2026-11-08T10:00:05+08:00", "merge_commit": "f" * 40},
+                  self.intent("m0", "2026-11-07T10:00:00+08:00", pr="6"),                      # 前一天合的不算
+                  {"event": "merged", "id": "m0", "at": "2026-11-07T10:00:05+08:00", "merge_commit": "e" * 40},
+                  self.intent("m2", "2026-11-08T11:00:00+08:00", pr="8"),                      # 没合上的不算行动
+                  {"event": "failed", "id": "m2", "at": "2026-11-08T11:00:05+08:00", "why": "x"})
+        (a,) = [x for x in self.run_day()["actions"] if x["origin"] == "按策略合并"]
+        self.assertEqual((a["action_id"], a["kind"], a["auth_tier"], a["result"], a["auth_gap"], a["project_id"]),
+                         (f"policy:o/digital-twin#7@{SHA[:12]}", "merge", "A", "业务已验证", None, "twin"))
+        self.assertIn("owner_approved_policy", a["auth_source"])
+        for word in ("合并提交 fffffff", "L1 退回（正文没有 Closes #号）", "会话交出", "审查结论未核实", "撤回 digital-twin#7"):
+            self.assertIn(word, a["verification"])
+
+    def test_unsettled_has_follow_up(self):
+        self.book(self.intent("m1", "2026-11-08T10:00:00+08:00"),
+                  {"event": "unsure", "id": "m1", "at": "2026-11-08T10:00:05+08:00", "why": "回读失败"})
+        (a,) = [x for x in self.run_day()["actions"] if x["origin"] == "按策略合并"]
+        self.assertEqual((a["result"], a["follow_up"]), ("不明", "合并官下一轮巡视只读核对，不重发"))
+
+    def test_merged_of_unknown_source_is_not_a_policy_merge(self):
+        """事后只读核对到 PR 已合并、证明不了是这次合的（#260-P1-02）：不算合上的，只在核对那天报一条「不明」。"""
+        self.book(self.intent("m1", "2026-11-08T10:00:00+08:00"),
+                  {"event": "unsure", "id": "m1", "at": "2026-11-08T10:00:05+08:00", "why": "断网"},
+                  {"event": "merged_unknown", "id": "m1", "at": "2026-11-08T10:30:00+08:00", "merge_commit": "a" * 40})
+        book = actions.policy_book(actions.pdaily_data.window(D))
+        self.assertEqual((book["merged"], [m.get("unknown_merge") for m in book["unsettled"]]), ([], [True]))
+        (a,) = [x for x in self.run_day()["actions"] if x["origin"] == "按策略合并"]
+        self.assertEqual((a["result"], a["follow_up"]), ("不明", "要撤回在电脑上处理"))
+        self.assertIn("来源不明", a["verification"])
+
+    def test_policy_owner_rows_not_reported_as_card_clicks(self):
+        self.ledger([self.row("2026-11-08T09:00:00+08:00", owner="策略合并", owner_at="2026-11-08T10:00:05+08:00")])
+        ids = [x["action_id"] for x in self.run_day()["actions"]]
+        self.assertFalse([i for i in ids if i.startswith("owner:")], ids)
+
+    def test_book_for_daily_report(self):
+        self.book(self.intent("m1", "2026-11-08T10:00:00+08:00"),
+                  {"event": "merged", "id": "m1", "at": "2026-11-08T10:00:05+08:00", "merge_commit": "f" * 40},
+                  {"event": "revert_opened", "id": "m1", "at": "2026-11-08T12:00:00+08:00", "revert_pr": "9",
+                   "revert_url": "https://github.com/o/digital-twin/pull/9", "reason": "合错了"},
+                  {"event": "bypass", "at": "2026-11-08T13:00:00+08:00", "repo": "o/digital-twin", "pr": "3", "title": "直接合的",
+                   "head": SHA, "tier": "L2", "suggestion": "建议合并", "merged_at": "2026-11-08T04:50:00Z",
+                   "policy_signed_at": "2026-11-08T09:00:00+08:00"},
+                  {"event": "bypass", "at": "2026-11-08T13:00:00+08:00", "repo": "o/digital-twin", "pr": "4", "title": "签之前合的",
+                   "head": SHA, "tier": "L1", "suggestion": "建议合并", "merged_at": "2026-11-08T00:59:00Z",
+                   "policy_signed_at": "2026-11-08T09:00:00+08:00"},
+                  {"event": "bypass", "at": "2026-11-08T13:00:00+08:00", "repo": "o/digital-twin", "pr": "6", "title": "旧版记的",
+                   "head": SHA, "tier": "L1", "suggestion": "建议合并", "merged_at": "2026-11-08T04:50:00Z"})   # #322 前没有签署时间
+        book = actions.policy_book(actions.pdaily_data.window(D))
+        (m,) = book["merged"]
+        self.assertEqual((m["pr"], m["tier"], m["revert_cmd"], m["revert"]["revert_pr"]), ("7", "L1", "撤回 digital-twin#7", "9"))
+        self.assertEqual([(b["pr"], b["tier"]) for b in book["bypass"]], [("3", "L2")])
+        self.assertEqual(book["unsettled"], [])
+
+    def test_no_book_yet_is_zero_not_error(self):
+        out = self.run_day()
+        self.assertEqual(out["coverage"]["按策略合并"], {"ok": True, "count": 0, "error": None})
 
 
 class MergeRunTests(Base):
@@ -509,7 +584,7 @@ class OutputTests(Base):
         self.assertEqual((out["stat_day"], out["window"]), ("2026-11-08", ["2026-11-08T04:00:00+08:00", "2026-11-09T04:00:00+08:00"]))
         self.assertEqual([a["origin"] for a in out["actions"]], ["合并官", "actions.jsonl"])        # 按时间排
         self.assertEqual(set(out["actions"][0]), set(actions.FIELDS) | {"origin", "auth_gap"})
-        self.assertEqual(list(out["coverage"]), ["actions.jsonl", "合并官", "merge-runs", "派单台账", "定时任务库", "夜跑", "裁决文件"])
+        self.assertEqual(list(out["coverage"]), ["actions.jsonl", "合并官", "按策略合并", "merge-runs", "派单台账", "定时任务库", "夜跑", "裁决文件"])
         self.assertEqual({k: v["error"] for k, v in out["coverage"].items() if not v["ok"]}, {})   # 编程错误不会藏成「取不到」
 
     def test_cli_bad_date(self):

@@ -24,6 +24,9 @@ import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
 
+sys.path.insert(0, str(HERE))
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
+
 CLI = os.environ.get("DT_AUTOLOOP_CLI", "agent-autoloop")
 OWNER = "ou_fixture_owner_0001"
 SKIP = os.environ.get("DT_HUB_E2E") == "0" or not shutil.which(CLI)
