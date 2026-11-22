@@ -318,8 +318,10 @@ class ChecksTest(unittest.TestCase):
         q = mock.patch.object(H, "ROOT_UID", os.getuid())
         q.start()
         self.addCleanup(q.stop)
+        # 脚本里每个有真机默认值的目录都指到临时目录（11-22 漏了启动脚本目录：首单在真机装了 dt-worktree-*，这里就读到了）
         for k, v in {"DT_GATE_ROOT": root, "DT_GATE_SHARED": self.d / "shared/dt-gate", "DT_GATE_USERS": self.d / "users",
-                     "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": self.d / "pf"}.items():
+                     "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": self.d / "pf", "DT_GATE_LAUNCHERS": self.d / "launchers",
+                     "DT_GATE_LOGS": self.d / "logs", "DT_GATE_DAEMONS": self.d / "daemons"}.items():
             p = mock.patch.dict(os.environ, {k: str(v)})
             p.start()
             self.addCleanup(p.stop)
@@ -401,6 +403,15 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(seen, ["e", "o"])
         self.assertEqual(backups[0][0], "backup")                                 # 换之前先备份中台库（复核 P2-d）
         self.assertEqual(json.loads((root / "current.json").read_text())["engine"]["commit"], "o" * 40)
+
+    def test_every_real_path_default_is_redirected(self):
+        """脚本里凡是 env_path("DT_…", 真机路径) 的目录，这里都已指到临时目录：新加一个忘了隔离，这条先失败。"""
+        import re
+        names = set(re.findall(r'env_path\("(DT_[A-Z_]+)"', (REPO / "ops/dt_gate_hub.py").read_text(encoding="utf-8")))
+        self.assertTrue(names)
+        for n in sorted(names):
+            with self.subTest(n=n):
+                self.assertTrue(os.environ.get(n, "").startswith(str(self.d)), f"{n} 没指到临时目录")
 
     def test_all_good(self):
         r = self.run_checks(self.snap())
