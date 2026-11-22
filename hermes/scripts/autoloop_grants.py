@@ -856,7 +856,7 @@ SENT_WORDS = {0: "待发", 2: "在途或结果不明", 1: "已送到中台", -1:
 
 
 def show(task_id=None, path=None, now=None):
-    """只读。除了凭证字段，另给两样查进度要用的（autoloop 技能读）：usable / why_not 是按现在的时间现判的
+    """不改任何数据（但走的是写事务 tx：会短暂拿凭证库写锁，库不存在时会新建空库）。除了凭证字段，另给两样查进度要用的（autoloop 技能读）：usable / why_not 是按现在的时间现判的
     「这张凭证现在还能不能用」（status 写着 active 的凭证过了 valid_until 也不能用，和 check() 同一套判定）；
     events 是这张单每个派单事件送没送到中台。"""
     now = now or now_tz()

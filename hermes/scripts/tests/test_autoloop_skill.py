@@ -7,8 +7,12 @@ autoloop 技能（#195 批 2 派活入口，hermes/skills/autoloop/SKILL.md）�
      「把一句话整理成五要素」是模型做的，这里测不到，从整理好的五要素文件开始；
   3. 端到端：临时目录里起真的 agent-autoloop 中台（同 test_autoloop_hub_e2e 的 HubFixture，本机没有命令行时跳过），
      按技能第 1 节看通道（暂停不派、没规则不派、没钥匙不派），恢复后派一单，中台里出现这张单的轮次；
-     提单后通道被暂停，中台收到但没有轮次（技能第 4 节第二步要查出来的情况）。
+     提单后通道被暂停，中台收到但没有轮次（技能第 4 节第二步要查出来的情况）；
+     续接后按技能第 6 节数这张单的事件条数：通道开着多一条，通道暂停时 sent 是 true 但条数不变。
 凭证库、镜像、任务单、名册、中台都在临时目录；飞书回读和发私聊打桩。不碰 DigitalTwin/autoloop/ 和正式中台。
+
+没覆盖的：第 2、3 类把批 0D 的恢复闸打桩放行（RV.ensure_open / RV.admit，同 test_autoloop_grants.Base），
+「真中台 + 真恢复闸」这条路这里不走；恢复闸关着时的回话只用打桩的拒绝验（OneSentenceToDispatch 里那条）。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
@@ -134,7 +138,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                               ("kind", "autoloop_readonly"), ("state", "autoloop_readonly"),
                               ("lane", "autoloop_readonly"), ("attempts", "autoloop_readonly")):
             with self.subTest(field=field):
-                self.assertIn(field, self.text)
+                self.assertIn(f"`{field}`", self.text)             # 技能里当字段名写（带反引号），不是碰巧出现的单词
                 self.assertIn(f'"{field}"', self.src[script])
         for word in G.SENT_WORDS.values():                    # 技能第 5 节的状态词取自这张表：三个原样引，两个作废的按开头认
             self.assertTrue(f"`{word}`" in self.text or word.startswith("作废"), word)
@@ -293,7 +297,14 @@ class OneSentenceToDispatch(Base):
             code, out = self.propose()
         self.assertEqual((code, out["ok"]), (1, False))
         self.assertIn("恢复闸关着", out["why"])
+        # 网关拒绝语后半句「事件已记账，开闸后 send-pending 补发」对提单不成立（技能第 3 节那行叫猛鬼兽别转）：
+        # 钉住它，网关改了措辞这里会失败，技能那一行要跟着改
+        self.assertIn("事件已记账，开闸后 send-pending 补发", out["why"])
         self.assertEqual(self.notices, [])
+        with G.tx() as con:                                    # 真的什么都没登记：没有提议、没有事件
+            self.assertEqual([con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("proposals", "hub_events")],
+                             [0, 0])
+        self.assertEqual(cli(["send-pending"]), (0, []))       # 开闸后补发也补不出东西
         self.propose()
         mid = self.say(reply_line(self.notices[-1][0]))
         with closed:
@@ -338,6 +349,27 @@ class OneSentenceToDispatch(Base):
         self.assertEqual(cli(["resume-dispatch", "--task", third, "--kind", "redispatch", "--reason", "x"])[1]["why"],
                          "不能续接：任务已完成")
         self.assertEqual(len(self.posted), 4)                  # 三次 start + 一次重派，停掉之后一个也没多发
+
+    def test_stop_while_a_step_is_running_and_resume_while_another_entry_holds_the_task(self):
+        """技能第 7 节「输出里有 in_flight」、第 6 节「另有入口正在处理」两条回话对着的行为，走命令行。"""
+        tid = self.dispatch()
+        seen = {}
+
+        def do():                                              # 推分支正在做的时候常浩说「停」
+            seen["revoke"] = cli(["revoke", "--task", tid, "--reason", "常浩说停"])
+            return {"ok": 1}
+        key = f"push_branch:{tid}:b:h1"
+        EX.guard("push_branch", key, f"task:{tid}", {"github": "o/dt-sandbox", "branch": f"claude/{tid}"}, do,
+                 task=(tid, "push_branch", 1), now=T0)
+        code, out = seen["revoke"]
+        self.assertEqual((code, out["status"], out["in_flight"]), (0, "revoked", [{"key": key, "state": "executing"}]))
+
+        other = self.dispatch()
+        with G.task_lock(other):                               # 受信发布或秘书正持着这张单
+            code, out = cli(["resume-dispatch", "--task", other, "--kind", "redispatch", "--reason", "再跑一次"])
+        self.assertEqual(code, 1)
+        self.assertIn("另有入口正在处理", out["why"])
+        self.assertEqual(len(self.posted), 2)                  # 两次 start，续接没发
 
     def test_no_grant_no_event(self):
         for argv in (["resume-dispatch", "--task", "t-20261122-000000", "--kind", "redispatch", "--reason", "x"],
@@ -450,6 +482,32 @@ class SkillOnRealHub(HubFixture):
         self.assertEqual(self.runs_of(tid), [])                 # 但没有通道接：没有轮次
         self.assertEqual(self.gate(), "通道暂停")
         self.assertEqual(cli(["show", "--task", tid])[1][0]["events"][0]["state"], "已送到中台")
+
+    def events_of(self, tid):
+        """技能第 6 节「续接后」数的数：这张单所有轮次里的事件条数。"""
+        return sum(len(r["events"]) for r in self.runs_of(tid))
+
+    def test_resume_counts_events_open_lane_adds_one_paused_lane_adds_none(self):
+        """续接后不能只看 send 是 true，也不能只看「找得到轮次」（旧轮次本来就在）：
+        通道开着条数加一；通道暂停时中台照样收下（sent true），但条数不变。"""
+        C.install(confirm=True, target=self.home)
+        C.issue_source_key(confirm=True, target=self.home)
+        C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})
+        tid, sent = self.dispatch()
+        self.assertTrue(sent["sent"])
+        before = self.events_of(tid)
+        self.assertEqual(before, 1)
+
+        code, out = cli(["resume-dispatch", "--task", tid, "--kind", "redispatch", "--reason", "再跑一次"])
+        self.assertEqual((code, [s["sent"] for s in out["send"]]), (0, [True]))
+        self.assertEqual(self.events_of(tid), before + 1)
+
+        C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/pause", {"reason": "测试"})
+        self.assertEqual(self.gate(), "通道暂停")             # 技能第 6 节「续接前」看通道就该停在这里
+        code, out = cli(["resume-dispatch", "--task", tid, "--kind", "rework", "--reason", "返修"])
+        self.assertEqual((code, [s["sent"] for s in out["send"]]), (0, [True]))      # 中台收下了
+        self.assertEqual(self.events_of(tid), before + 1)                            # 但没有轮次接：条数没变
+        self.assertTrue(self.runs_of(tid))                                           # 旧轮次还在，「找得到」不算数
 
 
 if __name__ == "__main__":
