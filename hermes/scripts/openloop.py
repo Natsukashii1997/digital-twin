@@ -260,10 +260,15 @@ def is_current(record, head, pushed):
     return not (pushed and record["at"] and record["at"] < pushed)
 
 
-def pr_row(repo, node, rules, reviews=(), known=True):
-    """一个开着的 PR 现在是哪种状态（规格第 5 节 GitHub 一列）。几种情况同时成立时取最需要人的那种。
-    顺序就是谁更需要人：检查失败、有冲突、审查要求修改（卡住）先于草稿和检查在跑（在做），草稿但检查红了也算卡住。
-    reviews：驿窗送审给的记录（有结论的回信，或还在等回信的 flying），和 GitHub 上的审查一起按时间排，最新一条算数。"""
+def pr_row(repo, node, rules, reviews=(), known=True, now=None):
+    """一个开着的 PR 现在是哪种状态（规格第 5 节 GitHub 一列）。按下面的顺序，先成立的算数：
+    检查失败 → 卡住；有一轮送审送出去还没回 → 等外部（有冲突也先等审完）；草稿 → 在做；
+    有冲突、4 小时内没有提交也不在返修 → 卡住（有动静的照下面判，证据里写一句有冲突）；
+    审查要求修改：4 小时内算在做（在返修），过了还没新提交才卡住；检查在跑 → 在做；审过或只改文档 → 等你；
+    最近 4 小时内有新提交、还没审 → 在做；其余 → 待验证。（常浩 11-22 回「修账本判法」，见规格第 5 节）
+    reviews：驿窗送审给的记录（有结论的回信，或还在等回信的 flying），和 GitHub 上的审查一起按时间排，最新一条算数。
+    active_at：PR 最近一次有动静（提交或审查记录）的时间，并行时比它旧的会话、主线项说法不参与定状态。"""
+    now = now or current()
     name = repo.split("/")[-1]
     commit = ((((node.get("commits") or {}).get("nodes")) or [{}])[-1] or {}).get("commit") or {}
     pushed = parse_ts(commit.get("committedDate")) or parse_ts(node.get("updatedAt"))
@@ -274,41 +279,55 @@ def pr_row(repo, node, rules, reviews=(), known=True):
     records = sorted(list(reviews) + github_reviews(node), key=lambda r: iso(r["at"]) or "")
     last = records[-1] if records else None
     fresh = bool(last) and is_current(last, node.get("headRefOid") or "", pushed)
+    active = max((t for t in (pushed, last["at"] if last else None) if t), default=None)
     base = dict(id_=f"pr:{name}#{node['number']}", source="pr", project=name, what=node.get("title") or "",
-                done_when="PR 合并或关闭", url=node.get("url"))
+                done_when="PR 合并或关闭", url=node.get("url"), active_at=iso(active))
+    conflict = node.get("mergeable") == "CONFLICTING"
+    reworking = bool(last and last["verdict"] == "revise" and fresh and last["at"] and now - last["at"] < dt.timedelta(minutes=WAIT["rework"]))
+    recent = bool(pushed and now - pushed < dt.timedelta(minutes=WAIT["conflict"]))
+    note = "；和主分支有冲突" if conflict else ""
     if checks["failing"]:
         names = "、".join(n for n, _ in checks["failing"])
         failed = max((t for _, t in checks["failing"] if t), default=pushed)
         return make(state="卡住", owner=writer, at=failed, evidence=f"检查失败：{names}", next_=f"{who}看失败原因并修",
                     wait="ci_failed", blocked=f"CI 失败：{names}", **base)
+    if last and last.get("flying"):   # 正在审：等审查方，冲突留到审完再处理（0D 就是有意留着冲突送审的）
+        return make(state="等外部", owner="ChatGPT", at=last["at"], evidence=f"已送审（{last['by']}），对方在看" + ("；和主分支有冲突，审完再处理" if conflict else ""),
+                    next_=f"等 {last['label']}回信", wait="relay_wait", **base)
     if node.get("isDraft"):
         return make(state="在做", owner=writer, at=pushed, evidence="最近一次提交（草稿 PR）",
                     next_=f"{who}做完后转成可审", wait="draft", **base)
-    if node.get("mergeable") == "CONFLICTING":
+    if conflict and not (reworking or recent):   # 有冲突、4 小时没人动：没人在变基
         return make(state="卡住", owner=writer, at=pushed, evidence="最近一次提交；和主分支有冲突",
                     next_=f"{who}变基解决冲突", wait="conflict", blocked="和主分支有冲突", **base)
     if last and last["verdict"] == "revise" and fresh:
+        if reworking:   # 回信刚到：写代码的一方在返修，还没到「没人接」的门槛
+            return make(state="在做", owner=writer, at=last["at"], evidence=f"{last['by']}要求修改，{who}返修中（还没有新提交）{note}",
+                        next_=f"{who}返修后重新送审", wait="rework", **base)
         return make(state="卡住", owner=writer, at=last["at"], evidence=f"{last['by']}要求修改，之后没有新提交",
                     next_=f"{who}返修后重新送审", wait="rework", blocked=f"审查要求修改（{last['by']}）", **base)
-    if last and last.get("flying"):
-        return make(state="等外部", owner="ChatGPT", at=last["at"], evidence=f"已送审（{last['by']}），对方在看",
-                    next_=f"等 {last['label']}回信", wait="relay_wait", **base)
     if checks["pending"]:
-        return make(state="在做", owner=writer, at=pushed, evidence="最近一次提交，检查还在跑：" + "、".join(checks["pending"]),
+        return make(state="在做", owner=writer, at=pushed, evidence="最近一次提交，检查还在跑：" + "、".join(checks["pending"]) + note,
                     next_="等检查跑完", wait="ci_running", **base)
     tier = tier_of(repo, node, rules)
     passed = bool(last) and last["verdict"] == "pass" and fresh
     if passed or tier == "L0":
         why = f"{last['by']}通过" if passed else "只改文档（L0，不用审）"
         at = max((t for t in (pushed, last["at"] if last else None) if t), default=None)
+        if conflict:   # 审过了但有冲突：先变基，合不了
+            return make(state="在做", owner=writer, at=pushed, evidence=f"{why}，{ci}{note}", next_=f"{who}变基解决冲突，之后等常浩合并",
+                        wait="conflict", **base)
         return make(state="等你", owner=OWNER, at=at, evidence=f"{why}，{ci}", next_=MERGE_NEXT,
                     check_at=next_slip(at) if at else None, **base)
     stale = f"；上一次审的是旧版本（{last['by']}）" if last else "，没有审查或送审记录" if known else "，GitHub 上没有审查，驿窗的送审记录这次没读到"
+    if pushed and now - pushed < dt.timedelta(minutes=WAIT["unreviewed"]):   # 规格第 5 节「最近有新提交 = 在做」
+        return make(state="在做", owner=writer, at=pushed, evidence=f"最近一次提交，{ci}{stale}（刚提交，还在改或等送审）{note}",
+                    next_="送审或请人审", wait="unreviewed", **base)
     return make(state="待验证", owner=UNKNOWN, at=pushed, evidence=f"最近一次提交，{ci}{stale}",
                 next_="送审或请人审", wait="unreviewed", **base)
 
 
-def github_source(projects, hub, rules, reviews=None, known=True):
+def github_source(projects, hub, rules, reviews=None, known=True, now=None):
     """reviews：{PR 的编号: [驿窗送审记录]}；known：送审记录这次读到了没有。"""
     reviews = reviews or {}
     rows, cover = [], {"ok": [], "failed": {}, "no_repo": [], "capped": []}
@@ -328,7 +347,7 @@ def github_source(projects, hub, rules, reviews=None, known=True):
         cover["ok"].append(name)
         if capped:
             cover["capped"].append(name)
-        rows += [pr_row(repo, n, rules, reviews.get(f"pr:{name}#{n['number']}", ()), known) for n in nodes]
+        rows += [pr_row(repo, n, rules, reviews.get(f"pr:{name}#{n['number']}", ()), known, now) for n in nodes]
     return rows, cover
 
 
@@ -806,7 +825,11 @@ def merge(rows, since, now):
     out, home = [], {}
     for members in groups.values():
         members.sort(key=lambda m: (PRIMARY.index(m["source"]), m["id"]))
-        lead, main = min(members, key=need), members[0]
+        main = members[0]
+        # 会话、主线项、接力的说法比 PR 最近一次提交或审查记录还旧的，已经过时：不参与定状态，只记在 links（标 old）
+        active = parse_ts(main.get("active_at")) if main["source"] == "pr" else None
+        old = {m["id"] for m in members[1:] if active and parse_ts(m.get("evidence_at")) and parse_ts(m["evidence_at"]) < active}
+        lead = min((m for m in members if m["id"] not in old), key=need)
         row = {**lead, **{k: main.get(k) for k in ("id", "what", "source", "project", "done_when", "refs", "session_ref")}}
         if len(members) > 1:
             row.pop("url", None)
@@ -815,8 +838,9 @@ def merge(rows, since, now):
                 row["url"] = main["url"]
             row["since"] = min(m["since"] for m in members)
             row["parts"] = [dict(m) for m in members]
-            row["links"] = [{k: m[k] for k in ("id", "state", "what", "since", "next", "blocked")} for m in members[1:]]
-            same = [m["blocked"] for m in sorted(members, key=need) if m["state"] == lead["state"] and m["blocked"]]
+            row["links"] = [{**{k: m[k] for k in ("id", "state", "what", "since", "next", "blocked")}, **({"old": True} if m["id"] in old else {})}
+                            for m in members[1:]]
+            same = [m["blocked"] for m in sorted(members, key=need) if m["state"] == lead["state"] and m["blocked"] and m["id"] not in old]
             row["blocked"] = "；".join(dict.fromkeys(same))   # 同样最需要人的几条各自卡在哪都写上，先到点的在前
             if any(m.get("carried") for m in members):
                 row.update(carried=True, carried_from=min(m["carried_from"] for m in members if m.get("carried")))
@@ -969,7 +993,7 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
     known = not r_cover.get("failed")
     if not known and "reviews" in prev:   # 送审记录这次没读到：PR 的状态照上一份记下的送审记录判，不说成「没有记录」
         reviews, known = {k: [{**r, "at": parse_ts(r.get("at"))} for r in v] for k, v in prev["reviews"].items()}, True
-    prs, gh_cover = github_source(projects, hub, rules, reviews, known)
+    prs, gh_cover = github_source(projects, hub, rules, reviews, known, now)
     open_prs_now, checked = {r["id"] for r in prs}, tuple(f"pr:{name}#" for name in gh_cover["ok"])
     done = [r for r in relays if any(ref.startswith(checked) and ref not in open_prs_now for ref in r["_refs"])] if checked else []
     relays = [r for r in relays if r not in done]

@@ -7,11 +7,14 @@ autoloop_grants.py（任务凭证与派单网关，#195 批 0B-1）：两步批�
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
+import fcntl
 import io
 import json
 import os
+import re
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,7 +23,11 @@ from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
+import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
+import autoloop_recovery as R  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 
 OWNER = "ou_fixture_owner_0001"
 CHAT = "oc_fixture_p2p_0001"
@@ -53,7 +60,8 @@ class Base(unittest.TestCase):
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT)
         for p in (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(G, "ROSTER", self.roster),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", side_effect=self._notify)):
+                  mock.patch.object(G, "notify_owner", side_effect=self._notify),
+                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 RecoveryGate）
             p.start()
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted, self.notices = {}, 0, [], []
@@ -319,6 +327,36 @@ class Sending(Base):
         self.assertNotIn("README", json.dumps(ev, ensure_ascii=False))
 
 
+class RecoveryGate(Base):
+    """批 0D：恢复闸关着时不提议（不发确认消息）、不往中台发事件；事件留在账里，开闸后补发；冻结照常立刻生效。"""
+    def closed(self):
+        return mock.patch.object(R, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账"))
+
+    def test_closed_gate_blocks_propose_and_send_but_keeps_events(self):
+        with self.closed():
+            with self.assertRaisesRegex(G.Rejected, "睡醒"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        self.assertEqual(self.notices, [])
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        with self.closed():
+            out = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+            self.assertIn("恢复闸关着", out["send"]["error"])
+            with self.assertRaisesRegex(G.Rejected, "send-pending 补发"):
+                G.send_pending(post=self.post, now=T0)
+            self.assertEqual(G.freeze(out["task_id"], "常浩推翻", now=T0)["status"], "frozen")   # 收权不受闸影响
+        self.assertEqual(self.posted, [])
+        self.assertEqual(self.sent_states(out["task_id"]), {"start": -1})              # 冻结作废了没发的
+
+    def test_events_wait_for_the_gate_then_go_once(self):
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        with self.closed():
+            tid = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)["task_id"]
+        self.assertEqual(self.sent_states(tid), {"start": 0})
+        self.assertEqual([s["sent"] for s in G.send_pending(post=self.post, now=T0)], [True])
+        self.assertEqual(G.send_pending(post=self.post, now=LATER), [])
+        self.assertEqual(len(self.posted), 1)
+
+
 class Mirror(Base):
     def test_freeze_takes_effect_even_if_mirror_cannot_be_written(self):
         tid = self.new_task()
@@ -525,6 +563,153 @@ class Resume(Base):
             G.resume_dispatch(tid, "rework", " ", now=T0, post=self.post)
         with self.assertRaisesRegex(G.Rejected, "过期"):
             G.resume_dispatch(tid, "rework", "x", now=T0 + dt.timedelta(hours=13), post=self.post)
+
+    def test_resume_binds_ref_and_generation(self):
+        """L3 第 3 轮 P1-09：续接带决定号时记进同一条续接日志（同一个决定号只能续接一次）；发起方认定的代次不对就不续接。"""
+        tid = self.new_task()
+        with self.assertRaisesRegex(G.Rejected, "不是发起时的第 2 代"):
+            G.resume_dispatch(tid, "rework", "x", now=T0, post=self.post, ref="d-1", generation=2)
+        with self.assertRaisesRegex(G.Rejected, "决定号写法"):
+            G.resume_dispatch(tid, "rework", "x", now=T0, post=self.post, ref="../x")
+        out = G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post, ref="d-1", generation=1)
+        with self.assertRaisesRegex(G.Rejected, "已经续接过"):
+            G.resume_dispatch(tid, "rework", "再来", now=T0, post=self.post, ref="d-1", generation=1)
+        G.resume_dispatch(tid, "rework", "人工", now=T0, post=self.post)           # 不带决定号的照旧可以
+        with G.tx() as con:
+            refs = G.resume_refs(con, tid)
+        self.assertEqual(list(refs), ["d-1"])
+        self.assertEqual((refs["d-1"][0]["event"], refs["d-1"][0]["generation"]), (out["event_key"], 1))
+
+    def test_resume_refuses_while_a_resume_event_is_unsent(self):
+        """续审第 3 轮：这张单还有没确认送到中台的续接事件（sent 0 未发、2 发送中）就不再续接，
+        锁放开以后同一张单也不会冒出第二个事件号；送到了（sent=1）才能再续接。开单的 start 不算。"""
+        tid = self.new_task()
+
+        def down(*a, **k):
+            raise G.Rejected("连不上中台")
+        first = G.resume_dispatch(tid, "redispatch", "中台放弃了", now=T0, post=down)["event_key"]
+        for sent in (0, 2):
+            with self.subTest(sent=sent):
+                self.sql("UPDATE hub_events SET sent = ?, claimed_at = ? WHERE event_key = ?", (sent, G.iso(T0), first))
+                with self.assertRaisesRegex(G.Rejected, "没确认送到中台.*" + re.escape(first)):
+                    G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post)
+                n = self.sql("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind != 'start'", (tid,))[0][0]
+                self.assertEqual(n, 1)
+        self.sql("UPDATE hub_events SET sent = 1 WHERE event_key = ?", (first,))
+        self.sql("UPDATE hub_events SET sent = 0 WHERE task_id = ? AND kind = 'start'", (tid,))   # 开单事件没送到不挡续接
+        out = G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post)
+        self.assertEqual(out["event_key"], f"{tid}:g1:rework:1")
+
+    def test_events_of_a_voided_generation_do_not_block_resume(self):
+        """续审第 3 轮预审 P2-2：冻结时 sent=2 的事件原样留着；换到新代次后它已经发不出去（send-pending 会作废它），
+        不算「没送到」，新代次照常续接。"""
+        tid = self.new_task()
+
+        def down(*a, **k):
+            raise G.Rejected("连不上中台")
+        first = G.resume_dispatch(tid, "redispatch", "中台放弃了", now=T0, post=down)["event_key"]
+        self.sql("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE event_key = ?", (G.iso(T0), first))
+        G.freeze(tid, "推翻", now=T0)
+        self.assertEqual(self.sql("SELECT sent FROM hub_events WHERE event_key = ?", (first,))[0][0], 2)
+        self.sql("UPDATE grants SET status = 'active', generation = 2, freeze_code = NULL WHERE task_id = ?", (tid,))
+        out = G.resume_dispatch(tid, "correction", "换代后更正", now=T0, post=self.post)    # 解冻要私聊口令，这里直接改库
+        self.assertEqual(out["event_key"], f"{tid}:g2:correction:1")
+
+    def test_lock_token_must_be_the_callers_own(self):
+        """续审第 4 轮 P1-08-01：另一个进程持着这张单的任务锁时，本进程怎么传都续接不了——不传（自己拿被挡）、传布尔值、
+        传伪造的凭证（锁文件开着但没拿到锁）、传别的单的凭证，一律拒绝，事件数不变；离开 with 的凭证作废；
+        本进程自己拿到的凭证才认。「试着拿锁被挡」不再当成「调用方持锁」的证明。"""
+        tid, other = self.new_task(), self.new_task()
+
+        def events():
+            return self.sql("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind != 'start'", (tid,))[0][0]
+        with G.task_lock(tid) as expired:
+            pass
+        f = G._lock_file(tid)
+        child = subprocess.Popen([sys.executable, "-c",                    # 独立进程持锁（原秘书 ② / ③ 或受信发布）
+                                  "import fcntl, os, sys\n"
+                                  "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                                  "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                                  "print('held', flush=True)\n"
+                                  "sys.stdin.read()\n", str(f)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "held")
+            with self.assertRaisesRegex(G.Rejected, "另有入口正在处理"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post)
+            fd = os.open(f, os.O_RDWR)
+            try:
+                forged = G.TaskLock(tid, str(f), fd)
+                with G.task_lock(other) as theirs:
+                    for bad in (True, 1, "locked", forged, theirs, expired):
+                        with self.subTest(bad=type(bad).__name__):
+                            with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=bad)
+            finally:
+                os.close(fd)
+            self.assertEqual(events(), 0)
+        finally:
+            child.stdin.close()
+            child.wait(10)
+        with G.task_lock(tid) as mine:
+            out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
+        self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
+        self.assertEqual(events(), 1)
+
+    def test_forged_or_expired_token_is_refused_without_taking_the_lock(self):
+        """送审前预审：没人持锁时，手搓的凭证也不认，而且核实本身不会顺手拿锁（之后照常能拿）；离开 with 的凭证作废，
+        哪怕它的描述符号被同一张单的新凭证复用、新凭证正持着锁，也不认；锁文件被删掉重建过（别人能在新文件上再拿一把），
+        手里的凭证也不认。"""
+        tid = self.new_task()
+        f = G._lock_file(tid)
+        with G.task_lock(tid):
+            pass
+        fd = os.open(f, os.O_RDWR)
+        try:
+            with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=G.TaskLock(tid, str(f), fd))
+            with G.task_lock(tid):                                                # 没被顺手占住
+                pass
+        finally:
+            os.close(fd)
+        with G.task_lock(tid) as old:
+            pass
+        with G.task_lock(tid) as mine:
+            self.assertEqual(old.fd, mine.fd)                                     # 描述符号复用了（最小可用号）
+            with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=old)
+            out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
+        self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
+        self.sql("UPDATE hub_events SET sent = 1 WHERE event_key = ?", (out["event_key"],))
+        with G.task_lock(tid) as mine:
+            os.unlink(f)
+            with G.task_lock(tid):                                                # 新文件上又拿到一把
+                with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                    G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
+
+    def test_task_lock_lives_next_to_the_grants_db(self):
+        """续审第 3 轮：任务锁文件在凭证库旁边的 task-locks/，写同一个凭证库的进程（续接、受信发布、秘书 ② / ③）必然拿同一把，
+        不靠各自的环境变量对齐；被持着时续接拒绝、另一次拿锁抛 Busy；放了就能拿。"""
+        tid = self.new_task()
+        f = self.db.parent / "task-locks" / f"{tid}.lock"
+        with G.task_lock(tid):
+            self.assertTrue(f.is_file())
+            fd = os.open(f, os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            with self.assertRaises(G.Busy):
+                with G.task_lock(tid):
+                    pass
+            with self.assertRaisesRegex(G.Rejected, "不能续接：.*正在处理"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post)
+        with G.task_lock(tid):
+            pass
+        with self.assertRaisesRegex(G.Rejected, "单号写法"):
+            with G.task_lock("../x"):
+                pass
 
     def test_log_is_append_only_history(self):
         tid = self.new_task()

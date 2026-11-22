@@ -25,9 +25,12 @@ from unittest import mock
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
+import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
+import autoloop_recovery as R  # noqa: E402
 import fake_gh  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
 from test_dt_worktree import SCRIPT, WorkerBase, git  # noqa: E402
 
 
@@ -38,7 +41,7 @@ class PublishBase(WorkerBase):
         self.gh_state = r / "gh"
         exe = fake_gh.install(r / "ghbin", self.gh_state)
         p = mock.patch.dict(os.environ, {"DT_PUBLISH_OUTBOX": str(self.outbox), "DT_PUBLISH_MIRRORS": str(r / "mirrors"),
-                                         "DT_PUBLISH_LOG": str(r / "publish.jsonl"),
+                                         "DT_PUBLISH_LOG": str(r / "publish.jsonl"), "DT_EXITS_DB": str(r / "exits.db"),
                                          "FAKE_GH_STATE": str(self.gh_state), **{k: v for k, v in
                                                                                   self.wenv.items() if k.startswith("GIT_")}})
         p.start()
@@ -48,7 +51,8 @@ class PublishBase(WorkerBase):
         for q in (mock.patch.object(P, "GATE_USER", pwd.getpwuid(os.geteuid()).pw_name),
                   mock.patch.object(P, "TEST_BACKEND", self.backend),
                   mock.patch.object(P, "hub_run", side_effect=self.fake_hub_run),
-                  mock.patch.object(P, "hub_card", side_effect=self.fake_hub_card)):
+                  mock.patch.object(P, "hub_card", side_effect=self.fake_hub_card),
+                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 ExitLedger）
             q.start()
             self.addCleanup(q.stop)
         self.main_before = git("rev-parse", "main", cwd=self.remote)
@@ -150,10 +154,10 @@ class Publish(PublishBase):
 
     def test_second_publish_is_idempotent_and_resume_fast_forwards(self):
         tid = self.worked()
-        P.publish(tid)
+        first = P.publish(tid)
         (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, self.handoff(tid)["head"])]))
-        out = P.publish(tid)
-        self.assertEqual((out["pushed"], out["pr_opened"], out["pr"]), (False, False, "u8"))
+        out = P.publish(tid)                                              # 同一头提交：出口账本直接回原结果（批 0D）
+        self.assertEqual((out["pushed"], out["pr_opened"], out["pr"]), (False, False, first["pr"]))
         self.run_turn([self.answer_event(tid)])
         (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, self.handoff(tid)["head"])]))
         out = P.publish(tid)
@@ -258,6 +262,48 @@ class GrantAtPublish(PublishBase):
         code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
         self.unfreeze_ok(tid, code, when=self.now)
         self.rejects(tid, "第 1 代已作废")
+
+    def test_in_flight_event_of_a_voided_generation_arrives_late(self):
+        """续审第 4 轮 P2-07：第 1 代的续接事件已领走（sent=2）、请求还在路上时冻结并换到第 2 代，第 2 代照常续接；旧请求随后
+        才到中台。中台本身不核代次（引擎没改），代次在三处核：
+        ① 镜像已刷新时到 → 工人准入按镜像拦下：不启动 CLI、不交接；
+        ② 冻结提交到镜像刷新之间到（这里把镜像换回冻结前的样子模拟）→ 工人会跑、会交接（工人只看镜像），交接前重核同样看旧镜像，
+           受信发布按凭证库现读拦下：不推、不开 PR；
+        ③ 这张单跑过第 2 代以后、镜像又是旧的时候到的第 1 代事件 → 镜像拦不住，工人按本单状态拦下（比上次跑的旧）。
+        第 2 代照常跑完、交接。"""
+        tid = self.worked()
+
+        def down(body):
+            raise G.Rejected("请求还在路上")
+        old = G.resume_dispatch(tid, "redispatch", "中台放弃了", now=self.now, post=down)["event_key"]
+        self.sql("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE event_key = ?", (G.iso(self.now), old))
+        stale = self.status.read_text()                                          # 冻结前的工人镜像
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        fresh = self.status.read_text()
+        self.assertEqual(self.mirror()[tid]["generation"], 2)
+        self.assertEqual(self.sql("SELECT sent FROM hub_events WHERE event_key = ?", (old,))[0][0], 2)   # 旧请求还在途
+        new = G.resume_dispatch(tid, "correction", "换代后更正", now=self.now, post=self.post)  # 不被旧代次的在途事件挡
+        self.assertTrue(new["event_key"].startswith(f"{tid}:g2:correction"))
+        late = self.dispatch_event(tid, gen=1, kind="redispatch")
+        before = self.handoff(tid)
+        r, calls = self.run_turn([late])                                          # ① 镜像已刷新
+        self.assert_stopped(r, calls, "第 1 代已作废")
+        self.assertEqual(self.handoff(tid), before)
+        self.status.write_text(stale)                                             # ② 镜像还没刷新
+        r, calls = self.run_turn([late])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        self.assertEqual(self.handoff(tid)["generation"], 1)
+        self.status.write_text(fresh)
+        self.rejects(tid, "第 1 代已作废")
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        self.assertEqual(self.handoff(tid)["generation"], 2)
+        self.status.write_text(stale)                                             # ③ 第 2 代跑过以后，镜像又是旧的
+        r, calls = self.run_turn([late])
+        self.assert_stopped(r, calls, "第 1 代比这张单上次跑的旧")
+        self.status.write_text(fresh)
+        self.assertEqual(self.handoff(tid)["generation"], 2)
 
     def test_manifest_cannot_choose_repo_or_executor(self):
         tid = self.worked()
@@ -472,6 +518,130 @@ class GenerationEvidence(PublishBase):
         self.assertTrue(P.publish(tid)["pushed"])
 
 
+class ExitLedger(PublishBase):
+    """批 0D：推分支、开 PR 都经出口账本（docs/恢复门-0D-设计.md 第 6 节）：先记账再动手，做成的不重做，
+    结果不明冻结这张单（task:<单号>），对账回读远端分支 / PR 后才继续；恢复闸关着一样也不做。"""
+
+    def pushes(self):
+        """远端真正收到推送的次数：裸仓库里本单分支的引用日志条数。"""
+        r = subprocess.run(["git", "reflog", "show", "--format=%H", f"refs/heads/claude/{self.tid}"], cwd=self.remote,
+                           capture_output=True, text=True)
+        return len(r.stdout.split()) if r.returncode == 0 else 0
+
+    def setUp(self):
+        super().setUp()
+        git("config", "core.logAllRefUpdates", "always", cwd=self.remote)
+        self.tid = self.worked()
+
+    def row(self, kind):
+        with E.db(write=False) as con:
+            r = con.execute("SELECT * FROM exits WHERE kind = ?", (kind,)).fetchone()
+        return dict(r) if r else None
+
+    def push_then(self, result):
+        """真推一次（或不推），然后让 git push 看起来报错 / 进程在记结果之前死掉。"""
+        real = P.git
+
+        def fake(*a, **k):
+            if a[0] != "push":
+                return real(*a, **k)
+            if result == "hung_up_after_push":
+                real(*a, **k)
+            return subprocess.CompletedProcess(a, 1, "", "fatal: the remote end hung up unexpectedly")
+        return mock.patch.object(P, "git", side_effect=fake)
+
+    def die(self):
+        """把 executing 那一行的进程号改成一个已经结束的进程（模拟强杀后重启）。"""
+        q = subprocess.Popen([sys.executable, "-c", "pass"])
+        q.wait()
+        with E.db() as con:
+            con.execute("UPDATE exits SET pid = ? WHERE state = 'executing'", (q.pid,))
+
+    def test_published_once_then_replayed_from_ledger(self):
+        out = P.publish(self.tid)
+        self.assertEqual((out["pushed"], out["pr_opened"]), (True, True))
+        self.assertEqual((self.row("push_branch")["state"], self.row("open_pr")["state"]), ("done", "done"))
+        again = P.publish(self.tid)
+        self.assertEqual((again["pushed"], again["pr_opened"]), (False, False))
+        self.assertEqual(self.pushes(), 1)
+        self.assertEqual(len([x for x in self.gh_calls() if x[:2] == ["pr", "create"]]), 1)
+
+    def test_killed_after_push_is_reconciled_not_pushed_again(self):
+        real = E._finish
+
+        def killed(key, state, outcome=None, note=None):  # 推完、记结果之前进程被强杀：账本里留着 executing
+            if key.startswith("push_branch:"):
+                raise SystemExit("强杀")
+            return real(key, state, outcome, note)
+        with mock.patch.object(E, "_finish", killed), self.assertRaises(SystemExit):
+            P.publish(self.tid)
+        self.assertEqual(self.row("push_branch")["state"], "executing")
+        self.die()
+        out = P.publish(self.tid)                          # 重启后再发：先对这张单的账，确认已推，不再推
+        self.assertEqual(self.pushes(), 1)
+        self.assertEqual(self.row("push_branch")["state"], "done")
+        self.assertTrue(out["pr_opened"])
+
+    def test_unknown_push_freezes_until_reconciled(self):
+        with self.push_then("hung_up_after_push"), self.assertRaisesRegex(P.Rejected, "分不清推没推"):
+            P.publish(self.tid)
+        self.assertEqual(self.row("push_branch")["state"], "unknown")
+        self.assertEqual([x for x in self.gh_calls() if x[:2] == ["pr", "create"]], [])   # 推的结果不明：不开 PR
+        P.publish(self.tid)
+        self.assertEqual((self.pushes(), self.row("push_branch")["state"]), (1, "done"))
+
+    def test_unknown_push_that_never_landed_waits_for_owner_then_retried_once(self):
+        """L3 第 3 轮 P1-10：结果不明、远端还是推之前的样子 → 核不清（分不清没推还是推了又被删），不自动重推；
+        常浩核过结算成没做成，才重推一次。"""
+        with self.push_then("hung_up"), self.assertRaises(P.Rejected):
+            P.publish(self.tid)
+        self.assertEqual((self.pushes(), self.row("push_branch")["state"]), (0, "unknown"))
+        with self.assertRaises(P.Rejected):                # 对账：核不清，这张单冻结，不重推
+            P.publish(self.tid)
+        self.assertEqual((self.pushes(), self.row("push_branch")["state"]), (0, "unreconciled"))
+        E.settle(self.row("push_branch")["key"], "failed", "常浩核过：远端从没有过这条分支", confirm=True)
+        out = P.publish(self.tid)
+        self.assertEqual((out["pushed"], self.pushes()), (True, 1))
+        self.assertEqual(self.row("push_branch")["attempts"], 2)
+
+    def test_definite_push_failure_is_retryable(self):
+        real = P.git
+
+        def offline(*a, **k):
+            if a[0] == "push":
+                return subprocess.CompletedProcess(a, 128, "", "fatal: unable to access: Could not resolve host: x")
+            return real(*a, **k)
+        with mock.patch.object(P, "git", side_effect=offline), self.assertRaisesRegex(P.Rejected, "确定没做成"):
+            P.publish(self.tid)
+        self.assertEqual(self.row("push_branch")["state"], "failed")
+        self.assertTrue(P.publish(self.tid)["pushed"])
+
+    def test_pr_create_error_is_unknown_and_never_reopened(self):
+        real = subprocess.run
+
+        def gh_create_fails_after_creating(cmd, *a, **k):
+            r = real(cmd, *a, **k)
+            if cmd[1:3] == ["pr", "create"]:
+                return subprocess.CompletedProcess(cmd, 1, "", "HTTP 502")    # 其实 PR 已经开了
+            return r
+        with mock.patch.object(P.subprocess, "run", side_effect=gh_create_fails_after_creating), \
+                self.assertRaisesRegex(P.Rejected, "分不清开没开"):
+            P.publish(self.tid)
+        self.assertEqual(self.row("open_pr")["state"], "unknown")
+        head = self.handoff(self.tid)["head"]
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(self.tid, head)]))   # GitHub 上其实有了
+        with mock.patch.dict(os.environ, {"DT_GH": self.backend["gh"]}):
+            out = P.publish(self.tid)                      # 对账查到这条 PR：不再开
+        self.assertEqual(out["pr_opened"], False)
+        self.assertEqual(self.row("open_pr")["state"], "done")
+        self.assertEqual(len([x for x in self.gh_calls() if x[:2] == ["pr", "create"]]), 1)
+
+    def test_closed_gate_publishes_nothing(self):
+        with mock.patch.object(R, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账")):
+            self.rejects(self.tid, "睡醒")
+        self.assertEqual(self.gh_calls(), [])
+
+
 class PrIdentity(PublishBase):
     """审查 P1-05：同名分支已有开着的 PR，核对目标、来源、分支、头提交都对才沿用。"""
 
@@ -479,17 +649,24 @@ class PrIdentity(PublishBase):
         tid = self.worked()
         P.publish(tid)
         head = self.handoff(tid)["head"]
+
+        def forget_pr():                                                  # 出口账本记着「已开」会直接回原结果：每种情况从头核
+            with E.db() as con:
+                con.execute("DELETE FROM exits WHERE kind = 'open_pr'")
         for over in ({"isCrossRepository": True}, {"headRepositoryOwner": {"login": "fork-owner"}},
                      {"headRepository": {"name": "other"}}, {"baseRefName": "dev"}, {"headRefOid": "0" * 40},
                      {"headRefName": f"claude/{tid}-x"}):
             (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, head, **over)]))
+            forget_pr()
             with self.assertRaises(P.Rejected) as c:
                 P.publish(tid)
             self.assertIn("不沿用", str(c.exception))
         (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, head)] * 2))
+        forget_pr()
         with self.assertRaises(P.Rejected):
             P.publish(tid)                                                # 两个开着的也不认
         (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, head)]))
+        forget_pr()
         self.assertEqual(P.publish(tid)["pr"], "u8")
 
 

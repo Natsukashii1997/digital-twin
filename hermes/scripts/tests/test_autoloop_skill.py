@@ -31,7 +31,9 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
+import autoloop_exits as EX  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
+import autoloop_recovery as RV  # noqa: E402
 from test_autoloop_grants import CHAT, LATER, OWNER, T0, Base, raw_msg  # noqa: E402
 from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
 
@@ -103,15 +105,17 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [5, 8], tables)
-        reach = [inspect.getsource(G.propose) + inspect.getsource(G.notify_owner),
+        self.assertEqual([len(t) for t in tables], [6, 8], tables)
+        reach = [inspect.getsource(G.propose) + inspect.getsource(G.notify_owner) + inspect.getsource(RV.ensure_open),
                  inspect.getsource(G.approve) + inspect.getsource(G.verify_owner)]
         for table, src in zip(tables, reach):
             for words in table:
                 with self.subTest(words=words):
                     self.assertIn(words, src)
         for words, fn in (("已发到常浩私聊", G.propose), ("不能续接：", G.resume_dispatch), ("已经是终态", G._tighten),
-                          ("凭证已过期", G.check_row), ("【派单确认】", G.notice_text)):
+                          ("凭证已过期", G.check_row), ("【派单确认】", G.notice_text),
+                          ("还有没确认送到中台的派单事件", G.resume_dispatch), ("另有入口正在处理", G.task_lock),
+                          ("开闸后 send-pending 补发", G.send_pending), ("恢复闸关着", RV.ensure_open)):
             with self.subTest(words=words):
                 self.assertIn(words, self.text)
                 self.assertIn(words, inspect.getsource(fn))
@@ -120,6 +124,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
         for field, script in (("usable", "autoloop_grants"), ("why_not", "autoloop_grants"), ("events", "autoloop_grants"),
                               ("valid_until", "autoloop_grants"), ("freeze_code", "autoloop_grants"),
                               ("mirror_error", "autoloop_grants"), ("event_key", "autoloop_grants"),
+                              ("in_flight", "autoloop_grants"),
                               ("task_id", "autoloop_grants"), ("dispatch_rules", "autoloop_config"),
                               ("source_hermes", "autoloop_config"), ("key_file", "autoloop_config"),
                               ("loaded", "autoloop_config"), ("paused", "autoloop_config"),
@@ -280,6 +285,34 @@ class OneSentenceToDispatch(Base):
         self.assertIn("还没有 hermes 来源密钥", out["send"][0]["why"])
         self.assertEqual(len(G.show()), 1)                     # 凭证已签，只是没派出去
 
+    def test_closed_recovery_gate_is_reported_not_retried(self):
+        """批 0D 的恢复闸关着时：提单被拒、原因里有「恢复闸关着」；批准照样签凭证，但 send 是一句 error、事件留在账里；
+        开闸后 send-pending 补发。技能第 3、4 节各有一行讲这种情况。"""
+        closed = mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：电脑睡醒过，要先对账"))
+        with closed:
+            code, out = self.propose()
+        self.assertEqual((code, out["ok"]), (1, False))
+        self.assertIn("恢复闸关着", out["why"])
+        self.assertEqual(self.notices, [])
+        self.propose()
+        mid = self.say(reply_line(self.notices[-1][0]))
+        with closed:
+            code, out = cli(["approve", "--message-id", mid])
+        self.assertEqual(code, 0)                              # 退出码还是 0
+        self.assertIn("恢复闸关着", out["send"]["error"])
+        tid = out["task_id"]
+        self.assertEqual((self.posted, cli(["show", "--task", tid])[1][0]["events"][0]["state"]), ([], "待发"))
+        code, sent = cli(["send-pending"])                     # 开闸之后补送
+        self.assertEqual([(s["event_key"], s["sent"]) for s in sent], [(f"{tid}:g1:start", True)])
+        # 上一次派单还没送到时不能续接（技能第 6 节）
+        other = self.dispatch()
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            first = cli(["resume-dispatch", "--task", other, "--kind", "redispatch", "--reason", "再跑一次"])[1]
+        self.assertIsNone(first["send"][0]["sent"])
+        code, out = cli(["resume-dispatch", "--task", other, "--kind", "redispatch", "--reason", "再跑一次"])
+        self.assertEqual(code, 1)
+        self.assertIn("不能续接：这张单还有没确认送到中台的派单事件", out["why"])
+
     def test_resume_stop_freeze_complete(self):
         tid = self.dispatch()
         code, out = cli(["resume-dispatch", "--task", tid, "--kind", "redispatch", "--reason", "常浩说再跑一次"])
@@ -326,7 +359,8 @@ class SkillOnRealHub(HubFixture):
         for p in (mock.patch.dict(os.environ, {"DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"), "DT_OWNER_CHAT_ID": CHAT,
                                                "DT_GRANTS_STATUS": str(self.status_file), "DT_GRANTS_TASKS": str(self.tasks)}),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", side_effect=self._notify)):
+                  mock.patch.object(G, "notify_owner", side_effect=self._notify),
+                  mock.patch.object(RV, "ensure_open"), mock.patch.object(RV, "admit")):   # 恢复闸放行，同 test_autoloop_grants.Base
             p.start()
             self.addCleanup(p.stop)
         self.scope = root / "五要素.md"
