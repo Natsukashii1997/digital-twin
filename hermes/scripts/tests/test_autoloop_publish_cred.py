@@ -154,7 +154,7 @@ class CredBase(PublishBase):
         real, seen = subprocess.run, []
 
         def run(cmd, *a, **kw):
-            if cmd[0] != "/bin/ls":                      # has_acl 的 ls -led 不是 git / gh，不记
+            if cmd[0] not in ("/bin/ls", str(BACKEND)):  # has_acl 的 ls -led、假远端自己起的 git-http-backend 不记
                 seen.append((list(cmd), dict(kw.get("env") or {})))
             return real(cmd, *a, **kw)
         with mock.patch.object(P.subprocess, "run", side_effect=run):
