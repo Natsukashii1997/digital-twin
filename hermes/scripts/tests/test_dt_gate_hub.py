@@ -396,7 +396,7 @@ class ChecksTest(unittest.TestCase):
         self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])
 
     # ---------- 0D 恢复门：停写 → 排空 ----------
-    def fake_recovery(self, hold=None, items=None, writes=None, log=None, fail=()):
+    def fake_recovery(self, hold=None, items=None, writes=None, log=None, fail=(), cards=()):
         """恢复闸命令行的替身：leftovers / writes 按给的返回（writes、items 可以是一串，逐次取，最后一个一直用），
         hold / release 改闸上的恢复点；fail 里的命令抛 Stop。"""
         st = {"hold": hold}
@@ -415,6 +415,8 @@ class ChecksTest(unittest.TestCase):
                 return {"hold": st["hold"], "items": take("items")}
             if args[0] == "writes":
                 return {"in_flight": take("writes")}
+            if args[0] == "cards-after":
+                return {"cards": list(cards)}
             if args[0] == "hold":
                 st["hold"] = args[args.index("--point") + 1]
             if args[0] == "release":
@@ -585,24 +587,33 @@ class ChecksTest(unittest.TestCase):
 
     def test_full_rollback_releases_owner_hold_or_records_it(self):
         root = Path(os.environ["DT_GATE_ROOT"])
-        for fail, left in (((), None), (("release",), "gate-migrate-S")):
-            with self.subTest(fail=fail):
-                w = self.d / f"rb{len(fail)}"
+        cases = (((), (), None, 5), (("release",), (), "gate-migrate-S", 5),
+                 ((), ("cards.db 卡片 9",), "gate-migrate-S", 5),     # dt-gate 搬家后发过卡片：保持停写（0D 指出的缺口）
+                 ((), (), "gate-migrate-S", None),                    # 记录里没有最大卡片号：核不了，保持停写
+                 (("cards-after",), (), "gate-migrate-S", 5))         # 查不了：保持停写
+        for n, (fail, cards, left, max_card) in enumerate(cases):
+            with self.subTest(fail=fail, cards=cards, max_card=max_card):
+                w = self.d / f"rb{n}"
                 (w / "moved").mkdir(parents=True)
                 base = {"owner_account": "nat", "owner_hub": str(w / "hub"), "owner_moved": str(w / "moved"),
                         "plist_moved": str(w / "p"), "plist_home": str(w / "ph"), "hub_url": "http://127.0.0.1:1",
-                        "owner_hold": "gate-migrate-S"}
+                        "owner_hold": "gate-migrate-S", "owner_hold_max_card": max_card}
                 (root / "state.json").write_text(json.dumps(base))
-                run = self.fake_recovery(hold="gate-migrate-S", fail=fail)
+                log = []
+                run = self.fake_recovery(hold="gate-migrate-S", fail=fail, cards=cards, log=log)
                 with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent"), \
                         mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "remove_daemon"), \
                         mock.patch.object(H, "installed", return_value=False), \
-                        mock.patch.object(H, "now_stamp", return_value=f"R{len(fail)}"), \
+                        mock.patch.object(H, "now_stamp", return_value=f"R{n}"), \
                         mock.patch("sys.stdout", io.StringIO()):
                     self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
-                arch = json.loads((root / f"state.rolled-back-R{len(fail)}.json").read_text())
+                arch = json.loads((root / f"state.rolled-back-R{n}.json").read_text())
                 self.assertEqual(arch.get("owner_hold_left"), left)
                 self.assertEqual(run.state["hold"], left)
+                if max_card is not None:
+                    q = [c for c in log if c[1] == "cards-after"][0]
+                    self.assertEqual(q[0], "dt-gate")                                 # 以 dt-gate 身份查它自己的账本
+                    self.assertEqual(q[2][q[2].index("--max-card") + 1], "5")
 
     def test_worker_launchers_must_match_the_staged_copy(self):
         """搬家后凭证镜像在 /Users/Shared/dt-gate/：装着的工人启动脚本要换成副本里的新版；没装的不拦。"""

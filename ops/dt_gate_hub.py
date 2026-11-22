@@ -610,6 +610,24 @@ def hold_and_drain(host, current, owner, point, snapshot, max_card):
         raise Stop(f"排空以后主账号账本里还有没结清的东西：{after['items']}")
 
 
+def gate_cards_clean(host, current, max_card):
+    """回滚前补主账号恢复闸看不到的那一半（0D 会话 11-22 指出）：dt-gate 开闸后发过的卡片记在 dt-gate 自己的出口账本和
+    卡片库里，主账号的回滚核对（mismatched_after）查不到；中台退回旧快照会复用这些卡片号，和飞书上已有的消息撞号。
+    以 dt-gate 身份只读查卡片号大于搬家时最大号的；查到、或查不了，都不结束主账号停写。"""
+    if max_card is None:
+        say("  搬家记录里没有快照时的最大卡片号，核不了 dt-gate 发过的卡片")
+        return False
+    try:
+        found = recovery_as(host, current, gate_account(), ["cards-after", "--max-card", str(int(max_card))]).get("cards")
+    except Stop as e:
+        say(f"  查 dt-gate 发过的卡片没查成：{e}")
+        return False
+    if not isinstance(found, list) or found:
+        say(f"  dt-gate 搬家后发过卡片（{found}），卡片号大于搬家时的 {max_card}")
+        return False
+    return True
+
+
 def release_hold(host, current, owner, point):
     """结束搬家登记的维护停写（退回、回滚用）。闸上不是这个恢复点（hold 没做成、已经结束）就什么都不做。
     回滚核对不过（快照之后发过卡片）恢复闸会拒绝，保持停写、说清原因和手工命令，交常浩。返回是否结束干净。"""
@@ -1024,7 +1042,7 @@ def cmd_migrate(host, a):
                  "owner_moved": str(moved), "owner_hub": str(ohub), "plist_moved": str(plist_moved),
                  "plist_home": str(owner_agent_plist(host, a.owner_account)), "owner_key": owner_name,
                  "hub_url": url, "keys_removed": pruned["removed"], "keys_kept": pruned["kept"], "worker_rotated": False,
-                 "owner_hold": point}
+                 "owner_hold": point, "owner_hold_max_card": max_card}
         write_json(root / "state.json", state)
     except BaseException as e:
         say(f"出错了，退回主账号中台：{e}")
@@ -1371,7 +1389,11 @@ def cmd_rollback(host, a):
         raise Stop(f"放不回去：{err[:200]}")
     host.as_user(s["owner_account"], ["/bin/mv", "-n", s["plist_moved"], s["plist_home"]])
     start_owner_agent(host, s["owner_account"])
-    if s.get("owner_hold") and not release_hold(host, current, s["owner_account"], s["owner_hold"]):
+    if s.get("owner_hold") and not gate_cards_clean(host, current, s.get("owner_hold_max_card")):
+        s["owner_hold_left"] = s["owner_hold"]
+        write_json(gate_root() / "state.json", s)
+        say(f"  主账号控制面保持停写（恢复点 {s['owner_hold']}），交常浩：中台退回旧快照后会复用这些卡片号")
+    elif s.get("owner_hold") and not release_hold(host, current, s["owner_account"], s["owner_hold"]):
         s["owner_hold_left"] = s["owner_hold"]           # 没结束的停写记进归档的 state；preflight 也会拦着
         write_json(gate_root() / "state.json", s)
         say("  主账号中台已放回，但主账号控制面的维护停写没结束（见上）")
