@@ -89,7 +89,10 @@ class ExecGateEndToEnd(HubFixture):
         for ex in G.EXECUTORS:
             (self.program_dir / f"dt-worktree-{ex}").symlink_to(SCRIPT)
         self.status = r / "shared/grants/status.json"
+        pf_status = r / "pf-dt-worker.status"                          # 门卫规则在生效（L3 P1-03 的开工闸）
+        pf_status.write_text("at=2026-11-20T10:00:00+0800 boot=1795125811 state=ok enabled=yes rules=15 users=dt-worker reloaded=no\n")
         env = {"DT_GRANTS_DB": str(r / "dt/autoloop/grants.db"), "DT_GRANTS_STATUS": str(self.status),
+               "DT_PF_STATUS": str(pf_status), "DT_BOOT_TIME": "1795125811",
                "DT_GRANTS_TASKS": str(r / "shared/tasks"), "DT_WORK_ROOT": str(self.work), "DT_OUTBOX": str(self.outbox),
                "DT_WORKTREE_REAL_CLAUDE": str(fake), "DT_WORKTREE_REMOTE": f"file://{r}/remote/{{github}}.git",
                "FAKE_LOG": str(self.fake_log), "DT_OWNER_CHAT_ID": CHAT,
