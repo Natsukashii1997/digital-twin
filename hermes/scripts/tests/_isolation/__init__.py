@@ -14,7 +14,8 @@
    AGENT_AUTOLOOP_HOME、HERMES_HOME、CODEX_HOME、CLAUDE_CONFIG_DIR 指到本次运行的临时目录（AGENT_AUTOLOOP_HOME 特意不放在
    临时家目录下，和默认的 ~/.agent-autoloop 不同，「--target 和实际目录不一致」这类检查才测得到）；默认路径不在家目录下的
    DT_GRANTS_STATUS、DT_GRANTS_TASKS、DT_GATE_SHARED（默认 /Users/Shared/dt-gate/…）、DT_GATE_ROOT、DT_GATE_LOGS、
-   DT_GATE_DAEMONS（0E-2 搬家脚本的 root 目录）、DT_PUBLISH_OUTBOX
+   DT_GATE_DAEMONS（0E-2 搬家脚本的 root 目录）、DT_GATE_LAUNCHERS（工人启动脚本）、DT_PF_DIR / DT_PF_STATUS（门卫目录和状态）、
+   DT_PUBLISH_OUTBOX
    （默认 /Users/dt-worker/dt-outbox）也指过去，DT_HUB 指到不监听的 127.0.0.1:9。
    要读真正的正式目录（只读核对、上游源码）用 REAL_HOME（按系统账号取），不用 ~。
    git 用临时全局配置（固定的测试身份、默认分支 main），不读本机 ~/.gitconfig。
@@ -85,6 +86,9 @@ def isolated_env():
         "DT_GATE_SHARED": str(ROOT / "shared/dt-gate"),
         "DT_GATE_ROOT": str(ROOT / "library/gate"), "DT_GATE_LOGS": str(ROOT / "library/logs/gate"),
         "DT_GATE_DAEMONS": str(ROOT / "library/LaunchDaemons"),
+        "DT_GATE_LAUNCHERS": str(ROOT / "shared/dt-autoloop/bin"),
+        "DT_PF_DIR": str(ROOT / "library/DigitalTwin"),
+        "DT_PF_STATUS": str(ROOT / "library/DigitalTwin/pf-dt-worker.status"),
         "DT_PUBLISH_OUTBOX": str(ROOT / "users/dt-worker/dt-outbox"),
         "DT_HUB": DEAD,
         "HTTP_PROXY": DEAD, "HTTPS_PROXY": DEAD, "ALL_PROXY": DEAD, "http_proxy": DEAD, "https_proxy": DEAD,

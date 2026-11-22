@@ -404,15 +404,6 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(backups[0][0], "backup")                                 # 换之前先备份中台库（复核 P2-d）
         self.assertEqual(json.loads((root / "current.json").read_text())["engine"]["commit"], "o" * 40)
 
-    def test_every_real_path_default_is_redirected(self):
-        """脚本里凡是 env_path("DT_…", 真机路径) 的目录，这里都已指到临时目录：新加一个忘了隔离，这条先失败。"""
-        import re
-        names = set(re.findall(r'env_path\("(DT_[A-Z_]+)"', (REPO / "ops/dt_gate_hub.py").read_text(encoding="utf-8")))
-        self.assertTrue(names)
-        for n in sorted(names):
-            with self.subTest(n=n):
-                self.assertTrue(os.environ.get(n, "").startswith(str(self.d)), f"{n} 没指到临时目录")
-
     def test_all_good(self):
         r = self.run_checks(self.snap())
         self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])

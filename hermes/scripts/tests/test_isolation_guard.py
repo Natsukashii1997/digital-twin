@@ -86,6 +86,22 @@ class Isolation(unittest.TestCase):
         self.assertEqual(os.path.expanduser("~"), str(ISO.HOME))
         self.assertEqual(os.environ["DT_HUB"], "http://127.0.0.1:9")
 
+    def test_every_script_default_outside_home_is_redirected(self):
+        """被测脚本里凡是「环境变量 or 家目录以外的真机路径」的默认值（/Users/Shared、/Library、/Users/dt-…），隔离都要指到
+        临时目录：新加一个忘了登记，这条先失败（11-22：DT_GATE_LAUNCHERS、DT_PF_DIR、DT_PF_STATUS 漏了，首单在真机装了
+        启动脚本和门卫之后测试读到了真机文件）。"""
+        import re
+        pat = re.compile(r'"(DT_[A-Z_]+)"\)?\s*(?:or|,)\s*"(?:/Users/Shared|/Library|/Users/dt-)')
+        repo = HERE.parents[2]
+        found = {}
+        for f in [*(repo / "ops").glob("*.py"), *(repo / "hermes/scripts").glob("*.py")]:
+            for name in pat.findall(f.read_text(encoding="utf-8")):
+                found.setdefault(name, f.name)
+        self.assertIn("DT_GATE_LAUNCHERS", found)                   # 扫描本身没失灵
+        for name, f in sorted(found.items()):
+            with self.subTest(name=name, file=f):
+                self.assertTrue(inside(os.environ.get(name) or "/nonexistent-real", ISO.ROOT), f"{name}（{f}）没指到临时目录")
+
     def test_rewrites_real_home_and_prod_vars_without_outer_protection(self):
         real = str(ISO.REAL_HOME)
         env = {"PATH": os.environ["PATH"], "HOME": real, "AGENT_AUTOLOOP_HOME": real + "/.agent-autoloop",
