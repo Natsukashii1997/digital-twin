@@ -12,6 +12,7 @@ import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一�
 import contextlib
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import sqlite3
@@ -28,11 +29,14 @@ HERE = Path(__file__).parent
 SCRIPTS = HERE.parent
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(HERE))
+import prod_guard  # noqa: E402  模块级隔离，见 setUpModule
 import autoloop_answer as A  # noqa: E402
 import autoloop_config as AC  # noqa: E402
+import autoloop_exits as E  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
+import autoloop_recovery as R  # noqa: E402
 import custody as CU  # noqa: E402
 import custody_ledger as L  # noqa: E402
 import secretary as S  # noqa: E402
@@ -40,6 +44,7 @@ import secretary_gate as SG  # noqa: E402
 import secretary_ledger as SL  # noqa: E402
 from test_autoloop_hub_e2e import CLI, OWNER, SKIP, HubFixture  # noqa: E402
 
+REAL_ENSURE_OPEN, REAL_ADMIT = R.ensure_open, R.admit           # Base 里打桩放行；要真恢复闸的用例换回来
 # 控制面按 YAML 语义核 Hermes 配置（PR #225），读不到 yaml 库就一律交常浩，这里大部分用例会跟着失败。
 # 本机的 PyYAML 装在用户目录（~/Library/Python/3.9/...），Python 启动时 HOME 不是真家目录、设了 PYTHONNOUSERSITE
 # 或沙箱挡了读那个目录，就读不到（2026-11-20 查清：P9 合并前全量的 117 条失败就是这样来的）。
@@ -83,12 +88,14 @@ BEFORE = {}
 
 
 def setUpModule():
+    prod_guard.setUpModule()                     # 中台相关路径整体指到临时目录、前后核对正式目录（AGENTS「规则」）
     BEFORE.update(real_files())
 
 
 def tearDownModule():
     after = real_files()
     changed = [k for k in set(BEFORE) | set(after) if BEFORE.get(k) != after.get(k)]
+    prod_guard.tearDownModule()
     if changed:
         raise AssertionError(f"测试改动了正式文件：{changed}")
 
@@ -120,6 +127,60 @@ CREATE TABLE session_model_usage (session_id TEXT NOT NULL, model TEXT NOT NULL,
 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT,
   active INTEGER NOT NULL DEFAULT 1);
 """
+
+
+@contextlib.contextmanager
+def watch_begin(thread_box, db):
+    """盯住某个线程（thread_box[0]）对库 db 新开的连接上的 BEGIN IMMEDIATE：entered 进去了、returned 返回了。
+    用来确定性地证明那个线程正卡在别人持着的写锁上（续审第 2 轮 P2-06）。"""
+    entered, returned = threading.Event(), threading.Event()
+    real_connect = sqlite3.connect
+
+    class Watch:
+        def __init__(self, con):
+            object.__setattr__(self, "_c", con)
+
+        def __getattr__(self, k):
+            return getattr(self._c, k)
+
+        def __setattr__(self, k, v):
+            setattr(self._c, k, v)
+
+        def execute(self, sql, *a):
+            if sql == "BEGIN IMMEDIATE":
+                entered.set()
+                try:
+                    return self._c.execute(sql, *a)
+                finally:
+                    returned.set()
+            return self._c.execute(sql, *a)
+
+    def connect(*a, **kw):
+        con = real_connect(*a, **kw)
+        hit = threading.current_thread() is thread_box[0] and a and str(a[0]) == str(db)
+        return Watch(con) if hit else con
+    with mock.patch.object(sqlite3, "connect", side_effect=connect):
+        yield entered, returned
+
+
+def assert_write_locked(case, db):
+    """确定性地证明此刻有别人持着库 db 的写锁：新开一条不等待（timeout=0）的连接 BEGIN IMMEDIATE，必须马上被拒
+    （续审第 3 轮 P2-06：不靠调用前置位的事件加 sleep 推断）。"""
+    con = sqlite3.connect(str(db), timeout=0, isolation_level=None)
+    try:
+        with case.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+            con.execute("BEGIN IMMEDIATE")
+    finally:
+        con.close()
+
+
+def assert_write_free(case, db):
+    con = sqlite3.connect(str(db), timeout=0, isolation_level=None)
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        con.execute("ROLLBACK")
+    finally:
+        con.close()
 
 
 def make_hermes(home):
@@ -186,7 +247,7 @@ class Base(unittest.TestCase):
                    DT_HUB="http://127.0.0.1:9", DT_HERMES_SOURCE_KEY_FILE=str(root / "dt/autoloop/hermes-source.key"),
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT, DT_AUTOLOOP_EVIDENCE=str(root / "evidence"),
                    DT_AUTOLOOP_LOCK=str(root / "dt/autoloop/config.lock"), DT_READONLY_TOKEN_FILE=str(root / "ro.token"),
-                   HERMES_HOME=str(root / "hermes"))
+                   HERMES_HOME=str(root / "hermes"), DT_EXITS_DB=str(root / "dt/autoloop/exits.db"))
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)
@@ -216,6 +277,9 @@ class Base(unittest.TestCase):
         p = mock.patch.object(SG, "TEST_ASK", True)                            # ① 的送达开关在测试里打开（正式关着）
         p.start()
         self.addCleanup(p.stop)
+        for gate in (mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 RecoveryGateTests）
+            gate.start()
+            self.addCleanup(gate.stop)
         self.posted = []
         p = mock.patch.object(G, "post_event", self.fake_post)
         p.start()
@@ -663,6 +727,144 @@ class AskTests(Base):
         self.assertEqual(out["result"], "unknown")
 
 
+def real_gate(case):
+    """换回真的恢复闸（Base 里打桩放行）：纪元、锁定版本打桩，入口自己对账开闸。"""
+    epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+    for p in (mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT),
+              mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40)):
+        p.start()
+        case.addCleanup(p.stop)
+
+
+class RecoveryGateTests(Base):
+    """批 0D（常浩 11-19「都按推荐」）：秘书的三条写入路径（① 回答、② 续派、③ 留言）和领卡都过恢复闸；
+    获准（账本 begin）的同一把锁里再核开闸资格；秘书结果不明关闸，秘书账本里还有结果不明的就不开闸。"""
+    CLOSED = E.Refused("恢复闸关着：电脑睡醒过，要先对账")
+
+    def test_closed_gate_is_not_ready_and_records_nothing(self):
+        with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED):
+            self.nothing(self.submit(), "not_ready")
+        self.assertEqual(self.held(), [])
+        self.assertEqual(self.submit()["result"], "done")                        # 开闸后照常
+
+    def test_gate_closing_before_approval_voids_and_sends_nothing(self):
+        with mock.patch.object(R, "admit", side_effect=self.CLOSED):          # 看一眼时开着，领资格那一刻关了
+            out = self.submit()
+        self.assertEqual(out["result"], "failed", out["msg"])
+        self.assertIn("睡醒", out["msg"])
+        self.assertEqual(self.answers(), [])
+        self.assertEqual(self.held(), [])                                       # 额度释放
+        self.assertIsNone(self.claim())
+        self.assertEqual(self.decisions()[0][3], "void")
+
+    def test_unknown_closes_gate_and_gate_stays_closed_until_secretary_reconciles(self):
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        out = self.submit()
+        self.assertEqual(out["result"], "unknown")
+        with E.db(write=False) as con:
+            gate = con.execute("SELECT dirty, dirty_reason FROM gate WHERE id = 1").fetchone()
+        self.assertEqual((gate[0] > 0, "秘书代批" in gate[1]), (True, True))
+        bad, _ = R._secretary()
+        self.assertIn(out["decision"], bad)                                      # 恢复闸对账：秘书还有结果不明 → 不开
+        self.hub_error = None
+        self.hub("UPDATE cards SET state = 'decided', choice = 0, \"by\" = '秘书'")
+        SG.reconcile(now=T + dt.timedelta(minutes=5))                            # 秘书自己的对账结掉它
+        self.assertEqual(R._secretary(), (None, "秘书账本没有结果不明的代批"))
+        self.assertEqual(len(self.answers()), 1)                                 # 从不重答
+
+    def test_unreconciled_is_settled_by_owner_and_then_stops_blocking(self):
+        """第 2 轮预审 P1-A：秘书核不清的决定原来没有人工结算入口，恢复闸会一直关着、只能改库。settle 要 --confirm，
+        做成了要写核到的回答；只结算核不清的；结算后恢复闸不再被它挡住。"""
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        did = self.submit()["decision"]
+        self.hub_error = None
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=5)), [(did, "unreconciled")])   # 卡还开着：核不清
+        self.assertIn(did, R._secretary()[0])
+        with self.assertRaisesRegex(SG.Refused, "confirm"):
+            SG.settle(did, "failed", "看过中台卡片", confirm=False)
+        with self.assertRaisesRegex(SG.Refused, "--ref"):
+            SG.settle(did, "done", "看过中台卡片", confirm=True)
+        self.assertEqual(SG.main(["settle", "--decision", did, "--result", "failed", "--note", "中台卡片还开着，秘书的回答没进去",
+                                  "--confirm"]), 0)
+        self.assertEqual(self.get(did)["status"], "failed")
+        self.assertIsNone(self.claim())
+        self.assertEqual(R._secretary(), (None, "秘书账本没有结果不明的代批"))
+        with self.assertRaisesRegex(SG.Refused, "核不清"):
+            SG.settle(did, "done", "再看", ref="x", confirm=True)
+        self.assertEqual(len(self.answers()), 1)                                 # 从不重答
+
+    def test_unknown_closes_the_gate_before_the_ledger_records_it(self):
+        """L3 第 3 轮 P1-08：结果不明先关闸、再记秘书账本；记账那一刻别的受保护写已经过不了闸。"""
+        real_gate(self)
+        R.ensure_open()
+        self.assertTrue(R.status()["open"])
+        tried, real_finish = [], SL.finish
+
+        def finish(st, decision_id, result, outcome=None, now=None):
+            if result == "unknown":
+                try:
+                    E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, dict)
+                    tried.append("passed")
+                except E.Refused as e:
+                    tried.append(str(e))
+            return real_finish(st, decision_id, result, outcome, now=now)
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        with mock.patch.object(SL, "finish", finish):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertEqual(len(tried), 1)
+        self.assertIn("恢复闸关着", tried[0])                                     # 被拒：闸已因这次结果不明关上
+        self.assertEqual(self.get(out["decision"])["status"], "unknown")
+
+    def test_ledger_failure_after_closing_keeps_the_gate_closed(self):
+        """P1-08：关闸之后记账失败：闸照样关着，交对账。"""
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        with mock.patch.object(SL, "finish", side_effect=L.LedgerError("库锁住了")):
+            out = self.submit()
+        self.assertEqual((out["result"], out["msg"]), ("refused", "账本记不了：库锁住了"))     # 记账失败照实报
+        with E.db(write=False) as con:
+            self.assertTrue(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0])
+
+    def test_locked_ledger_while_closing_still_keeps_the_gate_closed(self):
+        """L3 第 4 轮 P1-08：结果不明关闸时出口账本被锁住（写不进 dirty）：标记文件让闸照样关着；锁放开后别的写也过不了，
+        要等秘书对账结掉这条决定。"""
+        real_gate(self)
+        R.ensure_open()
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        real_close = E.close_gate
+
+        def locked(reason):
+            with mock.patch.object(E, "mark_dirty", side_effect=sqlite3.OperationalError("database is locked")):
+                return real_close(reason)
+        with mock.patch.object(E, "close_gate", locked):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertEqual(self.get(out["decision"])["status"], "unknown")
+        with E.db(write=False) as con:
+            self.assertEqual(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0], 0)   # 账本那笔确实没记上
+        with self.assertRaisesRegex(E.Refused, "恢复闸关着"):                                     # 锁放开后：照样拦住
+            E.guard("merge", "merge:o/r:1:h", "repo:o/r", {}, dict)
+        self.assertTrue(E.read_markers())                                                         # 秘书没结掉：标记不清
+
+    def test_both_closing_steps_failing_still_records_unknown(self):
+        """P1-08：标记和账本都写不进：照样把秘书决定记成结果不明，再把错报出来。"""
+        self.hub_error = F.HubError("中台回 HTTP 500", status=500)
+        with mock.patch.object(E, "close_gate", side_effect=OSError("盘满了")), self.assertRaisesRegex(OSError, "盘满了"):
+            self.submit()
+        self.assertEqual([d[3] for d in self.decisions()], ["unknown"])
+
+    def test_lease_waits_while_gate_closed(self):
+        self.calls.clear()
+        with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED):
+            out = SG.lease(wait=0)
+        self.assertIn("睡醒", out["paused"])
+        self.assertEqual(self.calls, [])                                        # 没领卡、没报送达
+        buf = io.StringIO()                                                     # 预审 P2：命令行照实说闸关着，不崩
+        with mock.patch.object(R, "ensure_open", side_effect=self.CLOSED), contextlib.redirect_stdout(buf):
+            self.assertEqual(SG.main(["lease", "--wait", "0"]), 1)
+        self.assertIn("恢复闸关着", json.loads(buf.getvalue())["msg"])
+
+
 class ReconcileTests(Base):
     def test_unknown_reconciled_by_evidence_never_resent(self):
         self.hub_error = F.HubError("超时")
@@ -739,6 +941,320 @@ class RedispatchTests(Base):
         self.stop_card(cid=18, run=19)                                            # 又放弃了一次：每张任务最多 1 次
         self.handoff_quota(self.submit(self.prop(card=18)))
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_unsent_resume_event_hands_off(self):
+        """续审第 3 轮预审 P2-1：这张任务还有没确认送到中台的续接事件，② 前闸就交常浩（不占额度），不等续接被拒落成没做成。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")):
+            G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        d = self.handoff(self.submit(), "unsure")
+        self.assertIn("没确认送到中台", d["basis"])
+        self.assertEqual(self.posted, [])
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
+    def test_redispatch_unknown_does_not_deadlock_the_gate(self):
+        """第 2 轮预审 P1-A（常浩 11-20 选甲）：② 发往中台结果不明 → 秘书记结果不明、关闸。原来恢复闸看到秘书结果不明就不开，
+        补发 send-pending 又要过闸，秘书对账等事件发出——死循环。现在只差网关补发的不挡闸：真恢复闸对账开闸，补发送到
+        （中台按 id 去重），秘书对账记 done。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        bad, note = R._secretary()
+        self.assertIsNone(bad)
+        self.assertIn("网关补发", note)
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40):
+            with E.db(write=False) as con:
+                self.assertTrue(con.execute("SELECT dirty FROM gate WHERE id = 1").fetchone()[0])   # 结果不明关了闸
+            sent = G.send_pending(now=T + dt.timedelta(minutes=5))
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["redispatch"])
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
+        self.assertEqual(self.get(out["decision"])["status"], "done")
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_redispatch_stuck_in_executing_does_not_deadlock_the_gate(self):
+        """L3 第 5 轮 P1-08 预审：② 的续接事件已记账、进程在 finish 之前没了（或 SL.finish 写不进），决定停在 executing。
+        第 4 步认它只差网关补发、不挡；第 5 步「已开始没记结果」那一关也不能把它算进来，否则又是 11-20 那个死锁。"""
+        import sqlite3
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as c:
+            c.execute("UPDATE secretary_decisions SET status = 'executing' WHERE id = ?", (out["decision"],))
+        self.assertIsNone(R._secretary()[0])
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40):
+            rep = R.reconcile()
+            self.assertTrue(rep["open"], rep["why"])
+            sent = G.send_pending(now=T + dt.timedelta(minutes=5))
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
+
+    def _stuck_redispatch_with_unsent_event(self):
+        """② 结果不明后决定停在 executing、续接事件已记账没领走（sent=0）：第 4 步会认它只差网关补发。"""
+        import sqlite3
+        with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1)), \
+                mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as c:
+            c.execute("UPDATE secretary_decisions SET status = 'executing' WHERE id = ?", (out["decision"],))
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = 0, claimed_at = NULL WHERE task_id = ? AND kind = 'redispatch'", (TASK,))
+        return out["decision"]
+
+    def _reconcile_with_change_between_step4_and_step5(self, change, clock):
+        """真恢复闸对账一次；第 4 步看完秘书账本之后、第 5 步之前做 change()。"""
+        real, done = R._secretary, []
+
+        def between(waits=None, gcon=None):
+            got = real(waits, gcon)
+            if gcon is None and not done:                       # 第 4 步（不持凭证库锁）
+                done.append(got)
+                change()
+            return got
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40), \
+                mock.patch.object(G, "now_tz", lambda: clock[0]), mock.patch.object(R, "_secretary", between):
+            rep = R.reconcile()
+        self.assertIsNone(done[0][0])                           # 第 4 步：只差补发、不挡
+        self.assertIn("网关补发", done[0][1])
+        return rep
+
+    def test_freeze_between_step4_and_open_keeps_the_gate_closed(self):
+        """续审第 1 轮 P1-08：第 4 步认定只差补发之后、开闸之前任务被冻结（sent=0 的事件作废成 -1）：第 5 步持凭证库锁
+        重新判，不再按第 4 步的名单放过它，闸关着。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+        rep = self._reconcile_with_change_between_step4_and_step5(lambda: G.freeze(TASK, "推翻", now=clock[0]), clock)
+        with G.tx() as con:
+            self.assertEqual([r[0] for r in con.execute("SELECT sent FROM hub_events WHERE task_id = ? AND kind = 'redispatch'",
+                                                        (TASK,))], [-1])
+        self.assertFalse(rep["open"])
+        self.assertIsNotNone(rep["why"])
+        self.assertIn(did, rep["why"])
+
+    def test_grant_expiring_between_step4_and_open_keeps_the_gate_closed(self):
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+
+        def expire():
+            clock[0] = T + dt.timedelta(hours=13)               # 凭证 12 小时有效
+        rep = self._reconcile_with_change_between_step4_and_step5(expire, clock)
+        self.assertFalse(rep["open"])
+        self.assertIsNotNone(rep["why"])
+        self.assertIn(did, rep["why"])
+
+    def _real_gate(self, clock):
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        return contextlib.ExitStack(), [
+            mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT),
+            mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40),
+            mock.patch.object(G, "now_tz", lambda: clock[0])]
+
+    def _in_step5(self, target, clock, db, extra=()):
+        """真恢复闸对账一次；第 5 步（两把锁都拿到、重判过之后，frozen_scopes 那里）起线程跑 target，
+        等它走到 BEGIN IMMEDIATE（调用前置位，只是辅助证据），再让对账提交。写锁在对账手里的确定性证明是零等待探针
+        assert_write_locked（续审第 3 轮 P2-06）。返回 (对账结果, 线程走到那里时的状态, 线程的异常)。"""
+        box, seen, errors = [None], [], []
+
+        def run():
+            try:
+                target()
+            except Exception as e:                             # pragma: no cover - 失败时给断言看
+                errors.append(e)
+        box[0] = threading.Thread(target=run)
+        real = E.frozen_scopes
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in [*patches, *extra]:
+                stack.enter_context(x)
+            entered, returned = stack.enter_context(watch_begin(box, db))
+
+            def in_final_tx(con):
+                assert_write_locked(self, db)                   # 确定性：此刻 db 的写锁在对账手里，竞争事务完成不了
+                box[0].start()
+                self.assertTrue(entered.wait(10))               # 线程已经走到 BEGIN IMMEDIATE（辅助证据）
+                time.sleep(0.3)
+                seen.append(returned.is_set())
+                assert_write_locked(self, db)                   # 开闸提交之前一直持着
+                return real(con)
+            stack.enter_context(mock.patch.object(E, "frozen_scopes", side_effect=in_final_tx))
+            rep = R.reconcile()
+            box[0].join(35)
+            self.assertTrue(returned.is_set())                  # 对账提交后拿到了
+        assert_write_free(self, db)                             # 都放了
+        return rep, seen, errors
+
+    def test_freeze_waits_until_the_gate_decision_is_committed(self):
+        """续审第 1 轮预审 P2：第 5 步重判完到开闸提交之间凭证库锁不能放——这时发起的冻结要卡到开闸提交之后才进去。
+        续审第 2 轮 P2-06：用连接代理确定性地证明冻结线程卡在凭证库的 BEGIN IMMEDIATE 上。"""
+        self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+        rep, seen, errors = self._in_step5(lambda: G.freeze(TASK, "推翻", now=clock[0]), clock, G.db_path())
+        self.assertEqual(errors, [])
+        self.assertEqual(seen, [False])
+        self.assertTrue(rep["open"], rep["why"])                # 判的那一刻只差补发：开闸
+        with G.tx() as con:                                     # 冻结在开闸提交之后进去了
+            self.assertEqual(con.execute("SELECT status FROM grants WHERE task_id = ?", (TASK,)).fetchone()[0], "frozen")
+
+    def test_grant_expiring_while_waiting_for_the_exits_lock_keeps_the_gate_closed(self):
+        """续审第 2 轮 P1-08-02：第 5 步拿凭证库锁之后、拿到出口账本锁之前（那里最多等 5 秒）凭证自然过期——
+        重判放在两把锁都拿到之后，按那一刻的时间判，闸关着。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        until = T + dt.timedelta(hours=12)
+        clock = [until - dt.timedelta(minutes=2)]               # 第 4 步时还有 2 分钟：只差补发
+        real_db = E.db
+
+        def slow_db(*a, **kw):
+            if kw.get("timeout") == 5:                          # 第 5 步持着凭证库锁去等出口账本：等的这几秒里过期了
+                clock[0] = until + dt.timedelta(seconds=1)
+            return real_db(*a, **kw)
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            self.assertIsNone(R._secretary()[0])
+            stack.enter_context(mock.patch.object(E, "db", side_effect=slow_db))
+            rep = R.reconcile()
+        self.assertFalse(rep["open"])
+        self.assertIsNotNone(rep["why"])
+        self.assertIn(did, rep["why"])
+
+    def test_grant_about_to_expire_is_not_waiting_for_resend(self):
+        """续审第 2 轮 P1-08-02：凭证 60 秒内就到期的续接事件，不靠「开闸后补发」放过（判完到网关领取之间时间还在走）。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        until = T + dt.timedelta(hours=12)
+        with mock.patch.object(G, "now_tz", lambda: until - dt.timedelta(seconds=90)):
+            self.assertIsNone(R._secretary()[0])
+        with mock.patch.object(G, "now_tz", lambda: until - dt.timedelta(seconds=30)):
+            bad = R._secretary()[0]
+            self.assertIsNotNone(bad)
+            self.assertIn(did, bad)
+
+    def test_late_unknown_finish_of_a_waiting_redispatch_is_the_decided_cost(self):
+        """续审第 2 轮 P1-08-01（提议判定不成立）：② 的续接事件只差网关补发，决定还停在 executing，秘书进程这时才走到
+        finish(unknown)：标记写不进、关闸那笔排在对账后面。按 11-20 选甲这类结果不明不挡闸，对账照样开闸（别的动作照常
+        放行，是那次定下的代价）；关闸那笔随后记上，下一次对账照样开闸，补发一次，秘书对账记 done，不死锁、不多派。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+
+        def late_finish():
+            with L.TS.Store(L.db_path()) as st:
+                SG.finish(st, did, "unknown", {"error": "进程挂起后恢复"}, now=clock[0])
+        rep, seen, errors = self._in_step5(late_finish, clock, E.db_path(),
+                                           [mock.patch.object(E, "write_marker", side_effect=PermissionError("只读"))])
+        self.assertEqual(errors, [])
+        self.assertEqual(seen, [False])                         # 关闸那笔确实排在对账后面
+        self.assertTrue(rep["open"], rep["why"])                # 11-20 选甲：只差补发的不挡
+        self.assertEqual(self.get(did)["status"], "unknown")
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            self.assertFalse(R.status()["open"])                # 关闸那笔记上了
+            self.assertTrue(R.reconcile()["open"])              # 再对一次：照样只差补发，开闸
+            sent = G.send_pending(now=clock[0])
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual(SG.reconcile(now=clock[0] + dt.timedelta(minutes=1)), [(did, "done")])
+
+    def test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task(self):
+        """续审第 3 轮 P1-08-01：秘书 ② 持着任务锁、决定还在 executing、恢复闸按 11-20 例外开着时，直接用命令行
+        `autoloop_grants.py resume-dispatch` 对同一张单续接，不能另记第二个派单事件；锁放了才可以。"""
+        self._stuck_redispatch_with_unsent_event()
+        clock = [T + dt.timedelta(minutes=2)]
+
+        def redispatch_events():
+            with G.tx() as con:
+                return con.execute("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind = 'redispatch'",
+                                   (TASK,)).fetchone()[0]
+        stack, patches = self._real_gate(clock)
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            stack.enter_context(G.task_lock(TASK))              # 原秘书 ② 还持着这张单的任务锁
+            rep = R.reconcile()
+            self.assertTrue(rep["open"], rep["why"])            # 11-20 例外：闸开着
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = G.main(["resume-dispatch", "--task", TASK, "--kind", "redispatch", "--reason", "人工重派"])
+            self.assertEqual(code, 1)
+            self.assertIn("另有入口正在处理", out.getvalue())
+            with self.assertRaisesRegex(G.Rejected, "另有入口正在处理"):
+                G.resume_dispatch(TASK, "redispatch", "别的调用方")
+            self.assertEqual(redispatch_events(), 1)
+        stack, patches = self._real_gate(clock)                  # 锁放了：原事件还没确认送到，照样不另记（预审 P1-A）
+        with stack:
+            for x in patches:
+                stack.enter_context(x)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = G.main(["resume-dispatch", "--task", TASK, "--kind", "redispatch", "--reason", "人工重派"])
+            self.assertEqual(code, 1)
+            self.assertIn("没确认送到中台", out.getvalue())
+            self.assertEqual(redispatch_events(), 1)
+            with G.tx() as con:                                  # 原事件送到了：同一个命令才能再记（证明拦它的是这两道）
+                con.execute("UPDATE hub_events SET sent = 1 WHERE task_id = ? AND kind = 'redispatch'", (TASK,))
+            stack.enter_context(mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")))
+            G.resume_dispatch(TASK, "redispatch", "人工重派")
+        self.assertEqual(redispatch_events(), 2)
+
+    def test_fresh_claim_is_a_send_in_progress_not_a_resend(self):
+        """续审第 1 轮：sent=2 刚领走不到 60 秒是一次正在进行的发送，不算只差补发（挡闸）；过了 60 秒才算（不挡）。"""
+        did = self._stuck_redispatch_with_unsent_event()
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE task_id = ? AND kind = 'redispatch'",
+                        (G.iso(T + dt.timedelta(minutes=2)), TASK))
+        with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=2, seconds=30)):
+            bad = R._secretary()[0]
+            self.assertIsNotNone(bad)
+            self.assertIn(did, bad)
+        with mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=3, seconds=1)):
+            self.assertIsNone(R._secretary()[0])
+
+    def test_event_of_a_frozen_or_expired_grant_is_not_waiting_for_resend(self):
+        """L3 第 4 轮 P1-09 另一处：② 的续接事件已领走在发（sent=2、超过 60 秒）时任务被冻结——冻结只作废没领走的，
+        这条补发不了：恢复闸不再当「只差补发」放行，秘书对账记核不清（发没发出去要核）；没领走的（sent=0）凭证过期了，
+        秘书对账记没做成，不干等。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        key = self.get(out["decision"])["outcome"]["event_key"]
+        late = T + dt.timedelta(minutes=10)
+        with mock.patch.object(G, "now_tz", lambda: late):
+            self.assertIsNone(R._secretary()[0])                                  # 凭证有效、只差补发：不挡
+        with G.tx() as con:
+            con.execute("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE event_key = ?", (G.iso(T), key))
+        G.freeze(TASK, "推翻", now=late)
+        with mock.patch.object(G, "now_tz", lambda: late):
+            self.assertIn(out["decision"], R._secretary()[0])                     # 冻结后补发不了：挡闸
+        self.assertEqual(SG.reconcile(now=late), [(out["decision"], "unreconciled")])
+
+    def test_unsent_event_of_an_expired_grant_is_failed(self):
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        key = self.get(out["decision"])["outcome"]["event_key"]
+        with G.tx() as con:                                                       # 发送那次已确定没出去（退回待发）
+            con.execute("UPDATE hub_events SET sent = 0, claimed_at = NULL WHERE event_key = ?", (key,))
+        later = T + dt.timedelta(hours=13)                                        # 凭证 12 小时有效
+        self.assertEqual(SG.reconcile(now=later), [(out["decision"], "failed")])
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证有效：挡闸只能是因为事件已作废 / 已送达
+    def test_redispatch_without_a_gateway_event_still_blocks(self):
+        """只差网关补发的才放：这次续接的事件已作废（或找不到、已送达）照常挡闸，由秘书对账结掉。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertIsNone(R._secretary()[0])                                      # 对照：待发（sent=0）只差补发，不挡
+        for sent in (1, -1):                                                      # 已送达 / 已作废：照常挡
+            with self.subTest(sent=sent):
+                with G.tx() as con:
+                    con.execute("UPDATE hub_events SET sent = ? WHERE kind = 'redispatch'", (sent,))
+                self.assertIn(out["decision"], R._secretary()[0])
+
     def handoff_quota(self, out):
         self.assertEqual((out["result"], out["reason"]), ("handoff", "gate"), out["msg"])
         self.assertIn("已用完", out["msg"])
@@ -777,7 +1293,7 @@ class RedispatchTests(Base):
         with P.task_lock(TASK):
             out = self.submit()
         self.assertEqual(out["reason"], "unsure")
-        self.assertIn("受信发布正在进行", self.get(out["decision"])["basis"])
+        self.assertIn("受信发布或续接正在进行", self.get(out["decision"])["basis"])
 
     def test_unpublished_package_hands_off(self):
         """交接目录里有这张任务还没发布出去的包：不重派（前闸、后闸各查一次）。"""
@@ -864,6 +1380,17 @@ class RejectTests(Base):
         self.assertEqual([c[:2] for c in calls], [["pr", "view"], ["pr", "view"], ["pr", "comment"]])   # 留言前再读一次
         self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["rework"])
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_unsent_resume_event_hands_off_before_commenting(self):
+        """续审第 3 轮预审 P2-1：这张任务还有没确认送到中台的续接事件时，③ 到续接那一步必然被拒；前闸就交常浩，
+        不先发出撤不回的留言、不落成结果不明、不冻结。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")):
+            G.resume_dispatch(TASK, "correction", "常浩人工更正", now=T + dt.timedelta(minutes=1))
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh):
+            d = self.handoff(self.submit(), "unsure")
+        self.assertIn("没确认送到中台", d["basis"])
+        self.assertFalse(self.ghlog.exists())                                     # 连 PR 都没查，更没留言
+
     def test_head_moved_or_not_ours(self):
         with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh):
             self.handoff(self.submit(self.prop(head="c" * 40)), "unsure")
@@ -904,6 +1431,79 @@ class RejectTests(Base):
             out = self.submit()
         self.assertEqual(out["result"], "unknown", out["msg"])                    # 留言撤不回：不能当没做
         self.assertEqual(sorted(self.held()), [("day", "frozen"), ("task", "frozen")])
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
+    def test_partial_rework_never_matches_another_generations_event(self):
+        """L3 第 3 轮 P1-09：第 1 代 ③ 留言已发、续接没记上事件 → 结果不明；凭证换到第 2 代后有人手动续接一条 rework
+        （还没发到中台）。这条不是这次决定的事件，恢复闸照样挡着，不按时间把它认成「只差网关补发」。"""
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
+                mock.patch.object(G, "resume_dispatch", side_effect=G.Rejected("不能续接：凭证已冻结")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with G.tx() as con:
+            con.execute("UPDATE grants SET generation = 2 WHERE task_id = ?", (TASK,))
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            ev = G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        self.assertTrue(ev["event_key"].startswith(f"{TASK}:g2:rework"))
+        bad, _ = R._secretary()
+        self.assertIn(out["decision"], bad)
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=3))   # 凭证按 T 建、2 小时有效；事件 T+1 分钟领走，
+    def test_rework_waits_on_its_own_event_even_without_event_key(self):   # 过了 60 秒才算只差补发（续审第 1 轮）
+        """反过来：这次决定自己的续接事件（日志里带决定号）只差补发，哪怕结果里还没记上事件号（进程在记结果前没了），
+        照样不挡闸；同一张单别的续接事件不影响。这时再手动续接会被拒（这张单还有没确认送到的续接事件，续审第 3 轮），
+        「别的续接事件」直接写进凭证库模拟（如这条规则之前留下的）。"""
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
+                mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
+            out = self.submit()
+            with self.assertRaisesRegex(G.Rejected, "没确认送到中台"):
+                G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        with G.tx() as con:
+            con.execute("INSERT INTO hub_events (event_key, task_id, rule, executor, generation, kind, at) "
+                        "SELECT ?, task_id, rule, executor, generation, kind, at FROM hub_events WHERE event_key = ?",
+                        (f"{TASK}:g1:rework:2", f"{TASK}:g1:rework:1"))
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        self.assertIsNone(R._secretary()[0])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:
+            con.execute("UPDATE secretary_decisions SET outcome = '{}' WHERE id = ?", (out["decision"],))
+        self.assertIsNone(R._secretary()[0])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:          # 记了别的事件号：对不上，挡闸
+            con.execute("UPDATE secretary_decisions SET outcome = ? WHERE id = ?",
+                        (json.dumps({"event_key": f"{TASK}:g1:rework:2"}), out["decision"]))
+        self.assertIn(out["decision"], R._secretary()[0])
+        with sqlite3.connect(os.environ["DT_STATE_DB"]) as con:
+            con.execute("UPDATE secretary_decisions SET outcome = '{}' WHERE id = ?", (out["decision"],))
+        with G.tx() as con:                                                     # 绑定的事件代次和日志记的对不上：挡闸
+            con.execute("UPDATE hub_events SET generation = 9 WHERE event_key = ?", (f"{TASK}:g1:rework:1",))
+        self.assertIn(out["decision"], R._secretary()[0])
+        with G.tx() as con:                                                     # 事件、决定、凭证都是第 1 代，只有续接日志记的
+            con.execute("UPDATE hub_events SET generation = 1 WHERE event_key = ?", (f"{TASK}:g1:rework:1",))   # 代次不同：照样挡
+        self.assertIsNone(R._secretary()[0])
+        with G.tx() as con:
+            for rid, detail in con.execute("SELECT id, detail FROM grant_log WHERE task_id = ? AND what = '续接'", (TASK,)).fetchall():
+                d = json.loads(detail)
+                if d.get("ref") == out["decision"]:
+                    d["generation"] = 9
+                    con.execute("UPDATE grant_log SET detail = ? WHERE id = ?", (json.dumps(d), rid))
+        self.assertIn(out["decision"], R._secretary()[0] or "")
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=2)), [(out["decision"], "unreconciled")])   # 秘书对账同一认法
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_secretary_reconcile_never_takes_a_delivered_event_of_another_generation(self):
+        """L3 第 4 轮 P1-09（常浩 11-21 定改秘书对账）：第 1 代 ③ 留言已发、续接被拒 → 结果不明；换到第 2 代后人工续接一条
+        rework 而且真的送到了中台（sent=1）。秘书自己的对账不能把它认成这次的、记做成：记核不清，恢复闸照样挡着。"""
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh), \
+                mock.patch.object(G, "resume_dispatch", side_effect=G.Rejected("不能续接：凭证已冻结")):
+            out = self.submit()
+        self.assertEqual(out["result"], "unknown", out["msg"])
+        with G.tx() as con:
+            con.execute("UPDATE grants SET generation = 2 WHERE task_id = ?", (TASK,))
+        ev = G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        with G.tx() as con:
+            self.assertEqual(con.execute("SELECT sent FROM hub_events WHERE event_key = ?", (ev["event_key"],)).fetchone()[0], 1)
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=2)), [(out["decision"], "unreconciled")])
+        self.assertEqual(self.get(out["decision"])["status"], "unreconciled")
+        self.assertIn(out["decision"], R._secretary()[0])
 
     def test_comment_unknown_is_not_resent(self):
         bad = self.root / "badgh"
@@ -1276,7 +1876,7 @@ class TaskLockTests(Base):
                         es.enter_context(x)
                     out = SG.submit(self.redispatch(), now=T)
                 self.assertEqual(out["result"], "done", out["msg"])
-                self.assertEqual(seen["publish"], "这张单另一个发布还在进行")
+                self.assertIn("另有入口正在处理", seen["publish"])
                 self.assertTrue(probes == [] if not target else probes and set(probes) == {"锁着"}, probes)
         with P.task_lock(TASK):                                                  # 秘书做完就放锁
             pass
@@ -1504,6 +2104,57 @@ class LateOwnerNoteTests(unittest.TestCase):
 
 
 class LeaseTests(Base):
+    def test_lease_hold_right_after_ensure_open_writes_nothing(self):
+        """L3 第 3 轮 P1-06 路径 B：入口看过闸、长轮询领卡期间开始维护（停写）：领到卡后锁里再核闸，本地不登记、不报送达。"""
+        real_gate(self)
+        card, got = {"id": 30, "version": 1, "ref": None, "state": "open"}, []
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            got.append((method, path.split("?")[0]))
+            if method == "GET":
+                R.hold("p1", self.root / "snap", "a" * 40, 7)
+                return {"card": dict(card)}
+            return {}
+        with mock.patch.object(F, "hub", hub):
+            out = SG.lease(wait=1)
+        self.assertIn("维护中", out["paused"])
+        self.assertEqual(got, [("GET", "/v1/cards/next")])                     # 没报送达、没报失败
+        with F.db() as con:
+            self.assertIsNone(con.execute("SELECT 1 FROM secretary_cards WHERE card_id = 30").fetchone())
+        self.assertEqual(R.in_flight_writes(), [])
+
+    def test_lease_writes_only_while_holding_the_bridge_lock(self):
+        """P1-06：领到卡之后的本地登记、报送达、本地确认都在桥接锁里，排空时看得见。"""
+        card, seen = {"id": 30, "version": 1, "ref": None, "state": "open"}, []
+        real_db = F.db
+
+        @contextlib.contextmanager
+        def db(write=False):
+            if write:
+                seen.append(("db", F.bridge_busy()))
+            with real_db(write) as con:
+                yield con
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            if method == "GET":
+                return {"card": dict(card)}
+            seen.append((path, F.bridge_busy(), R.in_flight_writes()))
+            return {}
+        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "db", db):
+            self.assertTrue(SG.lease(wait=1)["ok"])
+        self.assertEqual(seen, [("db", True), ("/v1/cards/30/delivered", True, ["飞书桥接或秘书领卡正持桥接锁"]), ("db", True)])
+        self.assertFalse(F.bridge_busy())
+
+    def test_lease_cli_prints_the_card(self):
+        """命令行领到卡：照实打印，不因结果里带 ok 和打印函数的参数重名而崩（预审时发现）。"""
+        card = {"id": 31, "version": 1, "ref": None, "state": "open"}
+        buf = io.StringIO()
+        with mock.patch.object(F, "hub", lambda m, p, b=None, timeout=20, channel="feishu": {"card": dict(card)} if m == "GET" else {}), \
+                contextlib.redirect_stdout(buf):
+            self.assertEqual(SG.main(["lease", "--wait", "1"]), 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual((out["ok"], out["msg"], out["card"]), (True, "领到卡片 31", 31))
+
     def test_lease_registers_ref_and_reports_once_per_version(self):
         card = {"id": 30, "version": 1, "ref": None, "state": "open"}
         got = []
@@ -1563,7 +2214,8 @@ class SecretaryEndToEnd(HubFixture):
                "DT_CUSTODY_FILE": str(root / "custody.json"), "DT_CUSTODY_POLICY": str(root / "custody-policy.md"),
                "DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"), "DT_GRANTS_STATUS": str(root / "shared/status.json"),
                "DT_GRANTS_TASKS": str(root / "shared/tasks"), "DT_PUBLISH_LOG": str(root / "dt/autoloop/publish.jsonl"),
-               "DT_PUBLISH_OUTBOX": str(root / "outbox"), "DT_PUBLISH_MIRRORS": str(root / "mirrors")}
+               "DT_PUBLISH_OUTBOX": str(root / "outbox"), "DT_PUBLISH_MIRRORS": str(root / "mirrors"),
+               "DT_EXITS_DB": str(root / "dt/autoloop/exits.db"), "DT_HUB_PIN": str(root / "dt/autoloop/hub-pin.json")}
         for p in (mock.patch.dict(os.environ, env), mock.patch.object(AC.G, "ROSTER", self.roster)):
             p.start()
             self.addCleanup(p.stop)
@@ -1587,6 +2239,7 @@ class SecretaryEndToEnd(HubFixture):
             self.addCleanup(p.stop)
         self.workdir = root / "work"
         self.workdir.mkdir()
+        R.pin(R.healthz(), confirm=True)                     # 真的恢复闸（批 0D）：锁定这个临时中台的版本，入口自己对账开闸
         self.prepare_hub()
 
     def status(self, now=None):

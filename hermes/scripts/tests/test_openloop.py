@@ -236,6 +236,44 @@ class PrState(unittest.TestCase):
         r = self.row(checks=[run("test"), ctx])
         self.assertEqual((r["state"], r["blocked"]), ("卡住", "CI 失败：deploy"))
 
+    def test_changes_requested_is_rework_for_four_hours_then_stuck(self):
+        at = lambda h, m: dt.datetime(2026, 11, 20, h, m, tzinfo=ol.TZ)   # noqa: E731
+        node = pr(checks=[run("test")], reviews=[review("CHANGES_REQUESTED")])   # 14:30 要求修改
+        r = ol.pr_row("o/dt", node, RULES, now=at(15, 30))
+        self.assertEqual((r["state"], r["blocked"], r["next"], r["check_at"]), ("在做", "", "Claude返修后重新送审", "2026-11-20T18:30:00+08:00"))
+        r = ol.pr_row("o/dt", node, RULES, now=at(18, 30))
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "审查要求修改（GitHub 审查）"))
+
+    def test_review_in_flight_is_external_even_with_a_conflict_but_not_with_a_red_check(self):
+        flying = {"verdict": None, "flying": True, "at": ol.parse_ts("2026-11-20T07:00:00Z"), "by": "驿窗 第 4 轮", "label": "第 4 轮"}
+        r = ol.pr_row("o/dt", pr(checks=[run("test")], mergeable="CONFLICTING"), RULES, reviews=[flying])
+        self.assertEqual((r["state"], r["owner"], r["next"], r["blocked"]), ("等外部", "ChatGPT", "等 第 4 轮回信", ""))
+        self.assertIn("和主分支有冲突，审完再处理", r["evidence"])
+        self.assertEqual(r["active_at"], "2026-11-20T15:00:00+08:00")
+        r = ol.pr_row("o/dt", pr(checks=[run("test", "FAILURE")]), RULES, reviews=[flying])
+        self.assertEqual(r["state"], "卡住")
+
+    def test_conflict_with_recent_activity_is_in_progress_and_noted(self):
+        """11-22 #211：10:12 有提交、10:41 收到「需修改」，主分支一动就有了冲突；在返修、在改的冲突不算卡住，4 小时没动静才算。"""
+        at = lambda h, m: dt.datetime(2026, 11, 20, h, m, tzinfo=ol.TZ)   # noqa: E731
+        node = pr(checks=[run("test")], mergeable="CONFLICTING", reviews=[review("CHANGES_REQUESTED")])   # 14:00 提交，14:30 要求修改
+        r = ol.pr_row("o/dt", node, RULES, now=at(15, 0))
+        self.assertEqual((r["state"], r["blocked"]), ("在做", ""))
+        self.assertEqual(r["evidence"], "11-20 14:30 GitHub 审查要求修改，Claude返修中（还没有新提交）；和主分支有冲突")
+        r = ol.pr_row("o/dt", pr(checks=[run("test")], mergeable="CONFLICTING"), RULES, now=at(15, 0))
+        self.assertEqual(r["state"], "在做")
+        self.assertIn("；和主分支有冲突", r["evidence"])
+        r = ol.pr_row("o/dt", pr(checks=[run("test")], mergeable="CONFLICTING", reviews=[review("APPROVED")]), RULES, now=at(15, 0))
+        self.assertEqual((r["state"], r["next"]), ("在做", "Claude变基解决冲突，之后等常浩合并"))   # 审过但有冲突：合不了，不是等你
+        r = ol.pr_row("o/dt", node, RULES, now=at(18, 30))
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "和主分支有冲突"))
+
+    def test_fresh_commit_without_review_is_in_progress_then_unverified(self):
+        at = lambda h, m: dt.datetime(2026, 11, 20, h, m, tzinfo=ol.TZ)   # noqa: E731
+        r = ol.pr_row("o/dt", pr(checks=[run("test")]), RULES, now=at(17, 59))   # 14:00 提交
+        self.assertEqual((r["state"], r["owner"], r["check_at"]), ("在做", "Claude", "2026-11-20T18:00:00+08:00"))
+        self.assertEqual(ol.pr_row("o/dt", pr(checks=[run("test")]), RULES, now=at(18, 0))["state"], "待验证")
+
     def test_review_records_from_other_sources_are_merged_by_time(self):
         """5a-2 的驿窗送审记录从 reviews 参数进来：比 GitHub 审查新的那条算数。"""
         later = {"verdict": "revise", "at": ol.parse_ts("2026-11-20T07:00:00Z"), "by": "驿窗 L3 第 2 轮", "current": True}
@@ -517,7 +555,7 @@ class Ledger(Base):
     def test_render_and_show(self):
         hub = Hub(prs={"o/dt": self.prs}, numbers={"o/dt": {253: {"__typename": "PullRequest", "state": "MERGED", "mergedAt": "2026-11-20T03:00:00Z"}}})
         text = ol.render(self.scan(hub), now=NOW)
-        for part in ("未闭环账本｜11-20 16:00 扫描", "【卡住】1", "pr:dt#2｜红的", "卡在：CI 失败：test", "【待验证】1", "【在做】",
+        for part in ("未闭环账本｜11-20 16:00 扫描", "【卡住】1", "pr:dt#2｜红的", "卡在：CI 失败：test", "（刚提交，还在改或等送审）", "【在做】",
                      "【记录和事实对不上】1", "PR #253 已合并（11-20 11:00）", "【主线清单里没解析出来的】1", "【只计数，不催】⏸ 1｜📌 1",
                      "【没收的旧主线】dt「托管上线（#126）｜完成 3/8」（标题写着旧主线）", "下次看：不催"):
             self.assertIn(part, text)
@@ -901,7 +939,7 @@ class Relays(Sources):
             self.assertEqual(self.relay_row(self.h(**kw))[0]["next"], want, kw)
         hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
         _, rows, _ = self.relay_row(self.h(steps=[WORK, ASK, REVISE, BACK], carried=3, pr_="O/dt#1"), hub=hub)
-        self.assertEqual(rows["pr:dt#1"]["blocked"], "审查要求修改（驿窗 L3 第 4 轮）")
+        self.assertIn("驿窗 L3 第 4 轮要求修改", rows["pr:dt#1"]["evidence"])
 
     def test_asking_chatgpt_to_mend_its_last_lines_is_still_waiting(self):
         noverdict = step("reply", "2026-11-20T14:40:00+08:00")
@@ -938,20 +976,27 @@ class Relays(Sources):
         self.assertEqual((r["state"], r["blocked"]), ("卡住", "ChatGPT 30 分钟没回信，自动往返停下，交还常浩"))
         self.assertEqual(r["evidence"], "11-20 15:10 驿窗自动往返停下")
 
-    def test_returned_revise_makes_the_pr_stuck_and_merges_into_it(self):
+    def test_returned_revise_is_rework_for_four_hours_then_stuck_and_merges_into_it(self):
+        """11-22 常浩「修账本判法」：回信要求修改后 4 小时内算在做（在返修），过了还没新提交才卡住。"""
         hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
         relay, rows, _ = self.relay_row(self.h(steps=[WORK, ASK, REVISE, BACK], pr_="O/dt#1"), hub=hub)
         self.assertIsNone(relay)                                   # 并进 PR 那一行了
         r = rows["pr:dt#1"]
-        self.assertEqual((r["state"], r["blocked"]), ("卡住", "审查要求修改（驿窗 L3 第 1 轮）"))
+        self.assertEqual((r["state"], r["blocked"], r["owner"]), ("在做", "", "Claude"))     # 16:00，回信 14:40
+        self.assertEqual(r["evidence"], "11-20 14:40 驿窗 L3 第 1 轮要求修改，Claude返修中（还没有新提交）")
         self.assertEqual(r["check_at"], "2026-11-20T18:40:00+08:00")
         self.assertEqual([(x["id"], x["state"]) for x in r["links"]], [("relay:h1", "在做")])
+        rows, _ = self.rows(hub, now=dt.datetime(2026, 11, 20, 18, 41, tzinfo=ol.TZ))
+        r = rows["pr:dt#1"]
+        self.assertEqual((r["state"], r["blocked"], r["stalled"]), ("卡住", "审查要求修改（驿窗 L3 第 1 轮）", True))
 
     def test_review_of_an_older_head_leaves_the_pr_unverified(self):
         hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
         _, rows, _ = self.relay_row(self.h(steps=[WORK, ASK, REVISE, BACK], head=OLD, pr_="O/dt#1"), hub=hub)
+        self.assertEqual(rows["pr:dt#1"]["state"], "在做")              # 14:00 的新提交，16:00 还在 4 小时内
+        self.assertIn("上一次审的是旧版本（驿窗 L3 第 1 轮）", next(x for x in rows["pr:dt#1"]["parts"] if x["source"] == "pr")["evidence"])
+        rows, _ = self.rows(hub, now=dt.datetime(2026, 11, 20, 18, 1, tzinfo=ol.TZ))
         self.assertEqual(rows["pr:dt#1"]["state"], "待验证")
-        self.assertIn("上一次审的是旧版本（驿窗 L3 第 1 轮）", rows["pr:dt#1"]["evidence"])
 
     def test_closed_pass_on_head_means_reviewed(self):
         end = step("end", "2026-11-20T14:41:00+08:00", auto=True)
@@ -1015,16 +1060,30 @@ class Merge(Sources):
     def test_mainline_item_naming_one_open_pr_joins_it(self):
         text = "## 主线：底座（#188）｜完成 0/2\n- ❓ 0D 恢复门：PR #1 等常浩看\n- ▶ 批 2：PR #1、#2 都在做\n"
         commit_current(Path(self.p["path"]), text, "2026-11-20 09:00:00 +0800")
-        hub = Hub(prs={"o/dt": [pr(1, "恢复门", checks=[run("test")]), pr(2, "派活", draft=True, checks=[run("test")])]})
+        hub = Hub(prs={"o/dt": [pr(1, "恢复门", checks=[run("test")], pushed="2026-11-20T00:00:00Z"), pr(2, "派活", draft=True, checks=[run("test")])]})
         rows, led = self.rows(hub)
         self.assertEqual(sorted(rows), ["mainline:dt/#188/批2", "pr:dt#1", "pr:dt#2"])
         one = rows["pr:dt#1"]
-        self.assertEqual((one["state"], one["owner"], one["what"]), ("等你", "常浩", "恢复门"))   # PR 是待验证，主线项是等你：取更需要人的
+        self.assertEqual((one["state"], one["owner"], one["what"]), ("等你", "常浩", "恢复门"))   # PR 08:00 之后是待验证，主线项 09:00 写的等你：取更需要人的
         self.assertEqual(one["next"], "常浩定：PR #1 等常浩看")
         self.assertEqual([(x["id"], x["state"]) for x in one["links"]], [("mainline:dt/#188/0D恢复门", "等你"), ("mainline:dt/#188/批2", "在做")])
         self.assertTrue(one["links"][1]["related"])                 # 提到两个 PR 的那一项没并进来，只是互相记一笔
         self.assertEqual([(x["id"], x.get("related")) for x in rows["mainline:dt/#188/批2"]["links"]], [("pr:dt#1", True), ("pr:dt#2", True)])
         self.assertEqual(led["counts"]["等你"], 1)
+
+    def test_sayings_older_than_the_pr_activity_do_not_set_the_state(self):
+        """11-22 #211：旧会话的〔等你决定〕比 PR 新的提交、送审还旧，不该把整行变成「等你」；比 PR 新的照样算。"""
+        old = session_row("a", "等你决定", "0D 交接", "要你定在哪里接着做。", at="2026-11-20T05:00:00.000Z")    # 13:00
+        new = session_row("b", "等你决定", "0D 收尾", "要你定合不合。", at="2026-11-20T07:00:00.000Z")       # 15:00
+        self.meta_of(old, prs=[("o/dt", 1)], cli="cli-1")
+        self.meta_of(new, prs=[("o/dt", 2)], cli="cli-2")
+        self.inbox(FakeInbox([old, new]))
+        rows, _ = self.rows(Hub(prs={"o/dt": [pr(1, checks=[run("test")]), pr(2, checks=[run("test")])]}))   # 两个 PR 都是 14:00 提交
+        one, two = rows["pr:dt#1"], rows["pr:dt#2"]
+        self.assertEqual((one["state"], one["owner"]), ("在做", "Claude"))
+        self.assertEqual([(x["id"], x.get("old")) for x in one["links"]], [(f"session:{old['id']}", True)])
+        self.assertEqual((two["state"], two["owner"]), ("等你", "常浩"))
+        self.assertNotIn("old", two["links"][0])
 
     def test_session_relay_mainline_and_pr_become_one_row(self):
         text = "## 主线：底座（#188）｜完成 0/1\n- ▶ 0D 恢复门：PR #1 在审\n"
@@ -1037,7 +1096,7 @@ class Merge(Sources):
         self.assertEqual(list(rows), ["pr:dt#1"])
         r = rows["pr:dt#1"]
         self.assertEqual(r["state"], "卡住")
-        self.assertEqual(r["blocked"], "回信没送回会话；审查要求修改（驿窗 L3 第 1 轮）")   # 两条都是卡住：都写上，先到点的在前
+        self.assertEqual(r["blocked"], "回信没送回会话")   # PR 自己在 4 小时返修期内（在做），卡住的是回信没送回会话
         self.assertEqual(r["check_at"], "2026-11-20T15:10:00+08:00")
         relay = next(x for x in r["links"] if x["id"] == "relay:h1")
         self.assertIn("需修改", relay["next"])                                # 并进来的那条自己的下一步还查得到
@@ -1080,7 +1139,7 @@ class Merge(Sources):
         self.relays(handoff(steps=[WORK, ASK, REVISE, BACK], pr_="O/dt#1", session="cli-1"))
         hub = Hub(prs={"o/dt": [pr(1, checks=[run("test")])]})
         rows, first = self.rows(hub)
-        self.assertEqual((list(rows), rows["pr:dt#1"]["state"]), (["pr:dt#1"], "卡住"))
+        self.assertEqual((list(rows), rows["pr:dt#1"]["state"]), (["pr:dt#1"], "在做"))   # 会话 14:00 的〔等你操作〕比 14:40 的回信旧，不参与定状态
         later = NOW + dt.timedelta(minutes=5)
         with mock.patch.object(ol, "inbox_module", side_effect=ol.Fail("找不到拍板清单脚本")):      # 会话这一类取不到
             rows, led = self.rows(hub, prev=first, now=later)
@@ -1088,7 +1147,7 @@ class Merge(Sources):
         self.assertEqual(sorted(x["id"] for x in r["links"]), ["relay:h1", f"session:{a['id']}"])   # 会话那部分还在这一行里
         self.assertEqual((r["carried"], r["carried_from"], led["coverage"]["sessions"]["carried"]), (True, "2026-11-20T16:00:00+08:00", 1))
         self.handoffs.write_text("{坏的", encoding="utf-8")                                          # 驿窗记录读坏
-        rows, led = self.rows(hub, prev=first, now=later)
+        rows, led = self.rows(hub, prev=first, now=NOW + dt.timedelta(hours=3))                       # 过了 4 小时返修期
         r = rows["pr:dt#1"]
         self.assertEqual((r["state"], r["blocked"]), ("卡住", "审查要求修改（驿窗 L3 第 1 轮）"))        # 照上一份记下的送审记录判，不说成没人审
         self.assertEqual(sorted(x["id"] for x in r["links"]), ["relay:h1", f"session:{a['id']}"])
