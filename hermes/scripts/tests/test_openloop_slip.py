@@ -169,6 +169,7 @@ class Send(unittest.TestCase):
         self.assertEqual(self.run_script("send", now=NOON).returncode, 0)
         self.assertEqual(len(self.sends()), 2)                                    # 第二天中午是另一档
         self.assertEqual([x["result"] for x in self.runs()], ["sent", "already", "sent"])
+        self.assertEqual((self.runs()[0]["ids"], self.runs()[0]["ids_gone"]), (["pr:dt#7", "session:local_b"], []))   # 单上列了哪几件（追问登记用）
 
     def test_nothing_to_do_sends_nothing(self):
         self.write([DECIDE, GONE])
