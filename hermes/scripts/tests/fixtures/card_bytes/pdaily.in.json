@@ -1,0 +1,3197 @@
+{
+ "default_no_doc": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52"
+ },
+ "doc_button": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "doc_error": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_error": "云文档接口超时"
+  }
+ },
+ "sent_with_buttons_selfcheck_ok": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc",
+   "selfcheck": "",
+   "token": "tok0123456789abcdef"
+  }
+ },
+ "selfcheck_problem": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc",
+   "selfcheck": "安装副本和 main 不一致：pdaily_publish.py、pdaily_act.py、openloop.py 三个脚本和仓库 main 对不上\n处理：重新安装这三个脚本",
+   "token": "tok0123456789abcdef"
+  }
+ },
+ "degraded_facts_only": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "分析降级：模型没写成：超时。以下只摘事实，没有判断和推荐",
+   "progress_projects": null,
+   "decisions": [
+    {
+     "type": null,
+     "kind": null,
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "recommendation": null,
+     "deadline": null,
+     "source": "run-log",
+     "evidence": []
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "合并 1 个 PR（最近：#43 月度策略证据口径）；交付、验收未核实"
+    },
+    {
+     "project": "数字分身",
+     "text": "合并 1 个 PR（最近：#102 M5 小修）；交付、验收未核实"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "管理失真",
+     "scope": "1 个项目 1 条",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家：主目录有 15 处未提交改动",
+     "to_decisions": null
+    }
+   ],
+   "degraded": "模型没写成：超时"
+  },
+  "trace": "生成：脚本事实版（模型没写成：超时）｜接入：本机脚本｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc",
+   "selfcheck": "",
+   "token": "tok0123456789abcdef"
+  }
+ },
+ "auto_merges_panel": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": [],
+   "auto_merges": {
+    "merged": [
+     {
+      "repo": "o/my-skills",
+      "pr": "119",
+      "title": "automation-checkup：自动附睡眠记录",
+      "tier": "L2",
+      "suggestion": "建议合并",
+      "reasons": "",
+      "revert_cmd": "撤回 my-skills#119",
+      "revert": null
+     },
+     {
+      "repo": "o/github-center",
+      "pr": "93",
+      "title": "LESSONS 写明状态词",
+      "tier": "L1",
+      "suggestion": "退回",
+      "reasons": "正文没有 Closes #号",
+      "revert_cmd": "撤回 my-skills#119",
+      "revert": null
+     },
+     {
+      "repo": "o/my-skills",
+      "pr": "121",
+      "title": "automation-checkup：自动附睡眠记录",
+      "tier": "L2",
+      "suggestion": "建议合并",
+      "reasons": "",
+      "revert_cmd": "撤回 my-skills#119",
+      "revert": {
+       "revert_pr": "130",
+       "revert_url": "u"
+      }
+     }
+    ],
+    "unsettled": [
+     {
+      "repo": "o/my-skills",
+      "pr": "125",
+      "title": "结果没核对清的",
+      "tier": "L2",
+      "suggestion": "建议合并",
+      "reasons": "",
+      "revert_cmd": "撤回 my-skills#119",
+      "revert": null
+     },
+     {
+      "repo": "o/my-skills",
+      "pr": "126",
+      "title": "别处也可能合了的",
+      "tier": "L2",
+      "suggestion": "建议合并",
+      "reasons": "",
+      "revert_cmd": "撤回 my-skills#119",
+      "revert": null,
+      "unknown_merge": true
+     }
+    ],
+    "bypass": []
+   }
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    }
+   ],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "nothing_to_report": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [],
+   "achievements": [],
+   "risks": []
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "unread_project": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": null,
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {
+      "disk-slim": "读不了仓库"
+     }
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    }
+   ],
+   "achievements": [],
+   "risks": [
+    {
+     "level": "待识别",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": []
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "rich_decisions_and_risks": {
+  "facts": {
+   "stat_day": "2026-11-08",
+   "timezone": "Asia/Shanghai",
+   "window": {
+    "start": "2026-11-08T04:00:00+08:00",
+    "end": "2026-11-09T04:00:00+08:00"
+   },
+   "fetched_at": "2026-11-09T07:52:00+08:00",
+   "projects": [
+    {
+     "project_id": "work-desk",
+     "name": "牛马之家",
+     "objective": {
+      "kind": "目标",
+      "text": "牛马之家的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "牛马之家最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 43,
+        "title": "月度策略证据口径",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "digital-twin",
+     "name": "数字分身",
+     "objective": {
+      "kind": "目标",
+      "text": "数字分身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "数字分身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [
+       {
+        "number": 102,
+        "title": "M5 小修",
+        "engineering": "已合并",
+        "delivery": "未核实",
+        "acceptance": "未核实",
+        "claims": []
+       }
+      ],
+      "closed_issues": [],
+      "commits": {
+       "main": 1
+      },
+      "current_changed": true
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "disk-slim",
+     "name": "磁盘瘦身",
+     "objective": {
+      "kind": "目标",
+      "text": "磁盘瘦身的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "磁盘瘦身最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {
+       "main": 2
+      },
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    },
+    {
+     "project_id": "personal-ai-workbench",
+     "name": "个人 AI 工作台（数码世界）",
+     "objective": {
+      "kind": "目标",
+      "text": "个人 AI 工作台（数码世界）的目标",
+      "source": "CURRENT.md"
+     },
+     "milestones": [],
+     "freshness": {
+      "stale": false,
+      "current_as_of": "2026-11-08T20:00:00+08:00"
+     },
+     "current_state": {
+      "top_section": "个人 AI 工作台（数码世界）最新一节",
+      "next_step": "接着做",
+      "next_reliable": true,
+      "open_prs": [],
+      "dirty_files": 0
+     },
+     "yesterday_delta": {
+      "merged_prs": [],
+      "closed_issues": [],
+      "commits": {},
+      "current_changed": false
+     },
+     "notes": [],
+     "errors": [],
+     "installs": []
+    }
+   ],
+   "actions": [
+    {
+     "action_id": "c1",
+     "ts": "2026-11-08T05:00:00+08:00",
+     "project_id": "hermes",
+     "kind": "cron",
+     "request": "定时任务「Tidings」",
+     "actor": "Hermes",
+     "auth_tier": null,
+     "auth_source": "已登记的定时任务",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "状态 completed",
+     "follow_up": null,
+     "origin": "定时任务库",
+     "auth_gap": null
+    },
+    {
+     "action_id": "m1",
+     "ts": "2026-11-08T21:00:00+08:00",
+     "project_id": "work-desk",
+     "kind": "merge",
+     "request": "常浩点 PR 卡片「合并」：niuma-home#43",
+     "actor": "Hermes",
+     "auth_tier": "B",
+     "auth_source": "常浩点卡片",
+     "decision": "执行",
+     "result": "调用成功",
+     "verification": "PR 已合并",
+     "follow_up": null,
+     "origin": "合并官",
+     "auth_gap": null
+    }
+   ],
+   "decisions": [
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "夜跑停机后收尾，授权 72 到期 2026-11-09T06:00",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": "2026-11-05T10:00:00+08:00"
+    },
+    {
+     "kind": "night",
+     "project_id": "hermes",
+     "item": "磁盘瘦身第四批要不要做",
+     "why_owner": "主控还开着",
+     "source": "run-log",
+     "evidence": [],
+     "type": null,
+     "recommendation": null,
+     "impact": null,
+     "reply": null,
+     "deadline": null,
+     "status": "待你决定",
+     "since": null
+    }
+   ],
+   "risks": [
+    {
+     "category": "管理失真",
+     "project_id": "work-desk",
+     "item": "主目录有 15 处未提交改动",
+     "evidence": [
+      "本机 git status"
+     ],
+     "level": "待识别"
+    }
+   ],
+   "cross_refs": [],
+   "observations": [],
+   "counts": {
+    "projects_with_delta": [
+     "work-desk",
+     "digital-twin"
+    ],
+    "projects_delta_unknown": [],
+    "decision_candidates": 1,
+    "risk_projects": [
+     "work-desk"
+    ],
+    "non_project_risks": 0
+   },
+   "activity": {
+    "merged_prs": 2,
+    "closed_issues": 1,
+    "commits": 2,
+    "actions_by_kind": {
+     "cron": 1,
+     "merge": 1
+    }
+   },
+   "coverage": {
+    "projects": {
+     "projects": 4,
+     "read_ok": 4,
+     "errors": {}
+    },
+    "actions": {
+     "合并官": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     },
+     "定时任务库": {
+      "ok": true,
+      "count": 1,
+      "error": null
+     }
+    },
+    "action_notes": [],
+    "stale": [],
+    "not_connected": [
+     "Hermes 对话记录：没接"
+    ],
+    "failed_parts": []
+   },
+   "notes": []
+  },
+  "card": {
+   "headline": "牛马之家证据口径合并；今天先收尾夜跑",
+   "progress_projects": [
+    "work-desk"
+   ],
+   "decisions": [
+    {
+     "type": "阻断",
+     "kind": "做",
+     "candidates": [
+      0
+     ],
+     "project": "猛鬼兽",
+     "item": "夜跑收尾",
+     "recommendation": "按授权 72 收尾",
+     "deadline": "11-09 06:00"
+    },
+    {
+     "type": "一般",
+     "kind": "选",
+     "candidates": [
+      1
+     ],
+     "project": "磁盘瘦身",
+     "item": "第四批要不要做",
+     "recommendation": null,
+     "deadline": null
+    },
+    {
+     "type": "限时",
+     "kind": "选",
+     "candidates": [],
+     "project": "牛马之家",
+     "item": "月度策略口径",
+     "recommendation": "按证据口径走",
+     "deadline": null
+    }
+   ],
+   "achievements": [
+    {
+     "project": "牛马之家",
+     "text": "证据口径对齐合并（#43），未发布"
+    },
+    {
+     "project": "数字分身",
+     "text": "M5 小修合并（#102）"
+    }
+   ],
+   "risks": [
+    {
+     "level": "高",
+     "cause": "本机有没提交的改动",
+     "scope": "1 个项目 15 处",
+     "projects": [
+      "牛马之家"
+     ],
+     "detail": "牛马之家 15 处",
+     "to_decisions": [
+      1,
+      3
+     ]
+    },
+    {
+     "level": "中",
+     "cause": "定时任务晚点",
+     "scope": "2 个任务",
+     "projects": [],
+     "detail": "",
+     "to_decisions": [],
+     "check": {
+      "ask": "查昨晚为什么晚点"
+     }
+    },
+    {
+     "level": "待识别",
+     "cause": "",
+     "scope": "",
+     "projects": [],
+     "detail": "说不清",
+     "to_decisions": null
+    }
+   ]
+  },
+  "trace": "生成：Hermes（claude-opus-5-5[1m]）｜接入：Hermes 派单｜统计日 11-08 04:00 → 11-09 04:00｜取数 11-09 07:52",
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc",
+   "selfcheck": "",
+   "token": "tok0123456789abcdef"
+  }
+ },
+ "failure": {
+  "day": "2026-11-08",
+  "reason": "取数失败：GitHub 连不上（等了 300 秒）"
+ }
+}
