@@ -967,6 +967,16 @@ class Auto(Fixture, unittest.TestCase):
         self.scan()
         (b,) = self.book()
         self.assertEqual((b["event"], b["repo"], b["pr"], b["tier"]), ("bypass", "o/app", "5", "L0"))
+        self.assertEqual(b["policy_signed_at"], "2026-11-07T09:00:00+08:00")
+
+    def test_merge_before_signing_is_not_bypass(self):
+        """#322：签字前（定时任务停着的那些天）合掉的 PR，签字后第一轮巡视补结局时不算绕过。"""
+        self.scan()                                                  # 还没签：合并官记下这个 PR
+        self.update_pr(state="MERGED", mergedAt="2026-11-07T00:59:59Z")       # 比签署（09:00 +08:00）早一秒合掉
+        self.sign()
+        self.scan()                                                  # 签了以后第一轮：补结局
+        self.assertEqual([r["event"] for r in self.book() if r["event"] == "bypass"], [])
+        self.assertEqual(self.ledger()[0]["outcome"], mo.MERGED)
 
     def test_policy_merge_is_not_bypass(self):
         self.sign()
