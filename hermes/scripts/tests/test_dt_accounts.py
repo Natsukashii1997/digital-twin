@@ -59,7 +59,7 @@ class PfRules(unittest.TestCase):
         self.assertNotIn("user != dt-gate", rules("dt-worker").stdout)
         r = subprocess.run(["bash", str(PF), "rules", "--guard", "dt-worker"], capture_output=True, text=True)
         body = [l for l in r.stdout.splitlines() if not l.startswith("#")]
-        self.assertEqual(body[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353 } user != dt-gate")
+        self.assertEqual(body[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353, 3359 } user != dt-gate")
         self.assertEqual(allowed_ports(r.stdout, "dt-worker"), {3350, 8090})
 
     def test_worker_only(self):
@@ -776,13 +776,20 @@ exit 1
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((f["state"], f["guard"]), ("ok", "yes"))
         lines = [l for l in (Path(self.last_dir) / "pf-dt-worker.rules").read_text().splitlines() if not l.startswith("#")]
-        self.assertEqual(lines[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353 } user != dt-gate")
+        self.assertEqual(lines[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353, 3359 } user != dt-gate")
         # 0E-2 换工人钥匙前的核对（#268 ops/dt_gate_hub.py pf_listener_rule）认的就是这种写法
         self.assertRegex("\n".join(lines), r"(?m)^\s*(pass|block)\b.*\bin\b.*\b3350\b.*\buser\b.*dt-gate")
         for d, why in ((self.guard_dir(owner="501"), "不是_root_的普通文件"), (self.guard_dir(link=True), "不是_root_的普通文件")):
             r, f, _ = self.apply("ok", d)
             self.assertEqual(f["state"], "failed")
             self.assertIn(why, f["reason"])
+        # 和 migrate / rollback 同时跑撞上：加载上的规则（或标记现在的样子）和这次生成的对不上 → failed，下一轮再核（子 agent 审查 P2-2）
+        d = self.guard_dir()
+        pf = d / "pf.sh"
+        pf.write_text(pf.read_text().replace("mark_now=$(trap - ERR; hub_in_gate)", "mark_now=no"))
+        r, f, _ = self.apply("ok", d)
+        self.assertEqual(f["state"], "failed")
+        self.assertIn("对不上", f["reason"])
         r, f, _ = self.apply("guard_nogate", self.guard_dir())
         self.assertEqual(f["state"], "failed")
         self.assertIn("有搬家标记，但_dt-gate", f["reason"])
@@ -1529,6 +1536,10 @@ while :; do sleep 0.05; done
         self.assertTrue(self.v.should_reach("dt-worker", ts[0]))        # 监听者是 dt-gate
         self.assertFalse(self.v.should_reach("dt-secretary", ts[1]))    # 监听者不是 dt-gate：准连也该被拒
         self.assertTrue(self.v.should_reach("dt-worker", ts[2]))        # 8090 不归监听者规则管
+        # 监听者不是 dt-gate 的：受管账号被拒算符合（不看 root 对照，root 也会被拒）、连上没挡住、超时判不了（子 agent 审查 P2-1）
+        self.assertEqual(self.v.judge("dt-secretary", ts[1], "refused", "refused"), "符合")
+        self.assertEqual(self.v.judge("dt-secretary", ts[1], "open:5", "refused"), "没挡住")
+        self.assertEqual(self.v.judge("dt-secretary", ts[1], "timeout", "refused"), "没法判断")
 
     def test_guard_check(self):
         """监听者规则的真机检查：dt-gate 在听的 root 要连得上、别人在听的要被拒；空着的端口 root 冒充、自己去连要被拒；
@@ -1566,15 +1577,20 @@ while :; do sleep 0.05; done
             w, rows = v.guard_check()
         self.assertEqual(w, 0, rows)
         self.assertIn(("127.0.0.1", 3353), bound)                      # 空着的端口 root 开监听冒充
-        self.assertEqual({r["port"] for r in rows if r["listener"] == "dt-gate"}, {3353})
+        self.assertIn(("127.0.0.1", 3359), bound)                      # 3359 专给冒充测试
+        self.assertEqual({r["port"] for r in rows if r["listener"] == "dt-gate"}, {3353, 3359})
         got[("127.0.0.1", 3352)] = "open:30002"                         # 别人在听的 3352 居然连上了
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(v.guard_check()[0], 1)
         got[("127.0.0.1", 3352)] = "refused"
-        got[("::1", 3353)] = "timeout"                                  # 冒充的监听没被 pf 回绝（超时不算被拒）
+        got[("::1", 3353)] = "timeout"                                  # 冒充的监听没被 pf 回绝、也没连上：判不了（2）
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(v.guard_check()[0], 1)
+            self.assertEqual(v.guard_check()[0], 2)
         got[("::1", 3353)] = "refused"
+        got[("127.0.0.1", 3353)] = got[("127.0.0.1", 3359)] = "nobind:48"   # IPv4 上冒充一项都没测成：2
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(v.guard_check()[0], 2)
+        del got[("127.0.0.1", 3353)], got[("127.0.0.1", 3359)]
         v.gate_listen_control = lambda ports: (2, [])
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(v.guard_check()[0], 2)

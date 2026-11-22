@@ -813,7 +813,7 @@ def should_reach(user, t):
 
 # ---------- 监听者规则（0E-2 搬家后生效）：3350 / 3352 / 3353 只收监听者是 dt-gate 的连接 ----------
 
-GUARDED = (3350, 3352, 3353)
+GUARDED = (3350, 3352, 3353, 3359)   # 3359 空着不跑服务，专给这里测冒充（见 dt_worker_pf.sh 头注释）
 GATE = "dt-gate"
 
 
@@ -864,9 +864,9 @@ def guard_check():
                 continue
             got = try_tcp(host, port, 3, lrange=CTRL_LPORTS)
             want = "通" if owners == {g} else "被拒"
-            ok = reached(got) if want == "通" else got == "refused"
+            ok = verdict(want, got)
             rows.append({"host": host, "port": port, "listener": sorted(owners), "want": want, "got": got, "ok": ok})
-            worst = worst if ok else 1
+            worst = merge(worst, ok)
     for host, port in free:
         s = socket.socket(family(host), socket.SOCK_STREAM)
         try:
@@ -881,22 +881,42 @@ def guard_check():
             continue
         got = try_tcp(host, port, 3, lrange=CTRL_LPORTS)
         s.close()
-        ok = got == "refused"
+        ok = verdict("被拒", got)
         rows.append({"host": host, "port": port, "listener": "root 冒充", "want": "被拒", "got": got, "ok": ok})
-        worst = worst if ok else 1
+        worst = merge(worst, ok)
     ports = sorted({p for h, p in free if h == "127.0.0.1"})
     if ports:
         w, ctrl = gate_listen_control(ports)
         rows += ctrl
         worst = 1 if 1 in (worst, w) else max(worst, w)
-    if not [r for r in rows if r["ok"] is not None and r["want"] == "被拒"]:
-        print("== 监听者规则：没有一项「该被拒」测成（端口都被 dt-gate 占着、或开不了冒充的监听），冒充这一面没测到")
+    # 冒充被拒要在 IPv4、IPv6 上各有一项测成（工人走的是 127.0.0.1，不能只靠 ::1 证明），dt-gate 在听连得上至少一项
+    for fam, label in ((False, "IPv4"), (True, "IPv6")):
+        if not [r for r in rows if r["ok"] is True and r["want"] == "被拒" and (":" in r["host"]) == fam]:
+            print(f"== 监听者规则：{label} 上没有一项「该被拒」测成，冒充这一面没测到")
+            worst = max(worst, 2) if worst != 1 else 1
+    if not [r for r in rows if r["ok"] is True and r["want"] == "通"]:
+        print("== 监听者规则：没有一项「dt-gate 在听、root 连得上」测成，不知道规则是不是把 dt-gate 也挡了")
         worst = max(worst, 2) if worst != 1 else 1
-    print("== 监听者规则（3350 / 3352 / 3353 只收 dt-gate 在听的）")
+    print("== 监听者规则（3350 / 3352 / 3353 / 3359 只收 dt-gate 在听的）")
     for r in rows:
-        v = {True: "符合", False: "没挡住" if r["want"] == "被拒" else "该通不通", None: "没测成"}[r["ok"]]
+        v = {True: "符合", False: "没挡住" if r["want"] == "被拒" else "该通不通",
+             None: "没测成" if str(r["got"]).startswith("没测成") else "判不了"}[r["ok"]]
         print(f"  [{v}] root → {r['host']}:{r['port']}（监听者：{r['listener']}）应{r['want']} → {r['got']}")
     return worst, rows
+
+
+def verdict(want, got):
+    """该被拒的：被拒（pf 回的 RST）算 True，连上算 False（没挡住），超时、出错、端口没绑上判不了（None，算不完整）；
+    该通的：连上算 True，别的算 False（该通不通）。"""
+    if want == "通":
+        return reached(got)
+    return True if got == "refused" else (False if reached(got) else None)
+
+
+def merge(worst, ok):
+    if ok is False:
+        return 1
+    return worst if ok else (max(worst, 2) if worst != 1 else 1)
 
 
 def gate_listen_control(ports):
@@ -931,6 +951,10 @@ def gate_listen_control(ports):
 
 
 def judge(user, t, got, ctrl):
+    if t.get("guarded") and not t.get("listener_gate"):
+        # 监听者规则开着、监听者不是 dt-gate：受管账号的 SYN 照常放出去，在对方入站那一步被 pf 回绝，root 也一样被拒，
+        # 所以不看 root 对照：被拒算符合，连上算没挡住，超时出错判不了（子 agent 审查 P2-1）
+        return "没挡住" if reached(got) else ("符合" if got == "refused" else "没法判断")
     if should_reach(user, t):
         return "符合" if reached(got) else "该通不通"
     if reached(got):
@@ -1372,6 +1396,12 @@ def verify():
             worst = worst or 2
         if own.vanished:
             print("== 这些地址测试时已不在本机，没开靶子：" + "、".join(b["host"] for b in own.vanished[:5]))
+        marked = os.path.exists(DIR + "/hub-in-gate")
+        if marked != guard:                     # 标记和门卫状态对不上：状态过时或和搬家撞上了，不知道规则开没开
+            print(f"== 监听者规则：搬家标记{'在' if marked else '不在'}，门卫状态却是 guard={'yes' if guard else 'no'}，测试不完整")
+            worst = max(worst, 2) if worst != 1 else 1
+        if not guard:
+            print("== 监听者规则没开（中台还没搬进 dt-gate）")
         if guard:
             try:
                 w, report["listener_guard"] = guard_check()
@@ -1415,7 +1445,8 @@ def half_open_verdict(report, ts, ctrl, ctrl_recs, users, watch, hosts):
         recs = LPORTS.get(u, [])
         problems += lport_problems(u, recs, ts, [r["got"] for r in got], hosts, CTRL_LPORTS)[:5]
         attempts += [(u, ts[int(i)], int(lp), at) for i, lp, at in recs
-                     if int(i) < len(ts) and evidenced(ts[int(i)], hosts) and not should_reach(u, ts[int(i)])]
+                     if int(i) < len(ts) and evidenced(ts[int(i)], hosts) and not should_reach(u, ts[int(i)])
+                     and not ts[int(i)].get("guarded")]   # 监听者规则管的端口：SYN 本来就放出去，在入站被拒，不按抓包判
     hits = half_open(watch, attempts, tail=4.0)
     problems += lport_problems("root", ctrl_recs, ts, ctrl, hosts)[:5]
     blind = unseen(watch, ctrl_recs, ts, ctrl, hosts)
