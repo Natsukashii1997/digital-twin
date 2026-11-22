@@ -727,6 +727,144 @@ class ChecksTest(unittest.TestCase):
                                     {"stopped": True, "guard_on": True}))
             self.assertNotIn("start", order)
 
+    def test_preflight_needs_new_guard_loaded_and_listener_rule_off(self):
+        """独立审查第 2 轮 P2-1：门卫不在生效、是旧版（没有 guard=）、监听者规则已经开着，preflight 各拦一条。"""
+        for line, word in (("at=x state=failed reason=x boot=1795000000 guard=no\n", "不在生效"),
+                           ("at=x state=ok enabled=yes boot=1795000000\n", "旧版"),
+                           ("at=x state=ok enabled=yes boot=1795000000 guard=yes\n", "guard=yes")):
+            with self.subTest(line=line):
+                self.pf(line)
+                bad = [m for m, ok in self.run_checks(self.snap()).items() if not ok]
+                self.assertEqual(len(bad), 1, bad)
+                self.assertIn("门卫规则在生效", bad[0])
+                self.assertIn(word, bad[0])
+        (Path(os.environ["DT_PF_DIR"]) / "pf-dt-worker.status").unlink()             # 读不到：也拦，不抛异常
+        bad = [m for m, ok in self.run_checks(self.snap()).items() if not ok]
+        self.assertEqual(len(bad), 1, bad)
+        self.assertIn("读不到", bad[0])
+
+    def test_pf_apply_refuses_a_guard_script_root_does_not_own(self):
+        """独立审查第 2 轮 P2-4：门卫脚本不在、不是普通文件、不属 root、别人能写，都不以 root 跑它。"""
+        pfd = Path(os.environ["DT_PF_DIR"])
+        script, real = pfd / "dt_worker_pf.sh", pfd / "real.sh"
+        cases = (("组能写", lambda: os.chmod(script, 0o775), os.getuid(), "root 所有"),
+                 ("其他人能写", lambda: os.chmod(script, 0o757), os.getuid(), "root 所有"),
+                 ("不属 root", lambda: None, os.getuid() + 1, "root 所有"),
+                 ("是链接", lambda: (script.rename(real), script.symlink_to(real)), os.getuid(), "root 所有"),
+                 ("不在", lambda: script.unlink(), os.getuid(), "没有门卫脚本"))
+        for name, spoil, root_uid, word in cases:
+            with self.subTest(name=name):
+                for f in (script, real):
+                    if os.path.lexists(f):
+                        f.unlink()
+                pf_fixture(pfd)
+                spoil()
+                self.host.calls.clear()
+                with mock.patch.object(H, "ROOT_UID", root_uid), self.assertRaisesRegex(H.Stop, word):
+                    H.pf_apply(self.host, "no")
+                self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
+        for f in (script, real):
+            if os.path.lexists(f):
+                f.unlink()
+        pf_fixture(pfd)
+        H.pf_apply(self.host, "no")                                                   # 复原后照常跑
+        self.assertEqual(len([c for c in self.host.calls if c[0] == "pf_apply"]), 1)
+
+    def test_hold_defers_a_stop_signal_until_it_is_recorded(self):
+        """独立审查第 2 轮 P2-3：hold 这一下收到停止信号，等 hold 做完才抛，退回时能看到这次的恢复点。"""
+        import signal
+        run = self.fake_recovery()
+
+        def hold_then_killed(host, current, name, args):
+            res = run(host, current, name, args)
+            if args[0] == "hold":
+                os.kill(os.getpid(), signal.SIGTERM)                                  # 落在 hold 中间
+                time.sleep(0.05)
+                run.after_kill = True                                                 # 信号没在这里打断
+            return res
+        old = signal.signal(signal.SIGTERM, H._on_term)
+        self.addCleanup(signal.signal, signal.SIGTERM, old)
+        with mock.patch.object(H, "recovery_as", hold_then_killed):
+            with self.assertRaisesRegex(H.Stop, "停止信号"):
+                H.hold_and_drain(self.host, {"engine": {"commit": "e" * 40}}, "nat", "gate-migrate-S", self.d, 0)
+        self.assertTrue(getattr(run, "after_kill", False))
+        self.assertEqual(run.state["hold"], "gate-migrate-S")
+        self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()) & {signal.SIGTERM, signal.SIGINT}, set())
+
+    def test_undo_after_guard_on_releases_hold_only_when_guard_is_off(self):
+        """第 4b 步之后出错：关门卫 → 启用主账号中台 → 结束停写；门卫关不掉就不启用、保持停写。"""
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
+        done = {"held": True, "stopped": True, "guard_on": True}
+        for pf_fail, started, held in ((0, True, None), (3, False, "gate-migrate-S")):
+            with self.subTest(pf_fail=pf_fail):
+                H.hub_mark().write_text("dt-gate S\n")
+                self.host.pf_fail = pf_fail
+                order = []
+                run = self.fake_recovery(hold="gate-migrate-S")
+                real_apply = self.host.pf_apply
+                with mock.patch.object(self.host, "pf_apply", lambda s: (order.append("pf_apply"), real_apply(s))[1]), \
+                        mock.patch.object(H, "recovery_as", lambda *a: (order.append(a[3][0]), run(*a))[1]), \
+                        mock.patch.object(H, "start_owner_agent", lambda *a: order.append("start")), \
+                        mock.patch("sys.stdout", io.StringIO()):
+                    self.assertEqual(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S", done), started)
+                self.assertEqual("start" in order, started)
+                self.assertEqual(run.state["hold"], held)
+                if started:
+                    self.assertLess(order.index("pf_apply"), order.index("start"))
+                    self.assertLess(order.index("start"), order.index("release"))
+                    self.assertFalse(os.path.lexists(H.hub_mark()))
+                else:
+                    self.assertNotIn("release", order)
+
+    def rollback_state(self, w):
+        """搬完的样子：主账号原位置是说明文件，原目录改了名。"""
+        (w / "moved").mkdir(parents=True)
+        (w / "moved/config.json").write_text("{}")
+        (w / "hub").write_text(f"{H.MARK}（S）\n")
+        s = {"owner_account": "nat", "owner_hub": str(w / "hub"), "owner_moved": str(w / "moved"),
+             "plist_moved": str(w / "p"), "plist_home": str(w / "ph"), "hub_url": "http://127.0.0.1:1",
+             "owner_hold": "gate-migrate-S", "owner_hold_max_card": 5}
+        (Path(os.environ["DT_GATE_ROOT"]) / "state.json").write_text(json.dumps(s))
+        return s
+
+    def test_rollback_keeps_note_and_dir_when_guard_off_fails_then_resumes(self):
+        """独立审查第 2 轮 P2-2：关门卫失败时说明文件不删、目录不放回、state 留着、不结束停写；修好再跑一次接着来。"""
+        w = self.d / "rbg"
+        self.rollback_state(w)
+        run = self.fake_recovery(hold="gate-migrate-S")
+        unmark = mock.Mock(side_effect=lambda *a: (w / "hub").unlink())
+        start = mock.Mock()
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
+                mock.patch.object(H, "unmark_owner", unmark), mock.patch.object(H, "installed", return_value=False), \
+                mock.patch.object(H, "now_stamp", return_value="G"), mock.patch("sys.stdout", io.StringIO()):
+            self.host.pf_fail = 3
+            with self.assertRaisesRegex(H.Stop, "门卫监听者规则没关掉"):
+                H.cmd_rollback(self.host, self.a())
+            unmark.assert_not_called()
+            start.assert_not_called()
+            self.assertTrue((w / "hub").read_text().startswith(H.MARK))
+            self.assertTrue((w / "moved/config.json").exists())
+            self.assertTrue((Path(os.environ["DT_GATE_ROOT"]) / "state.json").exists())
+            self.assertEqual(run.state["hold"], "gate-migrate-S")
+            self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)                  # 门卫好了，再跑一次
+        self.assertEqual((w / "hub/config.json").read_text(), "{}")
+        start.assert_called_once()
+        self.assertIsNone(run.state["hold"])
+        self.assertIsNone(H.load_state())
+
+    def test_rollback_refuses_before_touching_anything_when_note_is_not_ours(self):
+        w = self.d / "rbn"
+        self.rollback_state(w)
+        (w / "hub").write_text("别人的东西\n")
+        remove = mock.Mock()
+        with mock.patch.object(H, "remove_daemon", remove), mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(H.Stop, "不是搬家时放的说明文件"):
+                H.cmd_rollback(self.host, self.a())
+        remove.assert_not_called()
+        self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
+        self.assertEqual((w / "hub").read_text(), "别人的东西\n")
+
     def test_rotate_worker_needs_guard_loaded_not_just_the_rule_line(self):
         pfd = Path(os.environ["DT_PF_DIR"])
         (pfd / "pf-dt-worker.rules").write_text("block return in quick proto tcp from any to 127.0.0.1 port 3350 user != dt-gate\n")
@@ -910,6 +1048,18 @@ class MigrateEndToEndTest(unittest.TestCase):
         finally:
             db.close()
 
+    def owner_hold(self):
+        """主账号真实出口账本（恢复闸）上的停写恢复点；账本还没建就是 None。"""
+        f = self.users["nat"] / "Library/Application Support/DigitalTwin/autoloop/exits.db"
+        if not f.exists():
+            return None
+        db = sqlite3.connect(f"file:{f}?mode=ro", uri=True)
+        try:
+            r = db.execute("SELECT hold FROM gate WHERE id = 1").fetchone()
+            return r[0] if r else None
+        finally:
+            db.close()
+
     def stage(self):
         engine_commit = git(ENGINE, "rev-parse", "HEAD").decode().strip()
         repo_commit = git(self.repo, "rev-parse", "HEAD").decode().strip()
@@ -942,15 +1092,34 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.assertIsNone(H.load_state())
         self.assertNotIn("cn.digital-twin.gate.hub", self.host.procs)
         self.assertTrue(list(H.gate_root().glob("migrating.undone-*.json")))
+        self.assertIsNone(self.owner_hold())                                      # 退回时结束了这次停写
+
+        # 第 4b 步打不开门卫监听者规则：整条退回，先关门卫再启用主账号中台、结束停写
+        pf = self.d / "pf"
+        self.host.pf_fail = H.PF_APPLY_TRIES
+        self.assertEqual(self.main("migrate", "--confirm"), 1)
+        self.assertIn("没切到 guard=yes", self.out.getvalue())
+        self.wait_healthy()
+        self.assertFalse(os.path.lexists(pf / "hub-in-gate"))
+        self.assertIn("guard=no", (pf / "pf-dt-worker.status").read_text())
+        self.assertTrue((self.ohub / "config.json").exists() and self.oplist.exists())
+        self.assertFalse((gate / ".agent-autoloop").exists())
+        self.assertEqual(len(list(gate.glob(".agent-autoloop.failed-*"))), 2)
+        self.assertNotIn("cn.digital-twin.gate.hub", self.host.procs)
+        self.assertIsNone(H.load_state())
+        self.assertIsNone(self.owner_hold())
+        self.assertFalse((H.gate_root() / "migrating.json").exists())
 
         # 被打断（进程被杀、没来得及退回）：留下 migrating.json，preflight 不过；rollback 照记录收拾
         with mock.patch.object(H, "wait_health", side_effect=H.Stop("模拟被杀")), mock.patch.object(H, "undo"), \
                 mock.patch.object(H.Progress, "close"):
             self.assertEqual(self.main("migrate", "--confirm"), 1)
         self.assertTrue((H.gate_root() / "migrating.json").exists())
+        self.assertTrue(self.owner_hold().startswith("gate-migrate-"))              # 没退回：停写还在
         self.assertEqual(self.main("preflight"), 1)
         self.assertEqual(self.main("rollback", "--confirm"), 0, self.out.getvalue())
         self.assertIn("收拾好了", self.out.getvalue())
+        self.assertIsNone(self.owner_hold())
         self.wait_healthy()
         self.assertTrue((self.ohub / "config.json").exists())
         self.assertFalse((gate / ".agent-autoloop").exists())
@@ -961,6 +1130,8 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.assertEqual(self.main("migrate", "--confirm"), 0, self.out.getvalue())
         self.wait_healthy(commit)
         state = H.load_state()
+        self.assertTrue(state["owner_hold"].startswith("gate-migrate-"))
+        self.assertEqual(self.owner_hold(), state["owner_hold"])                  # 搬完主账号控制面保持停写
         ghub = gate / ".agent-autoloop"
         cfg = json.loads((ghub / "config.json").read_text())
         self.assertEqual(set(cfg), {"url", "hub", "owner"})
@@ -1021,7 +1192,6 @@ class MigrateEndToEndTest(unittest.TestCase):
         wcfg.parent.mkdir(mode=0o700)
         wcfg.write_text(json.dumps({"url": self.url, "worker": {"name": "dt-worker", "key": "old"}}))
         old_hash = self.keys(ghub)["worker:dt-worker"]
-        pf = self.d / "pf"
         self.assertTrue((pf / "hub-in-gate").exists())                              # 搬家第 4b 步打开了监听者规则
         self.assertIn("guard=yes", (pf / "pf-dt-worker.status").read_text())
         (pf / "pf-dt-worker.rules").write_text("pass out quick inet proto tcp from any to 127.0.0.1 port { 3350 } user dt-worker\n")
@@ -1057,6 +1227,7 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.assertTrue(list(gate.glob(".agent-autoloop.rolled-back-*")))
         self.assertTrue(list(gate.glob(".agent-autoloop-rollback-*/hub.db")))
         self.assertIn("接单钥匙在 dt-gate 里换过", self.out.getvalue())
+        self.assertIsNone(self.owner_hold())                                      # 回滚结束了主账号停写
         self.assertEqual(self.main("preflight"), 0, self.out.getvalue())   # 回滚后可以重新搬
 
 
