@@ -8,6 +8,8 @@ import contextlib
 import datetime as dt
 import io
 import json
+import re
+import sqlite3
 import os
 import subprocess
 import sys
@@ -1174,3 +1176,212 @@ class Merge(Sources):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------- 新通道派单（#195 缺口 3） ----------
+TID = "t-20261120-0a1b2c"
+TID2 = "t-20261120-0d0e0f"
+GRANTS_SCHEMA = None
+
+
+def grants_schema():
+    import autoloop_grants as G
+    return G.SCHEMA
+
+
+class BranchHub(Hub):
+    """假 GitHub，另认派单分支查询：branches = {仓库: {分支: [PR]}}。"""
+
+    def __init__(self, branches=None, **kw):
+        super().__init__(**kw)
+        self.branches = branches or {}
+
+    def _run(self, *args, partial=False):
+        f = dict(a.split("=", 1) for a in args if "=" in a)
+        if "headRefName:" not in f["query"]:
+            return super()._run(*args, partial=partial)
+        repo = f"{f['o']}/{f['n']}"
+        self.calls.append((repo, "branches"))
+        if repo in self.down:
+            raise pdaily_data.NetFail("error connecting to api.github.com")
+        got = {}
+        for i, b in re.findall(r'b(\d+): pullRequests\(headRefName:"([^"]+)"', f["query"]):
+            got[f"b{i}"] = {"nodes": self.branches.get(repo, {}).get(b, [])}
+        return {"data": {"repository": got}}
+
+
+class Dispatch(Base):
+    """派单网关签出的任务凭证一张一行：凭证库、中台库、交接目录都在临时目录，只读打开。"""
+
+    def setUp(self):
+        super().setUp()
+        self.grants = self.root / "dt/autoloop/grants.db"
+        self.hub_home = self.root / "hub"
+        self.outbox = self.root / "outbox"
+        p = mock.patch.dict(os.environ, {"DT_GRANTS_DB": str(self.grants), "AGENT_AUTOLOOP_HOME": str(self.hub_home),
+                                         "DT_PUBLISH_OUTBOX": str(self.outbox)})
+        p.start()
+        self.addCleanup(p.stop)
+        f = self.root / "projects.json"
+        f.write_text(json.dumps({"projects": [], "inventory": [
+            {"path": "github:o/dt-sandbox", "category": "沙盒", "sandbox": True}]}, ensure_ascii=False), encoding="utf-8")
+        q = mock.patch.object(progress_data, "ROSTER", f)
+        q.start()
+        self.addCleanup(q.stop)
+
+    def grant(self, tid=TID, status="active", executor="claude", repo="dt-sandbox", until="2026-11-21T04:00:00+08:00",
+              events=(("start", 1, "2026-11-20T15:00:00+08:00"),)):
+        self.grants.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(self.grants)
+        con.executescript(grants_schema())
+        con.execute("INSERT INTO grants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (tid, repo, f"o/{repo}", "目标：给 README 加一节\n交付物：只改 README.md", "h" * 64, executor,
+                     f"dispatch-{repo}-{executor}", '["edit"]', until, status, 1, "2026-11-20T15:00:00+08:00", None,
+                     "om_x", "2026-11-20T15:00:00+08:00", "2026-11-20T15:30:00+08:00"))
+        for i, (kind, sent, at) in enumerate(events):
+            con.execute("INSERT INTO hub_events (event_key, task_id, rule, executor, generation, kind, at, sent, claimed_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)", (f"{tid}:g1:{kind}:{i}", tid, f"dispatch-{repo}-{executor}", executor,
+                                                       1, kind, at, sent, at))
+        con.commit()
+        con.close()
+
+    def runs(self, *rows):
+        self.hub_home.mkdir(exist_ok=True)
+        con = sqlite3.connect(self.hub_home / "hub.db")
+        con.execute("CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, rule TEXT, agent TEXT, grp TEXT, lane TEXT, "
+                    "state TEXT, attempts INTEGER DEFAULT 0, created_at TEXT, claimed_at TEXT, seen_at TEXT, finished_at TEXT, "
+                    "summary TEXT)")
+        for r in rows:
+            r = {"rule": "dispatch-dt-sandbox-claude", "lane": TID, "attempts": 0, "created_at": "2026-11-20T15:01:00+08:00",
+                 "claimed_at": None, "seen_at": None, "finished_at": None, "summary": None, **r}
+            con.execute("INSERT INTO runs (id, rule, lane, state, attempts, created_at, claimed_at, seen_at, finished_at, summary) "
+                        "VALUES (:id,:rule,:lane,:state,:attempts,:created_at,:claimed_at,:seen_at,:finished_at,:summary)", r)
+        con.commit()
+        con.close()
+
+    def scan(self, hub=None, prev=None, now=NOW):
+        return ol.build(now, ol.roster(), hub or BranchHub(), RULES, prev=prev, fetch=False)
+
+    def row(self, ledger, id_=f"dispatch:{TID}"):
+        return next((r for r in ledger["rows"] if r["id"] == id_ or any(x["id"] == id_ for x in r.get("links") or [])), None)
+
+    def test_not_installed_is_not_a_gap_and_creates_nothing(self):
+        led = self.scan()
+        self.assertEqual(led["coverage"]["dispatch"]["installed"], False)
+        self.assertFalse([g for g in ol.gaps(led) if "派单" in g])
+        self.assertFalse(self.grants.exists())               # 只读打开：库不在不建库
+        self.assertFalse((self.hub_home / "hub.db").exists())
+
+    def test_worker_running_is_in_progress_and_other_repos_are_skipped(self):
+        self.grant()
+        self.grant(TID2, repo="not-in-roster")
+        self.runs({"id": 7, "state": "claimed", "claimed_at": "2026-11-20T15:02:00+08:00"})
+        before = self.grants.stat().st_mtime_ns
+        led = self.scan()
+        r = self.row(led)
+        self.assertEqual((r["state"], r["owner"], r["source"], r["project"]), ("在做", "Claude", "dispatch", "dt-sandbox"))
+        self.assertIn("中台轮次 7 在跑", r["evidence"])
+        self.assertEqual(r["check_at"], "2026-11-20T17:32:00+08:00")          # 开跑 + 150 分钟
+        self.assertTrue(r["what"].startswith(f"{TID}（Claude）：目标：给 README 加一节"))
+        self.assertEqual(led["coverage"]["dispatch"]["skipped"], 1)
+        self.assertIsNone(self.row(led, f"dispatch:{TID2}"))
+        self.assertEqual(self.grants.stat().st_mtime_ns, before)            # 没写凭证库
+
+    def test_hub_took_the_event_but_made_no_run(self):
+        self.grant()
+        self.runs()
+        r = self.row(self.scan())
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "中台没有接这张单"))
+        self.assertIn("通道暂停或没有这条派单规则", r["evidence"])
+
+    def test_event_not_confirmed_at_the_hub(self):
+        self.grant(events=(("start", 2, "2026-11-20T15:55:00+08:00"),))   # 5 分钟前发出、还没确认
+        self.runs()
+        r = self.row(self.scan())
+        self.assertEqual((r["state"], r["owner"]), ("卡住", "猛鬼兽"))
+        self.assertIn("send-pending", r["next"])
+        r = self.row(self.scan(now=dt.datetime(2026, 11, 20, 15, 56, tzinfo=ol.TZ)))   # 刚发出 1 分钟：不催
+        self.assertEqual((r["state"], r["evidence"].endswith("正在送往中台")), ("在做", True))
+
+    def test_open_pr_on_the_branch_becomes_one_row_with_the_pr(self):
+        self.grant()
+        self.runs({"id": 7, "state": "done", "finished_at": "2026-11-20T15:20:00+08:00", "summary": "改好了"})
+        node = {**pr(5, "给 README 加一节", branch=f"claude/{TID}", files=("README.md",), checks=[run("ci")]), "state": "OPEN"}
+        led = self.scan(BranchHub({"o/dt-sandbox": {f"claude/{TID}": [node]}}))
+        r = self.row(led)
+        self.assertEqual((r["id"], r["state"], r["next"]), ("pr:dt-sandbox#5", "等你", ol.MERGE_NEXT))   # 只改文档：L0
+        self.assertEqual([x["id"] for x in r["links"]], [f"dispatch:{TID}"])
+        self.assertEqual(ol.ask_kind(r), "合并")
+
+    def test_stopped_turn_is_stuck(self):
+        self.grant()
+        self.runs({"id": 7, "state": "done", "finished_at": "2026-11-20T15:20:00+08:00",
+                   "summary": "停下了：凭证已撤销，没有交接\n\n回执"})
+        r = self.row(self.scan())
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "停下了：凭证已撤销，没有交接"))
+
+    def test_finished_turn_with_or_without_a_handoff(self):
+        self.grant()
+        self.runs({"id": 7, "state": "done", "finished_at": "2026-11-20T15:20:00+08:00", "summary": "改好了"})
+        self.assertEqual(self.row(self.scan())["state"], "待验证")          # 没交接包：可能只提了问题
+        (self.outbox / TID).mkdir(parents=True)
+        (self.outbox / TID / "handoff.json").write_text(json.dumps({"head": HEAD}))
+        r = self.row(self.scan())
+        self.assertEqual((r["state"], r["owner"]), ("等外部", "受信发布"))
+        self.assertIn("由常浩在场手动做", r["next"])
+
+    def test_frozen_merged_closed_revoked(self):
+        self.grant(status="frozen")
+        self.runs()
+        r = self.row(self.scan())
+        self.assertEqual((r["state"], r["owner"], ol.ask_kind(r)), ("等你", "常浩", "拍板"))
+        con = sqlite3.connect(self.grants)
+        con.execute("UPDATE grants SET status = 'active'")
+        con.commit()
+        merged = {**pr(5, branch=f"claude/{TID}"), "state": "MERGED", "mergedAt": "2026-11-20T07:00:00Z"}
+        r = self.row(self.scan(BranchHub({"o/dt-sandbox": {f"claude/{TID}": [merged]}})))
+        self.assertEqual((r["state"], ol.ask_kind(r)), ("等你", "拍板"))
+        self.assertIn("收掉", r["next"])
+        closed = {**pr(5, branch=f"claude/{TID}"), "state": "CLOSED", "closedAt": "2026-11-20T07:00:00Z"}
+        self.assertIn("续接返修还是停单", self.row(self.scan(BranchHub({"o/dt-sandbox": {f"claude/{TID}": [closed]}})))["next"])
+        con.execute("UPDATE grants SET status = 'revoked'")
+        con.commit()
+        con.close()
+        self.assertIsNone(self.row(self.scan()))                            # 停了、没有轮次和 PR：完了，不收
+        self.runs({"id": 9, "state": "claimed"})
+        r = self.row(self.scan())
+        self.assertEqual((r["state"], r["blocked"]), ("卡住", "停单后轮次还活着"))
+        self.assertIn("agent-autoloop stop 9", r["next"])
+
+    def test_expired_grant_without_pr_is_done(self):
+        self.grant(until="2026-11-20T15:30:00+08:00")
+        self.runs({"id": 7, "state": "done", "finished_at": "2026-11-20T15:20:00+08:00", "summary": "改好了"})
+        self.assertIsNone(self.row(self.scan()))
+
+    def test_hub_or_github_missing_still_lists_the_task_and_says_so(self):
+        self.grant()
+        led = self.scan(BranchHub(down={"o/dt-sandbox"}))
+        r = self.row(led)
+        self.assertIn("中台库这次没读到", r["evidence"])
+        self.assertIn("PR 这次没查到", r["evidence"])
+        gaps = ol.gaps(led)
+        self.assertTrue(any("中台库不在" in g for g in gaps), gaps)
+        self.assertTrue(any(g.startswith("新通道派单·dt-sandbox：PR 没查到") for g in gaps), gaps)
+
+    def test_broken_grants_db_carries_last_ledger(self):
+        self.grant()
+        self.runs({"id": 7, "state": "claimed"})
+        prev = self.scan()
+        self.grants.write_bytes(b"not a database")
+        led = self.scan(prev=prev)
+        r = self.row(led)
+        self.assertTrue(r["carried"])
+        self.assertTrue(any(g.startswith("新通道派单：凭证库读不了") for g in ol.gaps(led)), ol.gaps(led))
+
+    def test_paths_match_the_gateway_and_publisher(self):
+        import autoloop_grants as G
+        import autoloop_publish as P
+        self.assertEqual((ol.grants_db(), ol.hub_db(), ol.dispatch_outbox()), (G.db_path(), P.hub_db(), P.outbox()))
+        with mock.patch.dict(os.environ, {"DT_GRANTS_DB": "", "AGENT_AUTOLOOP_HOME": "", "DT_PUBLISH_OUTBOX": ""}):
+            self.assertEqual((ol.grants_db(), ol.hub_db(), ol.dispatch_outbox()), (G.db_path(), P.hub_db(), P.outbox()))
+        self.assertEqual(ol.TASK_ID.pattern, G.TASK_ID.pattern)
