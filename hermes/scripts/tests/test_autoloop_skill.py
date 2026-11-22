@@ -2,10 +2,12 @@
 
 autoloop 技能（#195 批 2 派活入口，hermes/skills/autoloop/SKILL.md）的三类核对：
   1. 文档对得上脚本：技能里写的每条 G 命令都能被网关的命令行解析；技能表格里引用的脚本原话、字段名，脚本里确实有；
-  2. 一句话 → propose → 常浩照确认消息回 → approve → 派单事件发出，全程走命令行（和猛鬼兽调用的方式一样），
-     以及技能里写了回话的各条岔路（名单外、只回「可以」、别人回的、中台连不上后补送、续接、停、冻）；
+  2. 五要素文件 → propose → 常浩照确认消息回 → approve → 派单事件发出，全程走命令行（和猛鬼兽调用的方式一样），
+     以及技能里写了回话的各条岔路（名单外、只回「可以」、别人回的、中台连不上后补送、续接、停、冻）。
+     「把一句话整理成五要素」是模型做的，这里测不到，从整理好的五要素文件开始；
   3. 端到端：临时目录里起真的 agent-autoloop 中台（同 test_autoloop_hub_e2e 的 HubFixture，本机没有命令行时跳过），
-     按技能第 1 节看通道（暂停不派、没规则不派），恢复后派一单，中台里出现这张单的轮次。
+     按技能第 1 节看通道（暂停不派、没规则不派、没钥匙不派），恢复后派一单，中台里出现这张单的轮次；
+     提单后通道被暂停，中台收到但没有轮次（技能第 4 节第二步要查出来的情况）。
 凭证库、镜像、任务单、名册、中台都在临时目录；飞书回读和发私聊打桩。不碰 DigitalTwin/autoloop/ 和正式中台。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
@@ -14,9 +16,13 @@ import datetime as dt
 import io
 import json
 import os
+import inspect
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -31,7 +37,6 @@ from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
 
 SKILL = HERE.parents[1] / "skills/autoloop/SKILL.md"
 SCRIPTS = HERE.parent
-SAYS = "让 Claude 给 dt-sandbox 的 README 加一节「怎么跑测试」"
 FIVE = "\n".join(["目标：给 dt-sandbox 的 README 加一节「怎么跑测试」", "交付物：只改 README.md，开一个 PR",
                   "验收：PR 里只有 README.md，新增一节写明测试命令", "边界：不改别的文件，不合并", "交给谁：Claude"])
 
@@ -87,20 +92,29 @@ class SkillDocMatchesScripts(unittest.TestCase):
         self.assertIn('"default_worker"', self.src["ai_access"])
 
     def test_quoted_script_words_are_real(self):
-        """「`why` 里有」表格第一列引的脚本原话，网关里一字不差地有；改了脚本的措辞，这里会失败。"""
-        quoted, in_table = [], False
+        """「`why` 里有」两张表第一列引的脚本原话，在对应那条命令会走到的函数里一字不差地有：
+        第 3 节的表对 propose，第 4 节的表对 approve。改了脚本的措辞，或把原话放错了表，这里会失败。"""
+        tables, cur = [], None
         for line in self.text.splitlines():
             if line.startswith("| `why` 里有"):
-                in_table = True
-            elif in_table and line.startswith("| `"):
-                quoted.append(re.match(r"\| `([^`]+)`", line).group(1))
-            elif in_table and not line.startswith("|"):
-                in_table = False
-        self.assertGreaterEqual(len(quoted), 12, quoted)
-        for words in quoted + ["已发到常浩私聊", "不能续接：", "已经是终态", "凭证已过期", "【派单确认】"]:
+                cur = []
+                tables.append(cur)
+            elif cur is not None and line.startswith("| `"):
+                cur.append(re.match(r"\| `([^`]+)`", line).group(1))
+            elif cur is not None and not line.startswith("|"):
+                cur = None
+        self.assertEqual([len(t) for t in tables], [5, 8], tables)
+        reach = [inspect.getsource(G.propose) + inspect.getsource(G.notify_owner),
+                 inspect.getsource(G.approve) + inspect.getsource(G.verify_owner)]
+        for table, src in zip(tables, reach):
+            for words in table:
+                with self.subTest(words=words):
+                    self.assertIn(words, src)
+        for words, fn in (("已发到常浩私聊", G.propose), ("不能续接：", G.resume_dispatch), ("已经是终态", G._tighten),
+                          ("凭证已过期", G.check_row), ("【派单确认】", G.notice_text)):
             with self.subTest(words=words):
                 self.assertIn(words, self.text)
-                self.assertIn(words, self.src["autoloop_grants"])
+                self.assertIn(words, inspect.getsource(fn))
 
     def test_field_names_in_the_skill_are_real(self):
         for field, script in (("usable", "autoloop_grants"), ("why_not", "autoloop_grants"), ("events", "autoloop_grants"),
@@ -109,14 +123,17 @@ class SkillDocMatchesScripts(unittest.TestCase):
                               ("task_id", "autoloop_grants"), ("dispatch_rules", "autoloop_config"),
                               ("source_hermes", "autoloop_config"), ("key_file", "autoloop_config"),
                               ("loaded", "autoloop_config"), ("paused", "autoloop_config"),
+                              ("key", "autoloop_config"), ("executor", "autoloop_grants"), ("repo", "autoloop_grants"),
                               ("runs", "autoloop_readonly"), ("subject", "autoloop_readonly"),
+                              ("cards", "autoloop_readonly"), ("recentCards", "autoloop_readonly"),
+                              ("kind", "autoloop_readonly"), ("state", "autoloop_readonly"),
                               ("lane", "autoloop_readonly"), ("attempts", "autoloop_readonly")):
             with self.subTest(field=field):
                 self.assertIn(field, self.text)
                 self.assertIn(f'"{field}"', self.src[script])
-        for word in G.SENT_WORDS.values():                    # 技能第 5 节的三个状态词取自这张表
-            if word in ("待发", "在途或结果不明", "已送到中台"):
-                self.assertIn(f"`{word}`", self.text)
+        for word in G.SENT_WORDS.values():                    # 技能第 5 节的状态词取自这张表：三个原样引，两个作废的按开头认
+            self.assertTrue(f"`{word}`" in self.text or word.startswith("作废"), word)
+        self.assertIn("以 `作废` 开头", self.text)
         for kind in ("redispatch", "rework", "correction"):
             self.assertIn(kind, G.KINDS)
             self.assertIn(f"`{kind}`", self.text)
@@ -128,6 +145,35 @@ class SkillDocMatchesScripts(unittest.TestCase):
             self.assertIn(words, self.text)
         self.assertEqual(G.build_parser().parse_args(["propose", "--repo", "r", "--executor", "claude",
                                                       "--scope-file", "f"]).hours, 12)       # 技能写的默认 12 小时
+
+
+class InstalledLayoutNeedsRosterPrefix(unittest.TestCase):
+    """技能给 G、C 加的 DT_ROSTER 前缀不是摆设：脚本装到 ~/.hermes/scripts/ 之后，默认的名册位置（脚本目录的上上级）
+    没有名册。不打桩 ROSTER，把脚本拷到 <临时目录>/scripts/ 真跑一次。"""
+
+    def test_prefix_is_in_the_skill_and_is_what_makes_the_installed_copy_work(self):
+        text = SKILL.read_text(encoding="utf-8")
+        prefix = "DT_ROSTER=$HOME/Documents/ChatGPT/个人/work/digital-twin/projects.json /usr/bin/python3 ~/.hermes/scripts/"
+        for script in ("autoloop_grants.py", "autoloop_config.py"):
+            self.assertIn(f"`{prefix}{script}`", text)
+        with tempfile.TemporaryDirectory(prefix="dt-skill-install-") as tmp:
+            root = Path(tmp)
+            shutil.copytree(SCRIPTS, root / "scripts", ignore=shutil.ignore_patterns("tests", "__pycache__"))
+            roster = root / "elsewhere/projects.json"
+            roster.parent.mkdir()
+            roster.write_text(json.dumps({"projects": [], "inventory": []}), encoding="utf-8")
+            scope = root / "五要素.md"
+            scope.write_text(FIVE, encoding="utf-8")
+            argv = [sys.executable, "-B", str(root / "scripts/autoloop_grants.py"), "propose", "--repo", "dt-sandbox",
+                    "--executor", "claude", "--scope-file", str(scope)]
+            env = {k: v for k, v in os.environ.items() if k != "DT_ROSTER"}
+            bare = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+            self.assertNotEqual(bare.returncode, 0)                      # 不带前缀：找不到名册，输出是报错堆栈、不是 JSON
+            self.assertIn("FileNotFoundError", bare.stderr)
+            self.assertEqual(bare.stdout.strip(), "")
+            ok = subprocess.run(argv, capture_output=True, text=True, timeout=60, env={**env, "DT_ROSTER": str(roster)})
+            self.assertEqual((ok.returncode, json.loads(ok.stdout)),
+                             (1, {"ok": False, "why": "dt-sandbox 不在名册能派写入单的仓库里"}))
 
 
 class OneSentenceToDispatch(Base):
@@ -150,7 +196,7 @@ class OneSentenceToDispatch(Base):
         mid = self.say(reply_line(self.notices[-1][0]), now)
         return cli(["approve", "--message-id", mid], now)[1]["task_id"]
 
-    def test_one_sentence_to_event(self):
+    def test_five_elements_to_event(self):
         code, out = self.propose()
         self.assertEqual((code, out["notice"], out["repo"], out["executor"]), (0, "已发到常浩私聊", "dt-sandbox", "claude"))
         (notice, _key), = self.notices                         # 确认消息由网关自己发：五要素原文 + 怎么回
@@ -308,7 +354,20 @@ class SkillOnRealHub(HubFixture):
             return "没有通道"
         if not rule["loaded"] or rule["paused"]:
             return "通道暂停"
-        return "能派" if st["source_hermes"]["key_file"] else "没有钥匙"
+        return "能派" if st["source_hermes"]["key"] and st["source_hermes"]["key_file"] else "没有钥匙"
+
+    def runs_of(self, tid):
+        """技能第 4 节第二步、第 5 节第 2 层：中台里对象是这张单的轮次。"""
+        return [r for r in R.read()["runs"] if any(e.get("subject") == tid for e in r["events"])]
+
+    def dispatch(self, executor="claude", before_approve=lambda: None):
+        code, out = cli(["propose", "--repo", "dt-sandbox", "--executor", executor, "--scope-file", str(self.scope)])
+        self.assertEqual((code, out["notice"]), (0, "已发到常浩私聊"))
+        before_approve()
+        code, out = cli(["approve", "--message-id", self.say(reply_line(self.notices[-1]))])
+        self.assertEqual(code, 0)
+        (sent,) = [s for s in out["send"] if s["event_key"].startswith(out["task_id"])]
+        return out["task_id"], sent
 
     def test_gate_then_dispatch_reaches_the_hub(self):
         self.roster.write_text(json.dumps({
@@ -316,6 +375,9 @@ class SkillOnRealHub(HubFixture):
             "inventory": [{"path": "github:o/dt-sandbox", "category": "沙盒", "sandbox": True}]}), encoding="utf-8")
         C.install(confirm=True, target=self.home)
         self.assertEqual(self.gate(), "通道暂停")                      # 装完默认暂停，钥匙也还没签
+        C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})
+        self.assertEqual(self.gate(), "没有钥匙")                      # 规则开着但钥匙没签：技能第 1 节表里第三行
+        C.install(confirm=True, target=self.home)                      # 重装把它重新暂停，才能签钥匙
         C.issue_source_key(confirm=True, target=self.home)
         self.assertEqual(self.gate(), "通道暂停")
         # 网关的名单比中台的通道宽：digital-twin 网关会放行，但中台没有它的派单规则，技能在这一步停下
@@ -324,18 +386,13 @@ class SkillOnRealHub(HubFixture):
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})
         self.assertEqual((self.gate(), self.gate(executor="codex")), ("能派", "通道暂停"))
 
-        code, out = cli(["propose", "--repo", "dt-sandbox", "--executor", "claude", "--scope-file", str(self.scope)])
-        self.assertEqual((code, out["notice"]), (0, "已发到常浩私聊"))
-        code, out = cli(["approve", "--message-id", self.say(reply_line(self.notices[-1]))])
-        self.assertEqual(code, 0)
-        tid = out["task_id"]
-        (sent,) = out["send"]
+        tid, sent = self.dispatch()
         self.assertTrue(sent["sent"])
         self.assertIsInstance(sent["hub_event"], int)
 
-        snap = R.read()                                        # 技能第 5 节第 2 层：中台里这张单的轮次
-        mine = [r for r in snap["runs"] if any(e.get("subject") == tid for e in r["events"])]
+        mine = self.runs_of(tid)
         self.assertEqual([(r["rule"], r["agent"]) for r in mine], [("dispatch-dt-sandbox-claude", "dt-claude")])
+        self.assertEqual(mine[0]["attempts"], 0)                # 还没跑过是 0（技能：大于 0 才是重试过）
         self.assertIn(mine[0]["state"], ("queued", "claimed"))  # 临时中台没有工人接单
         self.assertEqual({e["source"] for e in mine[0]["events"]}, {"hermes"})
         self.assertEqual(json.loads(self.status_file.read_text(encoding="utf-8"))["tasks"][tid]["status"], "active")
@@ -344,8 +401,21 @@ class SkillOnRealHub(HubFixture):
         code, out = cli(["revoke", "--task", tid, "--reason", "常浩说停"])       # 停掉之后续接发不出去
         self.assertEqual((code, out["status"]), (0, "revoked"))
         self.assertEqual(cli(["resume-dispatch", "--task", tid, "--kind", "redispatch", "--reason", "x"])[0], 1)
-        again = [r for r in R.read()["runs"] if any(e.get("subject") == tid for e in r["events"])]
-        self.assertEqual(len(again), 1)
+        self.assertEqual(len(self.runs_of(tid)), 1)
+
+    def test_hub_accepts_but_nobody_takes_it_when_the_lane_was_paused_after_propose(self):
+        """提单时通道开着、他确认前被暂停：send 仍是 sent true，但中台里没有这张单的轮次。
+        技能第 4 节第二步靠查轮次发现，不能只看 send。"""
+        C.install(confirm=True, target=self.home)
+        C.issue_source_key(confirm=True, target=self.home)
+        C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})
+        self.assertEqual(self.gate(), "能派")
+        tid, sent = self.dispatch(
+            before_approve=lambda: C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/pause", {"reason": "测试"}))
+        self.assertTrue(sent["sent"])                           # 中台收到了
+        self.assertEqual(self.runs_of(tid), [])                 # 但没有通道接：没有轮次
+        self.assertEqual(self.gate(), "通道暂停")
+        self.assertEqual(cli(["show", "--task", tid])[1][0]["events"][0]["state"], "已送到中台")
 
 
 if __name__ == "__main__":
