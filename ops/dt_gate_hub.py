@@ -61,6 +61,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -590,9 +591,15 @@ def ledger_checks(host, current, owner, check):
 
 def hold_and_drain(host, current, owner, point, snapshot, max_card):
     """停写（hold 登记恢复点），等在途的写做完，再确认各账本没有剩下的；有剩的就停下（调用方退回、结束这次维护）。"""
-    recovery_as(host, current, owner, ["hold", "--point", point, "--snapshot", str(snapshot),
-                                       "--commit", current["engine"]["commit"], "--max-card", str(int(max_card)),
-                                       "--confirm"])
+    # hold 这一下期间屏蔽停止信号：不然停在 sudo 上、下面的 python 照样把 hold 写进账本，退回时已经核过「不是这次的」，
+    # 留下一个没记录的停写（独立审查第 2 轮 P2-3）。做完再放开，挂着的信号这时才抛出，退回能看到这次的恢复点。
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+    try:
+        recovery_as(host, current, owner, ["hold", "--point", point, "--snapshot", str(snapshot),
+                                           "--commit", current["engine"]["commit"], "--max-card", str(int(max_card)),
+                                           "--confirm"])
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
     tries = max(1, DRAIN_SECONDS // 2)
     left = None
     for i in range(tries + 1):                           # 最后一次睡完再复查一遍
@@ -690,6 +697,11 @@ def checks(host, a, migrating=True):
     check(load_state() is None, "还没搬过（gate/state.json 不存在）")
     check(not exists_as(host, gate, gate_paths(host)["hub"]), f"{gate} 里还没有中台目录")
     check(not os.path.lexists(hub_mark()), f"没有上次留下的门卫标记 {hub_mark()}（有就是上次没收干净，先 rollback --confirm）")
+    prob = pf_guard_problem(host, "no")
+    if prob is None and "guard=" not in (pf_dir() / "pf-dt-worker.status").read_text(encoding="utf-8"):
+        prob = "门卫是旧版（状态里没有 guard=），先装 #313 的新版"
+    check(prob is None, f"门卫规则在生效、监听者规则还关着（{prob or 'state=ok guard=no，本次开机写的'}；"
+                        "不然要到第 4b 步才停下，退回时也关不掉门卫）")
     hub = owner_hub(host, a.owner_account)
     check(exists_as(host, a.owner_account, owner_agent_plist(host, a.owner_account)),
           f"主账号的中台 LaunchAgent（{OWNER_AGENT}.plist）在")
@@ -1060,6 +1072,14 @@ def cmd_migrate(host, a):
     return 0
 
 
+def owner_note_ok(host, owner, path):
+    """主账号原位置是本脚本放的说明文件（或已经没有了）：只读，以主账号身份看（root 不碰账号家目录）。"""
+    code, out, _ = host.as_user(owner, ["/bin/cat", str(path)])
+    if code != 0:
+        return not exists_as(host, owner, path)
+    return out.decode("utf-8", "replace").startswith(MARK)
+
+
 def unmark_owner(host, current, owner_account):
     """主账号原位置的说明文件：是本脚本放的就删掉（别的东西不动）。"""
     run_helper(host, current, owner_account, ["unmark", str(owner_hub(host, owner_account)), "--prefix", MARK])
@@ -1156,6 +1176,7 @@ def cmd_windows(host, a):
 # 身份：三个端口都由 dt-gate 的进程自己绑（本脚本装的服务都是 UserName dt-gate、不用 launchd 的 Sockets）。
 PF_STALE_SECONDS = 10 * 60
 PF_APPLY_TRIES = 3
+ROOT_UID = 0                           # 测试里在进程内替换，不经环境变量
 
 
 def pf_dir():
@@ -1189,9 +1210,18 @@ def pf_guard_problem(host, want):
 
 def pf_apply(host, want):
     """让门卫按现在的标记重新加载，直到状态是 guard=<want>；和定时 apply 撞上会判 failed，隔 2 秒再来，最多 3 次。"""
+    script = pf_dir() / "dt_worker_pf.sh"
+    if host.guard("root_path", str(pf_dir())) != 0:
+        raise Stop(f"{pf_dir()} 不是从 / 起只有 root 能改的目录，不以 root 跑里面的门卫脚本")
+    try:
+        st = os.lstat(script)
+    except OSError:
+        raise Stop(f"没有门卫脚本 {script}（先装 #313 的新版门卫）")
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != ROOT_UID or st.st_mode & 0o022:
+        raise Stop(f"{script} 不是 root 所有、别人不能改的普通文件，不以 root 跑它")
     prob = None
     for i in range(PF_APPLY_TRIES):
-        host.pf_apply(pf_dir() / "dt_worker_pf.sh")
+        host.pf_apply(script)
         prob = pf_guard_problem(host, want)
         if prob is None:
             return
@@ -1363,12 +1393,10 @@ def cmd_rollback(host, a):
     gp = gate_paths(host)
     gate = gate_account()
     stamp = now_stamp()
-    try:
-        unmark_owner(host, current, s["owner_account"])
-    except Stop as e:
-        raise Stop(f"主账号里 {s['owner_hub']} 不是搬家时放的说明文件，没法放回：请人工查看（{e}）")
-    if exists_as(host, s["owner_account"], s["owner_hub"]):
-        raise Stop(f"主账号里已经有 {s['owner_hub']}，没法放回：请人工查看")
+    # 先只读核对，再停服务、关门卫，最后才删说明文件、放回目录：关门卫停下时说明文件还在，主账号命令行不会新建空中台，
+    # 再跑一次 rollback 能接着来（独立审查第 2 轮 P2-2）
+    if not owner_note_ok(host, s["owner_account"], s["owner_hub"]):
+        raise Stop(f"主账号里 {s['owner_hub']} 不是搬家时放的说明文件，没法放回：请人工查看")
     if not exists_as(host, s["owner_account"], s["owner_moved"]):
         raise Stop(f"主账号里找不到搬家时留下的 {s['owner_moved']}")
     say("1. 给 dt-gate 的中台留一份备份（在 dt-gate 自己家里）")
@@ -1382,6 +1410,12 @@ def cmd_rollback(host, a):
         remove_daemon(host, which)
     if not guard_off(host):                              # 关掉之前不动目录、不启用主账号中台；再跑一次 rollback 接着来
         raise Stop("门卫监听者规则没关掉（见上），没有放回主账号中台；看清原因后再跑一次 rollback --confirm")
+    try:
+        unmark_owner(host, current, s["owner_account"])
+    except Stop as e:
+        raise Stop(f"主账号里 {s['owner_hub']} 不是搬家时放的说明文件，没法放回：请人工查看（{e}）")
+    if exists_as(host, s["owner_account"], s["owner_hub"]):
+        raise Stop(f"主账号里已经有 {s['owner_hub']}，没法放回：请人工查看")
     host.as_user(gate, ["/bin/mv", "-n", str(gp["hub"]), str(gp["hub"]) + f".rolled-back-{stamp}"])
     say("3. 主账号的中台放回去、重新启用")
     code, _, err = host.as_user(s["owner_account"], ["/bin/mv", "-n", s["owner_moved"], s["owner_hub"]])

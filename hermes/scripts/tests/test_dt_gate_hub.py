@@ -33,6 +33,14 @@ import dt_gate_user as U  # noqa: E402
 
 REAL_RECOVERY_AS = H.recovery_as        # ChecksTest 默认把它换成替身；测它自己时用原来的
 
+
+def pf_fixture(d):
+    """假门卫目录：root 副本门卫脚本（测试里属主当 root）、新版状态 guard=no、本次开机写的。"""
+    d.mkdir(exist_ok=True)
+    (d / "dt_worker_pf.sh").write_text("#!/bin/bash\n")
+    os.chmod(d / "dt_worker_pf.sh", 0o755)
+    (d / "pf-dt-worker.status").write_text("at=x state=ok enabled=yes boot=1795000000 guard=no\n")
+
 CLI = os.environ.get("DT_AUTOLOOP_CLI", "agent-autoloop")
 
 
@@ -306,7 +314,10 @@ class ChecksTest(unittest.TestCase):
         root.mkdir()
         (root / "current.json").write_text(json.dumps({"node": str(self.d), "cli": str(self.d), "engine": {"commit": "e" * 40},
                                                        "repo": {"commit": "r" * 40, "dir": str(self.d)}}))
-        (self.d / "pf").mkdir()
+        pf_fixture(self.d / "pf")
+        q = mock.patch.object(H, "ROOT_UID", os.getuid())
+        q.start()
+        self.addCleanup(q.stop)
         for k, v in {"DT_GATE_ROOT": root, "DT_GATE_SHARED": self.d / "shared/dt-gate", "DT_GATE_USERS": self.d / "users",
                      "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": self.d / "pf"}.items():
             p = mock.patch.dict(os.environ, {k: str(v)})
@@ -829,7 +840,10 @@ class MigrateEndToEndTest(unittest.TestCase):
                "DT_GATE_USERS": d / "Users", "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": d / "pf",
                "DT_GATE_LAUNCHERS": d / "launchers"}
         (d / "Library/DigitalTwin").mkdir(parents=True)
-        (d / "pf").mkdir()
+        pf_fixture(d / "pf")
+        q = mock.patch.object(H, "ROOT_UID", os.getuid())
+        q.start()
+        self.addCleanup(q.stop)
         (d / "Library/Logs").mkdir(parents=True)
         p = mock.patch.dict(os.environ, {k: str(v) for k, v in env.items()})
         p.start()
@@ -1011,12 +1025,11 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.assertTrue((pf / "hub-in-gate").exists())                              # 搬家第 4b 步打开了监听者规则
         self.assertIn("guard=yes", (pf / "pf-dt-worker.status").read_text())
         (pf / "pf-dt-worker.rules").write_text("pass out quick inet proto tcp from any to 127.0.0.1 port { 3350 } user dt-worker\n")
-        if True:
-            self.assertEqual(self.main("rotate-worker", "--confirm"), 1)            # 门卫还没按监听账号保护 3350：不换
-            self.assertIn("监听账号", self.out.getvalue())
-            self.assertEqual(self.keys(ghub)["worker:dt-worker"], old_hash)
-            (pf / "pf-dt-worker.rules").write_text("block return in quick proto tcp from any to 127.0.0.1 port 3350 user != dt-gate\n")
-            self.assertEqual(self.main("rotate-worker", "--confirm"), 0, self.out.getvalue())
+        self.assertEqual(self.main("rotate-worker", "--confirm"), 1)            # 门卫还没按监听账号保护 3350：不换
+        self.assertIn("监听账号", self.out.getvalue())
+        self.assertEqual(self.keys(ghub)["worker:dt-worker"], old_hash)
+        (pf / "pf-dt-worker.rules").write_text("block return in quick proto tcp from any to 127.0.0.1 port 3350 user != dt-gate\n")
+        self.assertEqual(self.main("rotate-worker", "--confirm"), 0, self.out.getvalue())
         newkey = json.loads(wcfg.read_text())["worker"]["key"]
         self.assertEqual(self.keys(ghub)["worker:dt-worker"], hashlib.sha256(newkey.encode()).hexdigest())
         self.assertNotEqual(self.keys(ghub)["worker:dt-worker"], old_hash)
