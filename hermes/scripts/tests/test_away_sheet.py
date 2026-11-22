@@ -366,6 +366,25 @@ class Cli(unittest.TestCase):
         self.ok("push")
         self.assertEqual(self.ok("start", "--by", "Claude 会话「测试」", now="2026-11-21T13:00:00+08:00"), "2026-11-21-1300")
 
+    def test_unconfirmed_end_does_not_unlock_the_next_sheet(self):
+        # L3 审查 P1-01：结束状态改上去了但回读没对上（读回来还是旧卡片），不能当成已推到飞书、放行下一张
+        self.open_sheet()
+        self.ok("push")
+        self.ok("end", "--at", "12:40")
+        self.reply("托管流水｜还等你 1 件")                                # 回读到的还是没结束的那一版
+        r = self.run_script("push")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("回读对不上", r.stdout)
+        self.assertTrue(self.sheet()["dirty"])
+        r = self.run_script("start", "--by", "Claude 会话「测试」", now="2026-11-21T13:00:00+08:00")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("结束状态还没推", r.stdout)
+        self.assertIn("有改动还没推", self.ok("show"))
+        self.reply("托管结束｜还等你 1 件", sub="11-21 12:00 开始｜12:40 结束")
+        self.ok("push")                                                   # 重推、这次回读对上了
+        self.assertFalse(self.sheet()["dirty"])
+        self.assertEqual(self.ok("start", "--by", "Claude 会话「测试」", now="2026-11-21T13:00:00+08:00"), "2026-11-21-1300")
+
     def test_full_sheet_refuses_the_extra_item_and_can_still_be_ended(self):
         self.ok("start", "--by", "Claude 会话「测试」", "--at", "12:00")
         n = 0

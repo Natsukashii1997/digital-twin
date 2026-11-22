@@ -403,15 +403,16 @@ def push(sheet, now):
         for r in fresh:
             r["notified"] = True
         sheet["pushed_at"] = iso(now)
-        sheet["dirty"] = False
         rec.update(message_id=sheet["message_id"], tags=tags(card["body"]))
-        save(sheet)
+        save(sheet)                        # 消息号、提醒先落盘；「飞书上已是最新」要等回读对上才记（dirty 留着）
         write_json(base() / sheet["id"] / "card.json", card)
         m = (lark(["im", "+messages-mget", "--message-ids", sheet["message_id"]], "回读").get("messages") or [{}])[0]
         seen = str(m.get("content"))       # 标题和副标题（带这次的更新时间）都对得上才算
         if m.get("msg_type") != "interactive" or any(card["header"][k]["content"] not in seen for k in ("title", "subtitle")):
             rec["result"] += "_unverified"
             raise Fail(f"托管单已{'发' if rec['result'].startswith('sent') else '更新'}（{sheet['message_id']}），但回读对不上卡片内容")
+        sheet["dirty"] = False             # 回读对上才算推到了：没对上就保持「没确认」，不让开下一张，下次 push 重推重核
+        save(sheet)
         return rec
     except Fail as e:
         rec["result"] = rec["result"] or "failed"
