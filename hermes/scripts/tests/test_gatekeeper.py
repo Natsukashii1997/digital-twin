@@ -20,6 +20,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import autoloop_answer as A  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
+import autoloop_recovery as Rv  # noqa: E402
 import gatekeeper as G  # noqa: E402
 
 APP = "cli_0123456789abcdef"
@@ -86,10 +87,14 @@ class Base(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         t = Path(self.tmp.name)
         self.env = mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(t / "dt/autoloop/cards.db"),
+                                                "DT_EXITS_DB": str(t / "dt/autoloop/exits.db"),
                                                 "DT_GATE_HOME": str(t / "dt/gate"),
                                                 "DT_GATE_SECRET_FILE": str(t / "home/.dt/gate-app.secret")})
         self.env.start()
         self.addCleanup(self.env.stop)
+        for gate in (mock.patch.object(Rv, "ensure_open"), mock.patch.object(Rv, "admit")):   # 恢复闸放行（闸本身见 test_autoloop_feishu）
+            gate.start()
+            self.addCleanup(gate.stop)
         self.lark = Lark()
         p = mock.patch.object(G.GATE, "lark", self.lark)
         p.start()
@@ -1015,7 +1020,7 @@ READY = "[event] ready event_key=card.action.trigger"
                      "WARN: backpressure on conn pid=12 event_key=card.action.trigger dropped_total=3"):
             exe = self.fake_cli(f"""\
                 blog("Bus started for app=x pid=1 addr=y"); err(READY); blog("[SDK] connected to wss://a"); out(1)
-                blog({loss!r}); time.sleep(30)
+                time.sleep(2); blog({loss!r}); time.sleep(30)    # 先让门卫处理完点击 1（负载高时子进程会抢在前面写丢事件）
                 """)
             import time as _t
             t0 = _t.monotonic()
