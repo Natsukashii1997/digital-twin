@@ -30,17 +30,26 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
   5. 同一分支已有开着的 PR，核对它的目标是本仓库 main、来源是本仓库（不是同名 fork 分支）、分支和头提交正是这次的，
      才沿用（审查 P1-05）；对不上就拒绝；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
 
-本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
-测试只推本地裸仓库。推送和开 PR 用运行账号自己的 git / gh 登录：0E 在 dt-gate 里配机器账号令牌（只能推非 main、不能合并，
-#132 的做法），之前不在主账号或秘书账号里真跑（ADR-015 第 5 节第 6 条「真实特权不回流」）。
+本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务（ADR-015 生效顺序第 2 条）；测试只推本地裸仓库。
+发布凭据（批 0E-4 最小版，清单 docs/DT-ORC/migration/0E-4-发布凭据-常浩照做.md）：真发布不用运行账号的 git / gh 登录，只认
+  - 令牌文件 ~/.dt/publish-github.token（dt-gate 家目录；常浩亲手放，不经任何 AI；属本账号、600、普通文件、不认链接、
+    没有放行别人的 ACL）。登记的机器账号见 PUBLISH_CRED（只能推非 main、不能合并，由 GitHub 规则集在服务端挡，#132 实测）；
+  - 写死路径的 gh（GH：root 所有的副本，从 / 起每一级只有 root 能改才用）和 /usr/bin/git。
+  令牌只在内存和两类子进程的环境里：git push（凭据经 gh auth git-credential 从环境取，不进命令行、不写进任何配置）和 gh。
+  取包、验包、取 main、查远端分支都不带令牌。真发布的所有子进程用最小环境：不继承运行账号的 GH_* / GIT_* 变量，HOME 和
+  gh 配置目录是空的临时目录，不读全局和系统 git 配置。推之前联网核令牌身份：登录名是登记的机器账号、对仓库能写、不是管理员
+  （管理员令牌能绕过 main 的规则集，拒发）。报错和日志里出现令牌一律打码。
+  doctor [--online] 只读自检（账号、令牌文件、gh、交接目录、凭证库、中台库、推送目标、开关；--online 加令牌身份和读仓库）。
+不在主账号或秘书账号里真跑（ADR-015 第 5 节第 6 条「真实特权不回流」）。
 状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；
 凭证库随 autoloop_grants 一起搬进 dt-gate。写前账本、结果不明冻结在 0D；接成正式出口在批 3。
 
   autoloop_publish.py publish --task t-20261118-abcdef
   autoloop_publish.py scan                 只读：列交接目录里的单和各自能不能发
+  autoloop_publish.py doctor [--online]    只读自检：真发布要的东西齐不齐（不读出令牌内容、不推、不开 PR）
 环境变量：DT_PUBLISH_OUTBOX（交接目录，默认 /Users/dt-worker/dt-outbox）、DT_PUBLISH_MIRRORS（主账号的裸仓库副本）、
-DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://github.com/<仓库>.git、用运行账号的 gh，
-不能用环境变量改（测试在进程内换 TEST_BACKEND）。
+DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://github.com/<仓库>.git，gh、令牌文件的位置写死，
+都不能用环境变量改（测试在进程内换 TEST_BACKEND 或这几个常量）。
 """
 import argparse
 import contextlib
@@ -50,6 +59,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -78,6 +88,17 @@ REAL_PUBLISH = False            # 0D 恢复门（串行化、结果账本）之�
 TEST_BACKEND = None             # 测试在进程内换成 {"remote": "file://…/{github}.git", "gh": 假 gh 路径}；不经环境变量
 STOPPED = "停下了"               # 启动脚本出了问题没交接的一轮，最后一条消息以它开头（ops/dt_worktree.stop_text）
 MAX_HOPS = 5                    # 回答卡片的一轮往回追提问那一轮，最多几层
+# 发布凭据（0E-4 最小版）。都是写死的常量，不从环境变量取；测试在进程内替换。
+GIT_BIN = "/usr/bin/git"
+GH = "/Library/Application Support/DigitalTwin/bin/gh"      # root 所有的 gh 副本（和门卫的 lark-cli 同一个目录）
+TOKEN_FILE = "~/.dt/publish-github.token"                  # 运行账号（dt-gate）家目录里，常浩亲手放
+PUBLISH_CRED = {"Natsukashii1997/dt-sandbox": "shanhao1997"}   # 完整仓库名 → 登记的机器账号（#132：协作者 write，非管理员）
+PUBLISH_CONF = "/Library/Application Support/DigitalTwin/gate/publish.json"   # root 才能写的发布配置（现在只有代理一项）
+PROXY_SHAPE = re.compile(r"^http://127\.0\.0\.1:[1-9]\d{1,4}$")                  # 只认本机代理
+TRUST_UIDS = (0,)               # gh 副本、发布配置从 / 起每一级的属主只能是这些（root）
+SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9_]{20,255}$")
+CRED = None                     # 真发布进行中的凭据环境（credentials() 设置）；None 时 git / gh 照测试后端原样跑
 
 
 class Rejected(Exception):
@@ -112,7 +133,7 @@ def hub_db():
 
 
 def gh_cmd():
-    return TEST_BACKEND["gh"] if TEST_BACKEND else "gh"
+    return TEST_BACKEND["gh"] if TEST_BACKEND else GH
 
 
 def sensitive_patterns(repo):
@@ -162,12 +183,196 @@ def read_manifest(task_id):
 
 
 # ---------- git ----------
-def git(*args, cwd=None, check=True, timeout=300):
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    r = subprocess.run(["git", *GIT_SAFE, *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+def git(*args, cwd=None, check=True, timeout=300, auth=False):
+    """auth=True 只给要写远端的那一步（git push）：真发布时带令牌环境和凭据助手；其余 git 命令永远不带令牌。"""
+    cred = CRED
+    if cred is None:                                     # 测试后端：原样（运行环境里的 git）
+        cmd, env = ["git", *GIT_SAFE], {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    else:
+        cmd = [GIT_BIN, *GIT_SAFE, *(cred.helper() if auth else ["-c", "credential.helper="])]
+        env = cred.env(token=auth)
+    r = subprocess.run([*cmd, *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+    if cred is not None:
+        r.stdout, r.stderr = cred.scrub(r.stdout), cred.scrub(r.stderr)
     if check and r.returncode != 0:
         raise Rejected(f"git {args[0]} 失败：{(r.stderr or r.stdout).strip()[:300]}")
     return r
+
+
+def gh(*args, timeout=60):
+    """跑一次 gh：真发布时用写死路径的副本和令牌环境，输出里的令牌打码；测试后端原样。"""
+    cred = CRED
+    r = subprocess.run([gh_cmd(), *args], capture_output=True, text=True, timeout=timeout,
+                       env=cred.env(token=True) if cred is not None else None)
+    if cred is not None:
+        r.stdout, r.stderr = cred.scrub(r.stdout), cred.scrub(r.stderr)
+    return r
+
+
+# ---------- 发布凭据（批 0E-4 最小版） ----------
+def has_acl(path):
+    """macOS 上有没有放行别人的 ACL（ls -led 第二行起出现 allow）；看不了按「有」算。别的系统没有这种 ACL。"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(["/bin/ls", "-led", str(path)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return r.returncode != 0 or any(" allow " in line for line in r.stdout.splitlines()[1:])
+
+
+def trusted_path(path, what):
+    """从 / 起每一级（含它自己，链接先解析）属主都在 TRUST_UIDS 里、组和其他人不能写、没有放行别人的 ACL：
+    别人能换掉它就能拿到令牌（gh）或改掉发布走的代理（配置）。返回解析后的真实路径。"""
+    try:
+        real = Path(path).resolve(strict=True)
+    except OSError:
+        raise Rejected(f"找不到{what} {path}（按清单用 sudo 放一份 root 所有的）")
+    for q in (real, *real.parents):
+        st = os.stat(q)
+        sticky = stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX and q != real   # 带粘滞位的上级：别人换不掉里面不属于他的条目
+        if st.st_uid not in TRUST_UIDS or (st.st_mode & 0o022 and not sticky) or has_acl(q):
+            raise Rejected(f"{what}路径上的 {q} 不是只有 root 能改（属主、权限位或 ACL），不用")
+    return real
+
+
+def trusted_program(path, what):
+    real = trusted_path(path, what)
+    if not (real.is_file() and os.access(real, os.X_OK)):
+        raise Rejected(f"{what} {real} 不是可执行文件")
+    return str(real)
+
+
+def load_conf():
+    """发布配置（root 才能写的文件；dt-gate 的工具在清空的环境里跑，没有代理变量，G-19）：
+    {"schema": 1, "proxy": "http://127.0.0.1:<端口>"}，proxy 可以不写（直连）。文件不在 = 直连。多一项、格式不对都拒绝。"""
+    if not os.path.lexists(PUBLISH_CONF):
+        return {"schema": 1}
+    real = trusted_path(PUBLISH_CONF, "发布配置 ")
+    try:
+        conf = json.loads(_read_regular(real, 4096, "发布配置").decode("utf-8"))
+    except ValueError:
+        raise Rejected(f"发布配置 {PUBLISH_CONF} 不是合法的 JSON")
+    if not isinstance(conf, dict) or conf.get("schema") != 1 or set(conf) - {"schema", "proxy"}:
+        raise Rejected(f"发布配置 {PUBLISH_CONF} 的字段不对（只认 schema、proxy）")
+    if "proxy" in conf and not (isinstance(conf["proxy"], str) and PROXY_SHAPE.match(conf["proxy"])):
+        raise Rejected("发布配置里的 proxy 只能是本机代理 http://127.0.0.1:<端口>")
+    return conf
+
+
+def token_file():
+    return Path(TOKEN_FILE).expanduser()
+
+
+def read_token():
+    """发布令牌：本账号自己的普通文件（不认链接）、权限 600、没有放行别人的 ACL、一行。只返回给调用方放进子进程环境，
+    不打印、不写日志。"""
+    f = token_file()
+    try:
+        fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise Rejected(f"读不到发布令牌 {f}（不存在、是链接或没权限）：请常浩按清单亲手放进 dt-gate")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077 or has_acl(f):
+            raise Rejected(f"发布令牌 {f} 必须是本账号的普通文件、权限 600、没有放行别人的 ACL")
+        if st.st_size > 1024:
+            raise Rejected(f"发布令牌 {f} 太大，不像令牌")
+        raw = os.read(fd, 1025)
+    finally:
+        os.close(fd)
+    try:
+        v = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        v = ""
+    if not TOKEN_SHAPE.match(v):
+        raise Rejected(f"发布令牌 {f} 的内容不像 GitHub 令牌（应是一行字母、数字、下划线）")
+    return v
+
+
+class Cred:
+    """一次真发布（或联网自检）用的凭据环境：令牌只在内存里；HOME、gh 配置目录是这一次的空临时目录。"""
+
+    def __init__(self):
+        self.gh = trusted_program(GH, "gh ")
+        if not os.access(GIT_BIN, os.X_OK):
+            raise Rejected(f"找不到 {GIT_BIN}")
+        self.proxy = load_conf().get("proxy")
+        self.token = read_token()
+        self.tmp = tempfile.TemporaryDirectory(prefix="dt-publish-cred-")
+        for n in ("home", "gh"):
+            os.mkdir(Path(self.tmp.name) / n, 0o700)
+
+    def env(self, token=False):
+        """子进程的最小环境：不继承运行账号的任何变量（GH_*、GIT_*、代理都不带），不读全局和系统 git 配置，不交互。
+        代理只用发布配置里写的本机代理。token=True 才带令牌（GH_TOKEN，主机固定 github.com，gh 配置目录是空的：
+        读不到任何已有登录）。"""
+        t = Path(self.tmp.name)
+        e = {"PATH": SAFE_PATH, "HOME": str(t / "home"), "LANG": "en_US.UTF-8", "GIT_CONFIG_NOSYSTEM": "1",
+             "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/usr/bin/false",
+             "GH_CONFIG_DIR": str(t / "gh"), "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"}
+        if self.proxy:
+            for k in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+                e[k] = self.proxy
+            e["NO_PROXY"] = e["no_proxy"] = "localhost,127.0.0.1,::1"
+        if token:
+            e.update(GH_HOST="github.com", GH_TOKEN=self.token)
+        return e
+
+    def helper(self):
+        """git push 的凭据助手：先清空已有助手，再只用 gh auth git-credential（令牌从环境取，不进命令行）。"""
+        return ["-c", "credential.helper=", "-c", f"credential.helper=!{shlex.quote(self.gh)} auth git-credential"]
+
+    def scrub(self, text):
+        return (text or "").replace(self.token, "***")
+
+    def close(self):
+        self.token = ""
+        self.tmp.cleanup()
+
+
+@contextlib.contextmanager
+def credentials():
+    """真发布期间把凭据环境挂到 CRED；测试后端（TEST_BACKEND）不读令牌、不换环境。"""
+    global CRED
+    if TEST_BACKEND:
+        yield None
+        return
+    cred = Cred()
+    CRED = cred
+    try:
+        yield cred
+    finally:
+        CRED = None
+        cred.close()
+
+
+def check_identity(github):
+    """推之前核令牌是谁的（联网，只读）：登录名是这个仓库登记的机器账号，对仓库能写、不是管理员。
+    管理员令牌能绕过 main 的规则集（hermes/baselines/dt-sandbox-github.json：只对 admin 豁免），所以拒发。"""
+    if CRED is None:
+        return None
+    want = PUBLISH_CRED.get(github)
+    if not want:
+        raise Rejected(f"{github} 没有登记发布用的机器账号（只登记了 {'、'.join(PUBLISH_CRED)}）")
+    r = gh("api", "user", "--jq", ".login")
+    if r.returncode != 0:
+        raise Rejected(f"查令牌身份失败：{r.stderr.strip()[:200]}")
+    login = r.stdout.strip()
+    if login != want:
+        raise Rejected(f"发布令牌属于 {login or '（读不出）'}，不是登记的机器账号 {want}，不发")
+    r = gh("api", f"repos/{github}", "--jq", ".permissions")
+    try:
+        perms = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        perms = None
+    if not isinstance(perms, dict):
+        raise Rejected(f"查令牌对 {github} 的权限失败：{r.stderr.strip()[:200]}")
+    if perms.get("admin") is not False:
+        raise Rejected(f"发布令牌对 {github} 有管理员权限（能绕过 main 的规则集），不发；换成机器账号的令牌")
+    if perms.get("push") is not True:
+        raise Rejected(f"发布令牌对 {github} 没有写权限，推不了分支")
+    return {"login": login, "push": True, "admin": False}
 
 
 def ensure_mirror(repo, github):
@@ -386,6 +591,11 @@ def history_hits(mirror, base, head, repo):
 def publish(task_id, now=None, path=None):
     require_gate()
     require_publish_enabled()
+    with credentials():                # 真发布：先读令牌、核 gh 副本，读不到就停在最前面
+        return _publish(task_id, now, path)
+
+
+def _publish(task_id, now, path):
     now = now or G.now_tz()
     m = read_manifest(task_id)
     with task_lock(task_id):
@@ -421,6 +631,7 @@ def publish(task_id, now=None, path=None):
         hits = history_hits(mirror, base, head, row["repo"])
         if hits:
             raise Rejected(f"改动或提交历史碰到高风险路径（{'、'.join(hits[:5])}），不自动发布，交常浩")
+        check_identity(github)         # 真发布：推之前核令牌是登记的机器账号、不是管理员
         remote = git("ls-remote", remote_url(github), f"refs/heads/{branch}", cwd=mirror).stdout.split()
         existing = remote[0] if remote else None
         pushed = False
@@ -428,7 +639,8 @@ def publish(task_id, now=None, path=None):
             if existing and not (SHA.match(existing) and is_ancestor(mirror, existing, head)):
                 raise Rejected("远端同名分支已有别的提交，不覆盖")
             must(task_id, "push_branch", gen, G.now_tz(), path)        # 推之前现读一次
-            git("push", "--quiet", "--no-verify", remote_url(github), f"{head}:refs/heads/{branch}", cwd=mirror)
+            git("push", "--quiet", "--no-verify", remote_url(github), f"{head}:refs/heads/{branch}", cwd=mirror,
+                auth=True)
             pushed = True
         must(task_id, "open_pr", gen, G.now_tz(), path)
         pr = open_pr(github, branch, head, row)
@@ -451,8 +663,7 @@ def pr_is_ours(p, github, branch, head):
 
 
 def open_pr(github, branch, head, row):
-    r = subprocess.run([gh_cmd(), "pr", "list", "-R", github, "--head", branch, "--state", "all",
-                        "--json", PR_FIELDS], capture_output=True, text=True, timeout=60)
+    r = gh("pr", "list", "-R", github, "--head", branch, "--state", "all", "--json", PR_FIELDS)
     if r.returncode != 0:
         raise Rejected(f"查 PR 失败：{r.stderr.strip()[:200]}")
     prs = json.loads(r.stdout or "[]")
@@ -471,9 +682,8 @@ def open_pr(github, branch, head, row):
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
         f.write(body)
     try:
-        r = subprocess.run([gh_cmd(), "pr", "create", "-R", github, "-B", "main", "-H", branch,
-                            "-t", f"{row['task_id']}：{first}", "-F", f.name], capture_output=True, text=True,
-                           timeout=120)
+        r = gh("pr", "create", "-R", github, "-B", "main", "-H", branch, "-t", f"{row['task_id']}：{first}",
+               "-F", f.name, timeout=120)
     finally:
         os.unlink(f.name)
     if r.returncode != 0:
@@ -498,13 +708,134 @@ def scan(now=None, path=None):
     return out
 
 
+# ---------- 自检（只读） ----------
+def _readable(db, table):
+    """只读打开一个 SQLite 库、读一下这张表（不建库、不升结构、不拿写锁）。"""
+    import sqlite3
+    import urllib.parse
+    con = sqlite3.connect(f"file:{urllib.parse.quote(str(db))}?mode=ro", uri=True, timeout=5)
+    try:
+        con.execute(f"SELECT count(*) FROM {table}").fetchone()
+    finally:
+        con.close()
+
+
+def _branch_selftest():
+    """推送目标的写死检查自测：main、别的分支、别人的单号写法都拒，只放行 <执行方>/<单号>。"""
+    for bad in ("main", "refs/heads/main", "claude/main", "agent/t-20261118-abcdef", "claude/t-20261118-abcdef/x",
+                "claude/t-20261118-ABCDEF", "", None):
+        try:
+            assert_not_main(bad)
+        except Rejected:
+            continue
+        raise Rejected(f"推送目标检查放过了 {bad!r}")
+    for good in ("claude/t-20261118-abcdef", "codex/t-20261118-abcdef"):
+        assert_not_main(good)
+
+
+def doctor(online=False):
+    """真发布要的东西齐不齐（只读；不读出令牌内容、不推、不开 PR）。返回 {"ok": 全过没有, "checks": [...]}。
+    每项 {"name", "ok", "detail"}；--online 多两项联网的只读查询（令牌身份、读得到仓库的 main）。"""
+    checks = []
+
+    def add(name, fn):
+        try:
+            detail = fn()
+            checks.append({"name": name, "ok": True, "detail": detail or "好"})
+        except (Rejected, G.Rejected) as e:
+            checks.append({"name": name, "ok": False, "detail": str(e)})
+        except Exception as e:                        # 自检不因为某一项意外出错就整体退出
+            checks.append({"name": name, "ok": False, "detail": f"{type(e).__name__}：{str(e)[:200]}"})
+
+    def need(cond, why):
+        if not cond:
+            raise Rejected(why)
+
+    def token():
+        read_token()
+        d = token_file().parent
+        st = os.lstat(d)
+        need(stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and not st.st_mode & 0o077 and not has_acl(d),
+             f"{d} 必须是本账号自己的目录、权限 700、没有放行别人的 ACL（不认链接）")
+        return f"{token_file()}：属本账号、600、格式像令牌（内容不显示）"
+
+    def outbox_ok():
+        need(outbox().is_dir() and os.access(outbox(), os.R_OK | os.X_OK), f"读不了交接目录 {outbox()}")
+        return str(outbox())
+
+    def grants():
+        need(G.db_path().is_file(), f"凭证库 {G.db_path()} 不在（派单网关还没在本账号里建过凭证）")
+        _readable(G.db_path(), "grants")
+        return str(G.db_path())
+
+    def hub():
+        need(hub_db().is_file(), f"中台库 {hub_db()} 不在")
+        _readable(hub_db(), "runs")
+        return str(hub_db())
+
+    add("运行账号是 dt-gate", lambda: require_gate() or GATE_USER)
+    add("发布令牌文件", token)
+    add("gh 副本只有 root 能改", lambda: trusted_program(GH, "gh "))
+    add("发布配置（代理）", lambda: f"走本机代理 {load_conf().get('proxy')}" if load_conf().get("proxy")
+        else "没配代理，直连 github.com")
+    add("git", lambda: need(os.access(GIT_BIN, os.X_OK), f"找不到 {GIT_BIN}") or GIT_BIN)
+    add("交接目录读得到", outbox_ok)
+    add("凭证库", grants)
+    add("中台库（只读）", hub)
+    add("推送目标只能是 <执行方>/<单号>", lambda: _branch_selftest() or "main 和别的分支都被拒")
+    add("登记的仓库和机器账号", lambda: "；".join(f"{k} → {v}" for k, v in PUBLISH_CRED.items()))
+    add("高风险路径规则读得到", lambda: f"{len(sensitive_patterns('dt-sandbox'))} 条")
+    switch = {"name": "真发布开关", "ok": True,
+              "detail": "开着" if REAL_PUBLISH else "关着（推分支、开 PR 都不做）"}
+    if online:
+        def with_cred(fn):
+            def run():
+                global CRED
+                cred = Cred()
+                CRED = cred
+                try:
+                    return fn()
+                finally:
+                    CRED = None
+                    cred.close()
+            return run
+
+        def identity():
+            out = []
+            for github in PUBLISH_CRED:
+                who = check_identity(github)
+                out.append(f"{github}：{who['login']}，能写、不是管理员")
+            return "；".join(out)
+
+        def read_main():
+            out = []
+            for github in PUBLISH_CRED:
+                r = git("ls-remote", remote_url(github), "refs/heads/main").stdout.split()
+                need(r and SHA.match(r[0]), f"读不到 {github} 的 main")
+                out.append(f"{github} main {r[0][:12]}")
+            return "；".join(out)
+
+        add("联网：令牌身份", with_cred(identity))
+        add("联网：读得到仓库（不带令牌）", with_cred(read_main))
+    checks.append(switch)
+    return {"ok": all(c["ok"] for c in checks), "online": bool(online), "checks": checks}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="受信发布（最小版）：取 dt-worker 的交接包，核凭证后推非 main 分支、开 PR")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("publish")
     p.add_argument("--task", required=True)
     sub.add_parser("scan")
+    p = sub.add_parser("doctor")
+    p.add_argument("--online", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd == "doctor":
+        out = doctor(a.online)
+        for c in out["checks"]:
+            print(f"[{'通过' if c['ok'] else '不过'}] {c['name']}：{c['detail']}")
+        print("自检全过" if out["ok"] else "自检有不过的项，先处理再谈打开真发布")
+        return 0 if out["ok"] else 1
     try:
         out = publish(a.task) if a.cmd == "publish" else scan()
     except (Rejected, G.Rejected) as e:

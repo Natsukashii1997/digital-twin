@@ -513,7 +513,7 @@ class GateAndRealRemote(PublishBase):
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(P.remote_url("o/x"), self.backend["remote"].format(github="o/x"))
         with mock.patch.object(P, "TEST_BACKEND", None):
-            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", "gh"))
+            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", P.GH))   # 写死路径，不从 PATH 找
 
 
 def P_opt(args, name):
