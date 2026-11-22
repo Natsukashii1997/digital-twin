@@ -343,6 +343,16 @@ def find_merged(repo, pr, statuses=("merged",)):
     return hits[-1] if hits else None
 
 
+def merged_since(merged_at, since):
+    """绕过只算策略签署之后合的（#322）：合并时间（GitHub 给的 UTC，带 Z）不早于签署时间。
+    任何一边读不出就不算，没有依据不记、不报。巡视记绕过、日报读绕过共用这一处。"""
+    try:
+        utc = lambda v: dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))  # noqa: E731
+        return utc(merged_at) >= utc(since)
+    except (TypeError, ValueError):
+        return False
+
+
 def bypassed():
     return {(r["repo"], str(r["pr"])) for r in lines()[0] if r["event"] == "bypass"}
 
