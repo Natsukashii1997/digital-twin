@@ -45,12 +45,16 @@ owner_open_id、owner_chat_id（twin_identity.py setup / setup-chat 写的）和
 读不了、格式不对，都拒绝开新的。开下一张只问一个判定 undelivered()：账本里每一张单子（不只 state.json 指的那张）
 都要完整送到他手里——结束了、卡片发出去了而且回读确认是最后一版（一次都没发出去过的也算没送到：哪怕是张空单，
 也要 push 一次让他收到「托管结束」）、新冒出的事都记了提醒、每批提醒都确认发到了；差哪一样都不开，出路都是先 push。
-这几条对着 push 里每次存盘之后可能断掉的地方：程序断在哪两步之间，都有一条拦得住（测试里每个存盘点都断过一次）。
+这几条对着 push 里每一步之后可能断掉的地方：程序断在哪两步之间，都有一条拦得住（测试里每次写文件、每次调飞书
+之前都断过一次）。push 一开始就把单子记成「没确认」，回读对上这一版才改回：单子本来是干净的也一样，
+不然版本号加了、飞书还没改就断掉，账本还写着已推到。
 开单自己是先改 state.json、再写单子：断在中间，所有命令都读不到这张、start 也拒绝，等人核对后把 state.json 改回去；
 反过来写会留下一张没人管的单子。
 读单子时分两层核（flaws）：先逐项核这一版该有的字段和类型（SHAPE 等，含每行、每批提醒、每条回话记录），单号要和
 所在目录一致，时间、消息号、编号是正经的值；再核这些值合在一起是不是脚本真会写出来的状态（写着已推到就得有消息号、
-推送时间和版本号；提醒标成「不用发」得那批的事真办完了；办完时间和结果要么都有要么都没有……）。缺了、不对、
+推送时间和版本号；提醒标成「不用发」得那批的事真办完了；提醒有消息号就得有那次发送的记录；办完时间和结果
+要么都有要么都没有；必须写字的地方不能空着……）。每件「已提醒」的事还要说得出来源：随第一张卡片到的
+（first_asks，首发或认领时记下）或者第几批提醒，一件事只有一个来源；光有个标记不算送达的依据。缺了、不对、
 讲不通都拒绝，不补默认值、不自动修（缺 dirty 补成「没改动」、缺 sending 补成「没在发」就等于放行）。
 
 发卡片（P1-02）：发之前先把「要发」记进单子；发了却没拿到消息号算结果不明，这张单子冻结：不能开下一张，
@@ -60,6 +64,8 @@ P2-10：两样都要对上，别的卡片碰巧带了单号不认）：找到一
 回读要对上标题和卡片最后一行的这一版才算推到了（P2-01；最后一行是脚本写的，托管会话填的文字到不了那里）。
 提醒按批记账（P2-02）：每批先记再发，结果不明的下次先对账（机器人发的、引用这张卡、文字相同；文字里有这批的编号，
 编号不重复，所以每批的文字都不一样）；找到不止一句就都记下并报出来。卡片回读对上之后才发提醒（P2-09）。
+批次的文字什么时候定（P2-12）：建了批次、还一次都没尝试发的，发之前按单子现在的样子重写（办完的剔掉、文字用
+最新的，都办完了就不发）；尝试过、结果不明的不动，那句话可能已经在他那边了，对账就靠文字一样。
 push 一次最多要跑七八条飞书命令（每条最多 60 秒），都在文件锁里；外层给它的超时不要短于 10 分钟。
 
 回话（P1-04、P1-05、P2-03、P2-04、P2-05）：replies 只认常浩本人（发送人是用户、ID 类型 open_id、ID 对得上）
@@ -118,7 +124,7 @@ ASK_FIELDS = ("task", "what", "about", "progress", "todo")
 NONE = type(None)
 # 这一版（version 1）的单子必须有的字段和类型；load 逐项核，缺了、类型不对都拒绝，不补默认值（L3 审查 P1-07）
 SHAPE = {"id": str, "by": str, "started_at": str, "ended_at": (str, NONE), "message_id": (str, NONE), "chat_id": (str, NONE),
-         "sending": (dict, NONE), "rev": int, "pushed_at": (str, NONE), "dirty": bool, "reminders": list, "acks": dict,
+         "sending": (dict, NONE), "first_asks": (list, NONE), "rev": int, "pushed_at": (str, NONE), "dirty": bool, "reminders": list, "acks": dict,
          "rows": list, "doing": list}
 SENDING = {"first": str, "last": str, "asks": list, "tries": int}
 BATCH = {"batch": int, "asks": list, "at": str, "text": str, "tried": (str, NONE), "message_id": (str, NONE)}
@@ -245,6 +251,11 @@ def numbers(x):
     return isinstance(x, list) and all(type(n) is int and n > 0 for n in x)
 
 
+def blank(d, shape, may=()):
+    """必须写字的字段里空着的（时间另核；may 是可以空着的）。命令入口都不收空的，状态文件里出现就是不对。"""
+    return [k for k, t in shape.items() if t is str and k != "at" and k not in may and not d[k].strip()]
+
+
 def flaws(sheet, sheet_id):
     """这张单子哪里不完整、讲不通；没有就是空的（L3 审查 P1-07、P2-11）。分两层：
     先核每个字段在不在、类型对不对；都对了再核这些值合在一起是不是脚本真的会写出来的状态
@@ -267,6 +278,10 @@ def shapes(sheet):
         bad.append("chat_id")
     if sheet["rev"] < 0:
         bad.append("rev")
+    if not sheet["by"].strip():
+        bad.append("by")
+    if sheet["first_asks"] is not None and not numbers(sheet["first_asks"]):
+        bad.append("first_asks")
     send = sheet["sending"]
     if send is not None:
         bad += [f"sending.{k}" for k in wrong(send, SENDING)
@@ -277,7 +292,7 @@ def shapes(sheet):
         if not shape:
             bad.append(f"rows[{i}].kind" if isinstance(r, dict) else f"rows[{i}].（不是一条记录）")
             continue
-        miss = wrong(r, shape) or ([] if is_time(r["at"]) else ["at"])
+        miss = wrong(r, shape) or ([] if is_time(r["at"]) else ["at"]) + blank(r, shape)
         if not miss and r["kind"] == "ask":
             miss = ([] if r["n"] > 0 else ["n"]) + ([] if r["done_at"] is None or is_time(r["done_at"]) else ["done_at"])
         bad += [f"rows[{i}].{k}" for k in miss]
@@ -287,14 +302,14 @@ def shapes(sheet):
             continue
         miss = wrong(b, BATCH)
         if not miss:
-            miss = ([] if is_time(b["at"]) else ["at"]) + ([] if numbers(b["asks"]) and b["asks"] else ["asks"]) \
+            miss = ([] if is_time(b["at"]) else ["at"]) + blank(b, BATCH) + ([] if numbers(b["asks"]) and b["asks"] else ["asks"]) \
                 + ([] if b["tried"] is None or is_time(b["tried"]) else ["tried"]) \
                 + ([] if b["message_id"] is None or is_mid(b["message_id"]) else ["message_id"]) \
                 + ([] if type(b.get("dropped", False)) is bool else ["dropped"]) \
                 + ([] if "also" not in b or (isinstance(b["also"], list) and b["also"] and all(is_mid(x) for x in b["also"])) else ["also"])
         bad += [f"reminders[{i}].{k}" for k in miss]
     for i, d in enumerate(sheet["doing"]):
-        bad += [f"doing[{i}].{k}" for k in (wrong(d, DOING) if isinstance(d, dict) else ["（不是一条记录）"])]
+        bad += [f"doing[{i}].{k}" for k in (wrong(d, DOING) or blank(d, DOING, ("about",)) if isinstance(d, dict) else ["（不是一条记录）"])]
     for mid, rec in sheet["acks"].items():
         if not isinstance(rec, dict):
             bad.append(f"acks[{mid}].（不是一条记录）")
@@ -318,6 +333,10 @@ def sense(sheet):
         bad.append("chat_id（发过或者要发，却没记发到哪个会话）")
     if not sheet["dirty"] and not (sent and sheet["pushed_at"] and sheet["rev"] >= 1):
         bad.append("dirty（写着已经推到飞书，却没有消息号、推送时间或版本号）")
+    if (sheet["first_asks"] is None) == sent:
+        bad.append("first_asks（发出去了就得记着哪几件是随卡片到的，没发出去就不该有）")
+    if not sent and (sheet["pushed_at"] or sheet["acks"]):
+        bad.append("pushed_at / acks（单子还没发出去，却有推送时间或回话记录）")
     asks = {}
     for i, r in enumerate(sheet["rows"]):
         if r["kind"] != "ask":
@@ -343,16 +362,31 @@ def sense(sheet):
             bad.append(f"reminders[{i}].dropped（这批的事还没办完，不能标成不用发）")
         if b.get("dropped") and b["message_id"]:
             bad.append(f"reminders[{i}].dropped（发到了又标成不用发）")
+        if b["message_id"] and not b["tried"]:
+            bad.append(f"reminders[{i}].message_id（有发送结果却没有发送尝试记录）")
         if "also" in b and not b["message_id"]:
             bad.append(f"reminders[{i}].also（没有消息号，却记着重复的那几句）")
     send = sheet["sending"]
     if send is not None and [n for n in send["asks"] if n not in asks]:
         bad.append("sending.asks（记着的编号单子上没有）")
+    # 每个「已提醒」都要说得出来源：随第一张卡片到的，或者第几批提醒（P1-07：光有标记不算送达的依据）
+    source = [n for n in sheet["first_asks"] or []] + [n for b in sheet["reminders"] for n in b["asks"]]
+    if [n for n in sheet["first_asks"] or [] if n not in asks]:
+        bad.append("first_asks（记着的编号单子上没有）")
+    if len(source) != len(set(source)):
+        bad.append("first_asks / reminders（同一件事记了两个提醒来源）")
+    for n, r in asks.items():
+        if r["notified"] and n not in source and sent:
+            bad.append(f"第 {n} 件的 notified（写着提醒过了，却说不出是随第一张卡片还是哪一批提醒到的）")
+        elif not r["notified"] and n in (sheet["first_asks"] or []):
+            bad.append(f"第 {n} 件的 notified（记着是随第一张卡片到的，却没标成提醒过）")
     for mid, rec in sheet["acks"].items():
         if rec["how"] == "ack" and rec["was"] != "pending":
             bad.append(f"acks[{mid}].was（照办了的只能是当时还没办、没改过的原话）")
         if rec["version"] == "missing" and rec["how"] != "dismiss":
             bad.append(f"acks[{mid}].version（读不到的那句只能记成 dismiss）")
+        if (rec["version"] == "missing") != (rec["was"] == "missing_after_ack"):
+            bad.append(f"acks[{mid}].was（版本是 missing 和「办过之后读不到了」要对上）")
         if not rec["result"].strip():
             bad.append(f"acks[{mid}].result")
     return bad
@@ -526,7 +560,7 @@ def start(by, now, raw_at=None):
     if (base() / sheet_id / "sheet.json").exists():
         raise Fail(f"托管单 {sheet_id} 已经有了")
     sheet = {"version": 1, "id": sheet_id, "by": by.strip(), "started_at": t, "ended_at": None, "message_id": None,
-             "chat_id": None, "sending": None, "rev": 0, "pushed_at": None, "dirty": True, "reminders": [], "acks": {},
+             "chat_id": None, "sending": None, "first_asks": None, "rev": 0, "pushed_at": None, "dirty": True, "reminders": [], "acks": {},
              "rows": [], "doing": []}
     # 先改「当前是哪张」，再写单子：断在两步中间，下次所有命令都读不到这张、start 也拒绝，等人核对；
     # 反过来写（先单子后指针）断了会留下一张没人管的单子，下次还悄悄再开一张（L3 审查第 5 轮 P1-07）
@@ -743,10 +777,11 @@ def is_card(sheet, m):
 
 def claim(sheet, mid):
     """认下飞书上已有的那张卡片：第一次要发时就在单子上的事算随卡片到了，之后才加的还要另发提醒。"""
+    first = [r["n"] for r in sheet["rows"] if r["kind"] == "ask" and r["n"] in sheet["sending"]["asks"]]
     for r in sheet["rows"]:
-        if r["kind"] == "ask" and r["n"] in sheet["sending"]["asks"]:
+        if r["kind"] == "ask" and r["n"] in first:
             r["notified"] = True
-    sheet.update(message_id=mid, sending=None)
+    sheet.update(message_id=mid, sending=None, first_asks=first)       # 记下这几件是随卡片到的：每个「已提醒」都要说得出来源
     save(sheet)
 
 
@@ -773,22 +808,32 @@ def first_send(sheet, now, content, rec):
                 "--idempotency-key", f"away-sheet-{sheet['id']}"], "发托管单").get("message_id")
     if not mid:
         raise Fail("发托管单没拿到消息号")
+    first = [r["n"] for r in sheet["rows"] if is_open(r)]
     for r in sheet["rows"]:
         if is_open(r):
             r["notified"] = True
-    sheet.update(message_id=mid, sending=None)
+    sheet.update(message_id=mid, sending=None, first_asks=first)
     save(sheet)
     return True
 
 
+def remind_text(sheet, b):
+    """这批提醒现在该说什么：只说还没办完的那几件，文字用单子上最新的。"""
+    rows = [r for r in (find_ask(sheet, n) for n in b["asks"]) if is_open(r)]
+    names = "；".join(f"{num(r['n'])} {r['task']}｜{r['what']}" for r in rows)
+    return f"托管单多了 {len(rows)} 件要你做的：{names}。细节和怎么回，看上面引用的那张单子。"
+
+
 def remind(sheet, now, rec, problems):
-    """原地更新不弹通知，新冒出要他做的事（哪怕是结束时才冒出的）另发一句。按批记账：先记再发，结果不明的下次先对账。"""
+    """原地更新不弹通知，新冒出要他做的事（哪怕是结束时才冒出的）另发一句。按批记账：先记再发，结果不明的下次先对账。
+    批次的文字什么时候定（P2-12）：建了批次、还一次都没尝试发的，发之前按单子现在的样子重写（办完的剔掉、文字用最新的，
+    都办完了就不发）；尝试过、结果不明的不动——那句话可能已经在他那边了，对账就靠文字一样。"""
     fresh = unnotified(sheet)
     if fresh:
-        names = "；".join(f"{num(r['n'])} {r['task']}｜{r['what']}" for r in fresh)
-        sheet["reminders"].append({"batch": len(sheet["reminders"]) + 1, "asks": [r["n"] for r in fresh], "at": iso(now),
-                                   "text": f"托管单多了 {len(fresh)} 件要你做的：{names}。细节和怎么回，看上面引用的那张单子。",
-                                   "tried": None, "message_id": None})
+        b = {"batch": len(sheet["reminders"]) + 1, "asks": [r["n"] for r in fresh], "at": iso(now), "text": "",
+             "tried": None, "message_id": None}
+        b["text"] = remind_text(sheet, b)
+        sheet["reminders"].append(b)
         for r in fresh:
             r["notified"] = True
         save(sheet)
@@ -810,15 +855,18 @@ def remind(sheet, now, rec, problems):
                     problems.append(f"第 {b['batch']} 批提醒在飞书上有 {len(hit)} 句（重复发出过）："
                                     + "、".join(m["message_id"] for m in hit))
                 continue
-            if not any(is_open(find_ask(sheet, n)) for n in b["asks"]):
-                b["dropped"] = True                                  # 这一批的事都办完了，不用再提醒
-                how.append("dropped")
-                continue
+        if not any(is_open(find_ask(sheet, n)) for n in b["asks"]):
+            b["dropped"] = True                                      # 这一批的事都办完了，不用再提醒（建了批次还没发的也一样，P2-12）
+            how.append("dropped")
+            continue
+        if b["tried"]:
             wait = QUIET - (now - at(b["tried"])).total_seconds()
             if wait > 0:
                 how.append("unknown")
                 problems.append(f"第 {b['batch']} 批提醒上次结果不明，飞书上现在没找到；{int(wait) + 1} 秒后再 push")
                 continue
+        else:
+            b["text"] = remind_text(sheet, b)                        # 还没尝试过，外面没有它的痕迹：按单子现在的样子重写（P2-12）
         b["tried"] = iso(now)
         save(sheet)
         try:
@@ -837,6 +885,7 @@ def remind(sheet, now, rec, problems):
 
 def push(sheet, now):
     """发卡片或原地更新，回读；回读对上之后，新冒出要他做的事另发一句提醒。返回记进 runs.jsonl 的一条（卡片、提醒、回读分开记）。"""
+    sheet["dirty"] = True                  # 这一版还没确认到飞书：哪怕单子本来是干净的，版本号一加就得回读对上才算（P1-07）
     sheet["rev"] += 1
     save(sheet)
     rec = {"at": iso(now), "rev": sheet["rev"], "card": "failed", "remind": "none", "readback": "skipped", "result": "failed"}
