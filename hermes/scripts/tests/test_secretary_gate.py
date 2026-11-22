@@ -941,6 +941,15 @@ class RedispatchTests(Base):
         self.stop_card(cid=18, run=19)                                            # 又放弃了一次：每张任务最多 1 次
         self.handoff_quota(self.submit(self.prop(card=18)))
 
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_unsent_resume_event_hands_off(self):
+        """续审第 3 轮预审 P2-1：这张任务还有没确认送到中台的续接事件，② 前闸就交常浩（不占额度），不等续接被拒落成没做成。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")):
+            G.resume_dispatch(TASK, "rework", "常浩人工返修", now=T + dt.timedelta(minutes=1))
+        d = self.handoff(self.submit(), "unsure")
+        self.assertIn("没确认送到中台", d["basis"])
+        self.assertEqual(self.posted, [])
+
     @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))   # 凭证按 T 建、2 小时有效：恢复闸用的「现在」也拨到 T
     def test_redispatch_unknown_does_not_deadlock_the_gate(self):
         """第 2 轮预审 P1-A（常浩 11-20 选甲）：② 发往中台结果不明 → 秘书记结果不明、关闸。原来恢复闸看到秘书结果不明就不开，
@@ -1048,7 +1057,8 @@ class RedispatchTests(Base):
 
     def _in_step5(self, target, clock, db, extra=()):
         """真恢复闸对账一次；第 5 步（两把锁都拿到、重判过之后，frozen_scopes 那里）起线程跑 target，
-        确定性地等它卡在 BEGIN IMMEDIATE 上，再让对账提交。返回 (对账结果, 线程卡住时的状态, 线程的异常)。"""
+        等它走到 BEGIN IMMEDIATE（调用前置位，只是辅助证据），再让对账提交。写锁在对账手里的确定性证明是零等待探针
+        assert_write_locked（续审第 3 轮 P2-06）。返回 (对账结果, 线程走到那里时的状态, 线程的异常)。"""
         box, seen, errors = [None], [], []
 
         def run():
@@ -1172,8 +1182,8 @@ class RedispatchTests(Base):
             with contextlib.redirect_stdout(out):
                 code = G.main(["resume-dispatch", "--task", TASK, "--kind", "redispatch", "--reason", "人工重派"])
             self.assertEqual(code, 1)
-            self.assertIn("秘书或受信发布正在处理", out.getvalue())
-            with self.assertRaisesRegex(G.Rejected, "秘书或受信发布正在处理"):
+            self.assertIn("另有入口正在处理", out.getvalue())
+            with self.assertRaisesRegex(G.Rejected, "另有入口正在处理"):
                 G.resume_dispatch(TASK, "redispatch", "别的调用方")
             self.assertEqual(redispatch_events(), 1)
         stack, patches = self._real_gate(clock)                  # 锁放了：原事件还没确认送到，照样不另记（预审 P1-A）
@@ -1369,6 +1379,17 @@ class RejectTests(Base):
         calls = [json.loads(x) for x in self.ghlog.read_text().splitlines()]
         self.assertEqual([c[:2] for c in calls], [["pr", "view"], ["pr", "view"], ["pr", "comment"]])   # 留言前再读一次
         self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["rework"])
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_unsent_resume_event_hands_off_before_commenting(self):
+        """续审第 3 轮预审 P2-1：这张任务还有没确认送到中台的续接事件时，③ 到续接那一步必然被拒；前闸就交常浩，
+        不先发出撤不回的留言、不落成结果不明、不冻结。"""
+        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台")):
+            G.resume_dispatch(TASK, "correction", "常浩人工更正", now=T + dt.timedelta(minutes=1))
+        with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh):
+            d = self.handoff(self.submit(), "unsure")
+        self.assertIn("没确认送到中台", d["basis"])
+        self.assertFalse(self.ghlog.exists())                                     # 连 PR 都没查，更没留言
 
     def test_head_moved_or_not_ours(self):
         with mock.patch.multiple(SG, REVIEW_SOURCE=self.review, TEST_GH=self.gh):
@@ -1855,7 +1876,7 @@ class TaskLockTests(Base):
                         es.enter_context(x)
                     out = SG.submit(self.redispatch(), now=T)
                 self.assertEqual(out["result"], "done", out["msg"])
-                self.assertEqual(seen["publish"], "这张单另一个发布还在进行")
+                self.assertIn("另有入口正在处理", seen["publish"])
                 self.assertTrue(probes == [] if not target else probes and set(probes) == {"锁着"}, probes)
         with P.task_lock(TASK):                                                  # 秘书做完就放锁
             pass

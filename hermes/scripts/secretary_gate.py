@@ -214,6 +214,24 @@ def grant(task_id):
         con.close()
 
 
+def unsent_gate(task_id, t):
+    """这张任务还有没确认送到中台的续接事件（autoloop_grants.unsent_resume_events，和续接同一个判法）就不办 ② / ③：
+    续接到那一步必然被拒，③ 这时已经发出撤不回的留言（续审第 3 轮预审 P2-1）。调用方持着任务锁，持锁期间不会新增
+    续接事件，send-pending 只会把事件推向已送达或作废，所以这里判过、到续接时仍然成立。"""
+    try:
+        con = _ro(G.db_path())
+    except sqlite3.Error:
+        raise Handoff("gate", "查不了这张任务有没有没送到的续接事件")
+    try:
+        keys = G.unsent_resume_events(con, task_id, t)
+    except sqlite3.Error:
+        raise Handoff("gate", "查不了这张任务有没有没送到的续接事件")
+    finally:
+        con.close()
+    if keys:
+        raise Handoff("unsure", f"这张任务还有没确认送到中台的续接事件（{plain('、'.join(keys[:2]), 80)}），等它送到或作废再说")
+
+
 def gateway_check(row, generation):
     """给 autoloop_publish.bind_run 的 on_dispatch：这个派单事件必须是网关记过账、已送达中台的那一条——
     事件号（中台的）、事件键、任务号、规则名、执行方、代次全对上（规格第 5 节）。"""
@@ -935,6 +953,8 @@ def front_gates(p, ctx, st_status, t, st):
     frozen = frozen_task(st, ctx["task"])
     if frozen:
         raise Handoff("gate", "这件事有一次代批结果还不明，对账清楚之前不再代批")
+    if cat in ("redispatch", "reject"):
+        unsent_gate(ctx["task"], t)                          # ③ 在留言之前就挡下（留言撤不回，续审第 3 轮预审 P2-1）
     if cat == "redispatch":
         redispatch_gate(ctx)
     if cat == "reject":

@@ -199,7 +199,7 @@ def task_lock(task_id):
         lock = G.task_lock(task_id)
         lock.__enter__()
     except G.Busy:
-        raise Rejected("这张单另一个发布还在进行")
+        raise Rejected("这张单另有入口正在处理（另一个发布、秘书 ② / ③ 或续接）")
     except G.Rejected as e:
         raise Rejected(str(e))
     try:

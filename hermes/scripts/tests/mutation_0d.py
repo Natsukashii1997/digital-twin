@@ -236,15 +236,24 @@ M = [
     ("autoloop_recovery.py", "EXPIRY_MARGIN = dt.timedelta(seconds=60)", "EXPIRY_MARGIN = dt.timedelta(seconds=0)",
      "快到期的续接事件也算只差补发", [SG + ".RedispatchTests.test_grant_about_to_expire_is_not_waiting_for_resend"]),
     # 续审第 3 轮 P1-08-01
-    ("autoloop_grants.py", "    if not task_locked:\n        try:\n", "    if False:\n        try:\n",
+    ("autoloop_grants.py", "            lock = task_lock(task_id, path)\n", "            lock = contextlib.nullcontext()\n",
      "续接不拿任务锁（命令行能另记一条事件）",
-     [SG + ".RedispatchTests.test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task"]),
+     [SG + ".RedispatchTests.test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task",
+      GR + ".Resume.test_task_lock_lives_next_to_the_grants_db"]),
     # 续审第 3 轮预审 P1-A / P2-A
     ("autoloop_grants.py", "        if pending:                              #", "        if False:                              #",
      "这张单还有没确认送到的续接事件也照样续接（锁放开后冒出第二个事件号）",
      [GR + ".Resume", SG + ".RedispatchTests.test_cli_resume_cannot_add_a_second_event_while_the_secretary_holds_the_task"]),
     ("autoloop_grants.py", '    d = Path(path or db_path()).parent / "task-locks"', '    d = Path(path or db_path()).parent / "locks-elsewhere"',
      "任务锁不在凭证库旁边", [GR + ".Resume.test_task_lock_lives_next_to_the_grants_db"]),
+    # 续审第 3 轮预审 P2-1 / P2-2 / 备注
+    ("autoloop_grants.py", '                raise Rejected("不能续接：调用方说持着这张单的任务锁，实际没有人持着")', "                pass",
+     "task_locked=True 不核实（顺手传 True 能绕过任务锁）", [GR + ".Resume.test_task_locked_claim_is_checked"]),
+    ("autoloop_grants.py", '        if check_row(row, None, e["generation"], now, voided) is None]', "        ]",
+     "作废代次的遗留事件也算没送到（换代后误拒续接）", [GR + ".Resume.test_events_of_a_voided_generation_do_not_block_resume"]),
+    ("secretary_gate.py", '        unsent_gate(ctx["task"], t)                          #', '        pass                          #',
+     "② / ③ 前闸不查没送到的续接事件（③ 先留言再被拒）",
+     [SG + ".RejectTests.test_unsent_resume_event_hands_off_before_commenting", SG + ".RedispatchTests.test_unsent_resume_event_hands_off"]),
 ]
 
 

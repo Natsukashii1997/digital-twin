@@ -143,7 +143,7 @@ def task_lock(task_id, path=None):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise Busy("这张单秘书或受信发布正在处理，等它做完")
+            raise Busy("这张单另有入口正在处理（秘书 ② / ③、受信发布或另一次续接），等它做完")
         yield
     finally:
         os.close(fd)
@@ -631,8 +631,15 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=N
     整个续接持这张单的任务锁（task_lock，和受信发布、秘书 ② / ③ 同一把，不等待，拿不到就拒绝）：秘书 ② / ③ 或
     受信发布正在处理这张单时，命令行和别的调用方都不能另记一条事件（续审第 3 轮 P1-08-01）。task_locked=True 表示
     调用方已经持着这把锁（秘书 ② / ③），这里不再拿（同一进程再拿会被自己挡住）。这张单还有没确认送到中台的派单事件
-    （续接类、sent 0 / 2）也不续接：锁放开以后同一张单照样不会冒出第二个事件号（续审第 3 轮预审 P1-A）。"""
-    if not task_locked:
+    （续接类、sent 0 / 2、代次仍有效，unsent_resume_events）也不续接：锁放开以后同一张单照样不会冒出第二个事件号
+    （续审第 3 轮预审 P1-A）。传 task_locked=True 时核实这把锁确实有人持着（同一进程另开一次拿不到），顺手传 True 绕不过去。"""
+    if task_locked:
+        try:
+            with task_lock(task_id, path):
+                raise Rejected("不能续接：调用方说持着这张单的任务锁，实际没有人持着")
+        except Busy:
+            pass
+    else:
         try:
             lock = task_lock(task_id, path)
             lock.__enter__()
@@ -658,9 +665,7 @@ def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=N
             raise Rejected(f"不能续接：{why}")
         if ref is not None and ref in resume_refs(con, task_id):
             raise Rejected(f"决定 {ref} 已经续接过，不再记第二条事件")
-        pending = [r[0] for r in con.execute(                       # 只看续接事件：开单的 start 不是「只差补发」的那一类
-            f"SELECT event_key FROM hub_events WHERE task_id = ? AND kind IN ({','.join('?' * len(KINDS))}) "
-            "AND sent IN (0, 2) ORDER BY rowid", (task_id, *KINDS))]
+        pending = unsent_resume_events(con, task_id, now)
         if pending:                              # 「只差网关补发」的前提：同一张单不会再冒出另一个事件号（续审第 3 轮预审 P1-A）
             raise Rejected(f"不能续接：这张单还有没确认送到中台的派单事件（{'、'.join(pending[:3])}），"
                            "先 send-pending 补发，或等秘书对账结掉")
@@ -696,6 +701,18 @@ def bound_event(con, task_id, ref, kind, generation=None, event_key=None, now=No
     row = con.execute("SELECT * FROM grants WHERE task_id = ?", (task_id,)).fetchone()
     e["invalid"] = check_row(row, None, e["generation"], now or now_tz(), voided_of(con, task_id))
     return "ok", e, f"续接事件 {e['event_key']}：sent={e['sent']}"
+
+
+def unsent_resume_events(con, task_id, now):
+    """这张单还没确认送到中台、而且还能发出去的续接事件号（sent 0 未发、2 发送中；代次仍被凭证认）。代次已作废或凭证
+    不再认的不算：它们发不出去（send-pending 会把它作废），不会再多派一次。开单的 start 不算（不是「只差补发」那一类）。
+    续接（resume_dispatch）和秘书 ② / ③ 前闸共用（续审第 3 轮预审 P1-A、P2-1、P2-2）。"""
+    row = con.execute("SELECT * FROM grants WHERE task_id = ?", (task_id,)).fetchone()
+    voided = voided_of(con, task_id)
+    return [e["event_key"] for e in con.execute(
+        f"SELECT event_key, generation FROM hub_events WHERE task_id = ? AND kind IN ({','.join('?' * len(KINDS))}) "
+        "AND sent IN (0, 2) ORDER BY rowid", (task_id, *KINDS)).fetchall()
+        if check_row(row, None, e["generation"], now, voided) is None]
 
 
 def resume_refs(con, task_id):

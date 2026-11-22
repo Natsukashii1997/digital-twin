@@ -599,6 +599,31 @@ class Resume(Base):
         out = G.resume_dispatch(tid, "rework", "审查没过", now=T0, post=self.post)
         self.assertEqual(out["event_key"], f"{tid}:g1:rework:1")
 
+    def test_events_of_a_voided_generation_do_not_block_resume(self):
+        """续审第 3 轮预审 P2-2：冻结时 sent=2 的事件原样留着；换到新代次后它已经发不出去（send-pending 会作废它），
+        不算「没送到」，新代次照常续接。"""
+        tid = self.new_task()
+
+        def down(*a, **k):
+            raise G.Rejected("连不上中台")
+        first = G.resume_dispatch(tid, "redispatch", "中台放弃了", now=T0, post=down)["event_key"]
+        self.sql("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE event_key = ?", (G.iso(T0), first))
+        G.freeze(tid, "推翻", now=T0)
+        self.assertEqual(self.sql("SELECT sent FROM hub_events WHERE event_key = ?", (first,))[0][0], 2)
+        self.sql("UPDATE grants SET status = 'active', generation = 2, freeze_code = NULL WHERE task_id = ?", (tid,))
+        out = G.resume_dispatch(tid, "correction", "换代后更正", now=T0, post=self.post)    # 解冻要私聊口令，这里直接改库
+        self.assertEqual(out["event_key"], f"{tid}:g2:correction:1")
+
+    def test_task_locked_claim_is_checked(self):
+        """预审备注：task_locked=True 只在这把锁确实有人持着时才认，顺手传 True 绕不过任务锁。"""
+        tid = self.new_task()
+        with self.assertRaisesRegex(G.Rejected, "实际没有人持着"):
+            G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, task_locked=True)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind != 'start'", (tid,))[0][0], 0)
+        with G.task_lock(tid):
+            out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, task_locked=True)
+        self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
+
     def test_task_lock_lives_next_to_the_grants_db(self):
         """续审第 3 轮：任务锁文件在凭证库旁边的 task-locks/，写同一个凭证库的进程（续接、受信发布、秘书 ② / ③）必然拿同一把，
         不靠各自的环境变量对齐；被持着时续接拒绝、另一次拿锁抛 Busy；放了就能拿。"""
