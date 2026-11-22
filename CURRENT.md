@@ -16,6 +16,7 @@
 
 ## 0E-2 中台和网关搬进 dt-gate（ADR-015，2026-11-20，Claude；PR #268，叠在 #210 上，未合并、未安装）
 
+- **11-22 补的（L3 之后的新代码，只送这段增量去 L3）**：0D（#211 `de47d4f`）已合进来。①「停写 → 排空」：preflight 和 migrate 停写排空后都问恢复闸 `leftovers`（只读、不建库）；有没结清的就不搬（凭证、派单事件、出口账本、标记、点击、秘书、托管、任务锁）。migrate 第 0 步在主账号 hold，搬完主账号保持停写；退回、rollback 时 release rolled_back。完整回滚前，先以 dt-gate 身份跑 `cards-after`，补 0D 会话指出的卡片号撞号缺口。② 控制面账本不搬，dt-gate 从空库开始（0D 会话同意；设计第 7 节已改）。③ 门卫监听者规则（#313）：第 4b 步写 `hub-in-gate`、apply 核 guard=yes；退回、回滚先关再放回主账号中台；preflight 拦残留标记。④「先跑后搬」：preflight 核工人启动脚本是副本里的新版；命令清单写明首单先收尾。子 agent 独立审过停写排空（P1×2、P2×5 已修）。8090 被抢绑记进剩余风险。
 - **L3 通过**：审查链 r1a1f85007d100，第 2 轮通过（受审 `20d0497`，P0 0 / P1 0；CI hermes 1718、orca 48 全过）。之后只有 `b5ef2a0` 改注释（非阻断 P2-02：写准监听核对的保证边界）。等 #210 合并后变基、常浩合并；合并后按命令清单真机跑。
 
 - 做了什么：`ops/dt_gate_hub.py`（常浩用 sudo 跑：stage 复制 root 所有的运行副本并写 root 的入口 → preflight → migrate 搬家、出错自动退回、被打断可 rollback 收拾 → windows 装只读窗口 3352、秘书窄窗口 3353 → rotate-worker → update / run / status / rollback）、`ops/dt_gate_user.py`（以各账号身份跑的小工具，root 不碰账号家目录）、`hermes/scripts/gate_intake.py`（秘书窄窗口：只收秘书提议、关秘书、撤销单）、`hermes/scripts/hub_listener.py`（dt-gate 带钥匙访问本机端口前核监听者，防抢绑冒充）。
@@ -23,7 +24,7 @@
 - 改变的已有行为（都还没装，现在实际影响为零）：autoloop_config / autoloop_grants / autoloop_feishu 设了 DT_HUB_LISTENER_UID 时先核监听者（不设不变）；凭证镜像、任务单默认路径从 `/Users/Shared/dt-autoloop/{grants,tasks}` 改到 `/Users/Shared/dt-gate/…`（autoloop_grants、dt_worktree、派单规则提示词）；秘书巡视多两个可选变量 DT_READONLY_URL、DT_SECRETARY_INTAKE，不设时照旧；dt_worktree 的环境变量 DT_AUTOLOOP_SHARED 改名 DT_GATE_SHARED；工人反向测试多查 dt-gate 家目录三项。
 - 常浩照做的命令清单：`docs/DT-ORC/migration/0E-2-中台搬进dt-gate-命令清单.md`（合并后在 main 上跑；钥匙和令牌不经 AI）。
 - 测试：见 PR；端到端用例在临时目录起真中台、假账号、假 launchd 走完 stage → 中途出错退回 → 搬家 → 窗口 → 换工人钥匙 → 回滚。真跨账号、真 launchd 只能常浩真机验。
-- 没做 / 另议：0D（#211）合并后补「停写 → 排空」；派单提议、飞书桥接、点击直收到 0E-3；过滤代理 8090 没人登录时不在（转发的加速器 8086 也要登录），单改 8090 不够。
+- 没做 / 另议：派单提议、飞书桥接、点击直收到 0E-3；过滤代理 8090 没人登录时不在（转发的加速器 8086 也要登录），单改 8090 不够。
 
 ## 2026-11-22 · 今天集中落地：协调会话与分工（常浩「按方案开工」）
 
