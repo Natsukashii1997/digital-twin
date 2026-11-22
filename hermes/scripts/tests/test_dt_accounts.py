@@ -83,6 +83,21 @@ class PfRules(unittest.TestCase):
             self.assertIn(f"block return in quick proto tcp all user = {uid}", out)
             self.assertIn(f"block return in quick proto udp all user = {uid}", out)
         self.assertNotIn("inet6", out)
+        self.assertNotIn("fe80", out)        # 兜底不给本地链路开口子（子 agent 审 6987e0e 的 P2）
+        self.assertIn("block drop out quick proto tcp all user = unknown flags S/SA", out)
+        self.assertIn("block drop out quick proto udp all user = unknown", out)
+
+    def test_unknown_owner_fallback(self):
+        """查不到主人（user unknown）的兜底（L3 第 5 轮 P1-02，11-22 真机）：在按账号的规则之前、只写一次、
+        TCP 只丢新连接首包且不回 RST、UDP 一律丢、入站不加兜底。"""
+        for users in (("dt-worker",), ("dt-worker", "dt-secretary")):
+            lines = [l for l in rules(*users).stdout.splitlines() if not l.startswith("#")]
+            self.assertEqual(lines[:2], [
+                "block drop out quick proto tcp from any to any user unknown flags S/SA",
+                "block drop out quick proto udp from any to any user unknown",
+            ])
+            self.assertEqual(sum("unknown" in l for l in lines), 2)
+            self.assertFalse(any(" in " in l and "unknown" in l for l in lines))
 
     def test_gate_and_unknown_refused(self):
         """控制面不在这里限制；不认识的账号不生成规则、退出码非 0。"""
@@ -725,7 +740,7 @@ exit 1
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(f["state"], "ok")
         self.assertEqual(f["users"], "dt-worker,dt-secretary")
-        self.assertEqual(f["rules"], "13")         # 工人 2 条放行 + 2 条出站拒绝 + 2 条入站拒绝，秘书 3 + 2 + 2
+        self.assertEqual(f["rules"], "15")         # 兜底 2 条 + 工人 2 条放行 + 2 条出站拒绝 + 2 条入站拒绝，秘书 3 + 2 + 2
         self.assertEqual(f["reloaded"], "yes")
         self.assertRegex(f["boot"], r"^\d+$")      # 记本次开机时间（审查第 4 轮 P2-2）
         self.assertIn("state=applying", at_load)  # 加载前先写「进行中」

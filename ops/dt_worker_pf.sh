@@ -66,6 +66,15 @@ ports_for() {
 # 打印规则；参数是要管的账号（pf 不认不存在的用户名，所以只传本机已有的）
 print_rules() {
   echo "# 由 dt_worker_pf.sh 生成，不要手改（digital-twin#190、ADR-015 0E-1）"
+  # 兜底：pf 偶尔查不到包属于哪个套接字（user = unknown），下面按账号的规则就都不匹配、落到默认放行。
+  # 11-22 真机：不重载 600 秒里约 0.75% 的受管 SYN 这样漏出去，加了这几条后零漏过（L3 第 5 轮 P1-02 返修）。
+  # 对所有账号生效：TCP 只丢新连接的首包（drop 不回 RST，偶发查不到时程序约 1 秒后重发，重发时一般查得到）；
+  # UDP 查不到主人一律丢，不给本地链路 fe80::/10 开口子（路由器常把 DNS 公告成 fe80 地址，开了就是一条外传通道）。
+  # 每次都查不到主人的流量会一直被挡：本机转发 / 地址转换（互联网共享、虚拟机共享网络）、部分系统服务发往
+  # 局域网设备的 UDP（11-22 诊断见过一次，发往 fe80 地址）——本机现在没装这类软件，装了要另议。
+  # 入站不加兜底：没人在听的端口收到的包本来就查不到主人，拦了会让本机「连一个没人听的端口」从立刻被拒变成超时。
+  echo "block drop out quick proto tcp from any to any user unknown flags S/SA"
+  echo "block drop out quick proto udp from any to any user unknown"
   local u p
   for u in "$@"; do
     p=$(ports_for "$u") || { echo "不认识的账号：$u" >&2; return 1; }

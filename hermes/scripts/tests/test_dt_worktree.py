@@ -81,7 +81,7 @@ sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 
 
 BOOT = "1795125811"   # 测试里的「本次开机时间」（DT_BOOT_TIME）
-PF_OK = f"at=2026-11-20T10:00:00+0800 boot={BOOT} state=ok enabled=yes rules=13 users=dt-worker,dt-secretary reloaded=no\n"
+PF_OK = f"at=2026-11-20T10:00:00+0800 boot={BOOT} state=ok enabled=yes rules=15 users=dt-worker,dt-secretary reloaded=no\n"
 
 
 def git(*args, cwd=None):
@@ -292,7 +292,7 @@ class PfGate(WorkerBase):
 
     def test_not_ok_never_starts_cli(self):
         cases = ((f"at=x boot={BOOT} state=failed enabled=yes reason=规则没加载上（pf_保留了旧规则）\n", "规则没加载上"),
-                 (f"at=x boot={BOOT} state=ok enabled=no rules=13 users=dt-worker\n", "状态不对"),
+                 (f"at=x boot={BOOT} state=ok enabled=no rules=15 users=dt-worker\n", "状态不对"),
                  (f"at=x boot={BOOT} state=ok enabled=yes rules=4 users=dt-secretary\n", "状态不对"),
                  ("at=x state=ok enabled=yes rules=9 users=dt-worker reloaded=no\n", "旧版"),   # 没有 boot 的旧版状态
                  ("at=x enabled=yes rules=4\n", "状态不明"),                  # 0A 旧版状态文件没有 state
