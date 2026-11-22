@@ -411,6 +411,22 @@ class Readers(Base):
         with mock.patch.object(E, "lark_read", side_effect=E.Unreachable("断网")), self.assertRaises(E.Unreachable):
             E.read_send(t, row, now)
 
+    def test_read_send_reads_every_page(self):
+        """#312：--page-all 默认只翻 10 页，到顶不报错、只留 has_more=true。只看第一轮会把发了两条的认成一条、记成做成。"""
+        now = E.now_tz()
+        row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
+        msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
+               "body": {"content": json.dumps(card)}}
+        pages = [{"messages": [msg], "has_more": True, "page_token": "t2"}, {"messages": [{**msg, "message_id": "om_2"}]}]
+        with mock.patch.object(E, "lark_read", side_effect=pages) as m:
+            self.assertEqual(E.read_send(t, row, now), (None, {"hits": 2}))
+        self.assertEqual([c[0][0][-2:] == ["--page-token", "t2"] for c in m.call_args_list], [False, True])
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg], "has_more": True}):
+            with self.assertRaisesRegex(E.Unreachable, "对账：还有下一页，但飞书没给翻页标记，没读全"):   # 保持不明，不记成做成
+                E.read_send(t, row, now)
+
     def test_only_the_real_message_counts(self):
         """审查 P1-05：机器人发的、类型对、有消息号、令牌在按钮回调值里，才算这条；只在文字里搜到令牌不算。"""
         t = {"marker": "abcdef0123456789", "msg_type": "interactive"}

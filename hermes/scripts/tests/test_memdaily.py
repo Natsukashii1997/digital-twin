@@ -72,6 +72,35 @@ class FakeRun:
         raise AssertionError(args)
 
 
+class PagedRun(FakeRun):
+    """像真的 lark-cli 那样分轮回话（#312）：列表一轮只给 per 条、has_more=true 并给 page_token，后面的要带 --page-token 才给。
+    lose_token 写成命令名（如 "im +messages-search"）：那个命令还有下一页却不给标记。"""
+    def __init__(self, per, lose_token=None, **kw):
+        super().__init__(**kw)
+        self.per, self.lose_token = per, lose_token
+        self.meetings = [{"display_info": f"会议{i}\n09:00"} for i in range(5)]
+        self.tasks = [{"summary": f"任务{i}", "members": [{"id": ME, "role": "assignee"}], "created_at": "2026-11-10 09:00"} for i in range(5)]
+
+    def __call__(self, *args, **kw):
+        cmd = " ".join(args[:2])
+        data = super().__call__(*args, **kw)
+        if cmd == "vc +search":
+            data = {"items": self.meetings}
+        if cmd == "task +get-related-tasks":
+            data = {"items": self.tasks}
+        key = next((k for k in ("messages", "items") if isinstance(data, dict) and k in data), None)
+        if not key or cmd in ("im +messages-send", "api GET"):
+            return data
+        start = int(args[args.index("--page-token") + 1]) if "--page-token" in args else 0
+        page = {key: data[key][start:start + self.per], "has_more": start + self.per < len(data[key])}
+        if page["has_more"] and cmd != self.lose_token:
+            page["page_token"] = str(start + self.per)
+        return page
+
+    def tokens(self, cmd):
+        return [a[a.index("--page-token") + 1] if "--page-token" in a else None for a, _ in self.calls if " ".join(a[:2]) == cmd]
+
+
 CONFIG = {"whitelist_groups": [{"chat_id": "oc_w", "name": "AI实验室"}], "excluded_meetings": ["舀水群每周同频"],
           "priority_people": ["许铭凯"], "dropped_topics": ["CRM"]}
 
@@ -112,6 +141,29 @@ class Collect(unittest.TestCase):
         self.assertTrue(f["agenda"][0]["excluded"])
         self.assertIn("旧事项", f["prev"]["actions"])
         self.assertNotIn("|  |", f["prev"]["actions"])                         # 空壳表格行已整理掉
+
+    def test_lists_are_read_past_the_first_round(self):
+        """#312：lark-cli 到了页数上限（或只回第一页）不报错，只留 has_more=true。原来只取第一轮：5 条消息只剩 2 条，
+        私聊、常浩发言的群、会议、任务悄悄没有。"""
+        whole, run = PagedRun(50, doc_md=OLD), PagedRun(2, doc_md=OLD)
+        run.white = whole.white = [msg("oc_w", "group", "ou_y", "许铭凯", f"14:0{i}", f"白名单第{i}条", chat_name="AI实验室") for i in range(5)]
+        f = md.collect(D, run=run, config=CONFIG)
+        self.assertEqual(f, md.collect(D, run=whole, config=CONFIG))          # 分轮读和一轮读完结果一样
+        self.assertEqual({g["name"] for g in f["groups"]}, {"营销物料同步", "AI实验室"})   # 营销物料同步在第 2 轮
+        self.assertEqual(len(next(g for g in f["groups"] if g["whitelist"])["messages"]), 5)
+        self.assertEqual((f["meetings"], [t["summary"] for t in f["tasks"]]),
+                         ([f"会议{i}" for i in range(5)], [f"任务{i}" for i in range(5)]))
+        self.assertEqual(f["coverage"]["messages"], 10)
+        for cmd in ("im +messages-search", "im +chat-messages-list", "vc +search", "task +get-related-tasks"):
+            self.assertEqual(run.tokens(cmd), [None, "2", "4"], cmd)
+
+    def test_list_that_cannot_be_read_to_the_end_fails(self):
+        for cmd, what in (("im +messages-search", "读当天消息"), ("im +chat-messages-list", "读白名单群「AI实验室」"),
+                          ("vc +search", "读会议记录"), ("task +get-related-tasks", "读任务")):
+            run = PagedRun(2, lose_token=cmd, doc_md=OLD)
+            run.white = run.white * 3
+            with self.assertRaisesRegex(md.Fail, f"{what}：还有下一页，但飞书没给翻页标记，没读全"):   # 不拿半截材料写日报
+                md.collect(D, run=run, config=CONFIG)
 
     def test_already_written_skips(self):
         f = md.collect(D, run=FakeRun(doc_md="## 📅 2026-11-10（周二）\n"), config=CONFIG)

@@ -159,6 +159,33 @@ class DailyData(Base):
         r = self.run_py(DATA, "daily", "--date", "2026-10-25")
         self.assertTrue(r.stdout.startswith("SKIP："), r.stdout)
 
+    def test_lists_are_read_past_the_first_round(self):
+        """#312：lark-cli 到了页数上限（或只回第一页）不报错，只留 has_more=true。原来只取第一轮，后面的消息、会议、任务悄悄没有。"""
+        mine = [{"id": ME, "role": "assignee"}]
+        self.state({"page": 2,
+                    "im": [msg(f"oc_p{i}", "p2p", f"ou_{i}", f"第{i}条私聊", partner=f"ou_{i}", name=f"同事{i}") for i in range(5)],
+                    "vc": [{"display_info": f"会议{i}\n09:00"} for i in range(5)],
+                    "tasks": [{"summary": f"任务{i}", "members": mine, "created_at": "2026-10-27 09:00"} for i in range(5)]})
+        r = self.run_py(DATA, "daily", "--date", "2026-10-27")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for i in range(5):
+            self.assertIn(f"第{i}条私聊", r.stdout)
+            self.assertIn(f"- 会议：会议{i}", r.stdout)
+            self.assertIn(f"任务{i}｜截止：无", r.stdout)
+        self.assertIn("会议（5 场）", r.stdout)
+        calls = [json.loads(ln)["args"] for ln in (self.root / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        search = [a for a in calls if "+messages-search" in a]
+        self.assertEqual([a[a.index("--page-token") + 1] if "--page-token" in a else None for a in search], [None, "2", "4"])
+
+    def test_list_that_cannot_be_read_to_the_end_fails(self):
+        self.state({"page": 2, "lose_token": True,
+                    "im": [msg(f"oc_p{i}", "p2p", f"ou_{i}", f"第{i}条私聊", partner=f"ou_{i}") for i in range(5)]})
+        r = self.run_py(DATA, "daily", "--date", "2026-10-27")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stdout.startswith("取数失败："), r.stdout)
+        self.assertIn("读当天消息：还有下一页，但飞书没给翻页标记，没读全", r.stdout)
+        self.assertNotIn("第0条私聊", r.stdout)   # 不拿半截材料出稿
+
     def test_lark_failure_exit_1(self):
         self.env["DT_LARK_CLI"] = "false"
         r = self.run_py(DATA, "daily", "--date", "2026-10-27")

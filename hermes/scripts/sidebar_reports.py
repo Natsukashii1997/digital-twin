@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 import memdaily_data as md  # noqa: E402  lark-cli 调用（亚古兽应用、重试、去掉 Hermes 环境变量）共用
 
 HOME = Path(os.environ.get("DT_SIDEBAR_HOME", md.DT_HOME / "sidebar"))
@@ -194,9 +195,9 @@ def parse_group_post(msg):
 def group_post(prev, run):
     """群里常浩发的那期《需求反馈》（同一天发了几次取最后一条），没有返回 None。读群失败直接报错，不退回私聊存档。"""
     title = f"{prev['date']} 需求反馈"
-    data = run("im", "+chat-messages-list", "--chat-id", GROUP, "--start", f"{prev['date']}T00:00:00+08:00",
-               "--order", "asc", "--page-all", "--no-reactions", identity="user") or {}
-    hits = [m for m in data.get("messages") or []
+    msgs = md.listing(run, "读群里上一期", "im", "+chat-messages-list", "--chat-id", GROUP, "--start", f"{prev['date']}T00:00:00+08:00",
+                      "--order", "asc", "--page-all", "--no-reactions", identity="user")   # 翻到底，翻不完报错（#312）
+    hits = [m for m in msgs
             if (m.get("sender") or {}).get("id") == OWNER and m.get("msg_type") == "post" and not m.get("deleted")
             and title in (str(m.get("content", "")).splitlines() or [""])[0]]
     return max(hits, key=lambda m: str(m.get("create_time", ""))) if hits else None
@@ -270,8 +271,11 @@ def fb_group(date=None, run=md.lark):
         raise Invalid([f"{draft['date']} 还没私发常浩确认过，不能发群"])
     if draft.get("group_message_id"):
         raise Invalid([f"{draft['date']} 已经发过群（{draft['group_message_id']}），不重复发"])
-    members = run("im", "+chat-members-list", "--chat-id", GROUP, "--page-all")
-    ids = {u.get("member_id") or u.get("open_id") for u in (members or {}).get("users", [])}
+    members = lark_pages.read_all(lambda extra: run("im", "+chat-members-list", "--chat-id", GROUP, "--page-all", *extra),
+                                  "读群成员", md.Fail, ("users", "truncations"))   # 翻到底，翻不完报错（#312）
+    if members["truncations"]:
+        raise md.Fail("读群成员：飞书按安全设置截断了名单，没读全，不拿半截名单判断谁不在群里")
+    ids = {u.get("member_id") or u.get("open_id") for u in members["users"]}
     at = {q["open_id"]: q.get("name", "?") for it in draft["items"] for q in it["quotes"]}
     missing = [f"{n}（{i}）" for i, n in at.items() if i not in ids]
     if missing:
