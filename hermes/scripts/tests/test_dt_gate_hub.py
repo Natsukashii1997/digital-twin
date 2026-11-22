@@ -628,6 +628,54 @@ class ChecksTest(unittest.TestCase):
                     self.assertEqual(q[0], "dt-gate")                                 # 以 dt-gate 身份查它自己的账本
                     self.assertEqual(q[2][q[2].index("--max-card") + 1], "5")
 
+    # ---------- L3 第 1 轮：max_card 在 hold 之前读，读完到停中台之间新建的卡片 ----------
+    # 引擎（abc8d41 kernel/decide.ts:105）给卡片编号是 id = next[cards] + 1，只增不减：窗口里新建的卡片号都 > 读到的 max_card。
+    def test_window_card_open_at_stop_aborts_migrate_with_pre_hold_max(self):
+        """读完 max_card 后、停中台前中台新建了一张卡（还开着）：停下以后核出来、整条退回；hold 登记的是停写前读的号。"""
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
+        stopped = {"v": False}
+        log = []
+        run = self.fake_recovery(log=log)
+
+        def snap(*a):                                  # 停中台之前最大号 5；停下以后多出卡片 6，还开着
+            return self.snap(max_card=6, live_cards=1) if stopped["v"] else self.snap(max_card=5)
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "snapshot_as", snap), \
+                mock.patch.object(H, "unload", lambda *a: stopped.update(v=True)), \
+                mock.patch.object(H, "wait_port_free"), mock.patch.object(H, "start_owner_agent"), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(H.Stop, "没答完的卡片"):
+                H.cmd_migrate(self.host, self.a())
+        hold = [c for c in log if c[1] == "hold"][0][2]
+        self.assertEqual(hold[hold.index("--max-card") + 1], "5")
+        self.assertIsNone(run.state["hold"])                                     # 退回：主账号原样，结束停写
+        self.assertIsNone(H.load_state())
+
+    def test_rollback_flags_a_window_card_with_the_real_cards_after(self):
+        """回滚核卡片号用真的恢复闸脚本（以 dt-gate 身份、它自己的家目录）：dt-gate 发过窗口里那张卡（号 = 搬家时最大号 + 1）
+        就保持主账号停写；只有号不大于最大号的卡片才放行。停写前读的号只会偏小，偏小只会多拦、不会漏。"""
+        import autoloop_feishu as F
+        gate_home = self.users["dt-gate"]
+        cards = gate_home / "Library/Application Support/DigitalTwin/autoloop/cards.db"
+        current = {"repo": {"dir": str(REPO)}}
+        with mock.patch.object(H, "recovery_as", REAL_RECOVERY_AS):
+            self.assertTrue(H.gate_cards_clean(self.host, current, 5))                # dt-gate 还没有账本：干净，也不建库
+            self.assertFalse(cards.exists())
+            with mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(cards)}):
+                with F.db(write=True) as con:
+                    con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
+                                "VALUES (5, ?, 'oc_x', 'ask', 2, 1)", ("a" * 16,))
+            self.assertTrue(H.gate_cards_clean(self.host, current, 5))                # 号 = 最大号：搬家前就有的
+            with mock.patch.dict(os.environ, {"DT_AUTOLOOP_CARDS_DB": str(cards)}):
+                with F.db(write=True) as con:
+                    con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
+                                "VALUES (6, ?, 'oc_x', 'ask', 2, 1)", ("b" * 16,))
+            with mock.patch("sys.stdout", io.StringIO()) as out:
+                self.assertFalse(H.gate_cards_clean(self.host, current, 5))           # 窗口卡片 6：拦下
+            self.assertIn("卡片 6", out.getvalue())
+            with mock.patch("sys.stdout", io.StringIO()):
+                self.assertFalse(H.gate_cards_clean(self.host, current, 4))           # 号读得偏小：多拦，不漏
+
     def test_worker_launchers_must_match_the_staged_copy(self):
         """搬家后凭证镜像在 /Users/Shared/dt-gate/：装着的工人启动脚本要换成副本里的新版；没装的不拦。"""
         (self.d / "ops").mkdir()
