@@ -8,8 +8,9 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
 
 每一轮：
   1. 准入（不过就不启动 CLI）：门卫规则在生效——root 每 5 分钟核对后写的状态文件
-     （/Library/Application Support/DigitalTwin/pf-dt-worker.status）是 state=ok、10 分钟内刷新过、管着 dt-worker；
+     （/Library/Application Support/DigitalTwin/pf-dt-worker.status）是 state=ok、本次开机写的、10 分钟内刷新过、管着 dt-worker；
      规则没装上、正在加载、加载失败或核对不过，都不开工（常浩 11-20 定，ADR-015 0E-1 L3 第 3 轮 P1-03）。
+     正在重新加载、刚唤醒没刷新、刚开机还没核对这三种临时情况给「没跑成」由中台重派，其余给「停下了」（审查第 4 轮 P2-1）。
      这一轮的事件都来自 hermes 来源、事项（subject）是同一个任务单号；派单事件的类型是
      dispatch.<仓库>.<执行方>.write、detail 里的单号对得上；回答和复查事件沿用这张单上次派单的代次。
      读工人只读的凭证镜像（/Users/Shared/dt-gate/grants/status.json，0E-2 起由 dt-gate 写）和任务单（tasks/<单号>.md）：凭证有效、没过期、
@@ -143,22 +144,39 @@ def pf_status_path():
     return Path(os.environ.get("DT_PF_STATUS") or "/Library/Application Support/DigitalTwin/pf-dt-worker.status")
 
 
+def boot_time():
+    """本次开机的时间（秒）；读不出返回 None。DT_BOOT_TIME 只给测试用（CI 不是 macOS，没有 kern.boottime）。"""
+    if os.environ.get("DT_BOOT_TIME"):
+        return os.environ["DT_BOOT_TIME"]
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"\{ sec = (\d+),", out)
+    return m.group(1) if m else None
+
+
 def pf_problem(now_ts=None):
-    """门卫规则不在生效就返回原因，在生效返回 None（L3 第 3 轮 P1-03：加载失败时 pf 保留旧规则，只写状态拦不住人，
-    要在开工前看状态）。状态文件由 root 写（ops/dt_worker_pf.sh apply）、所有人可读、工人改不了。"""
+    """门卫规则不在生效就返回（原因, 是否临时），在生效返回 None（L3 第 3 轮 P1-03：加载失败时 pf 保留旧规则，
+    只写状态拦不住人，要在开工前看状态）。状态文件由 root 写（ops/dt_worker_pf.sh apply）、所有人可读、工人改不了。
+    临时的两种（正在重新加载、刚唤醒还没刷新、刚开机还没写）给「没跑成」由中台重派，其余给「停下了」（审查第 4 轮 P2-1）。"""
     p = pf_status_path()
     try:
         text = p.read_text()
         age = (now_ts or time.time()) - p.stat().st_mtime
     except OSError:
-        return "门卫规则没装（没有状态文件）"
+        return "门卫规则没装（没有状态文件）", False
     fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
+    if fields.get("state") == "applying" and 0 <= age <= PF_STALE_SECONDS:
+        return "门卫规则正在重新加载", True
     if fields.get("state") != "ok":
-        return f"门卫规则没在生效（{fields.get('state') or '状态不明'}：{fields.get('reason', '').replace('_', ' ')[:80]}）"
-    if fields.get("enabled") != "yes" or PF_ACCOUNT not in fields.get("users", "").split(","):
-        return "门卫规则的状态不对（pf 没开或没管上 dt-worker）"
+        return f"门卫规则没在生效（{fields.get('state') or '状态不明'}：{fields.get('reason', '').replace('_', ' ')[:80]}）", False
+    if fields.get("enabled") != "yes" or PF_ACCOUNT not in fields.get("users", "").split(",") or not fields.get("boot"):
+        return "门卫规则的状态不对（pf 没开、没管上 dt-worker，或状态文件是旧版）", False
+    if fields["boot"] != boot_time():           # 重启后旧的 ok 不算数：开机任务还没写这次开机的状态（审查第 4 轮 P2-2）
+        return "门卫规则还没在这次开机后核对过", True
     if not 0 <= age <= PF_STALE_SECONDS:
-        return f"门卫规则 {int(age // 60)} 分钟没刷新，开机任务可能停了"
+        return f"门卫规则 {int(age // 60)} 分钟没刷新，开机任务可能停了", True
     return None
 
 
@@ -271,7 +289,9 @@ def admit(executor, repo, context, now, check_budget=True):
         raise Refused("事件对象不是任务单号")
     pf = pf_problem()
     if pf:                                      # 交接前重核也走这里：跑到一半规则掉了，这一轮同样不交接
-        raise Refused(f"{pf}，工人不开工", task_id)
+        if pf[1]:                               # 临时的：没跑成，中台过几分钟重派；交接前遇到的，改动已在本地提交，下一轮接着交
+            raise Retry(f"{pf[0]}，工人这一轮不开工")
+        raise Refused(f"{pf[0]}，工人不开工", task_id)
     dispatch_type = f"dispatch.{repo}.{executor}.write"
     gens = []
     for e in events:

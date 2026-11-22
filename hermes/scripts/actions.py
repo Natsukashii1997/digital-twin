@@ -291,7 +291,9 @@ POLICY_OWNER = "策略合并"      # agreement.csv 的 owner 列：merge_act 按
 def policy_book(w):
     """按策略合并的账本（merge/auto-merges.jsonl，#257）在统计日内的三样，给行动记录和日报「替你合并了什么」用：
     merged：合上的（时间取记结果的那一行）；unsettled：发了合并命令、结果还不明的；
-    bypass：PR 已合并、账本里却没有合并执行器记录的（会话或网页上直接合的），按合并官发现的时间算。"""
+    bypass：PR 已合并、账本里却没有合并执行器记录的（会话或网页上直接合的），按合并官发现的时间算；
+    只认合并时间在策略签署之后的（记录带 policy_signed_at）。没带这一项的是 #322 之前的旧版记的，
+    会把签字之前合的 PR 也算进来，不报。"""
     import merge_policy as MP            # 只用它读账本；装了日报没装它时，这个来源记「取不到」，别的来源照常
     out = {"merged": [], "unsettled": [], "bypass": []}
     for m in MP.merges(MERGE_BOOK):
@@ -307,7 +309,8 @@ def policy_book(w):
         elif m["status"] == "merged_unknown" and inside(stamp(m["done_at"]), w):     # 已合并、证明不了是这次合的：只在核对那天报
             out["unsettled"].append({**base, "at": stamp(m["done_at"]), "unknown_merge": True})
     for r in MP.lines(MERGE_BOOK)[0]:
-        if r["event"] == "bypass" and inside(stamp(r["at"]), w):
+        if (r["event"] == "bypass" and inside(stamp(r["at"]), w)
+                and r.get("policy_signed_at") and MP.merged_since(r.get("merged_at"), r["policy_signed_at"])):
             out["bypass"].append({k: r.get(k) for k in ("repo", "pr", "title", "head", "tier", "suggestion", "merged_at")}
                                  | {"at": stamp(r["at"])})
     return out

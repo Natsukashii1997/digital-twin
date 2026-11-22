@@ -51,9 +51,17 @@ uid_ok() {
   uid=$(id -u "$1" 2>/dev/null) || return 1
   case $uid in ''|*[!0-9]*) return 1 ;; esac
   [ "$uid" -gt 0 ] || return 1
+  list=$(user_list) || return 1
+  [ "$(printf '%s\n' "$list" | awk -v id="$uid" '$2 == id {print $1}')" = "$1" ]
+}
+
+# 目录服务里的全部账号，一行「名字 uid」。出错或查出空返回 1：是「查不清」，不能当成「没有这个账号」
+# （审查第 4 轮 P1-1：开机头一分钟目录服务常没就绪，id 查不到不等于账号不存在）。
+user_list() {
+  local list
   list=$(dscl . -list /Users UniqueID 2>/dev/null) || return 1
   [ -n "$list" ] || return 1
-  [ "$(printf '%s\n' "$list" | awk -v id="$uid" '$2 == id {print $1}')" = "$1" ]
+  printf '%s\n' "$list"
 }
 
 # 是不是某个组的成员：0 是，1 不是，2 查不清（组不存在、目录服务出错）。

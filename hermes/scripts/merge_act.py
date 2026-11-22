@@ -1006,12 +1006,14 @@ def auto_scan(rules, open_now, settled):
     covered = lambda repo: bool((act_repos(rules).get(repo.split("/")[-1]) or {}).get("ci"))  # noqa: E731
     said = reconcile_unsettled()                           # 1. 上次结果不明的：只读核对，不重发
     done = MP.bypassed()                                   # 2. 已合并却没经合并执行器的：留一条记录
+    since = MP.active(rules)[2]["signed_at"]               # 只算这次签了以后合的：签之前（或关着的时候）合的本来就不归策略管
     for r in settled:
         key = (r["repo"], r["pr"])
         if (r["outcome"] == mo.MERGED and covered(r["repo"]) and not r.get("owner") and key not in done
+                and MP.merged_since(r["outcome_at"], since)
                 and not MP.find_merged(*key, statuses=("merged", "merged_unknown"))):      # 来源不明的另有记录，不重复算绕过
             MP.append({"event": "bypass", "repo": r["repo"], "pr": r["pr"], "title": r["title"], "head": r["outcome_head"],
-                       "tier": r["tier"], "suggestion": r["suggestion"], "merged_at": r["outcome_at"],
+                       "tier": r["tier"], "suggestion": r["suggestion"], "merged_at": r["outcome_at"], "policy_signed_at": since,
                        "note": "PR 已合并，账本里没有合并执行器的记录（会话或网页上直接合的）"})
             done.add(key)
     now_open = {(f["repo"], str(f["pr"])): f for f in open_now}
