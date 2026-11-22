@@ -1316,6 +1316,7 @@ while :; do sleep 0.05; done
         (d / "tcpdump").write_text(self.FAKE_TCPDUMP)
         (d / "tcpdump").chmod(0o755)
         self.v.TCPDUMP = str(d / "tcpdump")
+        self.v.STOP_GRACE = 0
         for k in ("DROPS", "EARLY"):
             os.environ.pop(k, None)
         os.environ.update(env)
@@ -1339,6 +1340,7 @@ while :; do sleep 0.05; done
         self.assertEqual([b[:4] for b in w.births], [("tcp4", 5000, 50001, "SYN"), ("tcp6", 6000, 50002, "SYN"),
                                                      ("tcp4", 53, 50003, "UDP")])
         self.assertEqual(w.births[0][4], 1732245600.123456)
+        self.assertEqual([b[5] for b in w.births], ["127.0.0.1", "::1", "223.5.5.5"])   # 目标地址（IPv6 标准写法）
         hits = self.v.half_open(w, [("dt-worker", {**self.t("::1", 6000)}, 50002, 1732245600.0)], tail=3.0)
         self.assertEqual([(h["port"], h["state"]) for h in hits], [(6000, "SYN")])
 
@@ -1362,6 +1364,51 @@ while :; do sleep 0.05; done
             w.ready.wait = lambda t=None: False
             w.begin()
         self.assertEqual(real, self.v.threading.Event.wait)
+
+    def test_synwatch_abort_and_partial_begin(self):
+        """子 agent 二审 P2-1：SynWatch 要有 abort（出错收尾时停掉 root 的 tcpdump）；几块网卡里后一块起不来时，
+        前面已经起来的要停掉，原来的「不完整」原因原样抛出，不被别的异常盖掉。"""
+        self.fake_tcpdump()
+        a, b = self.v.SynWatch("lo0", {5000}), self.v.SynWatch("en0", {443})
+        b.ready.wait = lambda t=None: False
+        ws = self.v.Watches([a, b])
+        with self.assertRaises(self.v.Incomplete):
+            ws.begin()
+        a.proc.wait(5)
+        self.assertIsNotNone(a.proc.poll())                    # 前一块已经停了
+        c = self.v.SynWatch("lo0", {5000})
+        c.begin()
+        c.abort()
+        c.proc.wait(5)
+        self.assertIsNotNone(c.proc.poll())
+        with self.assertRaises(self.v.Incomplete):             # 没有要抓的端口：不起全抓
+            self.v.SynWatch("lo0")
+
+    def test_half_open_checks_destination(self):
+        """子 agent 二审 P2-2：抓包记得到目标地址；靶子按 IP 写的，目标地址对不上就不算（整机发往 53 的 UDP 来源端口随机，
+        别的进程碰巧用同一个端口）；按域名写的不核地址；映射地址按 IPv4 比。"""
+        w = type("W", (), {})()
+        w.births = [("tcp4", 53, 50001, "UDP", 10.2, "192.168.1.1"), ("tcp4", 53, 50002, "UDP", 10.2, "223.5.5.5"),
+                    ("tcp4", 443, 50003, "SYN", 10.2, "1.2.3.4"), ("tcp4", 5000, 50004, "SYN", 10.2, "127.0.0.1")]
+        dns, feishu = self.t("223.5.5.5", 53, "dns"), self.t("open.feishu.cn", 443)
+        mapped = self.t("::ffff:127.0.0.1", 5000)
+        hits = self.v.half_open(w, [("dt-worker", dns, 50001, 10.0), ("dt-worker", dns, 50002, 10.0),
+                                    ("dt-worker", feishu, 50003, 10.0), ("dt-worker", mapped, 50004, 10.0)], tail=3.0)
+        self.assertEqual([h["lport"] for h in hits], [50002, 50003, 50004])
+        self.assertEqual(self.v.host_of("2400:3200:0:0::1.53"), "2400:3200::1")
+
+    def test_root_control_retries_public(self):
+        """子 agent 二审 P2-4：root 对照连公网偶尔丢包：没连上的再试两次，本机靶子不重试。"""
+        tries = []
+
+        def one(t, timeout=3, hold=0.0, lrange=None):
+            tries.append(t["host"])
+            return "answer:1" if tries.count(t["host"]) >= 2 else "timeout"
+        self.v.probe_one = one
+        got, _ = self.v.probe_logged([self.t("8.8.8.8", 53, "dns"), self.t("127.0.0.1", 5000)])
+        self.assertEqual(got, ["answer:1", "timeout"])
+        self.assertEqual(tries.count("8.8.8.8"), 2)
+        self.assertEqual(tries.count("127.0.0.1"), 1)
 
     def test_egress_ifaces(self):
         """公网目标走哪块网卡：route -n get 查；IPv6 没路由跳过（那项本来可选），IPv4 查不出算不完整。"""

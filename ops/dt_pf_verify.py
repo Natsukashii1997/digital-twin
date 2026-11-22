@@ -38,6 +38,7 @@ lsof / ifconfig 出错、开不了靶子、压力模式的重新加载没覆盖�
 import errno
 import json
 import os
+import ipaddress
 import random
 import re
 import signal
@@ -65,6 +66,7 @@ ON_LPORT = None     # verify 以账号身份跑时：每次 TCP / UDP 尝试报�
 CTRL_HOLD = 0.6     # root 对照连上后拿着多久（秒），见 probe_logged
 CTRL_LPORTS = (20000, 40000)   # 对照组（root、dt-gate）连的时候用的本地端口区间；受管账号用系统临时端口（49152 起），两边不撞
 TCPDUMP = "/usr/sbin/tcpdump"
+STOP_GRACE = 1.5    # 停抓包前等几秒
 GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dt_root_guard.sh")
 ECHO = b"dt-verify"
 DNS_Q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x06feishu\x02cn\x00" + b"\x00\x01\x00\x01"
@@ -213,8 +215,16 @@ def probe_logged(targets, lrange=CTRL_LPORTS):
     global ON_LPORT
     recs = []
     ON_LPORT = lambda port, at: recs.append((CUR, port, at))
+    global CUR
     try:
-        return probe(targets, lrange, CTRL_HOLD), recs
+        got = probe(targets, lrange, CTRL_HOLD)
+        for i, t in enumerate(targets):          # 公网偶尔丢一个包：root 对照没连上的再试两次（子 agent 二审 P2-4）
+            for _ in range(2):
+                if reached(got[i]) or t["host"] not in PUBLIC_HOSTS:
+                    break
+                CUR = i
+                got[i] = probe_one(t, hold=CTRL_HOLD, lrange=lrange)
+        return got, recs
     finally:
         ON_LPORT = None
 
@@ -412,11 +422,14 @@ class SynWatch:
         if udp_ports:
             parts.append("(udp and (" + " or ".join(f"dst port {p}" for p in sorted(set(udp_ports))) + "))")
         self.expr = " or ".join(parts)
+        if not self.expr:                       # 过滤条件为空等于全抓：不该发生
+            raise Incomplete(f"{iface} 上没有要抓的端口")
         self.ready, self.proc, self.threads = threading.Event(), None, []
 
     def begin(self):
         """起 tcpdump，等它报「listening on」（抓包点已挂上）再返回；起不来算测试不完整。"""
-        self.proc = subprocess.Popen([TCPDUMP, "-i", self.iface, "-n", "-l", "-tt", "-s", "128", self.expr],
+        # -p 不开混杂模式；--immediate-mode 包一到就交出来，停下时内核缓冲里不积压（子 agent 二审 P2-5）
+        self.proc = subprocess.Popen([TCPDUMP, "-i", self.iface, "-p", "--immediate-mode", "-n", "-l", "-tt", "-s", "128", self.expr],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
         self.threads = [threading.Thread(target=self.read_out, daemon=True), threading.Thread(target=self.read_err, daemon=True)]
         for th in self.threads:
@@ -444,6 +457,7 @@ class SynWatch:
         if self.proc.poll() is not None:
             bad.append(f"{self.iface} 上的抓包中途退了（退出码 {self.proc.returncode}）")
         else:
+            time.sleep(STOP_GRACE)                 # 最后几个包还在路上：先等一会儿再停
             self.proc.send_signal(signal.SIGINT)   # tcpdump 收到 SIGINT 会打印抓包统计再退
             try:
                 self.proc.wait(10)
@@ -459,6 +473,10 @@ class SynWatch:
         elif int(m.group(1)):
             bad.append(f"{self.iface} 上的抓包内核丢了 {m.group(1)} 个包，看不全")
         return bad
+
+    def abort(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
 
 
 PKT = re.compile(r"^(\d+\.\d+) (IP6?) (\S+) > (\S+?): (.*)$")
@@ -480,12 +498,16 @@ def parse_pkt(line):
         proto = "SYN"
     else:
         proto = "UDP"
-    return ("tcp6" if ip == "IP6" else "tcp4", dport, sport, proto, float(ts))
+    return ("tcp6" if ip == "IP6" else "tcp4", dport, sport, proto, float(ts), host_of(dst))
 
 
-    def abort(self):
-        if self.proc and self.proc.poll() is None:
-            self.proc.kill()
+def host_of(addr):
+    """tcpdump 打印的「地址.端口」里的地址（IPv6 不截短），统一成标准写法；认不出就原样返回。"""
+    a = addr.rpartition(".")[0]
+    try:
+        return str(ipaddress.ip_address(a))
+    except ValueError:
+        return a
 
 
 def capture(iface, tcp_ports=(), udp_ports=()):
@@ -522,7 +544,8 @@ class Watches:
 def out_watch(ts, hosts):
     """出站包证据要抓的：发往本机 TCP 靶子的 SYN（lo0），发往公网 TCP 443 的 SYN 和公网 DNS（UDP 53）包（默认路由的网卡）。"""
     pub = [t for t in ts if evidenced(t, hosts) and not local_tcp(t, hosts)]
-    ws = [capture("lo0", {t["port"] for t in ts if local_tcp(t, hosts)})]
+    lo = {t["port"] for t in ts if local_tcp(t, hosts)}
+    ws = [capture("lo0", lo)] if lo else []
     for i in (egress_ifaces(sorted({t["host"] for t in pub})) if pub else []):
         ws.append(capture(i, {t["port"] for t in pub if t["kind"] == "tcp"}, {t["port"] for t in pub if t["kind"] == "dns"}))
     return Watches(ws)
@@ -545,15 +568,30 @@ def half_open(watch, attempts, slack=0.3, tail=10.0):
     """attempts：[(账号, 靶子, 本地端口, 时间)]。服务端（靶子端口）上新出现的、对端端口正是这次尝试的本地端口、出现时间在
     这次尝试之后不久的连接，就是这次的 SYN 过了门卫（哪怕握手没完成）。返回命中的明细。"""
     idx = {}
-    for fam, lp, rp, state, first in watch.births:
-        idx.setdefault((lp, rp), []).append((first, state, fam))
+    for b in watch.births:
+        fam, lp, rp, state, first = b[:5]
+        idx.setdefault((lp, rp), []).append((first, state, fam, b[5] if len(b) > 5 else None))
     hits = []
     for user, t, lport, at in attempts:
-        for first, state, fam in idx.get((t["port"], lport), []):
+        want = ip_of(t["host"])
+        for first, state, fam, dst in idx.get((t["port"], lport), []):
+            # 抓包记得到目标地址：靶子是按 IP 写的，就要求目标地址对得上（整机发往 53 的 UDP 来源端口是随机的，
+            # 别的进程碰巧用到同一个来源端口，不能算到受管账号头上，子 agent 二审 P2-2）
+            if dst and want and dst != want:
+                continue
             if at - slack <= first <= at + tail:
                 hits.append({"user": user, "kind": t["kind"], "host": t["host"], "port": t["port"], "lport": lport,
                              "at": at, "seen": round(first, 3), "state": state})
     return hits
+
+
+def ip_of(host):
+    """靶子按 IP 写的返回标准写法（映射地址按 IPv4），按域名写的返回 None。"""
+    try:
+        a = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    return str(a.ipv4_mapped) if getattr(a, "ipv4_mapped", None) else str(a)
 
 
 def unseen(watch, recs, ts, got, hosts, slack=0.3, tail=4.0):
@@ -1476,7 +1514,8 @@ def stress(seconds, interval=1.0):
         own.close()
         if watch:
             watch.abort()
-    report.update(leaks=leaks, hits_on_own_targets=own.hits, live_snapshots=live, incomplete=incomplete)
+    leak_hits = foreign_hits(own.hits)        # 和 verify 一样只算来源端口不在对照区间的（root 对照晚到的连接不算）
+    report.update(leaks=leaks, hits_on_own_targets=own.hits, leak_hits=leak_hits, live_snapshots=live, incomplete=incomplete)
     path = write_report("stress-", report)
     for u, rows in report["accounts"].items():
         print(f"== {u}")
@@ -1485,15 +1524,15 @@ def stress(seconds, interval=1.0):
             print(f"  {row['what']} {row['host']}:{row['port']}：试了 {row['n']} 次，连上 {k} 次（{row['got']}）")
     rl = report.get("reloads", {})
     print(f"重新加载 {rl.get('count', 0)} 次" + (f"（{rl['mode']}）" if rl.get("mode") else ""))
-    for h in own.hits:
+    for h in leak_hits:
         print(f"  root 靶子收到：{h['kind']} {h['host']}:{h['port']} ← {h['peer']}，离最近一次重新加载 {h.get('ms_from_reload')} 毫秒")
     for x in half:
         print(f"  抓到漏出的包：{x['user']} → {x['kind']} {x['host']}:{x['port']}（本地端口 {x['lport']}）自己没连上，"
               f"但它的 {x['state']} 包过了门卫；离最近一次重新加载 {x['ms_from_reload']} 毫秒")
     if "half_open_checked" in report:
         print(f"抓包核对了受管账号连本机 TCP、公网 TCP、公网 DNS 的 {report['half_open_checked']} 次尝试")
-    if leaks or own.hits or live or half:
-        print(f"有漏过：账号报告 {len(leaks)} 次，root 靶子收到 {len(own.hits)} 次，当场抓到现场 {len(live)} 次，"
+    if leaks or leak_hits or live or half:
+        print(f"有漏过：账号报告 {len(leaks)} 次，root 靶子收到 {len(leak_hits)} 次，当场抓到现场 {len(live)} 次，"
               f"抓到漏出的包 {len(half)} 次；记录在 {path}")
         return 1
     if incomplete:
