@@ -127,12 +127,16 @@ class Busy(Rejected):
 
 
 class TaskLock:
-    """持着这张单任务锁的凭证（续审第 4 轮 P1-08-01）：只有 task_lock 在真拿到锁之后才交出，离开 with 就作废；
-    是进程里的对象，别的进程拿不到。resume_dispatch(lock=...) 认它而不是一个「我已持锁」的布尔值。"""
-    __slots__ = ("task_id", "path", "fd", "held")
+    """持着这张单任务锁的凭证（续审第 4 轮 P1-08-01）：只有 task_lock 在真拿到锁之后才交出，登记在 _LIVE_LOCKS 里，
+    离开 with 就从登记里拿掉（作废）；是进程里的对象，别的进程拿不到。resume_dispatch(lock=...) 认它而不是一个
+    「我已持锁」的布尔值。"""
+    __slots__ = ("task_id", "path", "fd")
 
     def __init__(self, task_id, path, fd):
-        self.task_id, self.path, self.fd, self.held = task_id, path, fd, True
+        self.task_id, self.path, self.fd = task_id, path, fd
+
+
+_LIVE_LOCKS = set()        # task_lock 发出、还没离开 with 的凭证；holds 先查这里，手搓的、作废的凭证进不来
 
 
 def _lock_file(task_id, path=None):
@@ -159,18 +163,19 @@ def task_lock(task_id, path=None):
         except BlockingIOError:
             raise Busy("这张单另有入口正在处理（秘书 ② / ③、受信发布或另一次续接），等它做完")
         token = TaskLock(task_id, str(f), fd)
+        _LIVE_LOCKS.add(token)
         yield token
     finally:
-        if token is not None:
-            token.held = False
+        _LIVE_LOCKS.discard(token)
         os.close(fd)
 
 
 def holds(lock, task_id, path=None):
-    """lock 是不是调用方此刻持着的、这张单的任务锁凭证：类型对、没作废、单号和锁文件对得上、文件描述符还指着那个锁文件，
-    并且在这个描述符上再拿一次排他锁马上成功（flock 按打开的文件算：别人持着时这一步一定失败）。
-    「试着拿锁被挡」只说明有人持着，不说明是调用方，所以不拿它当证明（续审第 4 轮 P1-08-01）。"""
-    if type(lock) is not TaskLock or not lock.held or lock.task_id != task_id:
+    """lock 是不是调用方此刻持着的、这张单的任务锁凭证：是 task_lock 真拿到锁后发出、还没离开 with 的那一个（在 _LIVE_LOCKS
+    登记里；手搓的、作废的都不在，核实本身不碰锁），单号和锁文件对得上，文件描述符还指着现在那个锁文件（锁文件被删掉重建过，
+    别人就能在新文件上拿到「同一把」锁，这时不认）。「试着拿锁被挡」只说明有人持着，不说明是调用方，所以不拿它当证明
+    （续审第 4 轮 P1-08-01）。"""
+    if type(lock) is not TaskLock or lock not in _LIVE_LOCKS or lock.task_id != task_id:
         return False
     f = _lock_file(task_id, path)
     try:
@@ -179,7 +184,6 @@ def holds(lock, task_id, path=None):
         a, b = os.fstat(lock.fd), os.stat(f)
         if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
             return False
-        fcntl.flock(lock.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return False
     return True

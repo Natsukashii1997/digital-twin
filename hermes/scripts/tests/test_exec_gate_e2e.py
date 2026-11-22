@@ -20,6 +20,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import urllib.parse
@@ -162,6 +163,50 @@ class ExecGateEndToEnd(HubFixture):
         self.assertGreater(run["not_before"], G.dt.datetime.now(G.dt.timezone.utc).isoformat())   # 排在以后重派
         self.assertEqual([x for x in self.calls() if x["argv"][:1] == ["-p"]], [])               # CLI 没启动
         self.assertFalse((self.outbox / tid).exists())
+
+    def test_in_flight_event_of_a_voided_generation_reaches_the_real_hub_late(self):
+        """0D 续审第 4 轮 P2-07（真中台）：第 1 代的续接事件由网关真领走、POST 停在半路（sent=2），这时冻结、记更正、
+        常浩私聊恢复到第 2 代，再放行旧 POST。中台本身不核代次，照样收下、排一轮；启动脚本按刷新过的镜像拦下：
+        不启动 CLI、本轮以「停下了」结束、不重派；网关把旧事件记成已送到。之后第 2 代的更正照常续接、跑完、交接。"""
+        tid = self.setup_dispatch()
+        (run,) = self.wait_runs(tid, 1)
+        self.assertEqual(run["state"], "done", run)
+        gate, posting, box = threading.Event(), threading.Event(), []
+
+        def paused(body):
+            posting.set()
+            self.assertTrue(gate.wait(60))
+            return G.post_event(body)
+
+        t = threading.Thread(target=lambda: box.append(G.resume_dispatch(tid, "redispatch", "中台放弃了", post=paused)))
+        t.start()
+        self.assertTrue(posting.wait(30))                                      # 已领走、请求停在半路
+        with G.tx() as con:
+            (old, sent) = con.execute("SELECT event_key, sent FROM hub_events WHERE task_id = ? AND kind = 'redispatch'",
+                                      (tid,)).fetchone()
+        self.assertEqual(sent, 2)
+        code = G.freeze(tid, "推翻")["freeze_code"]
+        G.record_resolution(tid, 1, "d-1", "常浩重选，旧的不要了")
+        G.unfreeze(self.say(f"恢复 {tid} {code}"))
+        self.assertEqual(json.loads(self.status.read_text())["tasks"][tid]["generation"], 2)
+        gate.set()                                                             # 旧 POST 放行，到达真中台
+        t.join(60)
+        self.assertTrue(box and box[0]["send"][0].get("sent"), box)
+        with G.tx() as con:
+            self.assertEqual(con.execute("SELECT sent FROM hub_events WHERE event_key = ?", (old,)).fetchone()[0], 1)
+        runs = self.wait_runs(tid, 2)
+        self.assertEqual(runs[-1]["state"], "done", runs[-1])                  # 本轮结束，不重派
+        self.assertEqual(runs[-1]["attempts"], runs[0]["attempts"])
+        self.assertTrue(runs[-1]["summary"].startswith("停下了"), runs[-1])
+        self.assertEqual(len([x for x in self.calls() if x["argv"][:1] == ["-p"]]), 1)   # CLI 没再启动
+        cards = self.hub_rows("SELECT title, text FROM cards WHERE lane = ?", (tid,))
+        self.assertTrue(any("第 1 代已作废" in (x["text"] or "") for x in cards), cards)
+        self.assertEqual(json.loads((self.outbox / tid / "handoff.json").read_text())["generation"], 1)   # 没有新交接
+        G.resume_dispatch(tid, "correction", "换代后更正")                     # 第 2 代：不被旧事件挡
+        runs = self.wait_runs(tid, 3)
+        self.assertEqual(runs[-1]["state"], "done", runs[-1])
+        self.assertEqual(len([x for x in self.calls() if x["argv"][:1] == ["-p"]]), 2)
+        self.assertEqual(json.loads((self.outbox / tid / "handoff.json").read_text())["generation"], 2)
 
     def wait_runs(self, lane, n, timeout=90):
         end = time.monotonic() + timeout

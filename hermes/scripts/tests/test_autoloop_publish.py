@@ -269,7 +269,8 @@ class GrantAtPublish(PublishBase):
         ① 镜像已刷新时到 → 工人准入按镜像拦下：不启动 CLI、不交接；
         ② 冻结提交到镜像刷新之间到（这里把镜像换回冻结前的样子模拟）→ 工人会跑、会交接（工人只看镜像），交接前重核同样看旧镜像，
            受信发布按凭证库现读拦下：不推、不开 PR；
-        ③ 这张单跑过第 2 代以后再到的第 1 代事件 → 工人按本单状态拦下（比上次跑的旧）。第 2 代照常跑完、交接。"""
+        ③ 这张单跑过第 2 代以后、镜像又是旧的时候到的第 1 代事件 → 镜像拦不住，工人按本单状态拦下（比上次跑的旧）。
+        第 2 代照常跑完、交接。"""
         tid = self.worked()
 
         def down(body):
@@ -298,8 +299,10 @@ class GrantAtPublish(PublishBase):
         r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
         self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
         self.assertEqual(self.handoff(tid)["generation"], 2)
-        r, calls = self.run_turn([late])                                          # ③ 第 2 代跑过以后
-        self.assert_stopped(r, calls, "第 1 代")
+        self.status.write_text(stale)                                             # ③ 第 2 代跑过以后，镜像又是旧的
+        r, calls = self.run_turn([late])
+        self.assert_stopped(r, calls, "第 1 代比这张单上次跑的旧")
+        self.status.write_text(fresh)
         self.assertEqual(self.handoff(tid)["generation"], 2)
 
     def test_manifest_cannot_choose_repo_or_executor(self):

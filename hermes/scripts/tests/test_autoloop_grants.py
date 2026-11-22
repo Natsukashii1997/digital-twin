@@ -656,6 +656,37 @@ class Resume(Base):
         self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
         self.assertEqual(events(), 1)
 
+    def test_forged_or_expired_token_is_refused_without_taking_the_lock(self):
+        """送审前预审：没人持锁时，手搓的凭证也不认，而且核实本身不会顺手拿锁（之后照常能拿）；离开 with 的凭证作废，
+        哪怕它的描述符号被同一张单的新凭证复用、新凭证正持着锁，也不认；锁文件被删掉重建过（别人能在新文件上再拿一把），
+        手里的凭证也不认。"""
+        tid = self.new_task()
+        f = G._lock_file(tid)
+        with G.task_lock(tid):
+            pass
+        fd = os.open(f, os.O_RDWR)
+        try:
+            with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=G.TaskLock(tid, str(f), fd))
+            with G.task_lock(tid):                                                # 没被顺手占住
+                pass
+        finally:
+            os.close(fd)
+        with G.task_lock(tid) as old:
+            pass
+        with G.task_lock(tid) as mine:
+            self.assertEqual(old.fd, mine.fd)                                     # 描述符号复用了（最小可用号）
+            with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=old)
+            out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
+        self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
+        self.sql("UPDATE hub_events SET sent = 1 WHERE event_key = ?", (out["event_key"],))
+        with G.task_lock(tid) as mine:
+            os.unlink(f)
+            with G.task_lock(tid):                                                # 新文件上又拿到一把
+                with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                    G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
+
     def test_task_lock_lives_next_to_the_grants_db(self):
         """续审第 3 轮：任务锁文件在凭证库旁边的 task-locks/，写同一个凭证库的进程（续接、受信发布、秘书 ② / ③）必然拿同一把，
         不靠各自的环境变量对齐；被持着时续接拒绝、另一次拿锁抛 Busy；放了就能拿。"""
