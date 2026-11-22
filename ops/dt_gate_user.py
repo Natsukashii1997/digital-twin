@@ -160,6 +160,7 @@ def snapshot(home):
         pauses = [r[0] for r in db.execute("SELECT name FROM pauses ORDER BY name")]
         keys = [f"{k}:{n}" for k, n in db.execute("SELECT kind, name FROM keys ORDER BY kind, name")]
         events = db.execute("SELECT MAX(id) FROM events").fetchone()[0] or 0
+        max_card = db.execute("SELECT MAX(CAST(id AS INTEGER)) FROM cards").fetchone()[0] or 0
     finally:
         db.close()
     rules = home / "rules.json"
@@ -173,7 +174,7 @@ def snapshot(home):
             if line and not line.startswith("#") and "=" in line:
                 env_names.append(line.split("=", 1)[0].replace("export ", "").strip())
     return {
-        "runs": runs, "cards": cards, "pauses": pauses, "keys": keys, "max_event": events,
+        "runs": runs, "cards": cards, "pauses": pauses, "keys": keys, "max_event": events, "max_card": max_card,
         "live_runs": sum(runs.get(s, 0) for s in LIVE_RUNS),
         "live_cards": sum(cards.get(s, 0) for s in LIVE_CARDS),
         "rules_sha256": hashlib.sha256(rules.read_bytes()).hexdigest() if rules.exists() else None,
