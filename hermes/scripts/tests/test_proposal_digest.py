@@ -629,6 +629,15 @@ class Digest(unittest.TestCase):
         text = json.loads(call[call.index("--content") + 1])["body"]["elements"][0]["content"]
         self.assertIn("⚠️ 没查到（不是 0 条）：全部 1 个仓库——gh 没登录或登录失效（", text)
 
+    def test_unmerged_unexpected_error_only_marks_this_section(self):
+        # 没想到的异常也只算这一栏没查到、照样要看，不拖垮整张周卡（全局坑 G-39）
+        from unittest import mock
+        with mock.patch.object(pd.unmerged_fixes, "collect", side_effect=RuntimeError("坏了")), \
+                mock.patch("sys.stderr"):
+            lines, has = pd.collect_unmerged(None)
+        self.assertTrue(has)
+        self.assertEqual(lines, ["**已修未合并**（只提醒，不用回复）", "⚠️ 本期没查到（不是 0 条）：意外错误（RuntimeError：坏了）。"])
+
     def test_unmerged_nothing_found_does_not_send_alone(self):
         for dd in ("retro", "niuma"):
             subprocess.run(["rm", "-rf", str(self.tmp / dd)], check=True)

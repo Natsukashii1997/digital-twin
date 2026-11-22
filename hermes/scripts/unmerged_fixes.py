@@ -80,7 +80,8 @@ class Gh:
         if self.down:
             raise GhError(self.down, stop=True)
         try:
-            r = subprocess.run([self.exe, *args], capture_output=True, text=True, timeout=self.timeout)
+            r = subprocess.run([self.exe, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=self.timeout)   # diff 里有非 UTF-8 字节时换成替换符，不抛错
         except subprocess.TimeoutExpired:
             self.timeouts += 1
             if self.timeouts >= MAX_TIMEOUTS:
@@ -114,6 +115,17 @@ def is_fix(title):
 
 def parse_time(s):
     return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))   # 3.9 的 fromisoformat 不认结尾的 Z
+
+
+def check_pr(p):
+    """pr list 的一条：缺字段抛 KeyError，类型不对抛 TypeError（都按这个仓库没查到算），不让 null、缺 number 漏到后面崩掉。"""
+    if not isinstance(p, dict):
+        raise TypeError("有一条不是对象")
+    for k, t in (("number", int), ("createdAt", str)):
+        if k not in p:
+            raise KeyError(k)
+        if not isinstance(p[k], t) or isinstance(p[k], bool):
+            raise TypeError(f"{k} 是 {type(p[k]).__name__}，不是 {t.__name__}")
 
 
 def stale_fixes(prs, now, days=STALE_DAYS):
@@ -212,6 +224,8 @@ def scan(repos, now, gh):
                                      "--json", "number,title,createdAt"]) or "null")
             if not isinstance(prs, list):
                 raise TypeError("不是列表")
+            for p in prs:
+                check_pr(p)
             stale = stale_fixes(prs, now)
         except GhError as e:
             res["failed"][name] = e.why

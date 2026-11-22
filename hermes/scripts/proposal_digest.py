@@ -47,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 import unmerged_fixes
@@ -354,8 +355,14 @@ def collect(now):
 
 
 def collect_unmerged(now):
-    """已修未合并（复盘 N3）：返回 (卡片末尾这一栏的行, 有没有要看的)。"""
-    return unmerged_fixes.render(unmerged_fixes.collect(ROSTER, now))
+    """已修未合并（复盘 N3）：返回 (卡片末尾这一栏的行, 有没有要看的)。
+    意外错误也只算这一栏没查到、卡片照发，不让 GitHub 那边的问题拖垮整张周卡（全局坑 G-39）。"""
+    try:
+        return unmerged_fixes.render(unmerged_fixes.collect(ROSTER, now))
+    except Exception as e:  # noqa: BLE001  兜底：已知的失败在 unmerged_fixes 里归类，这里接没想到的
+        traceback.print_exc(file=sys.stderr)
+        return [f"**{unmerged_fixes.GROUP}**（只提醒，不用回复）",
+                f"⚠️ 本期没查到（不是 0 条）：意外错误（{type(e).__name__}：{unmerged_fixes.clip(e, 60)}）。"], True
 
 
 # ---------- 卡片 ----------

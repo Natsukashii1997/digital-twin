@@ -43,7 +43,7 @@ if args[:2] == ["pr", "diff"]:
     f = root / f"{repo}-{args[2]}.diff"
     if not f.exists():
         sys.stderr.write("HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)\n"); sys.exit(1)
-    sys.stdout.write(f.read_text(encoding="utf-8")); sys.exit(0)
+    sys.stdout.flush(); sys.stdout.buffer.write(f.read_bytes()); sys.exit(0)
 sys.stderr.write("假 gh 不认这个命令\n"); sys.exit(2)
 '''
 
@@ -249,6 +249,29 @@ class Scan(unittest.TestCase):
         self.put("get-index", [{"number": 1, "title": "修复"}])                    # 缺 createdAt 也不当 0 条
         (self.tmp / "mode-get-index").unlink()
         self.assertTrue(self.scan()["failed"]["get-index"].startswith("gh 输出格式不对（KeyError"))
+
+    def test_malformed_fields_only_fail_that_repo(self):
+        # JSON 合法但字段畸形：createdAt 是 null、开得不久的 PR 缺 number、number 是字符串，都只算这个仓库没查到，不崩
+        for prs, kind in (([pr(1, "修复", None)], "TypeError"),
+                          ([{"title": "新功能", "createdAt": "2026-11-19T00:00:00Z"}, pr(2, "x", "2026-11-19T00:00:00Z")], "KeyError"),
+                          ([pr("3", "修复", "2026-11-01T00:00:00Z")], "TypeError"),
+                          (["不是对象"], "TypeError")):
+            self.put("get-index", prs)
+            res = self.scan()
+            self.assertEqual(list(res["failed"]), ["get-index"], prs)
+            self.assertTrue(res["failed"]["get-index"].startswith(f"gh 输出格式不对（{kind}"), res["failed"]["get-index"])
+            self.assertEqual(len(res["dups"]), 1)                                     # 其他仓库照查
+            lines, has = uf.render(res)
+            self.assertTrue(has)
+
+    def test_non_utf8_diff_does_not_crash(self):
+        # diff 里带 GBK 字节：换成替换符照常比较，不抛 UnicodeDecodeError
+        gbk = diff(("legacy.txt", ["+旧编码的一行说明文字，足够长"])).encode("gbk")
+        (self.tmp / "trainee-hub-79.diff").write_bytes(diff(CI).encode("utf-8") + gbk)
+        res = self.scan()
+        self.assertEqual(res["failed"], {})
+        self.assertEqual(res["partial"], {})
+        self.assertEqual(res["dups"][0]["prs"], [77, 78, 79, 80])
 
     def test_one_diff_missing(self):
         (self.tmp / "trainee-hub-79.diff").unlink()
