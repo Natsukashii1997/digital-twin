@@ -1,0 +1,2178 @@
+{
+ "normal": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin",
+      "agent-kit"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "you",
+     "refs": [
+      "M3"
+     ],
+     "projects": [],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "you",
+     "refs": [
+      "M2"
+     ],
+     "projects": [],
+     "minutes": 10
+    }
+   ],
+   "consider": [
+    {
+     "idea": "每月跑一次 prompt-audit",
+     "why": "规则会过期",
+     "question": "和每月 skill 体检要不要合并",
+     "where": "全局 CLAUDE.md",
+     "refs": [
+      "M2",
+      "M3"
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  }
+ },
+ "doc_button": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin",
+      "agent-kit"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "you",
+     "refs": [
+      "M3"
+     ],
+     "projects": [],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "you",
+     "refs": [
+      "M2"
+     ],
+     "projects": [],
+     "minutes": 10
+    }
+   ],
+   "consider": [
+    {
+     "idea": "每月跑一次 prompt-audit",
+     "why": "规则会过期",
+     "question": "和每月 skill 体检要不要合并",
+     "where": "全局 CLAUDE.md",
+     "refs": [
+      "M2",
+      "M3"
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "doc_error": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin",
+      "agent-kit"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "you",
+     "refs": [
+      "M3"
+     ],
+     "projects": [],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "you",
+     "refs": [
+      "M2"
+     ],
+     "projects": [],
+     "minutes": 10
+    }
+   ],
+   "consider": [
+    {
+     "idea": "每月跑一次 prompt-audit",
+     "why": "规则会过期",
+     "question": "和每月 skill 体检要不要合并",
+     "where": "全局 CLAUDE.md",
+     "refs": [
+      "M2",
+      "M3"
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_error": "飞书建文档超时"
+  }
+ },
+ "preview_title": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin",
+      "agent-kit"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "you",
+     "refs": [
+      "M3"
+     ],
+     "projects": [],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "you",
+     "refs": [
+      "M2"
+     ],
+     "projects": [],
+     "minutes": 10
+    }
+   ],
+   "consider": [
+    {
+     "idea": "每月跑一次 prompt-audit",
+     "why": "规则会过期",
+     "question": "和每月 skill 体检要不要合并",
+     "where": "全局 CLAUDE.md",
+     "refs": [
+      "M2",
+      "M3"
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc",
+   "title": "【预览】🧭 AI 前沿群学习报告 · 11-13（周五）"
+  }
+ },
+ "all_dispatchable": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "claude",
+     "refs": [
+      "M3"
+     ],
+     "projects": [
+      "digital-twin"
+     ],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "claude",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin"
+     ],
+     "minutes": 10
+    }
+   ],
+   "consider": [
+    {
+     "idea": "每月跑一次 prompt-audit",
+     "why": "规则会过期",
+     "question": "和每月 skill 体检要不要合并",
+     "where": "全局 CLAUDE.md",
+     "refs": [
+      "M2",
+      "M3"
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "todo_only": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin",
+      "agent-kit"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "you",
+     "refs": [
+      "M3"
+     ],
+     "projects": [],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "you",
+     "refs": [
+      "M2"
+     ],
+     "projects": [],
+     "minutes": 10
+    }
+   ],
+   "consider": []
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "highlights_only": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "Anthropic 开放托管智能体自托管私测",
+     "detail": "Managed Agents 可以放在自己的机器上跑，沙箱和会话历史分开放。",
+     "refs": [
+      "M1",
+      "S1"
+     ],
+     "read": true
+    },
+    {
+     "title": "Claude Code 出了提示词体检命令",
+     "detail": "跑 /doctor prompt-audit 能查出提示词配置的问题。",
+     "refs": [
+      "M2"
+     ],
+     "read": false
+    }
+   ],
+   "todo": [],
+   "consider": []
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "only_news": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [],
+   "todo": [],
+   "consider": []
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  }
+ },
+ "no_messages": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [],
+   "todo": [],
+   "consider": []
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [],
+   "sources": [],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  }
+ },
+ "degraded_facts_only": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "ClaudeDevs @ClaudeDevs",
+     "detail": "Claude 托管智能体出了自托管私测版。",
+     "read": false,
+     "refs": [
+      "M1"
+     ]
+    },
+    {
+     "title": "Lydia Hallie @lydiahallie",
+     "detail": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "read": false,
+     "refs": [
+      "M2"
+     ]
+    }
+   ],
+   "todo": [],
+   "consider": []
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": "核对没通过",
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：脚本事实版（核对没通过）｜接入：本机脚本｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "「2条新帖」 「新功能」\n**What's going on · 1/2**\nClaude 托管智能体出了自托管私测版。\n▶ 原文\n    Self-hosted Managed Agents. [https://claude.com/resources/articles/self-hosted](https://claude.com/resources/articles/self-hosted)\n▲\n[查看第 1 条原帖 ↗](https://x.com/ClaudeDevs/status/111)",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "「新帖」\n**What's going on**\nClaude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x\n[查看 X 原帖 ↗](https://x.com/lydiahallie/status/222)",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "这个 prompt-audit 我试了，挺有用",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "kw": {
+   "doc_url": "https://x.feishu.cn/docx/abc"
+  }
+ },
+ "long_originals_tightened": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "第0条",
+     "detail": "说明",
+     "read": false,
+     "refs": [
+      "M1",
+      "M2",
+      "M3"
+     ]
+    },
+    {
+     "title": "第1条",
+     "detail": "说明",
+     "read": false,
+     "refs": [
+      "M1",
+      "M2",
+      "M3"
+     ]
+    },
+    {
+     "title": "第2条",
+     "detail": "说明",
+     "read": false,
+     "refs": [
+      "M1",
+      "M2",
+      "M3"
+     ]
+    },
+    {
+     "title": "第3条",
+     "detail": "说明",
+     "read": false,
+     "refs": [
+      "M1",
+      "M2",
+      "M3"
+     ]
+    },
+    {
+     "title": "第4条",
+     "detail": "说明",
+     "read": false,
+     "refs": [
+      "M1",
+      "M2",
+      "M3"
+     ]
+    },
+    {
+     "title": "第5条",
+     "detail": "说明",
+     "read": false,
+     "refs": [
+      "M1",
+      "M2",
+      "M3"
+     ]
+    }
+   ],
+   "todo": [
+    {
+     "task": "在数字分身仓库跑 /doctor prompt-audit",
+     "where": "digital-twin",
+     "done": "拿到问题清单",
+     "owner": "claude",
+     "snippet": "claude /doctor prompt-audit",
+     "refs": [
+      "M2"
+     ],
+     "projects": [
+      "digital-twin",
+      "agent-kit"
+     ],
+     "minutes": 15
+    },
+    {
+     "task": "打开 Codex 用量页看额度",
+     "where": "Codex",
+     "done": "知道到账没有",
+     "owner": "you",
+     "refs": [
+      "M3"
+     ],
+     "projects": [],
+     "minutes": 5
+    },
+    {
+     "task": "给 agent-kit 加一条规则",
+     "where": "agent-kit",
+     "done": "规则写进去",
+     "owner": "you",
+     "refs": [
+      "M2"
+     ],
+     "projects": [],
+     "minutes": 10
+    }
+   ],
+   "consider": [
+    {
+     "idea": "每月跑一次 prompt-audit",
+     "why": "规则会过期",
+     "question": "和每月 skill 体检要不要合并",
+     "where": "全局 CLAUDE.md",
+     "refs": [
+      "M2",
+      "M3"
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "07:17",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "ClaudeDevs @ClaudeDevs",
+     "subtitle": "Claude 开发者",
+     "gist": "Claude 托管智能体出了自托管私测版。",
+     "text": "▶ 原文与译文 · 展开\n    **中文**\n    很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文\n    **Original**\n    long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long \n▲",
+     "links": [
+      "https://claude.com/resources/articles/self-hosted",
+      "https://x.com/ClaudeDevs/status/111"
+     ],
+     "x_url": "https://x.com/ClaudeDevs/status/111",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M2",
+     "time": "08:01",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Lydia Hallie @lydiahallie",
+     "subtitle": "Claude Code",
+     "gist": "Claude Code 小技巧：跑 /doctor prompt-audit 查提示词配置。顺手提一下 claude.ai 和 https://feishu.cn/x",
+     "text": "▶ 原文与译文 · 展开\n    **中文**\n    很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文\n    **Original**\n    long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long \n▲",
+     "links": [
+      "https://feishu.cn/x",
+      "https://x.com/lydiahallie/status/222"
+     ],
+     "x_url": "https://x.com/lydiahallie/status/222",
+     "app_link": "https://applink.feishu.cn/x?position=2"
+    },
+    {
+     "id": "M3",
+     "time": "09:30",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": null,
+     "gist": null,
+     "text": "▶ 原文与译文 · 展开\n    **中文**\n    很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文很长的中文\n    **Original**\n    long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long \n▲",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [
+    {
+     "id": "S1",
+     "url": "https://claude.com/resources/articles/self-hosted",
+     "from": [
+      "M1"
+     ],
+     "ok": true,
+     "title": "自托管文章",
+     "text": "正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文正文",
+     "backend": "direct",
+     "error": null
+    }
+   ],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  }
+ },
+ "multi_post_refs": {
+  "day": "2026-11-13",
+  "fields": {
+   "highlights": [
+    {
+     "title": "黑白灰的排版思路",
+     "detail": "多帖卡片里的第 2 帖。",
+     "read": true,
+     "refs": [
+      "M1.2"
+     ]
+    },
+    {
+     "title": "只写到卡片一级的出处",
+     "detail": "只写 M1：不放第 1 帖冒充。",
+     "read": false,
+     "refs": [
+      "M1"
+     ]
+    },
+    {
+     "title": "单帖卡片和群友的话",
+     "detail": "单帖卡片照旧。",
+     "read": false,
+     "refs": [
+      "M10",
+      "M3"
+     ]
+    }
+   ],
+   "todo": [],
+   "consider": []
+  },
+  "meta": {
+   "day": "2026-11-13",
+   "model": null,
+   "degraded": null,
+   "attempts": [
+    {
+     "errors": [],
+     "warnings": [
+      "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+      "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+     ]
+    }
+   ],
+   "warnings": [
+    "todo 第 1 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条的项目 nope 不在名册里，派单时不算",
+    "todo 第 3 条标了 Claude 但没有名册里的项目，改成你自己做"
+   ],
+   "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  },
+  "mat": {
+   "day": "2026-11-13",
+   "group": {
+    "id": "oc_6f7635b44df5806b4de2891e133f993f",
+    "name": "Codex重置许愿群"
+   },
+   "window": "2026-11-13 00:00 到 2026-11-14 00:00（北京时间）",
+   "fetched_at": "2026-11-14T10:00:00+08:00",
+   "items": [
+    {
+     "id": "M1",
+     "time": "08:00",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "向阳乔木 @vista8",
+     "subtitle": "",
+     "gist": "SubCast 开源播客学习工具：能搜索订阅国内外播客、本地 ASR 转写无字幕音视频。",
+     "text": "「4条新帖」 「开源」 「播客」\n—— **1/4** · 2026-11-17 23:24:16 北京时间 ——\n**What's going on · 1/4**\nSubCast 开源播客学习工具：能搜索订阅国内外播客、本地 ASR 转写无字幕音视频。\n▶ 1/4 · 原文 · 展开\n    **原文**\n    SubCast 帮你解决播客学习痛点，边听、边问、边学。\n▲\n[查看第 1 条原帖 ↗](https://x.com/vista8/status/2122712433441849731)\n—— **2/4** · 2026-11-18 01:52:45 北京时间 ——\n**What's going on · 2/4**\n想让 AI 写的网站不带「AI 味」：配色学 Vercel 的黑白灰，再用给 Agent 用的组件库。\n▶ 2/4 · 原文 · 展开\n    **原文**\n    想让 AI Coding 出来的网站或工具没有明显的 Slop 味？\n    最佳配色是学 Vercel 风格：黑白灰，永远不会错。\n    推荐还是用 Vercel 做的给 Agent 用的组件库。\n▲\n[查看第 2 条原帖 ↗](https://x.com/vista8/status/2122749798348698021)\n—— **3/4** · 2026-11-18 02:11:13 北京时间 ——\n**What's going on · 3/4**\nZoom 上线 AI PPT。\n▶ 3/4 · 原文 · 展开\n    **原文**\n    Zoom 也推出 AI PPT 功能了。\n▲\n[查看第 3 条原帖 ↗](https://x.com/vista8/status/2122754446023401868)\n—— **4/4** · 2026-11-18 02:21:17 北京时间 ——\n**What's going on · 4/4**\n一个手写字体 Skill。\n▶ 4/4 · 原文 · 展开\n    **原文**\n    npx skills add byrishi/punchcutter\n▲\n[查看第 4 条原帖 ↗](https://x.com/vista8/status/2122756978216976509)",
+     "links": [
+      "https://x.com/vista8/status/2122712433441849731",
+      "https://x.com/vista8/status/2122749798348698021",
+      "https://x.com/vista8/status/2122754446023401868",
+      "https://x.com/vista8/status/2122756978216976509"
+     ],
+     "x_url": "https://x.com/vista8/status/2122712433441849731",
+     "app_link": "https://applink.feishu.cn/x?position=1"
+    },
+    {
+     "id": "M9",
+     "time": "08:00",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "Tibo @thsottiaux",
+     "subtitle": "",
+     "gist": "Tibo 确认 Pro 200 套餐也加上了 Ultrafast。",
+     "text": "「2条新帖」 「额度」 「Codex」\n—— **1/2** · 2026-11-18 02:09:24 北京时间 ——\n**What's going on · 1/2**\nTibo 确认 Pro 200 套餐也加上了 Ultrafast。\n▶ 1/2 · 原文与译文 · 展开\n    **中文**\n    GPT-6.2 Sol 和 Astra *终于*来了。\n    **Original**\n    GPT-6.2 Sol & Astra are *finally* here.\n▲\n[查看第 1 条原帖 ↗](https://x.com/thsottiaux/status/2122753991000133943)\n—— **2/2** · 2026-11-18 02:11:38 北京时间 ——\n**What's going on · 2/2**\nTibo 补一句：新模型很高效。\n▶ 2/2 · 原文与译文 · 展开\n    **中文**\n    这些模型极其高效，你能从完成任务的速度、成本以及额度能用多久上感受到。\n    **Original**\n    These models are extremely efficient, which you feel in speed to complete tasks\n▲\n[查看第 2 条原帖 ↗](https://x.com/thsottiaux/status/2122754551187132438)",
+     "links": [
+      "https://x.com/thsottiaux/status/2122753991000133943",
+      "https://x.com/thsottiaux/status/2122754551187132438"
+     ],
+     "x_url": "https://x.com/thsottiaux/status/2122753991000133943",
+     "app_link": "https://applink.feishu.cn/x?position=9"
+    },
+    {
+     "id": "M10",
+     "time": "08:00",
+     "sender": "X.COM",
+     "kind": "card",
+     "title": "宝玉 @dotey",
+     "subtitle": "",
+     "gist": "宝玉整理 GPT-6.2 发布要点。",
+     "text": "「新帖」\n**What's going on**\n宝玉整理 GPT-6.2 发布要点。\n▶ 原文 · 展开\n    **原文**\n    OpenAI 发布 GPT-6.2 Astra 和 Sol\n▲\n📝 时间\n[查看 X 原帖 ↗](https://x.com/dotey/status/2122755808689549335)",
+     "links": [
+      "https://x.com/dotey/status/2122755808689549335"
+     ],
+     "x_url": "https://x.com/dotey/status/2122755808689549335",
+     "app_link": "https://applink.feishu.cn/x?position=10"
+    },
+    {
+     "id": "M3",
+     "time": "08:00",
+     "sender": "张三",
+     "kind": "text",
+     "title": null,
+     "subtitle": "",
+     "gist": null,
+     "text": "这个 prompt-audit 我试了",
+     "links": [],
+     "x_url": null,
+     "app_link": "https://applink.feishu.cn/x?position=3"
+    }
+   ],
+   "sources": [],
+   "skipped_sources": [],
+   "context": {
+    "projects": [
+     {
+      "name": "数字分身",
+      "type": "product",
+      "goal": "执行底座换 agent-autoloop"
+     }
+    ],
+    "vault": [
+     {
+      "note": "个人上下文/关于我.md",
+      "text": "常浩"
+     }
+    ],
+    "rules": [
+     "0. 回复语言"
+    ],
+    "errors": []
+   },
+   "coverage": {
+    "messages": 3,
+    "cards": 2,
+    "member_posts": 1,
+    "sources": 1,
+    "sources_ok": 1,
+    "sources_skipped": 0,
+    "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
+   }
+  }
+ }
+}

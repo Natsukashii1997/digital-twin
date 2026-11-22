@@ -1,0 +1,411 @@
+{
+ "ask_recommend": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "ask",
+   "state": "open",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "ask_no_recommend": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "ask",
+   "state": "open",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": null,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "ask_single_option": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "ask",
+   "state": "open",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "好"
+   ],
+   "recommend": 0,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "ask_no_mark_own_hint": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "ask",
+   "state": "open",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "hint": "引用这张卡片回「1」也行"
+  },
+  "token": "0123456789abcdef"
+ },
+ "ask_plain_fields_escaped": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "ask",
+   "state": "open",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "[重新验证权限](https://example.invalid) <at id=all></at> **粗** <font color='red'>x</font>",
+    "保留 pip"
+   ],
+   "recommend": 0,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "r_[x](http://e)",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 <b>"
+  },
+  "token": "0123456789abcdef"
+ },
+ "notice_open": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "notice",
+   "state": "open",
+   "title": "第 3 轮跑不起来",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "已处理"
+   ],
+   "recommend": null,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "decided_other": {
+  "card": {
+   "id": 7,
+   "version": 4,
+   "kind": "ask",
+   "state": "decided",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": 1,
+   "answer": null,
+   "by": "ou_owner",
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": 1799999940000,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "decided_followed": {
+  "card": {
+   "id": 7,
+   "version": 4,
+   "kind": "ask",
+   "state": "decided",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": 0,
+   "answer": null,
+   "by": "ou_owner",
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": 1799999940000,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "decided_by_secretary": {
+  "card": {
+   "id": 7,
+   "version": 4,
+   "kind": "ask",
+   "state": "decided",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": 1,
+   "answer": null,
+   "by": "秘书",
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": 1799999940000,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "decided_typed_answer": {
+  "card": {
+   "id": 7,
+   "version": 4,
+   "kind": "ask",
+   "state": "decided",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": null,
+   "answer": "多行\n回答",
+   "by": "ou_owner",
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": 1799999940000,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "done": {
+  "card": {
+   "id": 7,
+   "version": 5,
+   "kind": "ask",
+   "state": "done",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": 1,
+   "answer": null,
+   "by": "ou_owner",
+   "result": "已改好并开了 PR",
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": 1799999940000,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "done_followed_multiline": {
+  "card": {
+   "id": 7,
+   "version": 5,
+   "kind": "ask",
+   "state": "done",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": 0,
+   "answer": null,
+   "by": "ou_owner",
+   "result": "第一行\n第二行",
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": 1799999940000,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "closed_ask": {
+  "card": {
+   "id": 7,
+   "version": 4,
+   "kind": "ask",
+   "state": "closed",
+   "title": "安装命令用哪个",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [
+    "统一写 uv",
+    "保留 pip",
+    "两种都写"
+   ],
+   "recommend": 0,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": "Agent 自己查到了仓库约定",
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": 1799999940000
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "notice_closed_with_note": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "notice",
+   "state": "closed",
+   "title": "第 3 轮跑不起来",
+   "text": "仓库里 uv 和 pip 都有",
+   "options": [],
+   "recommend": null,
+   "choice": null,
+   "answer": "已联系对方，约定下周交付",
+   "by": null,
+   "result": "已处理",
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ },
+ "notice_closed_no_text": {
+  "card": {
+   "id": 7,
+   "version": 3,
+   "kind": "notice",
+   "state": "closed",
+   "title": "第 3 轮跑不起来",
+   "text": "",
+   "options": [
+    "已处理"
+   ],
+   "recommend": null,
+   "choice": null,
+   "answer": null,
+   "by": null,
+   "result": null,
+   "rule": "dispatch-dt-sandbox-claude",
+   "createdAt": 1799998500000,
+   "decidedAt": null,
+   "closedAt": null
+  },
+  "kw": {
+   "mark": "尾号 cdef"
+  },
+  "token": "0123456789abcdef"
+ }
+}
