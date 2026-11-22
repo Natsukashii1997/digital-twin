@@ -31,6 +31,8 @@ sys.path.insert(0, str(HERE.parent))
 import dt_gate_hub as H  # noqa: E402
 import dt_gate_user as U  # noqa: E402
 
+REAL_RECOVERY_AS = H.recovery_as        # ChecksTest 默认把它换成替身；测它自己时用原来的
+
 CLI = os.environ.get("DT_AUTOLOOP_CLI", "agent-autoloop")
 
 
@@ -297,6 +299,9 @@ class ChecksTest(unittest.TestCase):
         (users["nat"] / "Library/LaunchAgents").mkdir(parents=True)
         (users["nat"] / "Library/LaunchAgents/agent-autoloop.plist").write_text("x")
         self.users = users
+        q = mock.patch.object(H, "recovery_as", self.fake_recovery())    # 主账号恢复闸默认干净；要测的用例自己再换
+        q.start()
+        self.addCleanup(q.stop)
 
     def a(self):
         return mock.Mock(owner_account="nat", confirm=True)
@@ -375,79 +380,76 @@ class ChecksTest(unittest.TestCase):
         self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])
 
     # ---------- 0D 恢复门：停写 → 排空 ----------
-    def with_ledger(self):
-        led = self.users["nat"] / "Library/Application Support/DigitalTwin/autoloop"
-        led.mkdir(parents=True)
-        (led / "exits.db").write_bytes(b"")
-        return led
+    def fake_recovery(self, hold=None, items=None, writes=None, log=None, fail=()):
+        """恢复闸命令行的替身：leftovers / writes 按给的返回（writes、items 可以是一串，逐次取，最后一个一直用），
+        hold / release 改闸上的恢复点；fail 里的命令抛 Stop。"""
+        st = {"hold": hold}
+        seq = {"writes": list(writes) if isinstance(writes, list) and writes and isinstance(writes[0], list) else [writes or []],
+               "items": list(items) if isinstance(items, list) and items and isinstance(items[0], list) else [items or []]}
 
-    def fake_recovery(self, status=None, writes=None, log=None):
-        """恢复闸命令行的替身：status / writes 按给的返回（writes 可以是一串，逐次取），其余命令记下来。"""
-        st = {"open": False, "hold": None, "frozen": [], "stalled": [], "markers": 0, **(status or {})}
-        ws = list(writes) if isinstance(writes, list) else [writes or []]
+        def take(k):
+            return seq[k].pop(0) if len(seq[k]) > 1 else seq[k][0]
 
         def run(host, current, name, args):
             if log is not None:
                 log.append((name, args[0], args))
-            if args[0] == "status":
-                return dict(st)
+            if args[0] in fail:
+                raise H.Stop(f"故意让 {args[0]} 失败")
+            if args[0] == "leftovers":
+                return {"hold": st["hold"], "items": take("items")}
             if args[0] == "writes":
-                return {"in_flight": ws.pop(0) if len(ws) > 1 else ws[0]}
+                return {"in_flight": take("writes")}
             if args[0] == "hold":
                 st["hold"] = args[args.index("--point") + 1]
             if args[0] == "release":
                 st["hold"] = None
             return {"ok": True}
+        run.state = st
         return run
 
     def ledger_checks(self, **kw):
         with mock.patch.object(H, "recovery_as", self.fake_recovery(**kw)):
             return self.run_checks(self.snap())
 
-    def test_no_ledger_passes_without_creating_one(self):
-        with mock.patch.object(H, "recovery_as", side_effect=AssertionError("没账本不该去跑恢复闸")):
-            r = self.run_checks(self.snap())
-        self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])
-        self.assertFalse((self.users["nat"] / "Library/Application Support/DigitalTwin/autoloop").exists())
-
-    def test_marker_dir_without_ledger_blocks(self):
-        (self.users["nat"] / "Library/Application Support/DigitalTwin/autoloop/gate-dirty.d").mkdir(parents=True)
-        r = self.run_checks(self.snap())
-        self.assertEqual([m for m, ok in r.items() if not ok], [m for m in r if "关闸标记" in m])
-
     def test_ledger_clean_passes(self):
-        self.with_ledger()
         r = self.ledger_checks()
         self.assertTrue(all(r.values()), [m for m, ok in r.items() if not ok])
 
-    def test_ledger_hold_frozen_markers_and_in_flight_each_block(self):
-        self.with_ledger()
-        for kw, word in (({"status": {"hold": "upgrade-1"}}, "维护停写"),
-                         ({"status": {"frozen": ["task:t-1"]}}, "结果不明"),
-                         ({"status": {"stalled": ["push_branch:x"]}}, "结果不明"),
-                         ({"status": {"markers": 2}}, "关闸标记"),
-                         ({"writes": ["出口 push_branch:x"]}, "在途的写")):
+    def test_ledger_hold_or_leftovers_each_block(self):
+        """不管出口账本在不在都问 leftovers（主账号删掉 exits.db 也绕不过）：维护中、任何一类没结清的都拦。"""
+        for kw, word in (({"hold": "upgrade-1"}, "维护停写"),
+                         ({"items": ["出口 push_branch:x（unknown）"]}, "没结清"),
+                         ({"items": ["本人点击 卡片 3（queued）"]}, "没结清"),
+                         ({"items": ["秘书代批 d-1（unreconciled）"]}, "没结清"),
+                         ({"items": ["派单事件 e-1（没送达）"]}, "没结清"),
+                         ({"items": ["关闸标记 2 个"]}, "没结清")):
             with self.subTest(kw=kw):
                 bad = [m for m, ok in self.ledger_checks(**kw).items() if not ok]
                 self.assertEqual(len(bad), 1, bad)
                 self.assertIn(word, bad[0])
 
     def test_ledger_unreadable_blocks(self):
-        self.with_ledger()
+        """读不了（副本里没有恢复闸、读不懂）一律不过。"""
         with mock.patch.object(H, "recovery_as", side_effect=H.Stop("读不懂")):
             r = self.run_checks(self.snap())
         self.assertFalse(r["读主账号 0D 恢复闸：读不懂"])
+        with mock.patch.object(H, "recovery_as", return_value={"hold": None}):        # 没给 items：不算干净
+            r = self.run_checks(self.snap())
+        self.assertEqual(len([m for m, ok in r.items() if not ok]), 1)
 
     def test_recovery_as_reads_json_and_refuses(self):
         current = {"repo": {"dir": str(self.d)}}
-        for code, out, ok in ((0, b'{"in_flight": []}', True), (2, b'{"open": false}', True),
-                              (1, b'{"ok": false, "why": "x"}', False), (0, b"not json", False), (3, b"{}", False)):
+        for code, out, ok in ((0, b'{"in_flight": []}', True), (2, b'{"open": false}', False),
+                              (1, b'{"ok": false, "why": "x"}', False), (0, b"not json", False), (0, b"[]", False)):
             with self.subTest(code=code, out=out), mock.patch.object(self.host, "as_user", return_value=(code, out, "")):
                 if ok:
-                    self.assertIsInstance(H.recovery_as(self.host, current, "nat", ["writes"]), dict)
+                    self.assertIsInstance(REAL_RECOVERY_AS(self.host, current, "nat", ["writes"]), dict)
                 else:
                     with self.assertRaises(H.Stop):
-                        H.recovery_as(self.host, current, "nat", ["writes"])
+                        REAL_RECOVERY_AS(self.host, current, "nat", ["writes"])
+        with mock.patch.object(self.host, "as_user", side_effect=subprocess.TimeoutExpired("x", 120)):
+            with self.assertRaisesRegex(H.Stop, "超时"):
+                REAL_RECOVERY_AS(self.host, current, "nat", ["writes"])
 
     def test_hold_then_drain_waits_for_in_flight_writes(self):
         log = []
@@ -455,38 +457,48 @@ class ChecksTest(unittest.TestCase):
         current = {"engine": {"commit": "e" * 40}}
         with mock.patch.object(H, "recovery_as", run):
             H.hold_and_drain(self.host, current, "nat", "gate-migrate-S", self.d / "bk", 7)
-        self.assertEqual([c[1] for c in log], ["hold", "writes", "writes", "writes"])
+        self.assertEqual([c[1] for c in log], ["hold", "writes", "writes", "writes", "leftovers"])
         hold = log[0][2]
         self.assertEqual(hold[hold.index("--max-card") + 1], "7")
         self.assertEqual(hold[hold.index("--commit") + 1], "e" * 40)
+        self.assertEqual(hold[hold.index("--point") + 1], "gate-migrate-S")
         self.assertIn("--confirm", hold)
 
-    def test_drain_timeout_stops(self):
-        with mock.patch.object(H, "recovery_as", self.fake_recovery(writes=["出口 x"])), \
+    def test_drain_rechecks_after_last_sleep_then_times_out(self):
+        log = []
+        with mock.patch.object(H, "recovery_as", self.fake_recovery(writes=["出口 x"], log=log)), \
                 mock.patch.object(H, "DRAIN_SECONDS", 4):
             with self.assertRaisesRegex(H.Stop, "还有在途的写"):
                 H.hold_and_drain(self.host, {"engine": {"commit": "e" * 40}}, "nat", "p", self.d, 0)
+        self.assertEqual([c[1] for c in log].count("writes"), 3)          # 2 次 + 睡完最后一次复查
+        log = []
+        with mock.patch.object(H, "recovery_as", self.fake_recovery(writes=[["出口 x"], ["出口 x"], []], log=log)), \
+                mock.patch.object(H, "DRAIN_SECONDS", 4):
+            H.hold_and_drain(self.host, {"engine": {"commit": "e" * 40}}, "nat", "p", self.d, 0)   # 最后一次空了就过
+
+    def test_leftovers_after_drain_stop(self):
+        """排空以后还有没结清的（hold 之前那一刻冒出来的结果不明）：停下。"""
+        with mock.patch.object(H, "recovery_as", self.fake_recovery(items=["出口 x（unknown）"])):
+            with self.assertRaisesRegex(H.Stop, "没结清"):
+                H.hold_and_drain(self.host, {"engine": {"commit": "e" * 40}}, "nat", "p", self.d, 0)
 
     def test_release_only_our_own_hold(self):
-        self.with_ledger()
         current = {}
         for hold, released in (("gate-migrate-S", True), ("upgrade-1", False), (None, False)):
             log = []
-            with self.subTest(hold=hold), mock.patch.object(H, "recovery_as",
-                                                             self.fake_recovery(status={"hold": hold}, log=log)):
+            with self.subTest(hold=hold), mock.patch.object(H, "recovery_as", self.fake_recovery(hold=hold, log=log)):
                 self.assertTrue(H.release_hold(self.host, current, "nat", "gate-migrate-S"))
                 self.assertEqual("release" in [c[1] for c in log], released)
-        with mock.patch.object(H, "recovery_as", side_effect=H.Stop("回滚后卡片号可能错位")), \
+        with mock.patch.object(H, "recovery_as", self.fake_recovery(hold="gate-migrate-S", fail=("release",))), \
                 mock.patch("sys.stdout", io.StringIO()) as out:
             self.assertFalse(H.release_hold(self.host, current, "nat", "gate-migrate-S"))
         self.assertIn("还在停写", out.getvalue())
 
-    def test_migrate_holds_before_stopping_and_releases_when_undone(self):
-        """停写在停中台之前；后面出错退回时用同一个恢复点结束维护。"""
-        self.with_ledger()
-        log = []
+    def migrate_failing(self, run, fail_at="unload"):
+        """migrate 走到停中台那步故意出错；返回调用顺序。主账号中台目录在（退回时核它放回来了）。"""
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
         order = []
-        run = self.fake_recovery(log=log)
 
         def recovery(*a):
             order.append(a[3][0])
@@ -501,13 +513,80 @@ class ChecksTest(unittest.TestCase):
                 mock.patch.object(H, "start_owner_agent"), mock.patch("sys.stdout", io.StringIO()):
             with self.assertRaisesRegex(H.Stop, "故意停不下"):
                 H.cmd_migrate(self.host, self.a())
+        return order
+
+    def test_migrate_holds_before_stopping_and_releases_when_undone(self):
+        """停写在停中台之前；后面出错退回时用同一个恢复点结束维护。"""
+        log = []
+        run = self.fake_recovery(log=log)
+        order = self.migrate_failing(run)
         self.assertLess(order.index("hold"), order.index("unload"))
         self.assertGreater(order.index("release"), order.index("unload"))
-        point = [c for c in log if c[1] == "hold"][0][2]
-        self.assertEqual(point[point.index("--max-card") + 1], "5")
+        hold = [c for c in log if c[1] == "hold"][0][2]
+        self.assertEqual(hold[hold.index("--max-card") + 1], "5")
         rel = [c for c in log if c[1] == "release"][0][2]
-        self.assertEqual(rel[rel.index("--point") + 1], point[point.index("--point") + 1])
+        self.assertEqual(rel[rel.index("--point") + 1], hold[hold.index("--point") + 1])
         self.assertEqual(rel[rel.index("--outcome") + 1], "rolled_back")
+        self.assertIsNone(run.state["hold"])
+        self.assertTrue(list(H.gate_root().glob("migrating.undone-*.json")))
+
+    def test_undo_keeps_hold_and_progress_when_release_fails(self):
+        run = self.fake_recovery(fail=("release",))
+        self.migrate_failing(run)
+        self.assertTrue(run.state["hold"].startswith("gate-migrate-"))
+        self.assertTrue((H.gate_root() / "migrating.json").exists())             # 没收拾干净：进度记录留着
+        log = []                                                                  # rollback 照记录再收拾一次，这次结束停写
+        run2 = self.fake_recovery(hold=run.state["hold"], log=log)
+        with mock.patch.object(H, "recovery_as", run2), mock.patch.object(H, "start_owner_agent"), \
+                mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "exists_as", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
+        self.assertIsNone(run2.state["hold"])
+        self.assertFalse((H.gate_root() / "migrating.json").exists())
+
+    def test_undo_does_not_release_while_other_steps_not_restored(self):
+        """主账号中台目录没放回之类：先保持停写（复核 P2：别的没收拾好就解除停写）。"""
+        run = self.fake_recovery()
+        real = H.exists_as
+        with mock.patch.object(H, "exists_as",                                    # 主账号的中台目录「没放回来」
+                               side_effect=lambda h, n, p: False if str(p).endswith(".agent-autoloop/config.json") else real(h, n, p)):
+            self.migrate_failing(run)
+        self.assertTrue(run.state["hold"].startswith("gate-migrate-"))
+
+    def test_killed_after_hold_rollback_releases(self):
+        """mark("held") 之后被杀（没来得及退回）：rollback 照进度记录结束这次停写。"""
+        run = self.fake_recovery()
+        with mock.patch.object(H, "undo"), mock.patch.object(H.Progress, "close"):
+            self.migrate_failing(run)
+        point = run.state["hold"]
+        self.assertTrue(point.startswith("gate-migrate-"))
+        self.assertTrue(json.loads((H.gate_root() / "migrating.json").read_text())["done"]["held"])
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent"), \
+                mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "exists_as", return_value=True), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
+        self.assertIsNone(run.state["hold"])
+
+    def test_full_rollback_releases_owner_hold_or_records_it(self):
+        root = Path(os.environ["DT_GATE_ROOT"])
+        for fail, left in (((), None), (("release",), "gate-migrate-S")):
+            with self.subTest(fail=fail):
+                w = self.d / f"rb{len(fail)}"
+                (w / "moved").mkdir(parents=True)
+                base = {"owner_account": "nat", "owner_hub": str(w / "hub"), "owner_moved": str(w / "moved"),
+                        "plist_moved": str(w / "p"), "plist_home": str(w / "ph"), "hub_url": "http://127.0.0.1:1",
+                        "owner_hold": "gate-migrate-S"}
+                (root / "state.json").write_text(json.dumps(base))
+                run = self.fake_recovery(hold="gate-migrate-S", fail=fail)
+                with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent"), \
+                        mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "remove_daemon"), \
+                        mock.patch.object(H, "installed", return_value=False), \
+                        mock.patch.object(H, "now_stamp", return_value=f"R{len(fail)}"), \
+                        mock.patch("sys.stdout", io.StringIO()):
+                    self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
+                arch = json.loads((root / f"state.rolled-back-R{len(fail)}.json").read_text())
+                self.assertEqual(arch.get("owner_hold_left"), left)
+                self.assertEqual(run.state["hold"], left)
 
     def test_live_run_card_and_unpaused_dispatch_block(self):
         r = self.run_checks(self.snap(live_runs=1, live_cards=2, pauses=[]))

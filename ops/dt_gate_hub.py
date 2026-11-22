@@ -19,8 +19,9 @@
   sudo "$GATE/bin/dt-gate-hub" rollback --confirm 退回搬家前；搬家中途被打断（进程被杀、关了终端）也用它收拾
 
 migrate 做的事（顺序固定；每一步做完记进 gate/migrating.json，被打断也能 rollback）：
-  0. 核对（同 preflight，含主账号 0D 恢复闸：不在维护、没有结果不明 / 核不清 / 卡住的出口动作、没有关闸标记、没有在途的写）；
-     主账号控制面停写（autoloop_recovery.py hold，恢复点 gate-migrate-<时间>），等在途的写做完（writes 为空，最多 2 分钟）
+  0. 核对（同 preflight，含主账号 0D 恢复闸 leftovers：不在维护；出口账本、关闸标记、本人点击、秘书代批、派单事件里
+     没有结果不明 / 核不清 / 还在送 / 排着队的）；主账号控制面停写（autoloop_recovery.py hold，恢复点 gate-migrate-<时间>），
+     等在途的写做完（writes 为空，最多 2 分钟），再看一遍 leftovers 为空
   1. 停掉主账号的中台（launchctl bootout + disable，等它真退出、端口空出来），停下后再核一次
   2. 以主账号身份用 dt-gate 那份引擎做备份（engine backup），root 把备份收进只有 root 能读的 gate/backups/<时间>/，
      主账号里的临时备份随即删掉
@@ -531,75 +532,74 @@ def snapshot_as(host, current, name, home):
 
 
 # ---------- 0D 恢复门：停写 → 排空（docs/恢复门-0D-设计.md 第 7 节） ----------
-# 控制面的账本（出口账本、凭证库、卡片库……）不搬：dt-gate 里从空的新库开始，恢复闸在那边「还没对过账」、关着，锁定版本
-# 并对账后才开。主账号这边要在停中台之前停写、排空，并且确认没有结果不明、核不清、卡住的动作——新库里没有它们，搬过去就
-# 等于把它们忘了。搬完主账号保持停写（主账号不再做受保护的写，ADR-015 第 3.4 节）；退回或回滚时用同一个恢复点结束维护。
-def owner_ledger(host, owner):
-    """主账号 0D 出口账本所在的目录（闸的状态、恢复点、关闸标记都在这里）。"""
-    return Path(host.account(owner)["home"]) / "Library/Application Support/DigitalTwin/autoloop"
-
-
+# 控制面的账本（出口账本、凭证库、卡片库、秘书账本）不搬：dt-gate 里从空的新库开始，恢复闸在那边「还没对过账」、关着，
+# 锁定版本并对账后才开。新库里没有主账号账本里的结果不明、核不清、还在送、排着队的东西，搬过去就等于把它们忘了，所以
+# 停中台之前要主账号这边一样都没有：先停写（hold），等在途的写做完（writes），再看一遍剩下的（leftovers，只读、
+# 不依赖出口账本在不在、不新建任何库）。主账号的账本原样留在原处，搬家不删不动。搬完主账号保持停写（主账号不再做受保护的写，
+# ADR-015 第 3.4 节）；退回或回滚时用同一个恢复点结束维护（release rolled_back）。
 def recovery_as(host, current, name, args):
     """以账号身份跑副本里的 0D 恢复闸命令行（hermes/scripts/autoloop_recovery.py），返回它打印的 JSON。
-    status 闸关着时退出码是 2，也算读到了；拒绝（ok: false）和读不懂一律停下。"""
+    拒绝（ok: false）、读不懂、跑不起来、超时一律停下。"""
     argv = [PY, *PY_FLAGS, str(Path(current["repo"]["dir"]) / "hermes/scripts/autoloop_recovery.py"), *args]
-    code, out, err = host.as_user(name, argv, timeout=120)
+    try:
+        code, out, err = host.as_user(name, argv, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Stop(f"以 {name} 身份执行恢复闸 {args[0]} 跑不起来或超时（{type(e).__name__}）")
     try:
         res = json.loads(out.decode("utf-8"))
     except ValueError:
         res = None
-    if not isinstance(res, dict) or code not in (0, 2) or res.get("ok") is False:
+    if not isinstance(res, dict) or code != 0 or res.get("ok") is False:
         why = res.get("why") if isinstance(res, dict) else (err or out.decode("utf-8", "replace")).strip()[:300]
         raise Stop(f"以 {name} 身份执行恢复闸 {args[0]} 失败：{why}")
     return res
 
 
 def ledger_checks(host, current, owner, check):
-    """主账号控制面能不能搬：不在维护停写、没有冻结 / 卡住的出口动作、没有关闸标记、没有在途的写。
-    主账号从没建过出口账本（0D 没装过）就是没有这些；只看，不在主账号里新建账本。"""
-    if not exists_as(host, owner, owner_ledger(host, owner) / "exits.db"):
-        check(not exists_as(host, owner, owner_ledger(host, owner) / "gate-dirty.d"),
-              "主账号没有 0D 出口账本（控制面没在主账号装过），也没有关闸标记")
-        return
-    st = recovery_as(host, current, owner, ["status", "--json"])
-    check(not st.get("hold"), f"主账号控制面不在维护停写中（现在：{st.get('hold') or '没有'}；"
-                              "是上次搬家留下的就先 rollback --confirm，别的维护等它结束）")
-    check(not st.get("frozen") and not st.get("stalled"),
-          f"主账号出口账本没有结果不明、核不清或卡住的动作（冻结：{st.get('frozen') or '无'}；"
-          f"卡住：{st.get('stalled') or '无'}；dt-gate 里是新账本，搬过去会把它们忘掉，先在主账号对账或交常浩结算）")
-    check(not st.get("markers"), f"主账号没有关闸标记（现在 {st.get('markers', '?')} 个：有结果不明还没对完账）")
-    w = recovery_as(host, current, owner, ["writes"])
-    check(not w.get("in_flight"), f"主账号没有在途的写（现在：{w.get('in_flight') or '无'}）")
+    """主账号控制面能不能搬：不在维护停写、各账本里没有结果不明 / 核不清 / 还在送 / 排着队的东西、没有关闸标记。只看。"""
+    left = recovery_as(host, current, owner, ["leftovers"])
+    check(not left.get("hold"), f"主账号控制面不在维护停写中（现在：{left.get('hold') or '没有'}；搬家留下的恢复点按 rollback "
+                                "输出的命令结束，别的维护等它结束）")
+    items = left.get("items")
+    check(isinstance(items, list) and not items,
+          f"主账号控制面账本里没有没结清的东西（现在：{items if items else '无'}；dt-gate 里是新账本，搬过去会把它们忘掉，"
+          "先在主账号对账或交常浩结算）")
 
 
 def hold_and_drain(host, current, owner, point, snapshot, max_card):
-    """停写（hold 登记恢复点），再等在途的写做完；等不到就停下（调用方退回，退回时用同一个恢复点结束维护）。"""
+    """停写（hold 登记恢复点），等在途的写做完，再确认各账本没有剩下的；有剩的就停下（调用方退回、结束这次维护）。"""
     recovery_as(host, current, owner, ["hold", "--point", point, "--snapshot", str(snapshot),
                                        "--commit", current["engine"]["commit"], "--max-card", str(int(max_card)),
                                        "--confirm"])
+    tries = max(1, DRAIN_SECONDS // 2)
     left = None
-    for _ in range(max(1, DRAIN_SECONDS // 2)):
+    for i in range(tries + 1):                           # 最后一次睡完再复查一遍
         left = recovery_as(host, current, owner, ["writes"]).get("in_flight")
         if not left:
-            return
-        host.sleep(2)
-    raise Stop(f"停写以后 {DRAIN_SECONDS} 秒还有在途的写：{left}")
+            break
+        if i < tries:
+            host.sleep(2)
+    else:
+        raise Stop(f"停写以后 {DRAIN_SECONDS} 秒还有在途的写：{left}")
+    after = recovery_as(host, current, owner, ["leftovers"])
+    if after.get("hold") != point:
+        raise Stop(f"停写以后闸上的恢复点不是这次的（{after.get('hold')}）")
+    if after.get("items"):
+        raise Stop(f"排空以后主账号账本里还有没结清的东西：{after['items']}")
 
 
 def release_hold(host, current, owner, point):
-    """结束搬家登记的维护停写（退回、回滚用）。闸上已经不是这个恢复点（hold 没做成、已经结束）就什么都不做。
-    回滚核对不过（快照之后发过卡片）恢复闸会拒绝，保持停写、说清原因，交常浩。返回是否结束干净。"""
+    """结束搬家登记的维护停写（退回、回滚用）。闸上不是这个恢复点（hold 没做成、已经结束）就什么都不做。
+    回滚核对不过（快照之后发过卡片）恢复闸会拒绝，保持停写、说清原因和手工命令，交常浩。返回是否结束干净。"""
     try:
-        if not exists_as(host, owner, owner_ledger(host, owner) / "exits.db"):
-            return True
-        if recovery_as(host, current, owner, ["status", "--json"]).get("hold") != point:
+        if recovery_as(host, current, owner, ["leftovers"]).get("hold") != point:
             return True
         recovery_as(host, current, owner, ["release", "--point", point, "--outcome", "rolled_back",
                                            "--note", "数字分身 0E-2 搬家退回", "--confirm"])
         return True
     except Stop as e:
         say(f"  主账号控制面还在停写（恢复点 {point}）：{e}；看清原因后在主账号跑 autoloop_recovery.py release "
-            f"--point {point} --outcome rolled_back --confirm")
+            f"--point {point} --outcome rolled_back --confirm（核对不过而确认卡片号不会重复的，交常浩定）")
         return False
 
 
@@ -888,7 +888,8 @@ def cmd_migrate(host, a):
     try:
         say(f"0. 主账号控制面停写、排空（0D 恢复门，恢复点 {point}）")
         prog.mark("held")                                # 先记：hold 做成了还没来得及记就被杀，退回时照样结束它
-        hold_and_drain(host, current, a.owner_account, point, bk, before.get("max_card", 0))
+        max_card = snapshot_as(host, current, a.owner_account, ohub).get("max_card", 0)   # hold 之前现取（停写后不再发卡）
+        hold_and_drain(host, current, a.owner_account, point, bk, max_card)
 
         say("1. 停主账号的中台")
         prog.mark("stopped")
@@ -1022,9 +1023,6 @@ def undo(host, current, owner_account, stamp, done):
             os.replace(state, gate_root() / f"state.undone-{stamp}.json")
     if done.get("stopped"):
         start_owner_agent(host, owner_account)
-    held_ok = True
-    if done.get("held"):
-        held_ok = release_hold(host, current, owner_account, f"gate-migrate-{stamp}")
     # 核结果（复核 P2-c）：主账号中台目录回来了、dt-gate 的中台目录已挪开、服务卸了
     ok = True
     if not exists_as(host, owner_account, ohub / "config.json"):
@@ -1036,7 +1034,12 @@ def undo(host, current, owner_account, stamp, done):
     if done.get("daemon") and installed("hub"):
         say(f"  {LABEL['hub']} 没有卸掉")
         ok = False
-    return ok and held_ok
+    if done.get("held"):                                 # 别的都放回去了才结束停写；没放回的保持停写，rollback 再收拾
+        if not ok:
+            say("  主账号控制面保持停写，等上面的收拾好再结束（rollback --confirm）")
+        else:
+            ok = release_hold(host, current, owner_account, f"gate-migrate-{stamp}")
+    return ok
 
 
 def start_owner_agent(host, owner_account):
@@ -1246,9 +1249,11 @@ def cmd_rollback(host, a):
         raise Stop(f"放不回去：{err[:200]}")
     host.as_user(s["owner_account"], ["/bin/mv", "-n", s["plist_moved"], s["plist_home"]])
     start_owner_agent(host, s["owner_account"])
-    os.replace(gate_root() / "state.json", gate_root() / f"state.rolled-back-{stamp}.json")
     if s.get("owner_hold") and not release_hold(host, current, s["owner_account"], s["owner_hold"]):
+        s["owner_hold_left"] = s["owner_hold"]           # 没结束的停写记进归档的 state；preflight 也会拦着
+        write_json(gate_root() / "state.json", s)
         say("  主账号中台已放回，但主账号控制面的维护停写没结束（见上）")
+    os.replace(gate_root() / "state.json", gate_root() / f"state.rolled-back-{stamp}.json")
     say("回滚好了：主账号的中台回到搬家前的数据（搬家之后 dt-gate 里新记下的不在里面，备份在 dt-gate 家里）")
     if s.get("worker_rotated"):
         say(f"  注意：{worker_account()} 的接单钥匙在 dt-gate 里换过，主账号旧中台不认，要重新给它接入")
