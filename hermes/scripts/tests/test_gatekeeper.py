@@ -78,6 +78,10 @@ def skip_code_trust(test):
 class Base(unittest.TestCase):
     def setUp(self):
         skip_code_trust(self)
+        G._BUS.clear()
+        self.addCleanup(G._BUS.clear)
+        G._OFFLINE[0] = None
+        self.addCleanup(G._OFFLINE.__setitem__, 0, None)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         t = Path(self.tmp.name)
@@ -151,6 +155,8 @@ class Config(Base):
                 G.lark_cli()
         with mock.patch.dict(os.environ, {"DT_GATE_LARK_CLI": str(exe)}):
             self.assertEqual(G.lark_cli(), str(exe.resolve()))
+            self.assertIn(exe.resolve(), G._LARK_OK)                     # 核过的按进程记下（#255 复核 P2-1），下面每次换条件前清掉
+            G._LARK_OK.clear()
             os.chmod(d, 0o777)                                           # 目录别人能写：换掉 lark-cli 就能拿到密钥
             with self.assertRaisesRegex(F.Fail, "别人能改"):
                 G.lark_cli()
@@ -801,6 +807,18 @@ class Consume(Base):
 
 class StateFiles(Base):
     """L3 第 1 轮 P1-02：门卫目录、gate.db、app.json、cards.db 用前核路径信任（含 ACL）、不认链接，不只靠 chmod 700。"""
+    def test_secret_dir_writable_by_others_is_refused(self):
+        """#255 复核 P2-4：密钥文件的上级目录同状态目录的判法。"""
+        sec = Path(os.environ["DT_GATE_SECRET_FILE"])
+        sec.parent.mkdir(parents=True)
+        sec.write_text("s\n")
+        os.chmod(sec, 0o600)
+        os.chmod(sec.parent, 0o777)
+        with self.assertRaisesRegex(F.Fail, "门卫密钥目录"):
+            G.read_secret()
+        os.chmod(sec.parent, 0o700)
+        self.assertEqual(G.read_secret(), "s")
+
     def fresh_home(self, name):
         d = Path(self.tmp.name) / name
         d.mkdir()
@@ -1006,6 +1024,7 @@ READY = "[event] ready event_key=card.action.trigger"
             self.assertEqual(seen, [(1, True)])
             self.assertEqual(len(told), 1)
             self.assertIn(loss[:20], told[0])
+            self.assertNotIn("body=y", logs)                             # #255 复核 P2-7：回调原文不进日志
             self.assertFalse(G.LISTENING.is_set())
             G.bus_log_file().unlink()
         for line in ("[feishu] drop oversized event: 5 bytes > cap 4", "[feishu] drop event missing header fields: event_id=\"\""):
@@ -1067,11 +1086,79 @@ READY = "[event] ready event_key=card.action.trigger"
             G.loss_alert("WARN: consume backpressure, dropped oldest event")
         self.assertIn("可能漏了你刚才的点击", self.lark.texts()[-1])
 
+    def test_every_loss_is_told_and_only_the_prefix_is_quoted(self):
+        """#255 复核 P1-1：丢事件提醒不限频，每次丢都说；P2-7：只引诊断前缀，不带回调原文。"""
+        self.bind()
+        n = len(self.lark.texts())
+        G.loss_alert("WARN: consume backpressure, dropped oldest event")
+        G.loss_alert("[feishu] drop malformed event: unmarshal error: x body={\"token\":\"c-secret\"}")
+        texts = self.lark.texts()[n:]
+        self.assertEqual(len(texts), 2)
+        self.assertNotIn("c-secret", texts[1])
+        self.assertIn("[feishu] drop", texts[1])
+
+    def test_loss_written_between_two_consumes_is_not_skipped(self):
+        """#255 复核 P1-2：上一次 consume 结束后、下一次起来前总线写进的丢事件行，下一次照样算（不当历史）。"""
+        self.history("Bus started for app=x pid=1 addr=y", "[feishu] drop oversized event: old", "[SDK] connected to wss://a")
+        exe = self.fake_cli("""\
+            err(READY); out(1)
+            """)
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual((seen, told), ([(1, True)], []))               # 第一次看到的旧内容是历史
+        with open(G.bus_log_file(), "a") as f:
+            f.write("2026/11/21 10:01:00 [feishu] drop oversized event: 9 bytes > cap 4\n")
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(len(told), 1)
+        self.assertIn("oversized", told[0])
+        seen, told, logs, code = self.consume(exe)                       # 已经说过的不再说
+        self.assertEqual(told, [])
+
+    def test_loss_reported_on_stderr_and_bus_log_is_told_once(self):
+        exe = self.fake_cli("""\
+            blog("Bus started for app=x pid=1 addr=y"); err(READY); blog("[SDK] connected to wss://a"); out(1)
+            blog("WARN: backpressure on conn pid=12 event_key=card.action.trigger dropped_total=1")
+            err("WARN: event seq gap 3->5, missed 1 events (dropped by bus backpressure)"); time.sleep(30)
+            """)
+        seen, told, logs, code = self.consume(exe)
+        self.assertEqual(len(told), 1)
+
+    def test_no_ready_mark_ends_this_consume(self):
+        """#255 复核 P2-2：lark-cli 一直不打就绪标记，超过 CONNECT_WAIT 也结束这次 consume。"""
+        exe = self.fake_cli("""\
+            time.sleep(30)
+            """)
+        import time as _t
+        t0 = _t.monotonic()
+        with mock.patch.object(G, "READY_WAIT", 1):
+            seen, told, logs, code = self.consume(exe)
+        self.assertLess(_t.monotonic() - t0, 25)
+        self.assertIn("没打就绪标记", logs)
+
+    def test_long_offline_after_binding_tells_owner(self):
+        """#255 复核 P2-3：绑定后一直收不了点击，超过 OFFLINE_ALERT 私聊提醒一次（限频）；没绑定不提醒。"""
+        G.LISTENING.clear()
+        n = len(self.lark.texts())
+        with mock.patch.object(G, "OFFLINE_ALERT", 0), mock.patch("builtins.print"):
+            self.assertTrue(G.cards_ready())
+            self.assertEqual(len(self.lark.texts()), n)                 # 没绑定：不提醒
+            self.bind()
+            n = len(self.lark.texts())
+            G.cards_ready()
+            G._OFFLINE[0] -= 1
+            G.cards_ready()
+            G.cards_ready()
+        texts = self.lark.texts()[n:]
+        self.assertEqual(len(texts), 1)
+        self.assertIn("收不了点击", texts[0])
+        G.LISTENING.set()
+        G.cards_ready()
+        self.assertIsNone(G._OFFLINE[0])
+
     def test_child_holding_the_pipe_does_not_hang_after_exit(self):
         """复核 P2-2：lark-cli 退了，但它起的子进程还占着 stdout：不能卡住、就绪要撤。"""
         exe = self.fake_cli("""\
             err(READY)
-            subprocess.Popen(["/bin/sleep", "20"])
+            subprocess.Popen(["/bin/sleep", "60"])
             time.sleep(0.5)
             sys.exit(4)
             """)
@@ -1079,7 +1166,7 @@ READY = "[event] ready event_key=card.action.trigger"
         t0 = _t.monotonic()
         seen, told, logs, code = self.consume(exe)
         self.assertEqual(code, 4)
-        self.assertLess(_t.monotonic() - t0, 15)
+        self.assertLess(_t.monotonic() - t0, 40)    # 卡住会等满子进程的 60 秒；起进程前的信任检查本机要几秒到十几秒
         self.assertFalse(G.LISTENING.is_set())
 
     def test_card_loop_claims_only_while_listening(self):
@@ -1125,6 +1212,11 @@ READY = "[event] ready event_key=card.action.trigger"
         with mock.patch.object(F, "hub", hub), mock.patch.object(F, "hub_readable", lambda: True):
             out = F.once(ready=mock.Mock(side_effect=OSError("ls 跑不起来")))   # 复核 P2-6：核对本身出错也报 failed
         self.assertIn("OSError", posts[-1][1]["error"])
+        self.assertEqual(len(self.lark.calls), sends)
+        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "hub_readable", lambda: True):
+            out = F.once(ready=mock.Mock(side_effect=[None, "断了"]))  # #255 复核 P2-5：等锁期间断了，拿到锁再问一次
+        self.assertEqual(out["paused"], "断了")
+        self.assertEqual(posts[-1][1]["error"], "断了")
         self.assertEqual(len(self.lark.calls), sends)
 
 

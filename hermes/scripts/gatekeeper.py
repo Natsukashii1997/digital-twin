@@ -187,6 +187,7 @@ SDK_STATES = (("trying to reconnect", "reconnecting"), ("disconnected to ", "dis
 #   lark-cli 1.0.96 websocket/sdk_log_patterns.go：SDK 日志按前缀判长连接状态（顺序同 feishu.go 的 tryNotify）
 LOG_TIME_RE = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ")   # bus.log 每行开头的时间（log.LstdFlags）
 CONNECT_WAIT = 120                        # 秒：总线 ready 后，飞书长连接不在 connected（连接中、断了、认不出）超过这么久就重起 consume
+READY_WAIT = 120                          # 秒：consume 起来后一直不打就绪标记，超过这么久也重起（#255 复核 P2-2）
 NOTICE_RETRY_WINDOW = 50 * 60             # 秒：通知只在这么久内自动重发（飞书幂等键只保证一小时内去重），过了交人工核查
 ENTRY_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 ENTRY_ENV = {"PATH", "LANG", "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING"}   # 入口 env -i 之后，
@@ -298,6 +299,13 @@ def read_secret():
     code_trusted()
     f = secret_file()
     try:
+        parent = f.parent.resolve(strict=True)
+    except OSError:
+        raise F.Fail(f"读不到门卫应用密钥 {f}（目录不存在或没权限）：请常浩亲手放进 dt-gate")
+    if parent not in _DIRS_OK:                   # 上级目录同状态目录的判法（#255 复核 P2-4）
+        trusted(parent, "门卫密钥目录")
+        _DIRS_OK.add(parent)
+    try:
         fd = os.open(f, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         raise F.Fail(f"读不到门卫应用密钥 {f}（不存在、是链接或没权限）：请常浩亲手放进 dt-gate")
@@ -375,7 +383,13 @@ def lark_cli():
         raise F.Fail(f"找不到 lark-cli：{real}")
     if not stat.S_ISREG(st.st_mode) or not os.access(real, os.X_OK):
         raise F.Fail(f"{real} 不是能执行的文件")
-    return str(trusted(real, "lark-cli"))
+    if real not in _LARK_OK:                     # 每个进程核一次（同 private_dir：能改这些属性的只有 root 和本账号；#255 复核 P2-1）
+        trusted(real, "lark-cli")
+        _LARK_OK.add(real)
+    return str(real)
+
+
+_LARK_OK = set()
 
 
 # ---------- 门卫机器人 ----------
@@ -761,10 +775,17 @@ LISTENING = threading.Event()                    # 收点击这一端确实在�
 _LISTEN_LOCK = threading.Lock()
 
 
+def loss_kind(line):
+    """丢事件行只取诊断前缀：bus.log 的 drop 行后面可能带回调原文（含飞书延迟更新卡片的令牌），不进日志和私聊（#255 复核 P2-7）。"""
+    m = LOSS_RE.match(line) or BUSLOG_LOSS_RE.match(line)
+    return m.group(0).strip() if m else line[:40]
+
+
 def loss_alert(line):
-    """lark-cli 说确定丢了事件：可能漏了常浩的点击，私聊提醒他（限频）。"""
+    """lark-cli 说确定丢了事件：可能漏了常浩的点击，私聊提醒他。每次丢都说（#255 复核 P1-1）：一次 consume 最多说一次
+    （说完就结束这次 consume，run 至少隔 10 秒再起），所以不会刷屏。"""
     F.alert("gate-event-loss", "门卫收点击时 lark-cli 报告丢了事件，可能漏了你刚才的点击；如果点过卡片没有反应，"
-            f"请等一两分钟再点一次。（{line[:80]}）")
+            f"请等一两分钟再点一次。（{loss_kind(line)}）", every=0)
 
 
 def bus_log_file():
@@ -794,15 +815,21 @@ class BusLog:
             st = os.lstat(self.path)
         except FileNotFoundError:
             self.close()
-            self.state, self.watched = None, True     # 之后出现的新文件里都算新内容
+            self.ino, self.state, self.watched = None, None, True   # 之后出现的新文件里都算新内容
             return []
         follow = self.watched
-        if self.fh is None or st.st_ino != self.ino or st.st_size < self.pos:
+        if self.fh is not None and (st.st_ino != self.ino or st.st_size < self.pos):
             self.close()
+            self.ino = None
+        if self.fh is None:
             state_file(self.path, "lark-cli 事件总线日志")
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
             self.fh = os.fdopen(fd, "rb")
-            self.ino, self.pos, self.buf, self.state = os.fstat(fd).st_ino, 0, b"", None
+            got = os.fstat(fd)
+            if got.st_ino == self.ino and got.st_size >= self.pos:
+                self.fh.seek(self.pos)                # 同一个文件（上次 consume 结束时关了）：接着上次读到的地方（#255 复核 P1-2）
+            else:
+                self.ino, self.pos, self.buf, self.state = got.st_ino, 0, b"", None
         self.watched = True
         chunk = self.fh.read()
         self.pos += len(chunk)
@@ -831,6 +858,20 @@ class BusLog:
             self.state = "down"
 
 
+_BUS = []
+
+
+def bus_log():
+    """bus.log 的读取位置跨 consume 保留（#255 复核 P1-2）：两次 consume 之间总线写进的丢事件行下一次照样算新内容；
+    只有进程里第一次看这个文件时，已有内容才当历史。"""
+    path = bus_log_file()
+    if not _BUS or _BUS[0].path != path:
+        if _BUS:
+            _BUS[0].close()
+        _BUS[:] = [BusLog(path)]
+    return _BUS[0]
+
+
 def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
     """起一次长连接消费进程，逐行处理，进程退出时返回退出码。stdin 一直开着（lark-cli 遇到 stdin 关闭就退出）。
     LISTENING 要同时满足才置：consume 进程活着、本机事件总线 ready（stderr 的 [event] ready）、bus.log 里当前总线的飞书长连接
@@ -841,9 +882,10 @@ def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
     stdout 按 1 秒超时轮询读：进程退了即使有子进程还占着管道也不卡住（复核 P2-2）。"""
     LISTENING.clear()
     cmd, env = GATE.command(["event", "consume", EVENT_KEY, "--as", "bot"])
-    bus = BusLog(bus_log_file())
+    bus = bus_log()
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-    st = {"alive": True, "bus": False, "source": None, "down_since": None, "stop": None}
+    started = time.monotonic()
+    st = {"alive": True, "bus": False, "source": None, "down_since": None, "stop": None, "alerted": False}
 
     def update(**kw):
         with _LISTEN_LOCK:
@@ -855,6 +897,10 @@ def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
 
     def lost(line):
         update(stop="lark-cli 报告丢了事件")
+        with _LISTEN_LOCK:
+            first, st["alerted"] = not st["alerted"], True
+        if not first:                            # 同一次丢事件 stderr 和 bus.log 可能各报一行：一次 consume 只说一次
+            return
         try:
             on_loss(line)
         except Exception as e:                   # 提醒发不出去也照样停下这次 consume
@@ -871,6 +917,7 @@ def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
             update(bus=True)
         elif LOSS_RE.match(line):
             lost(line)
+            line = loss_kind(line)
         elif line.startswith("[event] exited") or line.startswith("{"):
             update(stop="lark-cli 退出或报错")
         log(json.dumps({"at": F.now(), "lark_cli": line[:300]}, ensure_ascii=False))
@@ -884,15 +931,18 @@ def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
             update(source=None, stop=f"读不了 lark-cli 事件总线日志：{str(e)[:120]}")
             return
         for line in losses:
-            log(json.dumps({"at": F.now(), "bus_log": line[:300]}, ensure_ascii=False))
+            log(json.dumps({"at": F.now(), "bus_log": loss_kind(line)}, ensure_ascii=False))
             lost(line)
         now = time.monotonic()
         with _LISTEN_LOCK:
-            down = st["bus"] and bus.state != "connected"
+            ready = st["bus"]
+            down = ready and bus.state != "connected"
             down_since = (st["down_since"] or now) if down else None
         update(source=bus.state, down_since=down_since)
         if down_since and now - down_since > CONNECT_WAIT:
             update(stop=f"飞书长连接 {CONNECT_WAIT} 秒没连上（现在：{bus.state or '未知'}）")
+        elif not ready and now - started > READY_WAIT:     # 一直不打就绪标记也不干等（#255 复核 P2-2）
+            update(stop=f"lark-cli {READY_WAIT} 秒没打就绪标记")
 
     def handle(line):
         if not line.strip():
@@ -920,6 +970,14 @@ def consume_once(on_event=handle_event, log=print, on_loss=loss_alert):
                 stop = st["stop"]
             if stop:
                 log(json.dumps({"at": F.now(), "ok": False, "why": f"{stop}，结束这次长连接、稍后重起"}, ensure_ascii=False))
+                while select.select([fd], [], [], 0)[0]:   # 管道里已经到了的点击是真点击：处理完再走，不丢（已不算在线）
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    handle(line.decode("utf-8", "replace"))
                 break
             if not select.select([fd], [], [], 1.0)[0]:
                 if proc.poll() is not None:
@@ -960,6 +1018,23 @@ def not_ready():
 
 
 _NOTICE_AT = [0.0]
+_OFFLINE = [None]
+OFFLINE_ALERT = 600                       # 秒：绑定后收点击一直不在线超过这么久，私聊提醒常浩（限频一小时，#255 复核 P2-3）
+
+
+def offline_watch(why):
+    """绑定后一直领不了卡：超过 OFFLINE_ALERT 秒提醒一次（发不出去只记日志，不影响领卡判断）。"""
+    if not why or why == GATE.unbound:
+        _OFFLINE[0] = None
+        return
+    _OFFLINE[0] = _OFFLINE[0] or time.monotonic()
+    if time.monotonic() - _OFFLINE[0] > OFFLINE_ALERT:
+        try:
+            F.alert("gate-offline", f"门卫已经 {OFFLINE_ALERT // 60} 分钟多收不了点击（{why}），中台卡片暂时发不到你这里；"
+                    "恢复后自动继续。")
+        except Exception as e:
+            print(json.dumps({"at": F.now(), "ok": False, "why": f"离线提醒没发出去：{type(e).__name__}"},
+                             ensure_ascii=False), flush=True)
 
 
 def cards_ready():
@@ -973,7 +1048,9 @@ def cards_ready():
         except Exception as e:
             print(json.dumps({"at": F.now(), "ok": False, "why": f"补发通知出错：{type(e).__name__}"}, ensure_ascii=False),
                   flush=True)
-    return not_ready()
+    why = not_ready()
+    offline_watch(why)
+    return why
 
 
 def run():

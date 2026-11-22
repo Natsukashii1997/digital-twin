@@ -331,7 +331,7 @@ def _deliver(card):
         raise Fail(f"本地已登记第 {r['version']} 版，不把消息改回第 {card['version']} 版")
     if card.get("ref"):
         with db() as con:
-            r = con.execute("SELECT token, message_id FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
+            r = con.execute("SELECT token, message_id, chat_id FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
         if not r and card["state"] == "open":          # 开着、却不是本桥接发的卡：不改（改了按钮也对不上任何登记）
             raise Fail("这张卡不是飞书桥接发的，改不了")
         if r and r["message_id"] and r["message_id"] != card["ref"]:   # 中台记的消息号和登记的不一致：不猜，不改
@@ -343,7 +343,10 @@ def _deliver(card):
         except SendError:
             if card["state"] == "open":                # 开着的卡：原消息的按钮还能用，不另发
                 raise
-            send_card(owner_chat(), content, f"autoloop-card-{card['id']}-v{card['version']}")
+            chat = owner_chat()
+            if r and r["chat_id"] != chat:             # 发卡后换绑过：结果不另发到新私聊（门卫 #255 独立复核 P2-6）
+                raise Fail(f"卡片 {card['id']} 发在换绑前的私聊，改不了原消息，也不另发到新私聊")
+            send_card(chat, content, f"autoloop-card-{card['id']}-v{card['version']}")
         with db(write=True) as con:                    # 开着的卡改版送到了：送达时间从这一版起算（结束的卡不再计时）
             con.execute("UPDATE feishu_cards SET delivered_at = CASE WHEN ? AND version != ? THEN ? ELSE delivered_at END, "
                         "hub_delivered_at = CASE WHEN version != ? THEN NULL ELSE hub_delivered_at END, "
@@ -484,14 +487,20 @@ def once(wait=50, ready=None):
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
-    try:
-        why = ready() if ready else None
-    except Exception as e:                       # 核对本身出错也报 failed，不让卡空等中台租约过期（复核 P2-6）
-        why = f"领到卡后核对能不能发时出错（{type(e).__name__}）"
+    def not_ready():
+        try:
+            return ready() if ready else None
+        except Exception as e:                   # 核对本身出错也报 failed，不让卡空等中台租约过期（复核 P2-6）
+            return f"领到卡后核对能不能发时出错（{type(e).__name__}）"
+    why = not_ready()
     if why:
         hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
         return {"card": card["id"], "ok": False, "paused": why}
     with bridge_lock():
+        why = not_ready()                        # 等锁期间（如 bind confirm 占着）长连接可能断了：拿到锁再问一次（#255 复核 P2-5）
+        if why:
+            hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
+            return {"card": card["id"], "ok": False, "paused": why}
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
             return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}

@@ -112,6 +112,15 @@ class Deliver(Base):
         F.deliver({**CARD, "ref": "om_fixture_1", "version": 4, "state": "closed", "result": "不用了"})
         self.assertEqual(self.lark.keys()[-1], "autoloop-card-7-v4")
 
+    def test_settled_card_from_before_rebind_is_not_sent_to_the_new_chat(self):
+        """门卫 #255 复核 P2-6：发卡后换绑过，结束的卡改不了原消息时不另发到新私聊。"""
+        self.register()
+        self.lark.fail_patch = True
+        sent = len(self.lark.sent())
+        with mock.patch.object(F, "owner_chat", lambda: "oc_new_chat"), self.assertRaisesRegex(F.Fail, "换绑前"):
+            F.deliver({**CARD, "ref": "om_fixture_1", "version": 2, "state": "closed", "result": "不用了"})
+        self.assertEqual(len(self.lark.sent()), sent)
+
     def test_delivered_at_follows_the_version_that_reached_the_owner(self):
         """#218 审查 P1-02：送达时间按版本记——开着的卡改版成功才换成新版本的送达时刻，改不了就留在旧版本；同一版重送不变。"""
         def row():
