@@ -638,7 +638,14 @@ def unfreeze(message_id, now=None, path=None):
     return _publish_after_commit({"task_id": row["task_id"], "status": "active", "generation": gen}, path, now)
 
 
-def show(task_id=None, path=None):
+SENT_WORDS = {0: "待发", 2: "在途或结果不明", 1: "已送到中台", -1: "作废没发", -2: "作废前已领取（可能已送达，靠代次拦）"}
+
+
+def show(task_id=None, path=None, now=None):
+    """只读。除了凭证字段，另给两样查进度要用的（autoloop 技能读）：usable / why_not 是按现在的时间现判的
+    「这张凭证现在还能不能用」（status 写着 active 的凭证过了 valid_until 也不能用，和 check() 同一套判定）；
+    events 是这张单每个派单事件送没送到中台。"""
+    now = now or now_tz()
     with tx(path) as con:
         rows = [grant_row(con, task_id)] if task_id else list(con.execute("SELECT * FROM grants ORDER BY created_at"))
         out = []
@@ -646,12 +653,18 @@ def show(task_id=None, path=None):
             d = {k: r[k] for k in r.keys() if k not in ("scope_text", "approval_message", "freeze_code")}
             d["actions"] = json.loads(r["actions"])
             d["voided_generations"] = sorted(voided_of(con, r["task_id"]))
+            d["why_not"] = check_row(r, None, r["generation"], now, d["voided_generations"])
+            d["usable"] = d["why_not"] is None
+            d["events"] = [{"event_key": e["event_key"], "kind": e["kind"], "generation": e["generation"],
+                            "state": SENT_WORDS[e["sent"]], "hub_event": e["hub_event"], "at": e["at"]}
+                           for e in con.execute("SELECT * FROM hub_events WHERE task_id = ? ORDER BY at, rowid",
+                                                (r["task_id"],))]
             out.append(d)
         return out
 
 
 # ---------- 命令行 ----------
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("propose")
@@ -678,7 +691,11 @@ def main(argv=None):
     p.add_argument("--generation", type=int, required=True)
     sub.add_parser("show").add_argument("--task")
     sub.add_parser("send-pending")
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
     try:
         if a.cmd == "propose":
             out = propose(a.repo, a.executor, Path(a.scope_file).read_text(encoding="utf-8"), a.hours)

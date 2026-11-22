@@ -551,6 +551,29 @@ class Cli(Base):
             self.assertEqual(G.main(["check", "--task", tid, "--action", "edit", "--generation", "1"]), 1)
         self.assertEqual(json.loads(out.getvalue()), {"ok": False, "why": "凭证已过期"})
 
+    def test_show_tells_usable_now_and_event_delivery(self):
+        """查进度用的两样只读输出（autoloop 技能读）：现在能不能用、每个派单事件送没送到中台。"""
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        tid = G.approve(self.say(f"派单 {code}"), now=T0, post=down)["task_id"]
+        (g,) = G.show(tid, now=T0)
+        self.assertEqual((g["usable"], g["why_not"]), (True, None))
+        self.assertEqual([(e["event_key"], e["kind"], e["state"], e["hub_event"]) for e in g["events"]],
+                         [(f"{tid}:g1:start", "start", "在途或结果不明", None)])
+        G.send_pending(post=self.post, now=LATER)
+        G.resume_dispatch(tid, "redispatch", "常浩说再跑一次", now=LATER, post=self.post)
+        (g,) = G.show(tid, now=LATER)
+        self.assertEqual([(e["kind"], e["state"], e["hub_event"]) for e in g["events"]],
+                         [("start", "已送到中台", 101), ("redispatch", "已送到中台", 102)])
+        (g,) = G.show(tid, now=T0 + dt.timedelta(hours=13))       # status 还写着 active，但已过期
+        self.assertEqual((g["status"], g["usable"], g["why_not"]), ("active", False, "凭证已过期"))
+        G.revoke(tid, now=LATER)
+        (g,) = G.show(tid, now=LATER)
+        self.assertEqual((g["usable"], g["why_not"]), (False, "凭证已撤销"))
+        for hidden in ("scope_text", "approval_message", "freeze_code"):      # 原来不给的三样照旧不给
+            self.assertNotIn(hidden, g)
+        other = self.new_task(when=LATER)
+        self.assertEqual([e["event_key"] for e in G.show(other, now=LATER)[0]["events"]], [f"{other}:g1:start"])
+
     def test_no_cli_entry_for_resolution(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             G.main(["record-resolution", "--task", "t-20261117-000000"])
