@@ -11,8 +11,6 @@ hermes/scripts/autoloop_grants.py  # 秘书代批 / 执行底座（#195），各
 hermes/scripts/autoloop_publish.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/autoloop_readonly.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/button_probe.py  # 按钮实测探针（#195 0B-3），只在实测时手动跑
-hermes/scripts/openloop_ask.py  # 未闭环账本追问登记与一周基线（#266 批 5a-4），常浩点头装、猛鬼兽规程改好之前不装
-hermes/scripts/openloop_slip.py @face9b84e0fc5bdfd2cf9de2a4554c11837d8567  # 5a-4 只多记单上列了哪几件（ids），装着的是 5a-3c 那版；随 openloop_ask.py 一起装
 hermes/scripts/custody.py @648658c0e795e1a6043abb4f85686051f84904e5  # 托管开关（#131）；main 版开启托管要 custody_ledger（11-15 定暂不装），单独装开启会被拒；随秘书代批 #195 上线再装
 hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
 hermes/scripts/custody_ledger.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装

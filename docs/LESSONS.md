@@ -130,3 +130,15 @@
 - 证据：`~/Library/Application Support/DigitalTwin/evidence/multica-night-slow-20261120/`（整文件日志、cProfile 剖析脚本、README）；PR #231 CI 通过。
 - 升级：〔提醒〕未升级。
 - 触发：`test_multica_night`、`unittest discover -s hermes/scripts/tests`
+
+## L-10 重启猛鬼兽网关撞上日报写稿：旧网关只等 30 秒就退，定时任务会被丢在半路（2026-11-22）
+
+- 现象：11-22 09:38 为装 5a-4 规程重启网关（`launchctl kickstart -k`），09:28 开始的日报写稿任务（`pdaily_build_job.py`，正在让模型重写）还在跑。旧网关日志写「Shutdown drain: 1 in-flight cron job(s) … waiting up to 30s」，没等到就退出。这次写稿进程没被杀，成了孤儿进程，09:39:39 自己写完（`build.json` 不是降级版）；网关那头记不到这次任务的结果。新网关第一次连飞书超时，30 秒后自动重连成功。
+- 根因：网关停机时给在跑的定时任务的排空时间只有 30 秒（cron_drain_timeout），带模型的任务一跑就是几分钟。
+- 正确做法：
+  - 重启网关前先看 `~/.hermes/cron` 里接下来 20 分钟有没有任务、现在有没有在跑的（`ps` 找 `~/.hermes/scripts/*_job.py`）。09:15～10:45（日报写稿和发送、群学习报告写稿和发送）尽量不重启。
+  - 撞上了：别手动杀那个进程，等它退出，再核对它的产物（日报看 `DigitalTwin/daily/<统计日>.build.json`），10:00 发送前确认稿子在。
+  - 重启后在 `gateway.log` 看到「✓ feishu reconnected」或「connected to wss」才算起来了。
+- 证据：`~/.hermes/logs/gateway.log` 2026-11-22 09:38:30～09:40:51；`DigitalTwin/daily/2026-11-21.build.json`。
+- 升级：〔提醒〕未升级。
+- 触发：`launchctl kickstart`、重启网关、`ai.hermes.gateway`
