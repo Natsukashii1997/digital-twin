@@ -669,6 +669,7 @@ echo 4242
 case "$SCENARIO:${@: -1}" in
   kill_stuck:4242) echo " dt-worker"; exit 0 ;;
   ps_err:4242) exit 70 ;;
+  ps_empty:4242) exit 0 ;;
 esac
 exit 1
 """
@@ -766,6 +767,7 @@ exit 1
                               ("kill_stuck", "dt-worker_的进程结束不掉（4242）"),
                               ("pgrep_err", "查不清_dt-worker_还有没有进程（pgrep_返回_3）"),
                               ("ps_err", "查不清_dt-worker_的进程清没清（ps_返回_70）"),
+                              ("ps_empty", "查不清_dt-worker_的进程清没清（ps_返回_0_却没有输出）"),
                               ("flush_fail", "清不掉_pf_的连接状态表"),
                               ("no_nat_pass", "com.apple/250.ApplicationFirewall_的地址转换里有：no_nat_pass"),
                               ("no_rdr_pass", "com.apple/250.ApplicationFirewall_的地址转换里有：no_rdr_pass"),
@@ -787,13 +789,13 @@ exit 1
             status = (Path(self.last_dir) / "pf-dt-worker.status").read_text()
             self.assertEqual(len(status.splitlines()), 1, status)   # 状态只有一行：原因里没混进子 shell 里陷阱写的东西
             self.assertNotIn("行出错", status, scenario)
-            if scenario not in ("load_fail", "partial", "dup", "tampered", "kill_stuck", "pgrep_err", "ps_err", "disabled", "flush_fail"):
+            if scenario not in ("load_fail", "partial", "dup", "tampered", "kill_stuck", "pgrep_err", "ps_err", "ps_empty", "disabled", "flush_fail"):
                 self.assertEqual(self.loads, 0, scenario)   # 前面的核对不过，根本不加载
             # 判定不在生效：两个账号正在跑的进程一律结束（审查第 4 轮 P2-5）；目录服务查不清时不知道账号在不在，只报不清
             if scenario == "ds_fail":
                 self.assertEqual(self.kills, [], scenario)
                 self.assertIn("查不清_dt-worker_在不在", f["reason"])
-            elif scenario not in ("kill_stuck", "pgrep_err", "ps_err"):
+            elif scenario not in ("kill_stuck", "pgrep_err", "ps_err", "ps_empty"):
                 # 加载前清一遍、判 failed 再清一遍；flush_fail 在规则生效前停下
                 n = {"partial": 2, "dup": 2, "tampered": 2, "load_fail": 2, "disabled": 2, "flush_fail": 2}.get(scenario, 1)
                 self.assertEqual(self.kills, ["-KILL -u dt-worker", "-KILL -u dt-secretary"] * n, scenario)
@@ -1055,7 +1057,7 @@ class Verify(unittest.TestCase):
         self.addCleanup(subprocess.run, ["rm", "-rf", str(d)])
         self.assertFalse(self.v.root_path_ok(str(d)))   # 真用 dt_root_guard.sh 核：自己账号的临时目录不过
         self.v.DIR, self.v.OUT_DIR = str(d), str(d / "verify")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(self.v.Incomplete):   # 退出码 2（不完整），不是 1（会被读成「有漏过」）
             self.v.write_report("", {})
         self.assertFalse((d / "verify").exists())
 
@@ -1227,23 +1229,294 @@ class Verify(unittest.TestCase):
         self.assertTrue(any("没停下" in b for b in self.v.reload_coverage(stuck, 0.0, 1.0)))
         self.assertIn("reload_coverage(rel, started, ended)", VERIFY.read_text())
 
-    def test_suspects(self):
-        """11-21 真机：同一个靶子绝大多数「被拒」、偶尔一次「超时」，多半是包出去了、回包被入站拒绝挡掉：列成疑似漏过，
-        带离最近一次重新加载几毫秒；本来就全是超时的靶子不算。"""
-        rows = {"dt-secretary": [
-            {"kind": "udp", "host": "192.168.1.16", "port": 1, "n": 4, "got": {"refused": 3, "timeout": 1},
-             "log": [[10.0, "refused"], [10.5, "timeout"], [11.0, "refused"], [11.5, "refused"]]},
-            {"kind": "tcp", "host": "192.168.1.16", "port": 2, "n": 2, "got": {"timeout": 2},
-             "log": [[10.0, "timeout"], [10.5, "timeout"]]}]}
-        sus = self.v.suspects(rows, [[10.4, 10.45]])
-        self.assertEqual([(x["port"], x["got"], x["ms_from_reload"]) for x in sus], [(1, "timeout", 50)])
-        self.assertIn("or sus", VERIFY.read_text())      # 疑似漏过也算退出码 1
+    NETSTAT_HEAD = "Active Internet connections (including servers)\nProto Recv-Q Send-Q  Local Address  Foreign Address  (state)\n"
+
+    def fake_netstat(self, *tables):
+        """依次给出几张假的 netstat 连接表（macOS 的格式：地址和端口用点隔开，IPv6 地址会被截短）。"""
+        it = iter(tables)
+        real = self.v.subprocess.run
+        self.addCleanup(setattr, self.v.subprocess, "run", real)
+        self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 0, self.NETSTAT_HEAD + next(it), "")
+
+    def test_connwatch_births(self):
+        """L3 第 5 轮 P1-07：连接表监视只记关心的端口上「新出现」的连接：第一次读表是基线，同一个连接换状态不算新出现，
+        客户端那一侧（本地端口不是靶子端口）、LISTEN 不算；IPv6 地址被截短也认得出端口。"""
+        self.fake_netstat(
+            "tcp4 0 0 127.0.0.1.5000 127.0.0.1.50001 TIME_WAIT\ntcp46 0 0 *.5000 *.* LISTEN\n",
+            "tcp4 0 0 127.0.0.1.5000 127.0.0.1.50001 TIME_WAIT\n"
+            "tcp6 0 0 2409:8a20:f63:3f60.5000 2409:8a20:f63:3f60.50002 SYN_RCVD\n"
+            "tcp4 0 0 127.0.0.1.50003 127.0.0.1.5000 SYN_SENT\n"
+            "tcp4 0 0 127.0.0.1.6000 127.0.0.1.50004 ESTABLISHED\n",
+            "tcp6 0 0 2409:8a20:f63:3f60.5000 2409:8a20:f63:3f60.50002 ESTABLISHED\n")
+        w = self.v.ConnWatch({5000})
+        for _ in range(3):
+            w.poll()
+        self.assertEqual([b[:4] for b in w.births], [("tcp6", 5000, 50002, "SYN_RCVD")])
+        self.assertEqual([x[:2] for x in w.born(5000)], [(50002, "SYN_RCVD")])
+        self.assertEqual(w.polls, 3)
+        self.assertEqual(w.errors, [])
+
+    def test_connwatch_failures_are_incomplete(self):
+        """netstat 出错、读表次数太少或间隔太长，都要报成问题（监视看不全，不能说没有半连接）。"""
+        real = self.v.subprocess.run
+        self.addCleanup(setattr, self.v.subprocess, "run", real)
+        self.v.subprocess.run = lambda c, *a, **kw: subprocess.CompletedProcess(c, 1, "", "boom")
+        w = self.v.ConnWatch({5000}, interval=0.05)
+        w.start()
+        bad = w.finish()
+        self.assertTrue(any("netstat 退出码 1" in b for b in bad), bad)
+        self.assertTrue(any("只读了 0 次" in b for b in bad), bad)
+        self.fake_netstat("", "")
+        w2 = self.v.ConnWatch({5000})
+        w2.poll()
+        w2.last -= 3                                   # 两次读表隔了 3 秒
+        w2.poll()
+        w2.stop.set()
+        w2.is_alive = lambda: False
+        w2.join = lambda t=None: None
+        w2.poll = lambda: None
+        self.assertTrue(any("最长隔" in b for b in w2.finish()))
+
+    def test_half_open_and_positive_control(self):
+        """新出现的连接对端端口正是某次尝试的本地端口、出现时间在尝试之后不久，才算这次尝试的 SYN 过了门卫；
+        root 对照连上了却在表里看不到，算监视没起作用。"""
+        t, t2 = self.t("127.0.0.1", 5000), self.t("::1", 6000)
+        w = type("W", (), {})()
+        w.births = [("tcp4", 5000, 50002, "SYN_RCVD", 100.5), ("tcp4", 5000, 30001, "ESTABLISHED", 100.6)]
+        hits = self.v.half_open(w, [("dt-worker", t, 50002, 100.0), ("dt-worker", t, 50002, 90.0),
+                                    ("dt-secretary", t, 50009, 100.0), ("dt-secretary", t2, 50002, 100.0)], tail=3.0)
+        self.assertEqual([(h["user"], h["at"], h["state"]) for h in hits], [("dt-worker", 100.0, "SYN_RCVD")])
+        hosts = {"127.0.0.1", "::1"}
+        self.assertEqual(self.v.unseen(w, [(0, 30001, 100.5), (1, 30002, 100.5)], [t, t2], ["open:30001", "open:30002"], hosts),
+                         ["::1:6000"])
+        self.assertEqual(self.v.unseen(w, [(0, 30001, 100.5)], [t, t2], ["open:30001", "timeout"], hosts), [])
+        self.assertEqual(self.v.unseen(w, [], [t], ["open:1"], hosts), ["127.0.0.1:5000"])   # 没报本地端口也算没看到
+        pub = self.t("223.5.5.5", 443)
+        lp = self.v.lport_problems
+        self.assertEqual(lp("dt-worker", [(0, 50002, 1.0), (2, 50003, 1.0)], [t, t2, pub], ["timeout"] * 3, hosts),
+                         ["dt-worker 没报本地端口：::1:6000"])
+        self.assertTrue(lp("dt-worker", [(0, 50002, 1.0)], [t], ["nobind:48"], hosts))      # 端口都没绑上：没试到
+        self.assertTrue(any("对照组区间" in x for x in lp("dt-worker", [(0, 30000, 1.0)], [t], ["timeout"], hosts, (20000, 40000))))
+
+    FAKE_TCPDUMP = """#!/bin/bash
+trap 'echo "4 packets captured" >&2; echo "4 packets received by filter" >&2; echo "${DROPS:-0} packets dropped by kernel" >&2; exit 0' INT
+echo "tcpdump: verbose output suppressed, use -v[v]... for full protocol decode" >&2
+echo "listening on $2, link-type NULL (BSD loopback), snapshot length 128 bytes" >&2
+echo "1732245600.123456 IP 127.0.0.1.50001 > 127.0.0.1.5000: Flags [S], seq 1, win 65535, length 0"
+echo "1732245600.223456 IP6 ::1.50002 > ::1.6000: Flags [SEW], seq 1, win 65535, length 0"
+echo "1732245600.323456 IP 127.0.0.1.5000 > 127.0.0.1.50001: Flags [S.], seq 1, ack 2, length 0"
+echo "1732245600.423456 IP 192.168.1.16.50003 > 223.5.5.5.53: 4660+ A? feishu.cn. (28)"
+[ -n "$EARLY" ] && exit 0
+while :; do sleep 0.05; done
+"""
+
+    def fake_tcpdump(self, **env):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(d)])
+        (d / "tcpdump").write_text(self.FAKE_TCPDUMP)
+        (d / "tcpdump").chmod(0o755)
+        self.v.TCPDUMP = str(d / "tcpdump")
+        for k in ("DROPS", "EARLY"):
+            os.environ.pop(k, None)
+        os.environ.update(env)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in env])
+
+    def test_synwatch_parses_capture(self):
+        """L3 第 5 轮 P1-07（子 agent 审查 P1-1）：出站证据改成抓包。只认 SYN 不带 ACK 和 UDP 包，按（目标端口, 来源端口）记下；
+        IPv6、带 ECN 标志的 SYN 都认，SYN-ACK 不认；过滤条件只抓发往靶子端口的 SYN 和公网 DNS。"""
+        self.fake_tcpdump()
+        w = self.v.SynWatch("lo0", {5000, 6000}, {53})
+        self.assertIn("dst port 5000 or dst port 6000", w.expr)
+        self.assertIn("tcp[tcpflags] & (tcp-syn|tcp-ack) == tcp-syn", w.expr)
+        self.assertIn("ip6[53] & 0x12 == 0x02", w.expr)
+        self.assertIn("(udp and (dst port 53))", w.expr)
+        w.begin()
+        for _ in range(100):
+            if len(w.births) >= 3:
+                break
+            time.sleep(0.02)
+        self.assertEqual(w.finish(), [])
+        self.assertEqual([b[:4] for b in w.births], [("tcp4", 5000, 50001, "SYN"), ("tcp6", 6000, 50002, "SYN"),
+                                                     ("tcp4", 53, 50003, "UDP")])
+        self.assertEqual(w.births[0][4], 1732245600.123456)
+        hits = self.v.half_open(w, [("dt-worker", {**self.t("::1", 6000)}, 50002, 1732245600.0)], tail=3.0)
+        self.assertEqual([(h["port"], h["state"]) for h in hits], [(6000, "SYN")])
+
+    def test_synwatch_problems_are_incomplete(self):
+        """抓包内核丢了包、中途退了（读不到统计）、起不来，都算看不全（不完整），不能说没有漏出的包。"""
+        self.fake_tcpdump(DROPS="2")
+        w = self.v.SynWatch("lo0", {5000})
+        w.begin()
+        self.assertTrue(any("丢了 2 个包" in b for b in w.finish()))
+        self.fake_tcpdump(EARLY="1")
+        w = self.v.SynWatch("lo0", {5000})
+        w.begin()
+        time.sleep(0.3)
+        bad = w.finish()
+        self.assertTrue(any("中途退了" in b for b in bad), bad)
+        self.assertTrue(any("没给出统计" in b for b in bad), bad)
+        self.v.TCPDUMP = "/usr/bin/false"
+        w = self.v.SynWatch("lo0", {5000})
+        real = self.v.threading.Event.wait
+        with self.assertRaises(self.v.Incomplete):
+            w.ready.wait = lambda t=None: False
+            w.begin()
+        self.assertEqual(real, self.v.threading.Event.wait)
+
+    def test_egress_ifaces(self):
+        """公网目标走哪块网卡：route -n get 查；IPv6 没路由跳过（那项本来可选），IPv4 查不出算不完整。"""
+        real = self.v.subprocess.run
+        self.addCleanup(setattr, self.v.subprocess, "run", real)
+
+        def fake(c, *a, **kw):
+            ok = c[-1] != "8.8.8.8" and "-inet6" not in c
+            return subprocess.CompletedProcess(c, 0 if ok else 1, "   route to: x\n  interface: en0\n" if ok else "", "no route")
+        self.v.subprocess.run = fake
+        self.assertEqual(self.v.egress_ifaces(["223.5.5.5", "open.feishu.cn", "2400:3200::1"]), ["en0"])
+        with self.assertRaises(self.v.Incomplete):
+            self.v.egress_ifaces(["8.8.8.8"])
+
+    def test_out_watch_and_evidence(self):
+        """出站要抓的：本机 TCP 靶子（lo0，只抓 SYN）、公网 TCP 和公网 DNS（出口网卡）；本机 UDP 靶子靠 root 靶子收到就记。"""
+        made = []
+        self.v.capture = lambda iface, tcp=(), udp=(): made.append((iface, sorted(tcp), sorted(udp))) or object()
+        self.v.egress_ifaces = lambda hosts: ["en0"]
+        hosts = {"127.0.0.1", "::1"}
+        ts = [self.t("127.0.0.1", 5000), self.t("127.0.0.1", 5001, "udp"), self.t("open.feishu.cn", 443),
+              self.t("223.5.5.5", 53, "dns"), {"kind": "proxy", "what": "x", "host": "api.github.com", "port": 443}]
+        self.v.out_watch(ts, hosts)
+        self.assertEqual(made, [("lo0", [5000], []), ("en0", [443], [53])])
+        self.assertEqual([self.v.evidenced(t, hosts) for t in ts], [True, False, True, True, False])
+
+    def test_foreign_hits_on_own_targets(self):
+        """子 agent 审查 P2-2：root 自己的靶子收到来源端口不在对照组区间的包（UDP 包进来了、回包被挡也算），verify 判没挡住。"""
+        hits = [{"kind": "udp", "peer": ["127.0.0.1", 30001]}, {"kind": "udp", "peer": ["127.0.0.1", 50001]}]
+        self.assertEqual(self.v.foreign_hits(hits), [hits[1]])
+        self.assertIn("leak_hits = foreign_hits(own.hits)", VERIFY.read_text())
+
+    def test_udp_uses_control_range(self):
+        """UDP 也先绑本地端口、记下来；对照组用对照区间。"""
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        srv.bind(("127.0.0.1", 0))
+        self.addCleanup(srv.close)
+        th = threading.Thread(target=lambda: (lambda d, a: srv.sendto(d, a))(*srv.recvfrom(64)), daemon=True)
+        th.start()
+        got = self.v.try_udp("127.0.0.1", srv.getsockname()[1], 2, lrange=self.v.CTRL_LPORTS)
+        self.assertRegex(got, r"^answer:\d+$")
+        self.assertTrue(20000 <= int(got.split(":")[1]) < 40000)
+        self.assertEqual(self.v.LAST_LPORT[0], int(got.split(":")[1]))
+
+    def test_inbound_half_open_attribution(self):
+        """入站：受管账号监听端口上新出现的连接一律列出（SYN 进来了），对得上的写是谁连的，对不上的写空。"""
+        ts = [self.t("127.0.0.1", 5000), self.t("::1", 6000)]
+        w = type("W", (), {})()
+        w.births = [("tcp4", 5000, 30001, "SYN_RCVD", 10.1), ("tcp6", 6000, 61000, "SYN_RCVD", 10.2)]
+        half = self.v.inbound_half_open(w, ts, {"root": [(0, 30001, 10.0)], "dt-gate": [(1, 30002, 10.0)]})
+        self.assertEqual([(h["port"], h["by"]) for h in half], [(5000, ["root"]), (6000, [])])
+
+    def test_stress_attempts(self):
+        """压力模式：受管账号对本机 TCP 靶子的每次尝试都要有本地端口（nobind 除外），端口落进对照组区间算分不清；
+        公网目标也核对（出口网卡上抓包）；一个靶子每次都 nobind 算一次都没试到。"""
+        hosts = {"127.0.0.1"}
+        ts = [self.t("127.0.0.1", 5000), self.t("223.5.5.5", 443)]
+        outs = {"dt-worker": [{"n": 4, "got": {"timeout": 2, "nobind:48": 1, "error:0": 1},
+                               "log": [[1.0, "timeout", 50001], [2.0, "nobind:48", None], [3.0, "timeout", None],
+                                       [4.0, "error:0", 25000]]},
+                              {"n": 1, "got": {"timeout": 1}, "log": [[1.0, "timeout", 50009]]}],
+                "dt-secretary": RuntimeError("x")}
+        att, bad = self.v.stress_attempts(["dt-worker", "dt-secretary"], ts, outs, hosts)
+        self.assertEqual([(u, t["port"], lp) for u, t, lp, _ in att], [("dt-worker", 5000, 50001), ("dt-worker", 443, 50009)])
+        self.assertEqual(len(bad), 2, bad)
+        _, inc, _ = self.v.judge_stress(["dt-worker"], ts[:1], {"dt-worker": [{"n": 2, "got": {"nobind:48": 2}, "opens": []}]}, [])
+        self.assertTrue(any("一次都没试到" in x for x in inc), inc)
+        self.assertNotIn("suspects", VERIFY.read_text())                       # 旧的「疑似」判定去掉了，换成连接表证据
         self.assertIn("Reloader(interval) if interval > 0 else None", VERIFY.read_text())   # 间隔 0：不强制重新加载
+
+    def test_control_uses_own_port_range(self):
+        """对照组（root、dt-gate）连的时候用 20000–39999 的本地端口，和受管账号用的系统临时端口分开；绑不上端口时
+        返回 nobind（SYN 没发，不算试过），不当成「连不上」。"""
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        self.addCleanup(srv.close)
+        got = self.v.try_tcp("127.0.0.1", srv.getsockname()[1], lrange=self.v.CTRL_LPORTS)
+        self.assertRegex(got, r"^open:\d+$")
+        self.assertTrue(20000 <= int(got.split(":")[1]) < 40000, got)
+        self.assertEqual(self.v.LAST_LPORT[0], int(got.split(":")[1]))
+        real = self.v.bind_local
+        self.addCleanup(setattr, self.v, "bind_local", real)
+        self.v.bind_local = lambda *a: (_ for _ in ()).throw(OSError(errno.EADDRINUSE, "x"))
+        self.assertEqual(self.v.try_tcp("127.0.0.1", srv.getsockname()[1]), f"nobind:{errno.EADDRINUSE}")
+        self.assertIsNone(self.v.LAST_LPORT)
+        src = VERIFY.read_text()
+        self.assertIn('run_as("dt-gate", others, "probe-stress", seconds, popen=True, extra=["ctrl"])', src)
+        self.assertIn('probe_stress(others, seconds, CTRL_LPORTS)', src)
+        self.assertIn('run_as(u, ts, extra=["ctrl"] if u in CONTROL_ACCOUNTS else None)', src)
+
+    def test_verify_half_open_verdict(self):
+        """verify 的出站判定：受管账号在连接表里有对应新连接 → 没挡住（1）；没报本地端口、root 对照在表里看不到 → 不完整（2）。"""
+        t = {**self.t("127.0.0.1", 5000), "own": True}
+        hosts = {"127.0.0.1"}
+
+        class W:
+            births = [("tcp4", 5000, 30001, "ESTABLISHED", 10.2)]
+
+            def finish(self):
+                return []
+        report = {"accounts": {"dt-worker": [{**t, "got": "timeout"}]}}
+        self.v.LPORTS = {"dt-worker": [(0, 50001, 20.0)]}
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.v.half_open_verdict(report, [t], ["open:30001"], [(0, 30001, 10.0)], ["dt-worker"], W(), hosts), 0)
+            W.births = W.births + [("tcp4", 5000, 50001, "SYN_RCVD", 20.3)]
+            self.assertEqual(self.v.half_open_verdict(report, [t], ["open:30001"], [(0, 30001, 10.0)], ["dt-worker"], W(), hosts), 1)
+            self.assertEqual(report["accounts"]["dt-worker"][0].get("verdict"), "没挡住")
+            self.v.LPORTS = {"dt-worker": []}
+            report = {"accounts": {"dt-worker": [{**t, "got": "timeout"}]}}
+            self.assertEqual(self.v.half_open_verdict(report, [t], ["open:30001"], [(0, 30001, 10.0)], ["dt-worker"], W(), hosts), 2)
+            self.v.LPORTS = {"dt-worker": [(0, 50001, 30.0)]}
+            self.assertEqual(self.v.half_open_verdict(report, [t], ["open:30001"], [(0, 39999, 10.0)], ["dt-worker"], W(), hosts), 2)
+
+    @unittest.skipUnless(sys.platform == "darwin", "连接表监视读的是 macOS 的 netstat")
+    def test_stress_end_to_end_sees_connections(self):
+        """压力模式整段在本机真跑一遍（去掉 sudo，没有门卫规则）：账号真连上 root 的靶子，证据里要有「来源端口 = 账号
+        本地端口」的记录（包证据的管道打通），root 对照看得到（监视有效），判「有漏过」。不是 root 抓不了包，这里用连接表
+        代替抓包（记录形状一样）；真抓包由常浩在真机上跑。"""
+        v = self.v
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(d)])
+        (d / "rules").write_text("x")
+        v.RULES = str(d / "rules")
+        v.rules_intact = lambda: True
+        v.managed_accounts = lambda: ["dt-worker", "dt-secretary"]
+        v.account_exists = lambda u: True
+        v.own_addrs = lambda: ["127.0.0.1"]
+        v.own_targets = lambda own: own.specs()          # 映射地址在测试隔离（#212）里被当成外连拦下，真机上照常试
+        v.system_targets = lambda n=6, own_ports=(): []
+        v.public_targets = lambda: []
+        v.pfctl = lambda *a: ""
+        v.pf_snapshot = lambda kind, lport: {"at": time.time()}
+        v.capture = lambda iface, tcp=(), udp=(): v.ConnWatch(tcp)   # 不是 root 抓不了包：用连接表代替（形状一样）
+        saved = {}
+        v.write_report = lambda prefix, r: saved.setdefault("r", r) and "x"
+        real = subprocess.Popen
+        v.subprocess.Popen = lambda cmd, *a, **kw: real(cmd[4:] if cmd[:2] == ["sudo", "-u"] else cmd, *a, **kw)
+        self.addCleanup(setattr, v.subprocess, "Popen", real)
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = v.stress(3, 0)
+        r = saved["r"]
+        self.assertEqual(code, 1, r.get("incomplete"))
+        self.assertEqual(r["watch_problems"], [])
+        self.assertEqual({h["user"] for h in r["half_open"]}, {"dt-worker", "dt-secretary"})
+        self.assertTrue(all(h["lport"] >= 40000 for h in r["half_open"]))
 
     def test_inbound_judge(self):
         ts = [{"kind": "tcp", "host": "127.0.0.1", "port": 1, "takeover": False},
               {"kind": "udp", "host": "::1", "port": 2, "takeover": False}]
         self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused", "refused"]}, [])[0], 0)
+        # L3 第 5 轮 P1-08：TCP 只认被拒（pf 回的 RST）算挡住；超时、出错可能是 SYN 进去了、握手没完成：没法判断（2）
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["timeout", "refused"]}, [])[0], 2)
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["error:0", "timeout"]}, [])[0], 2)
+        self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused", "timeout"]}, [])[0], 0)   # UDP 靠 HIT
         self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["open:5", "refused"]}, [])[0], 1)
         self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused", "refused"]}, ["HIT tcp x 1"])[0], 1)
         self.assertEqual(self.v.inbound_judge("dt-worker", ts, {"root": ["refused"]}, [])[0], 2)          # 条数不对
@@ -1262,7 +1535,24 @@ class Verify(unittest.TestCase):
             x.close()
         self.v.ALLOWED = {"dt-worker": {free[0]}, "dt-secretary": {free[1]}}
         self.v.account_exists = lambda u: True
+        self.v.managed_accounts = lambda: ["dt-worker", "dt-secretary"]
         self.v.own_addrs = lambda: ["127.0.0.1", "::1"]
+        if sys.platform != "darwin":   # CI（Linux）没有 macOS 的 netstat：连接表监视换成空的，只测其余流程（子 agent 审查 P2-5）
+            class NoWatch:
+                births = []
+
+                def __init__(self, ports):
+                    pass
+
+                def begin(self):
+                    pass
+
+                def finish(self):
+                    return []
+
+                def abort(self):
+                    pass
+            self.v.ConnWatch = NoWatch
         real_popen, real_run = subprocess.Popen, subprocess.run
 
         def strip(cmd):   # subprocess.run 内部也走 Popen：只去掉 run_as 加的 sudo 前缀
@@ -1290,6 +1580,9 @@ class Verify(unittest.TestCase):
         # 冒充端口的对照：同一端口换 dt-gate 开，秘书去连要连得上
         self.assertEqual({(r["by"], r["port"], r["verdict"]) for r in ctrl}, {("dt-secretary", free[1], "对照")})
         self.assertTrue(all(r["verdict"] == "对照" for r in report["dt-gate"]["rows"]))
+        if sys.platform == "darwin":   # L3 第 5 轮 P1-08：连接表里看到了连进受管账号监听的新连接，并认出是谁连的
+            self.assertTrue(any("root" in h["by"] for h in report["dt-worker"]["half_open"]), report["dt-worker"]["half_open"])
+            self.assertEqual(report["dt-gate"]["watch_problems"], [])        # root 连 dt-gate 的监听在表里看得到
 
     def test_inbound_udp_hit_recorded_even_if_reply_blocked(self):
         """子 agent 审查第 4 轮：UDP 包已经进了受管账号的套接字、回包被它自己的出站拒绝挡掉时，也要记「收到」
@@ -1315,6 +1608,7 @@ class Verify(unittest.TestCase):
     def test_inbound_incomplete_paths(self):
         """入站：没有 dt-gate 对照、监听开不起来，都算不完整（2），不会报 0。"""
         self.v.account_exists = lambda u: u != "dt-gate"
+        self.v.managed_accounts = lambda: ["dt-worker", "dt-secretary"]
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(self.v.inbound()[0], 2)
         self.v.account_exists = lambda u: True

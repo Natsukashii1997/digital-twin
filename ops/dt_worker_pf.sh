@@ -113,9 +113,11 @@ write_rules() {
 
 # 状态文件：一行 key=value，值里不带空格
 write_status() {
-  printf 'at=%s boot=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$(boot_sec)" "$*" > "$STATUS.tmp"
-  chmod 644 "$STATUS.tmp"
-  mv -f "$STATUS.tmp" "$STATUS"
+  # 每一步都查：fail 里是 set +e，重定向失败时不能把上次留下的 .tmp 挪进来（子 agent 审查 P3-3）
+  rm -f "$STATUS.tmp" || return 1
+  printf 'at=%s boot=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$(boot_sec)" "$*" > "$STATUS.tmp" || return 1
+  chmod 644 "$STATUS.tmp" || return 1
+  mv -f "$STATUS.tmp" "$STATUS" || return 1
 }
 
 # 判定不在生效：先写 failed（工人看到就不再开工），再结束两个受管账号的全部进程。清进程不依赖状态写没写成
@@ -170,12 +172,12 @@ kill_accounts() {
       /usr/bin/pkill -KILL -u "$u" 2>/dev/null || true
       left="" unclear=""
       for p in $old; do
-        # ps 只有两种结果算数：返回 0 且属于这个账号（还活着；号被别的账号复用了不算）、返回 1 且没有输出（没了）；
-        # 别的一律查不清，不能当成已经结束（L3 第 5 轮 P1-03 B）
+        # ps 只有这几种结果算数：返回 0 且属于这个账号（还活着）、返回 0 且是别的账号（号被复用，这个进程没了）、
+        # 返回 1 且没有输出（没了）；返回 0 却没有输出等别的一律查不清，不能当成已经结束（L3 第 5 轮 P1-03 B、子 agent 审查 P3-1）
         out=$(/bin/ps -o user= -p "$p" 2>/dev/null) && prc=0 || prc=$?
         out=$(printf '%s' "$out" | tr -d ' \n')
         case $prc in
-          0) [ "$out" = "$u" ] && left="$left $p" ;;
+          0) if [ "$out" = "$u" ]; then left="$left $p"; elif [ -z "$out" ]; then unclear="ps 返回 0 却没有输出"; fi ;;
           1) [ -z "$out" ] || unclear="ps 返回 1 却有输出" ;;
           *) unclear="ps 返回 ${prc}" ;;
         esac
