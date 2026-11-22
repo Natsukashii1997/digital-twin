@@ -24,6 +24,8 @@ merge-buttons 插件把 {"autoloop": 令牌, "o": 选项号, "v": 按钮所在�
 卡已不开着就把排队的结算掉（从没发过）；inflight 超过 2 分钟且进程不在（或超过 10 分钟，防进程号复用）、unknown →
 只读窗口回读：已决定且回答人是常浩、选项一致 → answered；已决定 / 已结束但不是这一答 → settled；仍开着 → 保持 unknown。
 回读只认中台的四种卡片状态；缺字段或认不出的状态一律当结果不明，不结算、不放开（PR #202 审查 P1-08）。
+恢复闸（批 0D，autoloop_recovery）：submit 先过 ensure_open()，开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才交中台，
+关着时回答留在排队里（退出码 3）；改成 unknown 时把闸关上；恢复闸对账只调 reconcile(queued=False)，不提交排队的。
 版本（#218 第 3 轮 P1-03）：按钮带着它所在那一版的版本号，回调版本 ≠ 登记的当前版本（旧版本按钮的迟到点击、或桥接还没登记
 完的新版本）直接拒、不排队，请常浩在最新的卡上重点；没带版本的旧样式按钮一律拒（0B-4a 起发的卡没有版本号）。登记时在写锁里
 再核一次，排队的那一行记的是回调携带的版本。
@@ -132,15 +134,24 @@ def owner_row(con, card_id):
 def move(card_id, attempt, expect, state, note=None, pid=None):
     """把这次尝试从 expect（一个或几个状态）改成 state；不是这次尝试或状态已变就不改，返回是否改成。"""
     expect = (expect,) if isinstance(expect, str) else tuple(expect)
+    failed = None
+    if state == "unknown":                       # 结果不明：先关恢复闸、再记（同 L3 第 3 轮 P1-08），两步之间别的写入者
+        import autoloop_exits as E               # 过不了闸；没改成（不是这次尝试）多关一次闸无害，对账照常开。
+        try:                                     # 关闸先建标记文件再记账本（第 4 轮，常浩 11-21 选甲）；两步都失败
+            E.close_gate(f"卡片 {card_id} 的本人回答结果不明")   # 也照样记成结果不明，记完再把错抛出去
+        except Exception as e:
+            failed = e
     with F.db(write=True) as con:
         cur = con.execute(f"UPDATE claims SET state = ?, at = ?, pid = ?, note = COALESCE(?, note) WHERE card_id = ? "
                           f"AND who = 'owner' AND attempt = ? AND state IN ({','.join('?' * len(expect))})",
                           (state, F.now(), pid, note, card_id, attempt, *expect))
-        if cur.rowcount != 1:
-            return False
-        r = owner_row(con, card_id)
-        F.log_claim(con, card_id, "owner", state, r["choice"], note, attempt)
-        return True
+        moved = cur.rowcount == 1
+        if moved:
+            r = owner_row(con, card_id)
+            F.log_claim(con, card_id, "owner", state, r["choice"], note, attempt)
+    if failed is not None:
+        raise failed
+    return moved
 
 
 def release(card_id, attempt, expect, note):
@@ -257,25 +268,35 @@ def submit(card_id):
     领到的才发请求；请求带上点的那一版，中台对不上就拒绝（409）。返回 (退出码, 给常浩的话)；没有可发的、或别人已领走，
     返回 None；还不能发返回 (3, …)。"""
     owner = identities()[0]
-    with F.db(write=True) as con:
-        r = owner_row(con, card_id)
-        card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
-        if not r or r["state"] != "queued" or not card:
-            return None
-        if r["version"] != card["version"]:          # 点之后卡片改版了：旧版本的选择不转到新版本（#218 第 2 轮 P1-03）
-            note = f"你点的是第 {r['version']} 版，卡片已经改成第 {card['version']} 版"
-            con.execute("DELETE FROM claims WHERE card_id = ? AND who = 'owner' AND attempt = ? AND state = 'queued'",
-                        (card_id, r["attempt"]))
-            F.log_claim(con, card_id, "owner", "released", r["choice"], note, r["attempt"])
-            return 1, f"这张卡在你点之后改版了，你的选择没有交出去，请在新版卡片上重新点一次。（{note}）"
-        if not card["message_id"] or not card["hub_delivered_at"]:
-            return 3, "已记下你的选择，卡片送达确认后马上交给中台。"
-        cur = con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner' "
-                          "AND attempt = ? AND state = 'queued'", (F.now(), os.getpid(), card_id, r["attempt"]))
-        if cur.rowcount != 1:
-            return None
-        F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
-        attempt, choice, ref, version = r["attempt"], r["choice"], card["message_id"], r["version"]
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:                                         # 恢复闸（批 0D）：对账走完才交中台；领发送资格的同一个写事务里再核开闸资格
+        epoch = R.ensure_open()
+        with F.db(write=True) as con, R.admission(epoch):   # 锁顺序：卡片库 → 出口账本（审查 P1-03）
+            r = owner_row(con, card_id)
+            card = con.execute("SELECT * FROM feishu_cards WHERE card_id = ?", (card_id,)).fetchone()
+            if not r or r["state"] != "queued" or not card:
+                return None
+            if r["version"] != card["version"]:      # 点之后卡片改版了：旧版本的选择不转到新版本（#218 第 2 轮 P1-03）
+                note = f"你点的是第 {r['version']} 版，卡片已经改成第 {card['version']} 版"
+                con.execute("DELETE FROM claims WHERE card_id = ? AND who = 'owner' AND attempt = ? AND state = 'queued'",
+                            (card_id, r["attempt"]))
+                F.log_claim(con, card_id, "owner", "released", r["choice"], note, r["attempt"])
+                return 1, f"这张卡在你点之后改版了，你的选择没有交出去，请在新版卡片上重新点一次。（{note}）"
+            if not card["message_id"] or not card["hub_delivered_at"]:
+                return 3, "已记下你的选择，卡片送达确认后马上交给中台。"
+            cur = con.execute("UPDATE claims SET state = 'inflight', at = ?, pid = ? WHERE card_id = ? AND who = 'owner' "
+                              "AND attempt = ? AND state = 'queued'", (F.now(), os.getpid(), card_id, r["attempt"]))
+            if cur.rowcount != 1:
+                return None
+            F.log_claim(con, card_id, "owner", "inflight", r["choice"], None, r["attempt"])
+            con.execute("COMMIT")                # 放出口账本写锁之前先把 inflight 提交出去（续审第 1 轮 P1-08）：with 退出时
+            #   admission 先放锁、卡片库后提交，中间对账只读卡片库看到的还是 queued，会当成没有在发的本人回答而开闸
+            attempt, choice, ref, version = r["attempt"], r["choice"], card["message_id"], r["version"]
+    except E.Refused as e:                       # 关着：回答留在排队里
+        with F.db() as con:
+            r = owner_row(con, card_id)
+        return (3, f"已记下你的选择；{e}，对完账马上交给中台。") if r and r["state"] == "queued" else None
     try:
         out = F.hub("POST", f"/v1/cards/{card_id}/answer", {"choice": choice, "by": owner, "ref": ref, "version": version})
     except F.HubError as e:
@@ -311,8 +332,9 @@ def flush(card_id):
     return got
 
 
-def reconcile(card_id=None):
-    """对账。返回给常浩看的变化列表 [(卡片号, 一句话)]；读不到中台就不动；从不重答。"""
+def reconcile(card_id=None, queued=True):
+    """对账。返回给常浩看的变化列表 [(卡片号, 一句话)]；读不到中台就不动；从不重答。
+    queued=False（恢复闸对账时）：只回读结果不明、在途过久的，不碰排队的——提交排队的回答是开闸以后的动作。"""
     notes = []
     try:
         owner = identities()[0]
@@ -324,7 +346,8 @@ def reconcile(card_id=None):
     for r in rows:
         cid, attempt, age = r["card_id"], r["attempt"], _age(r["at"])
         if r["state"] == "queued":
-            notes += _reconcile_queued(cid, attempt)
+            if queued:
+                notes += _reconcile_queued(cid, attempt)
             continue
         if r["state"] == "inflight" and age < HARD_STALE and (age < STALE or pid_alive(r["pid"])):
             continue                             # 还在跑
@@ -343,11 +366,16 @@ def reconcile(card_id=None):
 
 
 def _reconcile_queued(cid, attempt):
+    """排队的本人回答：先按登记补报送达，再交中台。两步都往中台写，都过恢复闸（审查 P1-04）：补报送达在
+    report_delivered 里入口看一眼、桥接锁里再核（闸关了抛 Deferred，先不动）；交中台在 submit 的领资格事务里核
+    （闸关了留在排队）。"""
     with F.db() as con:
         card = con.execute("SELECT message_id, hub_delivered_at FROM feishu_cards WHERE card_id = ?", (cid,)).fetchone()
     if card and card["message_id"] and not card["hub_delivered_at"]:
         try:
             F.report_delivered(cid)              # 送达报告可能已被中台收下、本地没记上：按登记原样重报
+        except F.Deferred:                       # 恢复闸关着：先不动，开闸后再对
+            return []
         except F.HubError as e:
             if e.status in DEFINITE:             # 中台不收这份送达：看看卡还开不开
                 c = read_card(cid)
@@ -402,11 +430,19 @@ def answer(token, option, chat, operator, version=None):
 
 
 def tell(chat, text):
+    """私聊回话。持桥接锁发、锁里先看是否在维护停写：在维护就不发，返回 False（L3 第 4 轮 P1-06，常浩 11-21 选甲）；
+    其余返回 True（发不出去也是 True：回话发不出不影响答卷结果，结果在卡片上会更新）。调用方不能已持桥接锁。
+    维护中点卡片的那句回话也不发：选择照样排队（claim 只写本机卡片库，交中台要过闸），维护结束后对账提交时私聊说结果；
+    桥接常驻循环里被压下的对账回话留在内存里、维护结束后补发（见 autoloop_feishu.run）。"""
     from tidings_weekly import SendError, send
-    try:
-        send(chat, "text", {"text": text}, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
-    except SendError:
-        pass                                     # 回话发不出不影响答卷结果；结果在卡片上会更新
+    with F.bridge_lock():
+        if F.maintenance():
+            return False
+        try:
+            send(chat, "text", {"text": text}, f"al-ans-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
+        except SendError:
+            pass
+    return True
 
 
 def main(argv=None):

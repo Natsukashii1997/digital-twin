@@ -23,6 +23,11 @@
       本人已有 queued / inflight / unknown / answered 的一行，秘书就不许获准（作废自己的预占）；
     - 本人一侧从不改秘书的行：秘书已 approved 时本人照样提交，谁先被中台受理算谁，后到的一方收到 changed=false。
 
+恢复闸（批 0D）：领卡前先过 autoloop_recovery.ensure_open()；领了卡以后闸关了、或这张卡上次发送结果不明正在冻结，算「暂缓」
+（Deferred），不向中台报 failed；发新卡走出口账本（autoloop_exits，幂等键
+send_feishu:card-<卡片号>、冻结范围 card:<卡片号>、对账标记就是卡片令牌）：先记要发、再发，发送结果不明不重发，对账在私聊里
+按令牌找那条消息。改卡（patch）本身幂等，不记账；结束了的卡改不了时另发的那条通知不带令牌，只过闸、不记账（重复了也只是多一条结束通知）。
+
   autoloop_feishu.py run          常驻：长轮询领卡片、发送、报送达（装成常驻服务是 D 档，要常浩说「装」）
   autoloop_feishu.py once         只领一次（测试、手动补发）
   autoloop_feishu.py show [--json]  只读：登记过的卡片、答卷进度和最近的变化记录
@@ -94,6 +99,10 @@ class Fail(Exception):
     """说人话的原因，不带钥匙。"""
 
 
+class Deferred(Fail):
+    """暂缓：恢复闸关着、或这张卡上一次发送结果不明正在冻结。不是失败，不向中台报 failed（审查 P1-04）。"""
+
+
 class HubError(Fail):
     """中台调用失败。sent=False：请求根本没发出去（钥匙、配置读不到）；status：中台回的 HTTP 码，None 表示没拿到有效回应。"""
     def __init__(self, msg, status=None, sent=True):
@@ -140,7 +149,7 @@ def db(write=False):
         if write:
             con.execute("BEGIN IMMEDIATE")
         yield con
-        if write:
+        if write and con.in_transaction:          # 调用方可能已在 with 里提前提交（autoloop_answer.submit，续审第 1 轮 P1-08）
             con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
@@ -161,6 +170,33 @@ def bridge_lock():
         yield
     finally:
         os.close(fd)                             # 关掉文件描述符即释放锁
+
+
+def bridge_busy():
+    """桥接锁现在有人拿着吗（不等）。给恢复闸排空用（第 2 轮预审 P2-C）：停写之后桥接在锁里先看闸，锁空着就没有桥接写在途。"""
+    f = db_file()
+    if not Path(f"{f}.bridge.lock").exists():
+        return False
+    fd = os.open(f"{f}.bridge.lock", os.O_WRONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def _still_open(epoch):
+    """持桥接锁后再核一次开闸资格（第 2 轮预审 P2-C）：入口看过闸之后、拿到锁之前，可能已经停写或出现结果不明。
+    改卡、补发结束通知、报送达都在这之后，排空时看到锁空着就说明没有桥接写在途。关了抛 Deferred（暂缓，不报 failed）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        with R.admission(epoch):                 # 锁顺序：桥接锁 → 出口账本（出口账本持有者从不等桥接锁）
+            pass
+    except E.Refused as e:
+        raise Deferred(str(e))
 
 
 def card_by_token(token):
@@ -284,8 +320,16 @@ def send_card(chat, content, key):
 
 
 def deliver(card):
-    """发一张卡（ref 为空）或改那条消息（ref 不为空）；返回消息号。持桥接锁做（锁外的直接调用也串行、也核版本）。"""
+    """发一张卡（ref 为空）或改那条消息（ref 不为空）；返回消息号。持桥接锁做（锁外的直接调用也串行、也核版本）。
+    直接调用也过恢复闸（L3 第 4 轮 P1-06）：入口看一眼、锁里再核，关着抛 Deferred（暂缓，不是失败）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        epoch = R.ensure_open()
+    except E.Refused as e:
+        raise Deferred(str(e))
     with bridge_lock():
+        _still_open(epoch)
         return _deliver(card)
 
 
@@ -319,7 +363,29 @@ def _deliver(card):
         return card["ref"]
     chat = owner_chat()
     token = token_for(card, chat)
-    mid = send_card(chat, render(card, token), f"autoloop-card-{card['id']}")   # 幂等键只用卡片号：报告丢了重发不出第二条
+    content = render(card, token)
+    import autoloop_exits as E
+
+    def do():
+        try:                                       # 幂等键只用卡片号：报告丢了重发不出第二条
+            return {"message_id": send_card(chat, content, f"autoloop-card-{card['id']}")}
+        except SendError as e:                     # 只有 lark-cli 在本机根本没跑起来，才算确定没发出去（审查 P1-05）；
+            msg = str(e)                           # 飞书报错、超时、输出读不懂、没拿到消息号：请求可能已到飞书，结果不明
+            if "跑不起来" in msg and "Timeout" not in msg:
+                raise E.Definite(msg)
+            raise
+    try:                                           # 写前账本（批 0D）：先记要发，再发；结果不明不重发，对账按令牌找消息
+        got = E.guard("send_feishu", f"send_feishu:card-{card['id']}", f"card:{card['id']}",
+                      {"chat": chat, "marker": token, "msg_type": "interactive"}, do)
+    except E.Definite as e:
+        raise SendError(str(e))
+    except E.Refused as e:
+        raise Deferred(str(e))
+    except Exception as e:                         # 结果不明（出口账本已记、闸已关）：也是暂缓，不报 failed（第 2 轮预审 P2-B）
+        raise Deferred(f"发卡结果不明，冻结这张卡等对账：{type(e).__name__}: {str(e)[:200]}")
+    mid = got.get("message_id")
+    if not mid:                                    # 账本说发过却没有消息号（人工结算没填）：不猜，暂缓（第 2 轮预审 P2-B2）
+        raise Deferred(f"出口账本记这张卡已发出，但没有消息号（卡片 {card['id']}），请常浩按消息号结算")
     with db(write=True) as con:
         con.execute("UPDATE feishu_cards SET message_id = ?, version = ?, "
                     "delivered_at = CASE WHEN delivered_at IS NULL OR version != ? THEN ? ELSE delivered_at END, "
@@ -380,8 +446,26 @@ def given_up_cards():
     return [dict(r) for r in rows]
 
 
+def maintenance():
+    """维护停写（恢复闸 hold）中返回恢复点编号，否则 None；读不了出口账本当作在维护（宁可不发）。
+    维护期间给常浩的提醒也停（L3 第 4 轮 P1-06，常浩 11-21 选甲），维护结束后下一轮照常补上；平时闸关着照常提醒。"""
+    import autoloop_recovery as R
+    try:
+        return (R.gate_row() or {}).get("hold")
+    except Exception:
+        return "?"
+
+
 def alert(key, text, every=ALERT_EVERY):
-    """私聊提醒常浩；同一提醒键 every 秒内只提醒一次（every=None：只提醒一次）。发不出去不记，下次再试。返回是否发了。"""
+    """私聊提醒常浩；同一提醒键 every 秒内只提醒一次（every=None：只提醒一次）。发不出去不记，下次再试。返回是否发了。
+    持桥接锁做、锁里先看是否在维护（维护停写排空看得见它；在维护就不发不记，返回 False）。调用方不能已持桥接锁。"""
+    with bridge_lock():
+        if maintenance():
+            return False
+        return _alert(key, text, every)
+
+
+def _alert(key, text, every):
     with db() as con:
         r = con.execute("SELECT at FROM alerts WHERE key = ?", (key,)).fetchone()
     if r:
@@ -440,8 +524,14 @@ def check_given_up():
 
 
 def once(wait=50):
-    """领一张、处理一张；没有卡片返回 None。领卡前先确认中台库能读（读不到这轮不领，返回 paused）；处理在桥接锁里做，
-    锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。"""
+    """领一张、处理一张；没有卡片返回 None。恢复闸关着（批 0D）就不领卡（返回 paused）；领卡前先确认中台库能读（读不到这轮不领，
+    返回 paused）；处理在桥接锁里做，锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        epoch = R.ensure_open()
+    except E.Refused as e:
+        return {"ok": False, "paused": str(e)}
     if not hub_readable():                       # 第 5 轮 P1-01：领一次就用掉中台一次尝试，读不到就先别领
         why = "读不到中台库，暂停领卡"
         alert("hub-unreadable", f"飞书桥接：{why}，中台卡片暂时送不到你这里（不会用掉中台的重试次数）；中台库恢复后自动继续。")
@@ -450,6 +540,10 @@ def once(wait=50):
     if not card:
         return None
     with bridge_lock():
+        try:
+            _still_open(epoch)
+        except Deferred as e:                    # 领卡之后闸关了：什么都不写，中台过一会儿再给这张卡
+            return {"card": card["id"], "ok": False, "deferred": True, "why": str(e)}
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
             return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
@@ -463,6 +557,8 @@ def once(wait=50):
         else:
             try:
                 ref = _deliver(card)
+            except Deferred as e:                # 暂缓不是失败（批 0D 审查 P1-04）：不报 failed，中台过一会儿会再给这张卡
+                return {"card": card["id"], "ok": False, "deferred": True, "why": str(e)}
             except (SendError, Fail) as e:
                 hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": str(e)[:300]})
                 return {"card": card["id"], "ok": False, "why": str(e)}
@@ -480,8 +576,15 @@ def once(wait=50):
 
 
 def report_delivered(card_id):
-    """持桥接锁报送达（对账补报走这里，专项续审 P2-02）。"""
+    """持桥接锁报送达（对账补报走这里，专项续审 P2-02）。往中台写，过恢复闸：入口看一眼，锁里再核（闸关了抛 Deferred）。"""
+    import autoloop_exits as E
+    import autoloop_recovery as R
+    try:
+        epoch = R.ensure_open()
+    except E.Refused as e:
+        raise Deferred(str(e))
     with bridge_lock():
+        _still_open(epoch)
         _report_delivered(card_id)
 
 
@@ -499,9 +602,9 @@ def _report_delivered(card_id):
 
 
 def confirm(card_id):
-    """持桥接锁报送达，放锁后再把送达前点的、排着队的本人回答提交掉（手动补报、测试用）。"""
-    with bridge_lock():
-        _report_delivered(card_id)
+    """报送达（过恢复闸，同 report_delivered；关着抛 Deferred，L3 第 4 轮 P1-06），放锁后再把送达前点的、排着队的本人回答
+    提交掉（手动补报、测试用）。"""
+    report_delivered(card_id)
     _flush(card_id)
 
 
@@ -513,17 +616,29 @@ def _flush(card_id):
 
 def run():
     import autoloop_answer as A
+    held_back = []                                     # 维护刚开始时被压下的对账回话：只在内存里，维护结束后补发
     while True:
         try:
+            held = maintenance()
+            if held:                                   # 维护停写：对账回话、放弃提醒、领卡都停（P1-06），结束后照常补上
+                why = (f"维护中（恢复点 {held}）" if held != "?"
+                       else "读不了出口账本的闸状态，当作维护中、先不发提醒（核对出口账本）")
+                print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
+                time.sleep(30)
+                continue
+            notes, held_back = held_back, []
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
-                A.tell(A.identities()[1], text)
+                notes.append((cid, text))
+            for cid, text in notes:                    # 对账改了状态之后维护才开始：这句回话不会再生成，留着下一轮补发
+                if not A.tell(A.identities()[1], text):
+                    held_back.append((cid, text))
             for cid in check_given_up():               # 中台已放弃送达的卡：每一轮放弃私聊说一次
                 print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
             out = once()
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
-            if out and out.get("paused"):              # 中台库读不到：歇 30 秒再看，别空转
+            if out and out.get("paused"):              # 恢复闸关着、或中台库读不到：歇 30 秒再看，别空转
                 time.sleep(30)
         except Exception as e:                         # 常驻不因一次出错退出：记下来，10 秒后再领
             why = str(e) if isinstance(e, Fail) else f"{type(e).__name__}: {str(e)[:200]}"

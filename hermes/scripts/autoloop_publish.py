@@ -11,8 +11,10 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
      远端和 gh 都不从环境变量取（审查第 2 轮 P1-07：授权收紧和发布动作的串行化、结果账本在 0D，之前不启用）。
   1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 <执行方>/<单号>；包先复制到私有临时目录、
      核对哈希再用；只取 Git 对象（bundle verify + fetch，打开对象校验，钩子关掉），不检出、不运行里面任何东西。
-  2. 凭证以凭证库为准（autoloop_grants.check，和所有出口共用）：动手前 push_branch、open_pr 两个动作一起预检，
-     推之前、开 PR 之前再各现读一次；仓库从凭证取，不信清单。
+  2. 凭证以凭证库为准（autoloop_grants.check，和所有出口共用）：动手前 push_branch、open_pr 两个动作一起预检；
+     推分支、开 PR 各经出口账本（autoloop_exits.guard，批 0D）：在凭证库写锁里现读凭证、核目标仓库和分支落在这张凭证上，
+     同一把锁下记账（executing）才动手，和冻结、撤销串行；做成的不重做，结果不明冻结这张单（task:<单号>）到对账确认，
+     恢复闸关着一律不做（docs/恢复门-0D-设计.md 第 6 节）。仓库从凭证取，不信清单。
      清单里的代次不当证据（审查 P1-02）：交接包要落到中台里一轮真实的轮次（清单的 run 号，中台库只读查）——
      这一轮属于这张单（事项、规则、Agent 对得上）、已正常结束、不是被启动脚本挡回去的（最后一条以「停下了」开头的不算）、
      在当前代次开始之后才排进来、它的派单事件都是当前代次；还要有当前代次的正面证据（第 2 轮）：这一轮里有当前代次的
@@ -33,8 +35,9 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
 测试只推本地裸仓库。推送和开 PR 用运行账号自己的 git / gh 登录：0E 在 dt-gate 里配机器账号令牌（只能推非 main、不能合并，
 #132 的做法），之前不在主账号或秘书账号里真跑（ADR-015 第 5 节第 6 条「真实特权不回流」）。
-状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；
-凭证库随 autoloop_grants 一起搬进 dt-gate。写前账本、结果不明冻结在 0D；接成正式出口在批 3。
+状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；任务锁例外：
+在凭证库旁边（autoloop_grants.task_lock），和续接、秘书 ② / ③ 共用一把（续审第 3 轮）；
+凭证库随 autoloop_grants 一起搬进 dt-gate。写前账本、结果不明冻结已接（0D）；接成正式出口在批 3。
 
   autoloop_publish.py publish --task t-20261118-abcdef
   autoloop_publish.py scan                 只读：列交接目录里的单和各自能不能发
@@ -44,7 +47,6 @@ DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://g
 """
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -192,17 +194,18 @@ def assert_not_main(branch):
 
 @contextlib.contextmanager
 def task_lock(task_id):
-    d = mirrors()
-    d.mkdir(parents=True, exist_ok=True)
-    fd = os.open(d / f"{task_id}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    """这张单的任务锁：和续接、秘书 ② / ③ 共用 autoloop_grants.task_lock（凭证库旁边的 task-locks/，续审第 3 轮）。"""
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Rejected("这张单另一个发布还在进行")
+        lock = G.task_lock(task_id)
+        lock.__enter__()
+    except G.Busy:
+        raise Rejected("这张单另有入口正在处理（另一个发布、秘书 ② / ③ 或续接）")
+    except G.Rejected as e:
+        raise Rejected(str(e))
+    try:
         yield
     finally:
-        os.close(fd)
+        lock.__exit__(None, None, None)
 
 
 def record(entry):
@@ -421,21 +424,74 @@ def publish(task_id, now=None, path=None):
         hits = history_hits(mirror, base, head, row["repo"])
         if hits:
             raise Rejected(f"改动或提交历史碰到高风险路径（{'、'.join(hits[:5])}），不自动发布，交常浩")
-        remote = git("ls-remote", remote_url(github), f"refs/heads/{branch}", cwd=mirror).stdout.split()
+        url = remote_url(github)
+        remote = git("ls-remote", url, f"refs/heads/{branch}", cwd=mirror).stdout.split()
         existing = remote[0] if remote else None
         pushed = False
         if existing != head:
             if existing and not (SHA.match(existing) and is_ancestor(mirror, existing, head)):
                 raise Rejected("远端同名分支已有别的提交，不覆盖")
-            must(task_id, "push_branch", gen, G.now_tz(), path)        # 推之前现读一次
-            git("push", "--quiet", "--no-verify", remote_url(github), f"{head}:refs/heads/{branch}", cwd=mirror)
-            pushed = True
-        must(task_id, "open_pr", gen, G.now_tz(), path)
-        pr = open_pr(github, branch, head, row)
+            got = exit_guard("push_branch", task_id, gen, branch, head,     # 推之前在凭证库锁里现读（取代 must）
+                             {"github": github, "remote": url, "branch": branch, "head": head, "before": existing},
+                             lambda: push_branch(mirror, url, branch, head))
+            pushed = not got["again"]
+        pr = exit_guard("open_pr", task_id, gen, branch, head, {"github": github, "branch": branch, "head": head},
+                        lambda: _open_pr_once(github, branch, head, row))
+        pr = {"pr": pr.get("pr"), "pr_opened": bool(pr.get("pr_opened")) and not pr["again"]}
         out = {"task_id": task_id, "generation": gen, "github": github, "branch": branch, "head": head,
                "run": m["run"], "pushed": pushed, **pr}
         record({"what": "发布", **out})
         return out
+
+
+# ---------- 出口账本（批 0D 恢复门，docs/恢复门-0D-设计.md 第 6 节） ----------
+NOT_SENT = ("Could not resolve host", "Failed to connect", "Connection refused", "Couldn't connect",
+            "[rejected]", "[remote rejected]")   # 推送确定没落到远端：没连上，或远端明确拒绝（拒绝也是权威的「没推」）
+
+
+class PrUnknown(Rejected):
+    """gh pr create 报错：分不清 PR 开没开，结果不明（不当成确定没开）。"""
+
+
+def exit_guard(kind, task_id, gen, branch, head, target, do):
+    """推分支、开 PR 都经出口账本：先记账再动手，做成的不重做，结果不明冻结这张单（task:<单号>）等对账。
+    凭证在凭证库写锁里现读，executing 在同一把锁下落盘（和冻结、撤销串行；取代原来的 must 现读复核），
+    目标仓库和分支必须落在这张凭证上（autoloop_exits.bound）。恢复闸关着、范围冻着 → Rejected，不动手。
+    返回出口账本的结果（again=True 表示以前已做成，这次没再做）。结果不明的异常原样抛出（调用方记日志）。"""
+    import autoloop_exits as E
+    try:
+        return E.guard(kind, f"{kind}:{task_id}:{branch}:{head}", f"task:{task_id}", target, do,
+                       task=(task_id, kind, gen))
+    except E.Refused as e:
+        raise Rejected(str(e))
+    except E.Definite as e:
+        raise Rejected(f"确定没做成（可以再试）：{e}")
+
+
+def push_branch(mirror, url, branch, head):
+    """真正的推送。没连上、远端明确拒绝 → 确定没推（Definite）；其余报错、超时 → 结果不明（原样抛出）。"""
+    import autoloop_exits as E
+    try:
+        r = git("push", "--quiet", "--no-verify", url, f"{head}:refs/heads/{branch}", cwd=mirror, check=False)
+    except OSError as e:                                     # git 本身没跑起来：确定没推
+        raise E.Definite(f"git 跑不起来（{type(e).__name__}）")
+    if r.returncode == 0:
+        return {"pushed": head}
+    err = (r.stderr or r.stdout).strip()
+    if any(s in err for s in NOT_SENT):
+        raise E.Definite(f"推送没落到远端：{err[:200]}")
+    raise Rejected(f"git push 失败、分不清推没推：{err[:200]}")
+
+
+def _open_pr_once(github, branch, head, row):
+    """开 PR 的出口动作：建之前的查询和核对出问题 → 确定没开（Definite）；建的那一步报错 → 结果不明。"""
+    import autoloop_exits as E
+    try:
+        return open_pr(github, branch, head, row)
+    except PrUnknown:
+        raise
+    except Rejected as e:
+        raise E.Definite(str(e))
 
 
 PR_FIELDS = "number,url,state,baseRefName,headRefName,headRefOid,isCrossRepository,headRepository,headRepositoryOwner"
@@ -476,8 +532,8 @@ def open_pr(github, branch, head, row):
                            timeout=120)
     finally:
         os.unlink(f.name)
-    if r.returncode != 0:
-        raise Rejected(f"开 PR 失败：{r.stderr.strip()[:200]}")
+    if r.returncode != 0:                                    # 建的那一步报错：PR 可能已经开了，结果不明（对账查 PR 列表）
+        raise PrUnknown(f"开 PR 报错、分不清开没开：{r.stderr.strip()[:200]}")
     return {"pr": r.stdout.strip().splitlines()[-1] if r.stdout.strip() else None, "pr_opened": True}
 
 

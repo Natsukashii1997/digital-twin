@@ -26,6 +26,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import autoloop_grants as G  # noqa: E402
 from test_autoloop_grants import Base  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
 
 SCRIPT = HERE.parents[2] / "ops/dt_worktree.py"
 PY = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
