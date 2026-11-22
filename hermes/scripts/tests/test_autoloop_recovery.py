@@ -594,6 +594,104 @@ class Maintenance(Base):
         self.assertTrue(R.status()["open"])
 
 
+class Leftovers(unittest.TestCase):
+    """0E-2 搬家前的只读汇总 leftovers、回滚前的 cards-after（和 0D 会话 11-22 对过口径）：只读、不建库。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="dt-leftovers-test-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        isolate(self, self.root, open_gate=False)
+        p = mock.patch.dict(os.environ, {"DT_STATE_DB": str(self.root / "twin-state.db")})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def files(self):
+        return sorted(str(f.relative_to(self.root)) for f in self.root.rglob("*") if f.is_file())
+
+    def test_nothing_installed_is_clean_and_creates_nothing(self):
+        self.assertEqual(R.leftovers(), {"hold": None, "items": []})
+        self.assertEqual(R.cards_after(0), [])
+        self.assertEqual(self.files(), [])
+
+    def test_every_kind_of_unsettled_thing_is_listed(self):
+        import fcntl
+        import sqlite3
+        import autoloop_feishu as F
+        now = E.now_tz()
+        with E.db() as con:
+            for key, state in (("push_branch:t1:b:h", "unknown"), ("open_pr:t1:b:h", "executing"),
+                               ("merge:o/r:1:h", "unreconciled"), ("merge:o/r:2:h", "done")):
+                con.execute("INSERT INTO exits (key, kind, scope, target, state, created_at, started_at, updated_at) "
+                            "VALUES (?, ?, 'task:t1', '{}', ?, ?, ?, ?)", (key, key.split(":")[0], state, E.iso(now), E.iso(now), E.iso(now)))
+        E.write_marker("测试")
+        with F.db(write=True) as con:
+            con.executemany("INSERT INTO claims (card_id, who, state, at) VALUES (?, ?, ?, 'x')",
+                            [(3, "owner", "queued"), (4, "secretary", "inflight"), (5, "owner", "answered")])
+        add_grant("t-20261122-aaaaaa")
+        add_grant("t-20261122-bbbbbb", status="done")
+        with G.tx() as con:
+            for key, task, sent in (("ev-live", "t-20261122-aaaaaa", 0), ("ev-sent", "t-20261122-aaaaaa", 1),
+                                    ("ev-dead", "t-20261122-bbbbbb", 0)):
+                con.execute("INSERT INTO hub_events (event_key, task_id, rule, executor, generation, kind, at, sent) "
+                            "VALUES (?, ?, 'r', 'claude', 1, 'start', 'x', ?)", (key, task, sent))
+        with sqlite3.connect(self.root / "twin-state.db") as con:
+            con.execute("CREATE TABLE secretary_decisions (id TEXT, status TEXT, action TEXT)")
+            con.executemany("INSERT INTO secretary_decisions VALUES (?, ?, ?)",
+                            [("sd-1", "unknown", "ask"), ("sd-2", "unknown", "handoff"), ("sd-3", "done", "merge")])
+            con.execute("CREATE TABLE custody_decisions (id TEXT, status TEXT)")
+            con.executemany("INSERT INTO custody_decisions VALUES (?, ?)", [("cd-1", "executing"), ("cd-2", "void")])
+        locks = G.db_path().parent / "task-locks"
+        locks.mkdir()
+        (locks / "t-20261122-cccccc.lock").write_text("")
+        fd = os.open(locks / "t-20261122-dddddd.lock", os.O_RDWR | os.O_CREAT, 0o600)   # 别的入口正持着
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        R.hold("gate-migrate-S", self.root / "snap", C1, 7)
+        got = R.leftovers()
+        self.assertEqual(got["hold"], "gate-migrate-S")
+        self.assertEqual(got["items"], [
+            "出口 push_branch:t1:b:h（unknown）", "出口 open_pr:t1:b:h（executing）", "出口 merge:o/r:1:h（unreconciled）",
+            "关闸标记 1 个", "本人点击 卡片 3（queued）", "秘书点击 卡片 4（inflight）", "秘书代批 sd-1（unknown）",
+            "任务凭证 t-20261122-aaaaaa（active）", "派单事件 ev-live（没确认送达）", "托管决定 cd-1（executing）",
+            "任务锁 t-20261122-dddddd 正被持着"])
+        fcntl.flock(fd, fcntl.LOCK_UN)                                # 放了就不算
+        self.assertNotIn("任务锁 t-20261122-dddddd 正被持着", R.leftovers()["items"])
+
+    def test_unreadable_ledgers_count_as_unsettled(self):
+        for f in (E.db_path(), G.db_path()):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"not a sqlite file at all" * 100)
+        items = R.leftovers()["items"]
+        self.assertIn("出口账本读不了", items)
+        self.assertIn("凭证库读不了", items)
+
+    def test_cards_after_reads_both_ledgers_without_creating(self):
+        import autoloop_feishu as F
+        self.assertEqual(R.cards_after(5), [])
+        self.assertFalse(E.db_path().exists() or F.db_file().exists())
+        now = E.now_tz()
+        with E.db() as con:
+            for key in ("send_feishu:card-9", "send_feishu:card-4", "push_branch:t:b:h"):
+                con.execute("INSERT INTO exits (key, kind, scope, target, state, created_at, started_at, updated_at) "
+                            "VALUES (?, ?, 'card:x', '{}', 'done', ?, ?, ?)", (key, key.split(":")[0], E.iso(now), E.iso(now), E.iso(now)))
+        with F.db(write=True) as con:
+            for cid, tok in ((8, "b" * 16), (3, "c" * 16)):
+                con.execute("INSERT INTO feishu_cards (card_id, token, chat_id, kind, options, version) "
+                            "VALUES (?, ?, 'oc_x', 'ask', 2, 1)", (cid, tok))
+        self.assertEqual(R.cards_after(5), ["send_feishu:card-9", "cards.db 卡片 8"])
+        self.assertEqual(R.cards_after(9), [])
+
+    def test_cli_prints_json(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(R.main(["leftovers"]), 0)
+            self.assertEqual(R.main(["cards-after", "--max-card", "3"]), 0)
+        first, second = out.getvalue().split("\n}\n")[:2]
+        self.assertEqual(json.loads(first + "}"), {"hold": None, "items": []})
+        self.assertEqual(json.loads(second + "}"), {"cards": []})
+        self.assertEqual(self.files(), [])
+
+
 class Cli(Base):
     def test_status_reconcile_pin(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
