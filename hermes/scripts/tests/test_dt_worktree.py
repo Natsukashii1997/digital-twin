@@ -67,12 +67,44 @@ if mode == "revoke":
     p.write_text(json.dumps(doc))
 if mode == "branch":
     subprocess.run(["git", "checkout", "-q", "-b", "other"], check=True)
+if os.environ.get("FAKE_MODEL_LOG"):            # 像真的 CLI 一样往家目录里写会话记录（写法见 MODEL_WRITER）
+    exec(Path(os.environ["FAKE_MODEL_WRITER"]).read_text())
 print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1"}}), flush=True)
 print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": "改好了"}}),
       flush=True)
 if mode in ("sleep", "orphan_sleep"):           # 已经交了结果还没退出（中台会把本脚本追加的停下消息当最后一条）
     time.sleep(30)
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+'''
+
+
+MODEL_WRITER = r'''
+import datetime as _dt
+_now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+_home, _here = Path(os.environ["HOME"]), os.getcwd()
+_model = os.environ.get("FAKE_MODEL", "claude-opus-5-5")
+if os.environ["FAKE_MODEL_LOG"] == "claude":     # ~/.claude/projects/<目录名>/<会话号>.jsonl，只有本轮、本单目录的回复算数
+    _a = sys.argv[1:]
+    _sid = _a[_a.index("--session-id") + 1] if "--session-id" in _a else _a[_a.index("--resume") + 1]
+    _d = _home / ".claude/projects/-whatever-the-cli-names-it"
+    _d.mkdir(parents=True, exist_ok=True)
+    _rows = [{"type": "assistant", "timestamp": "2020-01-01T00:00:00.000Z", "cwd": _here, "message": {"model": "old-model"}},
+             {"type": "assistant", "timestamp": _now, "cwd": "/elsewhere", "message": {"model": "elsewhere-model"}},
+             {"type": "assistant", "timestamp": _now, "cwd": _here, "message": {"model": "<synthetic>"}},
+             {"type": "user", "timestamp": _now, "cwd": _here, "message": {"model": "user-row"}},
+             "这一行不是 JSON",
+             {"type": "assistant", "timestamp": _now, "cwd": _here, "message": {"model": _model}}]
+    with (_d / (_sid + ".jsonl")).open("a") as _f:
+        for _r in _rows:
+            _f.write((_r if isinstance(_r, str) else json.dumps(_r)) + "\n")
+else:                                            # ~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl 里的 turn_context
+    _d = _home / ".codex/sessions" / time.strftime("%Y/%m/%d")
+    _d.mkdir(parents=True, exist_ok=True)
+    (_d / "rollout-mine.jsonl").write_text("\n".join(json.dumps(x) for x in [
+        {"type": "session_meta", "timestamp": _now, "payload": {"cwd": _here, "id": "x"}},
+        {"type": "turn_context", "timestamp": _now, "payload": {"cwd": _here, "model": _model}}]) + "\n")
+    (_d / "rollout-other.jsonl").write_text(json.dumps(
+        {"type": "turn_context", "timestamp": _now, "payload": {"cwd": "/elsewhere", "model": "elsewhere-model"}}) + "\n")
 '''
 
 
@@ -184,6 +216,12 @@ class WorkerBase(Base):
     def wt(self, tid):
         return self.work / "dt-sandbox/wt" / tid
 
+    def with_model_log(self, kind, model=None):
+        """让假 CLI 写一份会话记录：kind 是 claude 或 codex。"""
+        w = self.root / "model_writer.py"
+        w.write_text(MODEL_WRITER)
+        return {"FAKE_MODEL_LOG": kind, "FAKE_MODEL_WRITER": str(w), **({"FAKE_MODEL": model} if model else {})}
+
     def patch_mirror(self, tid, **fields):
         doc = json.loads(self.status.read_text())
         doc["tasks"][tid].update(fields)
@@ -273,6 +311,40 @@ class FirstTurnAndResume(WorkerBase):
         lines = [json.loads(x) for x in r.stdout.strip().splitlines()]
         self.assertEqual([x["type"] for x in lines], ["item.completed", "turn.completed"])
         self.assertTrue(lines[0]["item"]["text"].startswith("停下了：凭证已撤销"))
+
+
+class WorkerModel(WorkerBase):
+    """P-13 留痕（#195 缺口 2）：这一轮实际用的模型从 CLI 自己的会话记录读出，跟着交接清单走。"""
+
+    def test_claude_model_comes_from_its_own_session_log(self):
+        tid = self.new_live_task()
+        r, _ = self.run_turn([self.dispatch_event(tid)], args=("-p", "做事", "--session-id", "s-1", "--model", "opus"),
+                             **self.with_model_log("claude", "claude-opus-5-5[1m]"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        m = self.handoff(tid)                          # 旧的、别的目录的、<synthetic>、不是回复的、坏行都不算；会话记录优先于参数
+        self.assertEqual((m["schema"], m["model"], m["model_from"]), (2, "claude-opus-5-5[1m]", "transcript"))
+        self.assertIn("这一轮用的模型：claude-opus-5-5[1m]", (self.work / ".state" / f"{tid}.log").read_text())
+
+    def test_codex_model_comes_from_turn_context_of_this_folder(self):
+        tid = self.new_live_task(executor="codex")
+        r, _ = self.run_turn([self.dispatch_event(tid, executor="codex")], executor="codex",
+                             args=("exec", "--json", "做事"), **self.with_model_log("codex", "gpt-6.1-sol"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.handoff(tid)["model"], self.handoff(tid)["model_from"]), ("gpt-6.1-sol", "transcript"))
+
+    def test_falls_back_to_the_launch_argument_then_to_not_recorded(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)], args=("-p", "做事", "--session-id", "s-1", "--model", "claude-sonnet-5-5"))
+        self.assertEqual((self.handoff(tid)["model"], self.handoff(tid)["model_from"]), ("claude-sonnet-5-5", "args"))
+        other = self.new_live_task(executor="codex")
+        self.run_turn([self.dispatch_event(other, executor="codex")], executor="codex", args=("exec", "--json", "做事"))
+        self.assertEqual((self.handoff(other)["model"], self.handoff(other)["model_from"]), (None, None))   # 不猜
+
+    def test_odd_model_names_are_not_recorded(self):
+        tid = self.new_live_task()
+        r, _ = self.run_turn([self.dispatch_event(tid)], **self.with_model_log("claude", "x; rm -rf / `whoami`"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.handoff(tid)["model"], self.handoff(tid)["model_from"]), (None, None))
 
 
 class ScopeDoesNotGrow(WorkerBase):

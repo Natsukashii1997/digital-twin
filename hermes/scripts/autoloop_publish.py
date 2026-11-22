@@ -68,8 +68,12 @@ MAX_BUNDLE = 50 * 1024 * 1024
 SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 BRANCH = re.compile(r"^(claude|codex)/t-\d{8}-[0-9a-f]{6}$")
-KEYS = {"schema", "task_id", "generation", "executor", "repo", "branch", "base", "head", "bundle", "bundle_sha256",
-        "run", "at"}
+KEYS_V1 = {"schema", "task_id", "generation", "executor", "repo", "branch", "base", "head", "bundle", "bundle_sha256",
+           "run", "at"}
+KEYS = KEYS_V1 | {"model", "model_from"}         # schema 2：多记这一轮用的模型（P-13 留痕，#195 缺口 2）
+MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,63}$")     # 和 ops/dt_worktree.MODEL_NAME 同一写法
+MODEL_FROM = {"transcript": "工人侧从 CLI 自己的会话记录读出", "args": "工人侧按启动参数"}
+MAX_MODELS = 3
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "transfer.fsckObjects=true",
             "-c", "fetch.fsckObjects=true"]
 RULES = HERE / "merge_rules.json"
@@ -150,9 +154,12 @@ def read_manifest(task_id):
         m = json.loads(raw.decode("utf-8"))
     except ValueError:
         raise Rejected("交接清单不是合法的 JSON")
-    if not isinstance(m, dict) or set(m) != KEYS:
+    if (not isinstance(m, dict) or type(m.get("schema")) is not int or m["schema"] not in (1, 2)
+            or set(m) != (KEYS_V1 if m["schema"] == 1 else KEYS)):
         raise Rejected("交接清单的字段不对")
-    ok = (m["schema"] == 1 and m["task_id"] == task_id and type(m["generation"]) is int and m["generation"] >= 1
+    if m["schema"] == 1:                         # 旧格式（还没记模型的启动脚本写的）：照收，模型按未记录
+        m = {**m, "model": None, "model_from": None}
+    ok = (valid_model(m["model"], m["model_from"]) and m["task_id"] == task_id and type(m["generation"]) is int and m["generation"] >= 1
           and m["executor"] in G.EXECUTORS and isinstance(m["repo"], str) and G.REPO_NAME.match(m["repo"])
           and m["branch"] == branch_name(m["executor"], task_id) and isinstance(m["base"], str)
           and SHA.match(m["base"]) and isinstance(m["head"], str) and SHA.match(m["head"])
@@ -161,6 +168,23 @@ def read_manifest(task_id):
     if not ok:
         raise Rejected("交接清单的内容不合格式（分支名必须是 <执行方>/<单号>）")
     return m
+
+
+def valid_model(model, source):
+    """工人侧自报的模型：要么两个都是 null（未记录），要么是 1～3 个合格式的名字（逗号隔开）加一种已知来源。"""
+    if model is None or source is None:
+        return model is None and source is None
+    if not isinstance(model, str) or source not in MODEL_FROM:
+        return False
+    names = model.split(",")
+    return len(names) <= MAX_MODELS and all(MODEL_NAME.match(n) for n in names) and len(set(names)) == len(names)
+
+
+def model_line(m):
+    """PR 正文里的模型一行（P-13）：照实写来源，写明是工人侧自报、控制面没核实。"""
+    if m["model"] is None:
+        return "模型：未记录（工人侧没读到这一轮用的模型）"
+    return f"模型：{m['model']}（{MODEL_FROM[m['model_from']]}，控制面没核实）"
 
 
 # ---------- git ----------
@@ -436,10 +460,10 @@ def publish(task_id, now=None, path=None):
                              lambda: push_branch(mirror, url, branch, head))
             pushed = not got["again"]
         pr = exit_guard("open_pr", task_id, gen, branch, head, {"github": github, "branch": branch, "head": head},
-                        lambda: _open_pr_once(github, branch, head, row))
+                        lambda: _open_pr_once(github, branch, head, row, m))
         pr = {"pr": pr.get("pr"), "pr_opened": bool(pr.get("pr_opened")) and not pr["again"]}
         out = {"task_id": task_id, "generation": gen, "github": github, "branch": branch, "head": head,
-               "run": m["run"], "pushed": pushed, **pr}
+               "run": m["run"], "model": m["model"], "model_from": m["model_from"], "pushed": pushed, **pr}
         record({"what": "发布", **out})
         return out
 
@@ -483,11 +507,11 @@ def push_branch(mirror, url, branch, head):
     raise Rejected(f"git push 失败、分不清推没推：{err[:200]}")
 
 
-def _open_pr_once(github, branch, head, row):
+def _open_pr_once(github, branch, head, row, m=None):
     """开 PR 的出口动作：建之前的查询和核对出问题 → 确定没开（Definite）；建的那一步报错 → 结果不明。"""
     import autoloop_exits as E
     try:
-        return open_pr(github, branch, head, row)
+        return open_pr(github, branch, head, row, m)
     except PrUnknown:
         raise
     except Rejected as e:
@@ -506,7 +530,10 @@ def pr_is_ours(p, github, branch, head):
             and p.get("isCrossRepository") is False and src_owner == owner.lower() and src_name == name.lower())
 
 
-def open_pr(github, branch, head, row):
+def open_pr(github, branch, head, row, m=None):
+    """m 是核过的交接清单，PR 正文的模型一行取自它；同一条分支的 PR 只开一次，之后续接推上去的新提交不改正文
+    （每次发布用的模型都记在发布记录 publish.jsonl 里）。"""
+    m = m or {"model": None, "model_from": None}
     r = subprocess.run([gh_cmd(), "pr", "list", "-R", github, "--head", branch, "--state", "all",
                         "--json", PR_FIELDS], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
@@ -521,6 +548,7 @@ def open_pr(github, branch, head, row):
         raise Rejected("这条分支的 PR 已关闭或已合并，不再开新的；要继续请常浩处理")
     first = row["scope_text"].strip().splitlines()[0][:80]
     body = "\n".join([f"任务单：{row['task_id']}（第 {row['generation']} 代）", f"执行方：{row['executor']}",
+                      "接入：本机 CLI（经中台，工人账号 dt-worker）", model_line(m),
                       f"范围哈希：{row['scope_hash']}", "",
                       "由受信发布（autoloop_publish.py）开出：提交来自工人账号 dt-worker，控制面只取 Git 对象、核过凭证。",
                       "合并照 B 档：常浩点合并卡片或在电脑上处理。", "", "## 五要素", "", row["scope_text"]])
