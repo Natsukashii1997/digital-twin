@@ -24,8 +24,13 @@ title、text、options、recommend、choice、answer、by、result、rule、crea
       认不出、卡片已结束都返回 None。
       只给出「想选哪一项」，算不算批准由调用方定（ADR-015 修订 1：私聊打字只能发起提议，批准要门卫卡上的点击）。
   button_values(content) -> list[dict]            从渲染结果里取出全部按钮回调值（回读核对、测试用）
+
+依赖：只依赖同目录的 card_parts.py（一段文字、灰色小字、折叠面板三样零件，#333；它自己不 import 任何模块、不读环境）。
+搬进 dt-gate 时两个文件一起装（0E-3c 的安装清单要带上 card_parts.py），缺了它本模块导入就失败。
 """
 import re
+
+from card_parts import grey, md, panel
 
 NUMS = "①②③④⑤⑥⑦⑧⑨⑩"
 DEFAULT_HINT = "点按钮就算你定了，只能点一次。"   # 引用回答在 ADR-015 下只算提议，怎么写等门卫接上再定（DECIDED「还没定」）
@@ -89,18 +94,10 @@ def outcome(card, secretary="秘书"):
     return None
 
 
-# ---------- 积木 ----------
-def md(text, **extra):
-    return {"tag": "markdown", "content": text, **extra}
-
-
+# ---------- 积木（一段文字 md、灰色小字 grey、折叠面板 panel 用 card_parts 的；下面是这张卡自己的） ----------
 def plain(text):
     """纯文本组件：选项、结果、回答这类字段原样显示（换行保留），不当 markdown 解析。"""
     return {"tag": "div", "text": {"tag": "plain_text", "content": str(text)}}
-
-
-def grey(text):
-    return md(f"<font color='grey'>{text}</font>", text_size="notation")
 
 
 def button(label, value, kind="default", width=None, size=None):
@@ -111,16 +108,6 @@ def button(label, value, kind="default", width=None, size=None):
     if size:
         b["size"] = size
     return b
-
-
-def panel(title, elements):
-    """默认收起的折叠面板（写法同日报乙版定稿）。"""
-    return {"tag": "collapsible_panel", "expanded": False, "background_color": "grey-50",
-            "border": {"color": "grey", "corner_radius": "6px"}, "padding": "4px 10px 8px 10px", "vertical_spacing": "8px",
-            "header": {"title": {"tag": "plain_text", "content": title}, "width": "fill", "vertical_align": "center",
-                       "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "color": "grey", "size": "16px 16px"},
-                       "icon_position": "right", "icon_expanded_angle": -180},
-            "elements": elements}
 
 
 def footer(card, mark, extra=""):
