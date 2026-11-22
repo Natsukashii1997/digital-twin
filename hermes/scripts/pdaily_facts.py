@@ -198,7 +198,7 @@ def from_ledger(day, w, dec, projects, notes):
               for n in re.findall(r"#(\d+)", " ".join(str(x) for x in (c.get("item"), c.get("source"), *(c.get("evidence") or []))))}
 
     def repeated(r):
-        for ref in r.get("refs") or []:
+        for ref in [r.get("id")] + list(r.get("refs") or []):   # 新通道派单并进 PR 行时，这一行自己就是 pr:…
             m = re.match(r"pr:(.+)#(\d+)$", str(ref))
             if m and (ids.get(m.group(1)), m.group(2)) in listed:
                 return True

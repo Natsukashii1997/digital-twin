@@ -502,15 +502,15 @@ def parts_of(prev):
     return {m["id"]: m for x in (prev or {}).get("rows", []) for m in (x.get("parts") or [x])}
 
 
-def carry_task(prev, task_id):
-    """上一份账本里这张单的那部分，连同它指到的 PR 那部分（沙盒的 PR 行只有派单来源会出），原样带回来、标沿用。
-    上一份里没有返回 []。"""
+def carry_task(prev, task_id, with_pr=True):
+    """上一份账本里这张单的那部分，原样带回来、标沿用；with_pr：连同它指到的 PR 那部分（沙盒的 PR 行只有派单来源会出；
+    这次 PR 查到了就不带旧的，由调用方照这次的实况出）。上一份里没有返回 []。"""
     old = parts_of(prev)
     me = old.get(f"dispatch:{task_id}")
     if not me or "state" not in me:
         return []
     out = []
-    for i in [me["id"]] + [r for r in me.get("refs") or [] if r.startswith("pr:")]:
+    for i in [me["id"]] + [r for r in me.get("refs") or [] if r.startswith("pr:") and with_pr]:
         m = old.get(i)
         if m:
             kept = {k: v for k, v in m.items() if k != "parts"}
@@ -611,9 +611,41 @@ def dispatch_row(g, events, runs, prs, now, hub_ok=True, pr_ok=True):
                     evidence="中台收到了派单，但没有排出轮次（通道暂停或没有这条派单规则，中台只记不接）",
                     next_="看通道（autoloop_config.py status），恢复后续接，或停单", wait="dispatch_unsent",
                     blocked="中台没有接这张单", **base)
-    said = "派单已送到中台，轮次不明" if sent else "凭证已签，还没有派单事件或轮次"
+    said = "派单已送到中台" if sent else "凭证已签，还没有派单事件或轮次"
     return make(state="待验证", owner=UNKNOWN, at=parse_ts(g["created_at"]), evidence=f"{said}{note}",
                 next_="看派单事件（autoloop_grants.py show --task <单号>）", wait="dispatch_unsent", **base)
+
+
+def gone(part):
+    """带回来的那部分指到的 PR 已经不开着了：证据后面补一句，午晚单把它归进「可能已过期」，不再催合并。"""
+    ev = part.get("evidence") or ""
+    return part if GONE_NOTE in ev else {**part, "evidence": ev + GONE_NOTE}
+
+
+def check_carried(rows, open_now, checked, hub):
+    """带回来的 PR 行核一次现状（复审 P1）：这个仓库这次 GitHub 那一类取到了而它不在开着的里面，或者是沙盒、按号查到已合并 /
+    已关闭，就去掉它，指着它的派单那部分补「可能已过期」；查不了的照旧带着。open_now：这次新取到的开着的 PR 编号。"""
+    boxes, dropped = sandboxes(), set()
+    for x in rows:
+        if x.get("source") != "pr" or not x.get("carried") or x["id"] in open_now:
+            continue
+        name, _, n = x["id"][len("pr:"):].rpartition("#")
+        if name in checked:
+            dropped.add(x["id"])
+        elif name in boxes and n.isdigit():
+            try:
+                node = lookup(hub, boxes[name], [int(n)]).get(int(n)) or {}
+            except Exception:   # 查不了：照旧带着，不当成已经合了
+                continue
+            if node.get("state") in ("MERGED", "CLOSED"):
+                dropped.add(x["id"])
+    out = []
+    for x in rows:
+        if x["id"] in dropped:
+            continue
+        refs = [r for r in x.get("refs") or [] if r.startswith("pr:")]
+        out.append(gone(x) if x.get("carried") and refs and all(r in dropped for r in refs) else x)
+    return out
 
 
 def dispatch_source(projects, hub, rules, reviews=None, known=True, now=None, prev=None):
@@ -629,13 +661,14 @@ def dispatch_source(projects, hub, rules, reviews=None, known=True, now=None, pr
         cover["installed"] = False
         return [], cover
     grants, events = got
-    old = parts_of(prev)
+    old, pc = parts_of(prev), ((prev or {}).get("coverage") or {}).get("dispatch") or {}
     allowed = {key_of(p): p.get("github") for p in projects if p.get("github")}
     allowed.update(sandboxes())
     mine = [g for g in grants if TASK_ID.match(str(g.get("task_id") or "")) and g.get("repo") in allowed
             and g.get("executor") in DISPATCH_OWNER]
     cover["skipped"] = len(grants) - len(mine)
-    stale = [g for g in mine if f"dispatch:{g['task_id']}" not in old and finished(g, now - DISPATCH_OLD)
+    trust = pc.get("installed") and not pc.get("failed") and "old" in pc   # 上一份是这个版本完整扫出来的，「上一份没有」才说明它完了
+    stale = [g for g in mine if trust and f"dispatch:{g['task_id']}" not in old and finished(g, now - DISPATCH_OLD)
              and (parse_ts(g["updated_at"]) or now) <= now - DISPATCH_OLD]   # 完了一周、上一份也没有的：不再查
     cover["old"] = len(stale)
     mine = [g for g in mine if g not in stale]
@@ -643,8 +676,8 @@ def dispatch_source(projects, hub, rules, reviews=None, known=True, now=None, pr
         runs = read_runs([g["task_id"] for g in mine])
     except Fail as e:
         runs, cover["hub"] = None, str(e)
-    if runs is None and cover["hub"] == "ok":
-        cover["hub"] = HUB_MISSING
+    if runs is None and cover["hub"] == "ok":   # 装过又不在了按读坏了办，同凭证库
+        cover["hub"] = "中台库不在了（上一份账本里还读得到）" if pc.get("hub") == "ok" else HUB_MISSING
     by_repo = {}
     for g in mine:
         by_repo.setdefault(g["github"], []).append(f"{g['executor']}/{g['task_id']}")
@@ -660,18 +693,25 @@ def dispatch_source(projects, hub, rules, reviews=None, known=True, now=None, pr
         on_branch = prs.get((g["github"], branch), [])
         hub_ok, pr_ok = runs is not None, g["github"].split("/")[-1] not in cover["pr_failed"]
         hub_broken = not hub_ok and cover["hub"] != HUB_MISSING   # 中台库读坏了才沿用；库不在（还没装）照现有数据判，不一直沿用旧行
-        kept = carry_task(prev, g["task_id"]) if hub_broken or not pr_ok else []
+        live_pr = next((x for x in on_branch if x.get("state") == "OPEN"), None)
+        # 冻结、停了单而 PR 还开着：只看凭证和 PR 就判得出，不用轮次，PR 查到了就现判
+        by_grant = pr_ok and ((g["status"] == "frozen" and not finished(g, now)) or (finished(g, now) and live_pr))
+        kept = carry_task(prev, g["task_id"], with_pr=not pr_ok) if (hub_broken or not pr_ok) and not by_grant else []
         if kept:
+            if pr_ok:   # 只是中台库没读到：PR 照这次的实况，派单那部分指到这次开着的 PR；原来指的 PR 不开了补「可能已过期」
+                me, live = kept[0], f"pr:{g['repo']}#{live_pr['number']}" if live_pr else None
+                if not live and any(r.startswith("pr:") for r in me.get("refs") or []):
+                    me = gone(me)
+                kept = [{**me, "refs": [live] if live else []}]
             rows += kept
             cover["carried"] += 1
-            continue
-        row = dispatch_row(g, events.get(g["task_id"], []), (runs or {}).get(g["task_id"], []), on_branch, now,
-                           hub_ok=hub_ok, pr_ok=pr_ok)
-        if row is None:
-            continue
-        rows.append(row)
-        live_pr = next((x for x in on_branch if x.get("state") == "OPEN"), None)
-        if live_pr:
+        else:
+            row = dispatch_row(g, events.get(g["task_id"], []), (runs or {}).get(g["task_id"], []), on_branch, now,
+                               hub_ok=hub_ok, pr_ok=pr_ok)
+            if row is None:
+                continue
+            rows.append(row)
+        if live_pr and pr_ok:
             name = g["repo"]
             rows.append(pr_row(g["github"], live_pr, rules, (reviews or {}).get(f"pr:{name}#{live_pr['number']}", ()), known, now))
     cover["rows"] = len(rows)
@@ -1158,6 +1198,9 @@ def merge(rows, since, now):
         old = {m["id"] for m in members[1:] if active and parse_ts(m.get("evidence_at")) and parse_ts(m["evidence_at"]) < active}
         lead = min((m for m in members if m["id"] not in old), key=need)
         row = {**lead, **{k: main.get(k) for k in ("id", "what", "source", "project", "done_when", "refs", "session_ref")}}
+        asks = [m["ask"] for m in members if m.get("ask") and m["state"] == lead["state"] and m["id"] not in old]
+        if asks:   # 新通道派单自己说了要他做哪种（冻结单并进只改文档的 PR，两行都是等你、PR 行当了主导）：拍板优先
+            row["ask"] = "拍板" if "拍板" in asks else asks[0]
         if len(members) > 1:
             row.pop("url", None)
             row.pop("line", None)
@@ -1337,6 +1380,7 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
         dispatch = [x for t in tasks for x in carry_task(prev, t)]   # 连同沙盒的 PR 行（GitHub 那一类不补它）
         d_cover["carried"] = sum(1 for x in dispatch if x["source"] == "dispatch")
     gh_old = carry(prev, "rows", gh_cover["failed"], "pr")
+    dispatch = check_carried(dispatch, {r["id"] for r in prs}, gh_cover.get("ok") or [], hub)
     seen_prs = {r["id"] for r in prs + gh_old}
     dispatch = [r for r in dispatch if not (r["source"] == "pr" and r["id"] in seen_prs)]   # 活跃项目的 PR 上面已经有了（新取的或沿用的）
     lines, parked, unparsed, candidates, ml_cover = mainline_source(projects, fetch)
@@ -1418,7 +1462,7 @@ def gaps(ledger):
     d = cov.get("dispatch") or {}
     if d.get("installed") is not False and not d.get("failed"):
         if d.get("hub") not in (None, "ok"):
-            out.append(f"新通道派单：{d['hub']}（轮次不明，状态只按凭证和 PR 判）")
+            out.append(f"新通道派单：{d['hub']}（轮次不明：上一份账本里有的单沿用，其余只按凭证和 PR 判）")
         for name, why in (d.get("pr_failed") or {}).items():
             out.append(f"新通道派单·{name}：PR 没查到（{why}）")
         if d.get("carried"):
