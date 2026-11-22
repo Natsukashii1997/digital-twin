@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -614,15 +615,46 @@ class Resume(Base):
         out = G.resume_dispatch(tid, "correction", "换代后更正", now=T0, post=self.post)    # 解冻要私聊口令，这里直接改库
         self.assertEqual(out["event_key"], f"{tid}:g2:correction:1")
 
-    def test_task_locked_claim_is_checked(self):
-        """预审备注：task_locked=True 只在这把锁确实有人持着时才认，顺手传 True 绕不过任务锁。"""
-        tid = self.new_task()
-        with self.assertRaisesRegex(G.Rejected, "实际没有人持着"):
-            G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, task_locked=True)
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind != 'start'", (tid,))[0][0], 0)
-        with G.task_lock(tid):
-            out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, task_locked=True)
+    def test_lock_token_must_be_the_callers_own(self):
+        """续审第 4 轮 P1-08-01：另一个进程持着这张单的任务锁时，本进程怎么传都续接不了——不传（自己拿被挡）、传布尔值、
+        传伪造的凭证（锁文件开着但没拿到锁）、传别的单的凭证，一律拒绝，事件数不变；离开 with 的凭证作废；
+        本进程自己拿到的凭证才认。「试着拿锁被挡」不再当成「调用方持锁」的证明。"""
+        tid, other = self.new_task(), self.new_task()
+
+        def events():
+            return self.sql("SELECT COUNT(*) FROM hub_events WHERE task_id = ? AND kind != 'start'", (tid,))[0][0]
+        with G.task_lock(tid) as expired:
+            pass
+        f = G._lock_file(tid)
+        child = subprocess.Popen([sys.executable, "-c",                    # 独立进程持锁（原秘书 ② / ③ 或受信发布）
+                                  "import fcntl, os, sys\n"
+                                  "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                                  "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                                  "print('held', flush=True)\n"
+                                  "sys.stdin.read()\n", str(f)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "held")
+            with self.assertRaisesRegex(G.Rejected, "另有入口正在处理"):
+                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post)
+            fd = os.open(f, os.O_RDWR)
+            try:
+                forged = G.TaskLock(tid, str(f), fd)
+                with G.task_lock(other) as theirs:
+                    for bad in (True, 1, "locked", forged, theirs, expired):
+                        with self.subTest(bad=type(bad).__name__):
+                            with self.assertRaisesRegex(G.Rejected, "不是调用方此刻持着"):
+                                G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=bad)
+            finally:
+                os.close(fd)
+            self.assertEqual(events(), 0)
+        finally:
+            child.stdin.close()
+            child.wait(10)
+        with G.task_lock(tid) as mine:
+            out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
         self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
+        self.assertEqual(events(), 1)
 
     def test_task_lock_lives_next_to_the_grants_db(self):
         """续审第 3 轮：任务锁文件在凭证库旁边的 task-locks/，写同一个凭证库的进程（续接、受信发布、秘书 ② / ③）必然拿同一把，

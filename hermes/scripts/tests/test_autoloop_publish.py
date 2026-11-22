@@ -263,6 +263,45 @@ class GrantAtPublish(PublishBase):
         self.unfreeze_ok(tid, code, when=self.now)
         self.rejects(tid, "第 1 代已作废")
 
+    def test_in_flight_event_of_a_voided_generation_arrives_late(self):
+        """续审第 4 轮 P2-07：第 1 代的续接事件已领走（sent=2）、请求还在路上时冻结并换到第 2 代，第 2 代照常续接；旧请求随后
+        才到中台。中台本身不核代次（引擎没改），代次在三处核：
+        ① 镜像已刷新时到 → 工人准入按镜像拦下：不启动 CLI、不交接；
+        ② 冻结提交到镜像刷新之间到（这里把镜像换回冻结前的样子模拟）→ 工人会跑、会交接（工人只看镜像），交接前重核同样看旧镜像，
+           受信发布按凭证库现读拦下：不推、不开 PR；
+        ③ 这张单跑过第 2 代以后再到的第 1 代事件 → 工人按本单状态拦下（比上次跑的旧）。第 2 代照常跑完、交接。"""
+        tid = self.worked()
+
+        def down(body):
+            raise G.Rejected("请求还在路上")
+        old = G.resume_dispatch(tid, "redispatch", "中台放弃了", now=self.now, post=down)["event_key"]
+        self.sql("UPDATE hub_events SET sent = 2, claimed_at = ? WHERE event_key = ?", (G.iso(self.now), old))
+        stale = self.status.read_text()                                          # 冻结前的工人镜像
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        fresh = self.status.read_text()
+        self.assertEqual(self.mirror()[tid]["generation"], 2)
+        self.assertEqual(self.sql("SELECT sent FROM hub_events WHERE event_key = ?", (old,))[0][0], 2)   # 旧请求还在途
+        new = G.resume_dispatch(tid, "correction", "换代后更正", now=self.now, post=self.post)  # 不被旧代次的在途事件挡
+        self.assertTrue(new["event_key"].startswith(f"{tid}:g2:correction"))
+        late = self.dispatch_event(tid, gen=1, kind="redispatch")
+        before = self.handoff(tid)
+        r, calls = self.run_turn([late])                                          # ① 镜像已刷新
+        self.assert_stopped(r, calls, "第 1 代已作废")
+        self.assertEqual(self.handoff(tid), before)
+        self.status.write_text(stale)                                             # ② 镜像还没刷新
+        r, calls = self.run_turn([late])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        self.assertEqual(self.handoff(tid)["generation"], 1)
+        self.status.write_text(fresh)
+        self.rejects(tid, "第 1 代已作废")
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        self.assertEqual(self.handoff(tid)["generation"], 2)
+        r, calls = self.run_turn([late])                                          # ③ 第 2 代跑过以后
+        self.assert_stopped(r, calls, "第 1 代")
+        self.assertEqual(self.handoff(tid)["generation"], 2)
+
     def test_manifest_cannot_choose_repo_or_executor(self):
         tid = self.worked()
         self.rewrite_manifest(tid, executor="codex", branch=f"codex/{tid}")

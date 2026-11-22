@@ -55,7 +55,7 @@
 环境变量：DT_GRANTS_DB（默认 DigitalTwin/autoloop/grants.db）、DT_GRANTS_STATUS（共享镜像）、DT_GRANTS_TASKS（任务单目录）、
 DT_HUB（中台地址）、DT_HERMES_SOURCE_KEY_FILE（hermes 来源密钥文件，600；0B-2 建）。
 任务锁（task_lock）不另设环境变量：固定在凭证库旁边的 task-locks/<单号>.lock（跟着 DT_GRANTS_DB 走），续接、受信发布、
-秘书 ② / ③ 共用这一把（续审第 3 轮）。
+秘书 ② / ③ 共用这一把（续审第 3 轮）；拿到后交出 TaskLock 凭证，已持锁的调用方把凭证传给 resume_dispatch（续审第 4 轮）。
 """
 import argparse
 import contextlib
@@ -126,27 +126,63 @@ class Busy(Rejected):
     """这张单的任务锁被别人持着（秘书 ② / ③、受信发布或另一次续接正在处理）。"""
 
 
+class TaskLock:
+    """持着这张单任务锁的凭证（续审第 4 轮 P1-08-01）：只有 task_lock 在真拿到锁之后才交出，离开 with 就作废；
+    是进程里的对象，别的进程拿不到。resume_dispatch(lock=...) 认它而不是一个「我已持锁」的布尔值。"""
+    __slots__ = ("task_id", "path", "fd", "held")
+
+    def __init__(self, task_id, path, fd):
+        self.task_id, self.path, self.fd, self.held = task_id, path, fd, True
+
+
+def _lock_file(task_id, path=None):
+    return Path(path or db_path()).parent / "task-locks" / f"{task_id}.lock"
+
+
 @contextlib.contextmanager
 def task_lock(task_id, path=None):
     """这张单的任务锁（续审第 3 轮 P1-08-01）：受信发布、秘书 ② / ③、续接共用这一把，锁文件在凭证库旁边的 task-locks/，
     写同一个凭证库的进程必然拿同一把（不靠环境变量对齐）。不等待：被别人持着抛 Busy；锁文件建不了抛 Rejected（不往下做）。
-    flock 按打开的文件算：同一进程已经持着时再拿也会被拒，调用方已持锁就别再拿（resume_dispatch 的 task_locked）。"""
+    拿到后交出 TaskLock 凭证；已经持锁的调用方把凭证交给 resume_dispatch，不再拿第二次（同一进程再拿也会被挡）。"""
     if not TASK_ID.match(str(task_id or "")):
         raise Rejected("单号写法不对")
-    d = Path(path or db_path()).parent / "task-locks"
+    f = _lock_file(task_id, path)
     try:
-        d.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(d / f"{task_id}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        f.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(f, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as e:
         raise Rejected(f"查不了这张单的任务锁（{type(e).__name__}）")
+    token = None
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Busy("这张单另有入口正在处理（秘书 ② / ③、受信发布或另一次续接），等它做完")
-        yield
+        token = TaskLock(task_id, str(f), fd)
+        yield token
     finally:
+        if token is not None:
+            token.held = False
         os.close(fd)
+
+
+def holds(lock, task_id, path=None):
+    """lock 是不是调用方此刻持着的、这张单的任务锁凭证：类型对、没作废、单号和锁文件对得上、文件描述符还指着那个锁文件，
+    并且在这个描述符上再拿一次排他锁马上成功（flock 按打开的文件算：别人持着时这一步一定失败）。
+    「试着拿锁被挡」只说明有人持着，不说明是调用方，所以不拿它当证明（续审第 4 轮 P1-08-01）。"""
+    if type(lock) is not TaskLock or not lock.held or lock.task_id != task_id:
+        return False
+    f = _lock_file(task_id, path)
+    try:
+        if lock.path != str(f):
+            return False
+        a, b = os.fstat(lock.fd), os.stat(f)
+        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
+            return False
+        fcntl.flock(lock.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
 
 
 # ---------- 路径、时间 ----------
@@ -624,31 +660,28 @@ def approve(message_id, now=None, path=None, post=None):
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
-def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=None, generation=None, task_locked=False):
+def resume_dispatch(task_id, kind, reason, now=None, path=None, post=None, ref=None, generation=None, lock=None):
     """续接（重派 / 返修 / 更正）：记一条派单事件再尝试发。ref = 发起这次续接的决定号（秘书代批传自己的决定号），
     和事件号记在同一条续接日志里，恢复闸据此认「只差网关补发」的是不是这次决定的事件（L3 第 3 轮 P1-09）；
     同一个 ref 只能续接一次。generation = 发起方认定的代次，凭证已经不是这一代就不续接。
     整个续接持这张单的任务锁（task_lock，和受信发布、秘书 ② / ③ 同一把，不等待，拿不到就拒绝）：秘书 ② / ③ 或
-    受信发布正在处理这张单时，命令行和别的调用方都不能另记一条事件（续审第 3 轮 P1-08-01）。task_locked=True 表示
-    调用方已经持着这把锁（秘书 ② / ③），这里不再拿（同一进程再拿会被自己挡住）。这张单还有没确认送到中台的派单事件
+    受信发布正在处理这张单时，命令行和别的调用方都不能另记一条事件（续审第 3 轮 P1-08-01）。已经持锁的调用方（秘书 ② / ③）
+    把 task_lock 交出的凭证传进 lock，这里用 holds 核实是它此刻持着这张单的锁才不再拿；凭证不对一律拒绝，不退回去自己拿
+    （续审第 4 轮：不认「我已持锁」的布尔值，也不拿「试着拿锁被挡」当证明）。这张单还有没确认送到中台的派单事件
     （续接类、sent 0 / 2、代次仍有效，unsent_resume_events）也不续接：锁放开以后同一张单照样不会冒出第二个事件号
-    （续审第 3 轮预审 P1-A）。传 task_locked=True 时核实这把锁确实有人持着（同一进程另开一次拿不到），顺手传 True 绕不过去。"""
-    if task_locked:
+    （续审第 3 轮预审 P1-A）。"""
+    if lock is None:
         try:
-            with task_lock(task_id, path):
-                raise Rejected("不能续接：调用方说持着这张单的任务锁，实际没有人持着")
-        except Busy:
-            pass
-    else:
-        try:
-            lock = task_lock(task_id, path)
-            lock.__enter__()
+            cm = task_lock(task_id, path)
+            token = cm.__enter__()
         except Rejected as e:
             raise Rejected(f"不能续接：{e}")
         try:
-            return resume_dispatch(task_id, kind, reason, now, path, post, ref, generation, task_locked=True)
+            return resume_dispatch(task_id, kind, reason, now, path, post, ref, generation, lock=token)
         finally:
-            lock.__exit__(None, None, None)
+            cm.__exit__(None, None, None)
+    if not holds(lock, task_id, path):
+        raise Rejected("不能续接：交来的不是调用方此刻持着的这张单的任务锁")
     now = now or now_tz()
     if kind not in KINDS:
         raise Rejected("续接只有 redispatch、rework、correction 三种")

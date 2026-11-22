@@ -968,16 +968,16 @@ def front_gates(p, ctx, st_status, t, st):
 @contextlib.contextmanager
 def task_locked(task_id):
     """这张任务的任务锁（autoloop_grants.task_lock，和受信发布、续接同一把，不等待）：持着时发布、续接都进不来；
-    别人正持着就交常浩。"""
+    别人正持着就交常浩。交出锁凭证，续接时原样交给 resume_dispatch（续审第 4 轮）。"""
     try:
         lock = G.task_lock(task_id)
-        lock.__enter__()
+        token = lock.__enter__()
     except G.Busy:
         raise Handoff("unsure", "这张任务的受信发布或续接正在进行，秘书不同时续接")
     except G.Rejected:
         raise Handoff("gate", "查不了这张任务的任务锁")
     try:
-        yield
+        yield token
     finally:
         lock.__exit__(None, None, None)
 
@@ -1129,14 +1129,15 @@ def deliver_ask(st, d, ctx, now):
     return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "已交给中台，但回读没对上，等对账"}
 
 
-def _resume(st, d, kind, reason, now, generation, partial=False):
+def _resume(st, d, kind, reason, now, generation, lock, partial=False):
     """经网关续接（② 重派、③ 返修）。按 resume_dispatch 的结果分类：凭证当场不放行（还没记事件）→ failed；
     事件已记、发出且中台给了事件号 → done；其余（发送结果不明、镜像写不成、事件还排着）→ unknown（网关以后补发，对账看它）。
     partial：前面已经做了撤不回的一步（③ 的留言已发出），这时网关不放行也只能记结果不明，交对账、不重发。
-    续接带上决定号和前闸核过的代次（L3 第 3 轮 P1-09）：事件和这次决定绑在同一条续接日志里，凭证换了代就不续接。"""
+    续接带上决定号和前闸核过的代次（L3 第 3 轮 P1-09）：事件和这次决定绑在同一条续接日志里，凭证换了代就不续接。
+    lock：submit 持着的这张任务的任务锁凭证（task_locked 交出的），网关核实后才不再拿锁（续审第 4 轮）。"""
     try:
         out = G.resume_dispatch(d["task_id"], kind, reason, now=now, ref=d["id"], generation=generation,
-                                task_locked=True)              # 调用方 submit 全程持着这张任务的任务锁
+                                lock=lock)                     # 调用方 submit 全程持着这张任务的任务锁
     except G.Rejected as e:
         result = "unknown" if partial else "failed"
         finish(st, d["id"], result, {"error": str(e), **({"note": "留言已发出、返修没派出"} if partial else {})}, now=now)
@@ -1182,7 +1183,8 @@ def deliver_reject(st, d, ctx, now):
     if r.returncode != 0:                                    # gh 报错分不清发没发：结果不明，不重发
         finish(st, d["id"], "unknown", {"error": r.stderr.strip()[:200]}, now=now)
         return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "留言结果不明，等对账"}
-    return _resume(st, d, "rework", f"秘书代批 {d['id']}：审查没过，退回返修", now, ctx["row"]["generation"], partial=True)
+    return _resume(st, d, "rework", f"秘书代批 {d['id']}：审查没过，退回返修", now, ctx["row"]["generation"], ctx["lock"],
+                   partial=True)
 
 
 def recovery_open():
@@ -1211,7 +1213,7 @@ def submit(proposal, now=None):
         with SL.open_store(now) as st, contextlib.ExitStack() as held:
             try:
                 if ctx["category"] in ("redispatch", "reject"):     # 从前闸到续接发出全程持锁（审查 P1-03）
-                    held.enter_context(task_locked(ctx["task"]))
+                    ctx["lock"] = held.enter_context(task_locked(ctx["task"]))
                 ctx["epoch"] = recovery_open()
                 void_orphans(st, ctx["task"], now)
                 front_gates(proposal, ctx, st_status, t, st)
@@ -1245,7 +1247,8 @@ def submit(proposal, now=None):
             if cat == "ask":
                 return deliver_ask(st, d, ctx, now)
             if cat == "redispatch":
-                return _resume(st, d, "redispatch", f"秘书代批 {d['id']}：中台放弃后重派一次", now, ctx["row"]["generation"])
+                return _resume(st, d, "redispatch", f"秘书代批 {d['id']}：中台放弃后重派一次", now, ctx["row"]["generation"],
+                               ctx["lock"])
             return deliver_reject(st, d, ctx, now)
     except L.LedgerError as e:
         return {"ok": False, "result": "refused", "msg": f"账本记不了：{e}"}
