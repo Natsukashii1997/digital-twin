@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import openloop as ol  # noqa: E402
 from aihot_hot import Fail, lark  # noqa: E402  以猛鬼兽机器人跑 lark-cli（去掉会让它改读别的配置的环境变量）
+from card_parts import md, panel, table  # noqa: E402  卡片零件（#333）：一段文字、折叠面板、表格
 from feishu_home import home_chat  # noqa: E402
 
 MAX_ROWS = 7          # 表里最多几件，多的收进折叠（常浩没单独定，先按推荐值）
@@ -64,20 +65,6 @@ def slot(now):
     return ("午间单", "午") if now.hour < EVENING_FROM else ("晚间单", "晚")
 
 
-def md(text):
-    return {"tag": "markdown", "content": text}
-
-
-def panel(title, text):
-    """折叠面板，默认收起（写法同日报）。"""
-    return {"tag": "collapsible_panel", "expanded": False, "background_color": "grey-50",
-            "border": {"color": "grey", "corner_radius": "6px"}, "padding": "4px 10px 8px 10px", "vertical_spacing": "8px",
-            "header": {"title": {"tag": "plain_text", "content": title}, "width": "fill", "vertical_align": "center",
-                       "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "color": "grey", "size": "16px 16px"},
-                       "icon_position": "right", "icon_expanded_angle": -180},
-            "elements": [md(text)]}
-
-
 def build_card(ledger, now, repos):
     """这一档的卡片；没有要他亲手做的事返回 None。"""
     todo, decide, gone = pick(ledger)
@@ -88,18 +75,15 @@ def build_card(ledger, now, repos):
     if not scanned or now - scanned > dt.timedelta(hours=STALE_HOURS):
         elements.append(md(f"⚠️ 账本 {ol.stamp(scanned) if scanned else '不知道哪天'} 之后没更新，下面可能不是最新的"))
     shown, rest = todo[:MAX_ROWS], todo[MAX_ROWS:]
-    elements.append({
-        "tag": "table", "page_size": 10, "row_height": "auto", "row_max_height": "999px",
-        "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey", "bold": True, "lines": 1},
-        "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": w, "vertical_align": "top"}
-                    for k, n, w in (("n", "#", "8%"), ("what", "哪件事", "37%"), ("do", "你要做什么", "42%"), ("age", "已挂", "13%"))],
-        "rows": [{"n": str(i), "what": name(r, repos), "do": f"**{kind(r)}**：{ol.clip(r.get('next'), 60)}", "age": age(r, now)}
-                 for i, r in enumerate(shown, 1)]})
+    elements.append(table(
+        (("n", "#", "8%"), ("what", "哪件事", "37%"), ("do", "你要做什么", "42%"), ("age", "已挂", "13%")),
+        [{"n": str(i), "what": name(r, repos), "do": f"**{kind(r)}**：{ol.clip(r.get('next'), 60)}", "age": age(r, now)}
+         for i, r in enumerate(shown, 1)]))
     if rest:
-        elements.append(panel(f"其余 {len(rest)} 件 · 展开", "\n".join(f"- **{kind(r)}** {name(r, repos)}（{ago(r, now)}）" for r in rest)))
+        elements.append(panel(f"其余 {len(rest)} 件 · 展开", [md("\n".join(f"- **{kind(r)}** {name(r, repos)}（{ago(r, now)}）" for r in rest))]))
     if gone:
         late = sorted(gone, key=lambda r: r.get("evidence_at") or "", reverse=True)
-        elements.append(panel(f"可能已过期的 {len(gone)} 件 · 展开", "\n".join(f"- {name(r, repos)}（{ago(r, now)}）" for r in late)))
+        elements.append(panel(f"可能已过期的 {len(gone)} 件 · 展开", [md("\n".join(f"- {name(r, repos)}（{ago(r, now)}）" for r in late))]))
     tail = (f"另有 {len(decide)} 件等你拍板（不在这张单上）｜{len(gone)} 件可能已过期（它的 PR 已合并或关闭）"
             f"｜账本 {scanned.astimezone(ol.TZ).strftime('%H:%M') if scanned else '—'} 扫描")
     elements.append(md(f"<font color='grey'>{tail}</font>"))

@@ -32,6 +32,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
+from card_parts import grey, hr, md  # noqa: E402  卡片零件（#333）：灰色小字、分隔线、一段文字
 from feishu_home import home_chat  # noqa: E402
 import netwait  # noqa: E402  唤醒后先等网络（P9）
 
@@ -172,10 +173,6 @@ def fetch(now):
 
 # ---------- 排版 ----------
 
-def md(content, **kw):
-    return {"tag": "markdown", "content": content, **kw}
-
-
 def build_card(items, now, banner_key=None):
     els = []
     if banner_key:
@@ -184,7 +181,7 @@ def build_card(items, now, banner_key=None):
     els.append(md("🔥 **TOP 3**"))
     for i in items:
         if i["rank"] == 4:
-            els += [{"tag": "hr"}, md("📈 **No.04–10**")]
+            els += [hr(), md("📈 **No.04–10**")]
         top = i["rank"] <= 3
         label, color = topic(i["title"])
         title = f"**[{i['title']}]({i['url']})**" if i["url"] else f"**{i['title']}**"
@@ -202,7 +199,7 @@ def build_card(items, now, banner_key=None):
         if top:
             row["background_style"] = "grey"
         els.append(row)
-    els += [{"tag": "hr"}, md(f"<font color='grey'>{FOOT}｜数据：aihot.news</font>", text_size="notation")]
+    els += [hr(), grey(f"{FOOT}｜数据：aihot.news")]
     # 不要表头，横幅就是标题（常浩 11-11，同 GitHub 周榜卡片）；聊天列表里的预览文字用 config.summary
     return {"schema": "2.0",
             "config": {"update_multi": True, "summary": {"content": summary_text(now)}},
