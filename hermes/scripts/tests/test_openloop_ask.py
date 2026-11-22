@@ -291,6 +291,32 @@ class Week(Base):
         self.assertEqual((got["done"], got["with_evidence"], got["rate"]), (3, 2, 0.667))
 
 
+class Job(Base):
+    """每周一 09:00 的入口：先粗筛上一周、再出基线，打印给定时任务发私聊。"""
+
+    def run_job(self, inbox):
+        self.write(self.tmp / "projects.json", {"projects": PROJECTS})
+        env = {**os.environ, "DT_ROSTER": str(self.tmp / "projects.json"), "DT_NOW": "2026-11-23T09:00:00+08:00",
+               "DT_DECISION_INBOX": str(inbox), "DT_OPENLOOP_META_DIR": str(self.tmp / "meta"), "DT_OPENLOOP_LOGS_DIR": str(self.tmp / "logs")}
+        return subprocess.run([sys.executable, "-B", str(SCRIPTS / "openloop_ask_job.py")], capture_output=True, text=True, env=env, timeout=60)
+
+    def test_weekly_job_prints_baseline_and_saves_it(self):
+        inbox = self.tmp / "decision_inbox.py"
+        inbox.write_text("META_DIR = PROJECTS_DIR = '/不存在'\nPEER = 'x'\ndef user_words(e):\n    return None\n", encoding="utf-8")
+        (self.tmp / "meta").mkdir()
+        r = self.run_job(inbox)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("未闭环账本 · 一周基线｜2026-11-16 到 2026-11-22", r.stdout)
+        self.assertIn("Claude 会话粗筛：像追问的 0 句", r.stdout)
+        self.assertTrue((self.book / "weekly" / "2026-11-22.json").exists())
+
+    def test_screen_failure_does_not_block_the_baseline(self):
+        r = self.run_job(self.tmp / "没有这个脚本.py")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("一周基线", r.stdout)
+        self.assertIn("⚠️ Claude 会话粗筛没跑成（找不到拍板清单脚本", r.stdout)
+
+
 REAL_INBOX = _isolation.REAL_HOME / "Documents/ChatGPT/个人/work/my-skills/skills/decision-inbox/scripts/decision_inbox.py"
 
 
