@@ -3,11 +3,13 @@ import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一�
 import datetime as dt
 import json
 import os
+import pwd
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -178,12 +180,12 @@ class Card(unittest.TestCase):
 # 假飞书：记着这个会话里的消息（chat.json），回读、列消息给的就是发上去的内容；ctl.json 里按命令名注入故障：
 #   "fail" 明确失败、没发出去；"lost" 发出去了但不给消息号；"ignored"（patch）说成功但没改；"empty"（mget）什么都读不到。
 FAKE = r'''#!/usr/bin/env python3
-import json, os, sys
+import json, os, re, sys
 from pathlib import Path
-root = Path(os.environ["FAKE_DIR"])
+root = Path(__file__).resolve().parent
 args = sys.argv[1:]
 with open(root / "calls.jsonl", "a", encoding="utf-8") as f:
-    f.write(json.dumps({"args": args}, ensure_ascii=False) + "\n")
+    f.write(json.dumps({"args": args, "env": sorted(os.environ)}, ensure_ascii=False) + "\n")
 ctl = json.loads((root / "ctl.json").read_text(encoding="utf-8"))
 store = root / "chat.json"
 msgs = json.loads(store.read_text(encoding="utf-8")) if store.exists() else []
@@ -218,9 +220,16 @@ def render(content):
                 walk(v)
     walk(card["body"])
     h = card["header"]
-    return '<card title="%s" subtitle="%s">\n%s\n</card>' % (h["title"]["content"], h["subtitle"]["content"], "\n".join(texts))
+    body = re.sub(r"</?font[^>]*>", "", "\n".join(texts))          # 真飞书回读给的是去掉颜色标签的文字（11-22 实测）
+    return '<card title="%s" subtitle="%s">\n%s\n</card>' % (h["title"]["content"], h["subtitle"]["content"], body)
 
 
+if cmd.startswith("api GET /open-apis/im/v1/messages/"):          # 原始接口：更新时间到毫秒
+    m = [x for x in msgs if x["message_id"] == cmd.rsplit("/", 1)[1]]
+    if not m:
+        out(error="fake: 没有这条消息")
+    out({"items": [{"message_id": m[0]["message_id"], "deleted": m[0]["deleted"], "updated": m[0]["updated"],
+                    "update_time": str(m[0].get("update_ms", 1795000000000))}]})
 if mode == "fail":
     out(error="fake: 不通")
 if cmd == "im chats get":
@@ -260,10 +269,54 @@ if cmd == "+chat-messages-list":
     out({"messages": mine[i:i + size], "has_more": i + size < len(mine), "page_token": str(i + size)})
 out(error="fake: 没有这条回话 " + cmd)
 '''
-# 身份文件的位置在脚本里是写死的（不认环境变量），测试只能在同一个进程里把它指到临时目录
+# 身份文件、账本目录、lark-cli 的位置、现在几点在脚本里都不认环境变量，测试只能在同一个进程里把它们指到临时目录
 RUN = ("import sys; sys.path.insert(0, sys.argv[1]); import away_sheet as A; from pathlib import Path; "
-       "A.OWNER_DIR = Path(sys.argv[2]); A.PAGE_MAX = int(sys.argv[3]); sys.exit(A.main(sys.argv[4:]))")
+       "A.OWNER_DIR = Path(sys.argv[2]); A.AWAY_DIR = Path(sys.argv[3]); A.LARK = sys.argv[4]; A.NOW = sys.argv[5]; "
+       "A.PAGE_MAX = int(sys.argv[6]); sys.exit(A.main(sys.argv[7:]))")
+NOON = "2026-11-21T12:40:00+08:00"
 LATER = "2026-11-21T12:45:00+08:00"          # 离 12:40 那次发送已过 120 秒
+REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
+SHOW_ENV = r'''#!/bin/sh
+printf '{"ok": true, "data": {"env": "%s", "home": "%s", "path": "%s"}}\n' "$(env | cut -d= -f1 | sort | tr '\n' ' ')" "$HOME" "$PATH"
+'''
+
+
+class Fixed(unittest.TestCase):
+    """账本、时钟、lark-cli 都不听环境变量的（L3 审查 P1-03、P1-08）。"""
+
+    def test_ledger_and_clock_ignore_the_environment(self):
+        want = REAL_HOME / "Library" / "Application Support" / "DigitalTwin"
+        with mock.patch.dict(os.environ, {"DT_AWAY_DIR": "/x/away", "HOME": "/y", "DT_NOW": "2000-01-01T00:00:00+08:00"}):
+            self.assertEqual((A.OWNER_DIR, A.base()), (want, want / "away"))
+            self.assertNotEqual(A.current().year, 2000)
+
+    def test_lark_cli_comes_from_the_protected_file_and_gets_a_bare_environment(self):
+        tmp = Path(tempfile.mkdtemp(prefix="dt-away-cli-"))
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)], check=False)
+        good, loose = tmp / "bin" / "lark-cli", tmp / "loose" / "lark-cli"
+        for f in (good, loose):
+            f.parent.mkdir()
+            f.write_text(SHOW_ENV, encoding="utf-8")
+            f.chmod(0o755)
+        loose.chmod(0o775)                                               # 同组的人写得了
+        with mock.patch.object(A, "OWNER_DIR", tmp), mock.patch.object(A, "LARK", None), \
+                mock.patch.dict(os.environ, {"DT_LARK_CLI": str(loose), "DT_SECRET": "x", "PATH": f"{loose.parent}:/usr/bin:/bin", "HOME": "/y"}):
+            with self.assertRaises(A.Fail) as e:
+                A.lark(["im", "x"], "试")
+            self.assertIn("没配置lark-cli 的位置", str(e.exception))        # 环境变量和 PATH 里的那个不算
+            (tmp / "lark_cli").write_text(str(loose) + "\n", encoding="utf-8")
+            (tmp / "lark_cli").chmod(0o600)
+            with self.assertRaises(A.Fail) as e:
+                A.lark(["im", "x"], "试")
+            self.assertIn("别人写不了", str(e.exception))
+            (tmp / "lark_cli").write_text(str(good) + "\n", encoding="utf-8")
+            got = A.lark(["im", "x"], "试")
+        self.assertEqual(got["home"], str(REAL_HOME))                    # 它读哪套配置也不由调用方的 HOME 定
+        self.assertEqual(got["path"], f"{good.parent}:/usr/bin:/bin:/usr/sbin:/sbin")
+        self.assertNotIn("DT_SECRET", got["env"].split())
+        self.assertNotIn("DT_LARK_CLI", got["env"].split())
 
 
 class Cli(unittest.TestCase):
@@ -308,17 +361,12 @@ class Cli(unittest.TestCase):
         [m for m in msgs if m["message_id"] == mid][0].update(fields)
         self.put(msgs)
 
-    def env(self, now="2026-11-21T12:40:00+08:00", **more):
-        env = dict(os.environ, DT_AWAY_DIR=str(self.dir), DT_LARK_CLI=str(self.fake / "lark-cli"), FAKE_DIR=str(self.fake),
-                   DT_NOW=now, HERMES_HOME="/x")
-        env.update(more)
-        return env
+    def cmd(self, *args, now=NOON):
+        return [sys.executable, "-B", "-c", RUN, str(SCRIPTS), str(self.who), str(self.dir), str(self.fake / "lark-cli"), now,
+                str(self.page_max), *args]
 
-    def cmd(self, *args):
-        return [sys.executable, "-B", "-c", RUN, str(SCRIPTS), str(self.who), str(self.page_max), *args]
-
-    def run_script(self, *args, **kw):
-        return subprocess.run(self.cmd(*args), capture_output=True, text=True, env=self.env(**kw), timeout=120)
+    def run_script(self, *args, now=NOON, **env):
+        return subprocess.run(self.cmd(*args, now=now), capture_output=True, text=True, env=dict(os.environ, **env), timeout=120)
 
     def ok(self, *args, **kw):
         r = self.run_script(*args, **kw)
@@ -332,9 +380,11 @@ class Cli(unittest.TestCase):
         return r.stdout
 
     def calls(self, word):
+        return [c["args"] for c in self.logged() if word in " ".join(c["args"])]
+
+    def logged(self):
         p = self.fake / "calls.jsonl"
-        calls = [json.loads(line)["args"] for line in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
-        return [a for a in calls if word in " ".join(a)]
+        return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()] if p.exists() else []
 
     def ask(self, **kw):
         a = dict(ASK, **kw)
@@ -476,6 +526,69 @@ class Cli(unittest.TestCase):
         self.assertFalse(self.sheet()["dirty"])
         self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
 
+    def test_marker_typed_into_the_text_does_not_fool_the_readback(self):
+        # L3 审查 P2-01：托管会话填的文字里出现「单号 … · 第 3 版」，更新又没生效；回读只认卡片最后一行
+        self.open_sheet()
+        self.ok("push")
+        self.ok("done", "--project", "磁盘瘦身", "--text", "正文里写着｜单号 2026-11-21-1200 · 第 3 版")
+        self.ok("push")                                                   # 第 2 版，这行字已经在卡片上了
+        self.ok("done", "--project", "磁盘瘦身", "--text", "又一件。")
+        self.ctl(**{"im messages patch": "ignored"})
+        self.bad("回读对不上", "push")                                     # 第 3 版没上去：最后一行还是「第 2 版」
+        self.assertTrue(self.sheet()["dirty"])
+
+    def test_reminder_waits_until_the_card_is_confirmed(self):
+        # L3 审查 P2-09：更新说成功但其实没上去，这时提醒不能先发（他点回卡片看不到新加的事）
+        self.open_sheet()
+        self.ok("push")
+        self.ask(task="数字分身 · 合并官")
+        self.ctl(**{"im messages patch": "ignored"})
+        self.bad("回读对不上", "push")
+        self.assertEqual(self.calls("+messages-reply"), [])
+        self.assertEqual((self.runs()[-1]["remind"], self.sheet()["rows"][1]["notified"], self.sheet()["reminders"]), ("held", False, []))
+        self.ctl()
+        self.ok("push")
+        self.assertEqual(len(self.calls("+messages-reply")), 1)
+
+    # ---------- 开下一张的门（P1-07） ----------
+
+    def test_state_that_cannot_be_read_is_not_treated_as_no_sheet(self):
+        self.open_sheet()
+        self.ok("push")
+        self.ok("end", "--at", "12:40")
+        self.ok("push")                                                   # 上一张干干净净结束了，本来可以开下一张
+        state, sheet = self.dir / "state.json", self.dir / "2026-11-21-1200" / "sheet.json"
+        good_state, good_sheet = state.read_text(encoding="utf-8"), sheet.read_text(encoding="utf-8")
+        for path, broken, word in ((state, "{", "读不了或者坏了"), (state, '{"current": "../x"}', "单号不对"), (state, "[]", "读不了或者坏了"),
+                                   (sheet, "{", "读不了"), (sheet, good_sheet.replace('"version": 1', '"version": 9'), "不是这个脚本写的格式")):
+            path.write_text(broken, encoding="utf-8")
+            r = self.next_sheet()
+            self.assertEqual((r.returncode, r.stderr), (1, ""), broken)
+            self.assertIn(word, r.stdout)
+            path.write_text(good_state if path == state else good_sheet, encoding="utf-8")
+        state.unlink()                                                    # 指针没了，可以前的单子还在
+        r = self.next_sheet()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("state.json 不见了", r.stdout)
+        self.assertEqual(sorted(d.name for d in self.dir.iterdir() if d.is_dir()), ["2026-11-21-1200"])   # 一张都没多开
+        state.write_text(good_state, encoding="utf-8")
+        self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
+
+    def test_unconfirmed_reminder_keeps_the_next_sheet_closed(self):
+        self.open_sheet()
+        self.ok("push")
+        self.ask(task="数字分身 · 合并官")
+        self.ok("end", "--at", "12:40")
+        self.ctl(**{"+messages-reply": "fail"})
+        self.bad("第 1 批提醒结果不明", "push")                             # 卡片推到了，提醒没确认发到
+        self.assertFalse(self.sheet()["dirty"])
+        self.ctl()
+        r = self.next_sheet()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("还有提醒没确认发到", r.stdout)
+        self.ok("push", now=LATER)                                        # 出路：再 push，对账后补发
+        self.assertEqual(self.next_sheet().stdout.strip(), "2026-11-21-1300")
+
     # ---------- 首发结果不明（P1-02） ----------
 
     def test_lost_first_send_freezes_the_sheet_then_adopts_the_card_already_there(self):
@@ -534,7 +647,8 @@ class Cli(unittest.TestCase):
         self.ctl(**{"+messages-send": "lost"})
         self.bad("没拿到消息号", "push")
         self.put(self.chat() + [dict(self.chat()[0], message_id="om_sheet_dup")])     # 超过一小时去重期又发出过一张
-        self.say("om_note", "别的卡片", quote=None, who="app", sender="cli_bot", id_type="app_id", msg_type="interactive")
+        self.say("om_note", '<card title="别的卡片" subtitle="x">\n正文里提到｜单号 2026-11-21-1200 · 第 1 版\n别的页脚\n</card>',
+                 quote=None, who="app", sender="cli_bot", id_type="app_id", msg_type="interactive")      # 只是正文里提到，不是这张单子
         self.ctl()
         out = self.bad("adopt --message-id", "push", now=LATER)
         self.assertIn("om_sheet_1、om_sheet_dup", out)
@@ -574,6 +688,23 @@ class Cli(unittest.TestCase):
         self.assertEqual(self.runs()[-1]["remind"], "sent")               # 一批找回、一批新发：记新发
         self.ok("push")
         self.assertEqual(self.runs()[-1]["remind"], "none")
+
+    def test_duplicate_reminders_are_all_recorded_and_reported(self):
+        # 同一批提醒在飞书上不止一句：不悄悄认第一句了事，报出来，两句都记下（引用哪一句回话都认）
+        self.open_sheet()
+        self.ok("push")
+        self.ask(task="数字分身 · 合并官")
+        self.ctl(**{"+messages-reply": "lost"})
+        self.bad("第 1 批提醒结果不明", "push")
+        self.put(self.chat() + [dict(self.chat()[-1], message_id="om_remind_dup")])
+        self.ctl()
+        out = self.bad("重复发出过", "push")
+        self.assertIn("om_remind_1、om_remind_dup", out)
+        batch = self.sheet()["reminders"][0]
+        self.assertEqual((batch["message_id"], batch["also"]), ("om_remind_1", ["om_remind_dup"]))
+        self.say("om_a", "2 开了再恢复", quote="om_remind_dup")
+        self.assertEqual(self.got()["om_a"]["state"], "pending")
+        self.ok("push")                                                   # 报过一次，之后照常
 
     def test_reminder_that_never_arrived_waits_then_goes_out_once(self):
         self.open_sheet()
@@ -635,13 +766,28 @@ class Cli(unittest.TestCase):
     def test_identity_cannot_be_swapped_through_the_environment(self):
         # L3 审查 P1-03：调用方用环境变量把「常浩」换成群里另一个人、把私聊换成群
         swapped = {"DT_OWNER_OPEN_ID": "ou_someone", "DT_OWNER_CHAT_ID": "oc_group000000001", "FEISHU_HOME_CHANNEL": "oc_group000000001",
-                   "DT_OWNER_FILE": str(self.tmp / "x"), "DT_OWNER_CHAT_FILE": str(self.tmp / "y"), "HOME": str(self.tmp)}
+                   "DT_OWNER_FILE": str(self.tmp / "x"), "DT_OWNER_CHAT_FILE": str(self.tmp / "y"), "HOME": str(self.tmp),
+                   "DT_LARK_CLI": "/usr/bin/false", "DT_AWAY_DIR": str(self.tmp / "other"), "DT_NOW": "2000-01-01T00:00:00+08:00",
+                   "DT_SECRET": "x"}
         self.open_sheet()
         self.ok("push", **swapped)
         self.assertEqual(self.chat()[0]["chat_id"], CHAT)                 # 还是发到身份文件里的私聊
         self.say("om_a", "1 删掉")
         self.say("om_f", "1 留着", sender="ou_someone")
         self.assertEqual(list(self.got(**swapped)), ["om_a"])
+        self.assertFalse((self.tmp / "other").exists())                   # 没有另起一套账本
+        self.assertEqual(self.sheet()["pushed_at"], NOON)                 # 时间也没被换掉
+        for call in self.logged():                                        # 给 lark-cli 的环境是最小的，调用方的变量带不进去
+            self.assertFalse([k for k in call["env"] if k.startswith(("DT_", "FEISHU_", "HERMES_"))], call["env"])
+
+    def test_another_environment_cannot_open_a_second_ledger(self):
+        # L3 审查 P1-08：换 HOME、DT_AWAY_DIR 再起一个，不能得到另一套账本和锁，开出第二张单子
+        self.open_sheet()
+        self.ok("push")
+        other = {"HOME": str(self.tmp / "home2"), "DT_AWAY_DIR": str(self.tmp / "away2")}
+        self.bad("还没结束", "start", "--by", "另一个会话", **other)
+        self.assertEqual(len(self.calls("+messages-send")), 1)
+        self.assertFalse((self.tmp / "away2").exists() or (self.tmp / "home2").exists())
 
     def test_a_group_is_never_treated_as_his_private_chat(self):
         self.open_sheet()
@@ -693,7 +839,9 @@ class Cli(unittest.TestCase):
         self.bad("要写一句怎么办的", "ack", "om_a", "--version", first["version"], "--result", " ")
         self.ok("ack", "om_a", "--version", first["version"], "--result", "已合并", now=LATER)
         done = self.got()["om_a"]
-        self.assertEqual((done["state"], done["ack"]), ("acked", {"version": first["version"], "at": LATER, "result": "已合并"}))
+        self.assertEqual((done["state"], done["ack"]), ("acked", {"version": first["version"], "at": LATER, "result": "已合并",
+                                                                  "how": "ack", "was": "pending"}))
+        self.bad("已经记过了", "ack", "om_a", "--version", first["version"], "--result", "再记一次")
         self.assertEqual(self.runs()[-1]["ack"], "om_a")
 
     def test_someone_elses_message_cannot_be_acked(self):
@@ -706,33 +854,68 @@ class Cli(unittest.TestCase):
         self.two_asks_pushed()
         self.say("om_a", "1 合并")
         seen = self.got()["om_a"]
-        self.change("om_a", content="1 不合并", updated=True, update_time="2026-11-21 12:52")
+        self.change("om_a", content="1 不合并", updated=True, update_time="2026-11-21 12:52", update_ms=1795000100000)
         self.bad("读过之后变了", "ack", "om_a", "--version", seen["version"], "--result", "已合并")   # 办之前他改了
         now = self.got()["om_a"]
         self.assertEqual((now["state"], now["text"]), ("edited", "1 不合并"))                       # 改过的不当授权
         self.assertNotEqual(now["version"], seen["version"])
+        # L3 审查 P1-05：拿改过之后的新版本去 ack，也不能把它记成「照办了」
+        self.bad("不能记成照办了", "ack", "om_a", "--version", now["version"], "--result", "已合并")
+        self.assertEqual(self.sheet()["acks"], {})
+        self.ok("dismiss", "om_a", "--version", now["version"], "--result", "改过的不算数，已请他重发一条")
+        after = self.got()["om_a"]
+        self.assertEqual((after["state"], after["ack"]["how"], after["ack"]["was"]), ("dismissed", "dismiss", "edited"))
+
+    def test_recalled_or_non_text_message_cannot_be_acked_as_done(self):
+        self.two_asks_pushed()
+        self.say("om_a", "1 合并")
+        self.say("om_i", "<forwarded>别人说：合并</forwarded>", msg_type="merge_forward")
+        self.change("om_a", deleted=True, content="This message was recalled")
+        got = self.got()
+        self.assertEqual((got["om_a"]["state"], got["om_i"]["state"]), ("recalled", "other_type"))
+        for mid in ("om_a", "om_i"):
+            self.bad("不能记成照办了", "ack", mid, "--version", got[mid]["version"], "--result", "已合并")
+        self.assertEqual(self.sheet()["acks"], {})
+        self.ok("dismiss", "om_a", "--version", got["om_a"]["version"], "--result", "他撤回了，没办")
+        self.assertEqual((self.got()["om_a"]["state"], self.got()["om_a"]["ack"]["was"]), ("dismissed", "recalled"))
 
     def test_edit_and_recall_after_handling_are_reported(self):
         self.two_asks_pushed()
         self.say("om_a", "1 合并")
         v1 = self.got()["om_a"]["version"]
         self.ok("ack", "om_a", "--version", v1, "--result", "已合并")
-        self.change("om_a", content="1 不合并", updated=True, update_time="2026-11-21 12:52")
+        self.change("om_a", content="1 不合并", updated=True, update_time="2026-11-21 12:52", update_ms=1795000100000)
         changed = self.got()["om_a"]
         self.assertEqual((changed["state"], changed["text"], changed["ack"]["result"]), ("edited_after_ack", "1 不合并", "已合并"))
-        self.ok("ack", "om_a", "--version", changed["version"], "--result", "已经合并了，撤不回，告诉他了")
-        self.assertEqual(self.got()["om_a"]["state"], "acked")
+        self.bad("不能记成照办了", "ack", "om_a", "--version", changed["version"], "--result", "照新的办了")
+        self.ok("dismiss", "om_a", "--version", changed["version"], "--result", "已经合并了，撤不回，告诉他了")
+        self.assertEqual((self.got()["om_a"]["state"], self.got()["om_a"]["ack"]["was"]), ("dismissed", "edited_after_ack"))
         self.change("om_a", deleted=True, content="This message was recalled", reply_to=None)   # 撤回后引用关系也可能没了
         recalled = self.got()["om_a"]
         self.assertEqual((recalled["state"], recalled["text"]), ("recalled_after_ack", None))
-        self.ok("ack", "om_a", "--version", recalled["version"], "--result", "知道了")
-        self.assertEqual(self.got()["om_a"]["state"], "acked")
+        self.ok("dismiss", "om_a", "--version", recalled["version"], "--result", "知道了")
+        self.assertEqual(self.got()["om_a"]["state"], "dismissed")
         self.put([m for m in self.chat() if m["message_id"] != "om_a"])
         gone = self.got()["om_a"]
         self.assertEqual((gone["state"], gone["version"]), ("missing_after_ack", "missing"))
-        self.bad("只有办过、现在读不到的那句", "ack", "om_zzz", "--version", "missing", "--result", "x")
-        self.ok("ack", "om_a", "--version", "missing", "--result", "知道了")
-        self.assertEqual(self.got()["om_a"]["state"], "acked")
+        self.bad("只有记过、现在读不到的那句", "dismiss", "om_zzz", "--version", "missing", "--result", "x")
+        self.bad("只有记过、现在读不到的那句", "ack", "om_a", "--version", "missing", "--result", "x")
+        self.ok("dismiss", "om_a", "--version", "missing", "--result", "知道了")
+        self.assertEqual(self.got()["om_a"]["state"], "dismissed")
+
+    def test_edit_then_revert_within_the_same_minute_is_still_seen(self):
+        # L3 审查 P1-05：办过之后他改了又改回原文，列消息给的更新时间只到分钟，内容也一样；靠原始接口的毫秒值认出来
+        self.two_asks_pushed()
+        self.say("om_a", "1 合并", updated=True, update_time="2026-11-21 12:52", update_ms=1795000100000)   # 办之前就改过一次
+        self.say("om_b", "2 合并")
+        got = self.got()
+        self.ok("dismiss", "om_a", "--version", got["om_a"]["version"], "--result", "改过的，请他重发")
+        self.ok("ack", "om_b", "--version", got["om_b"]["version"], "--result", "已合并")
+        self.change("om_a", update_ms=1795000130000)                       # 同一分钟里又改了一次、改回原文：别的字段都没变
+        self.change("om_b", updated=True, update_time="2026-11-21 12:50", update_ms=1795000030000)   # 没改过的那句：改了又改回
+        again = self.got()
+        self.assertEqual((again["om_a"]["state"], again["om_b"]["state"]), ("edited_after_ack", "edited_after_ack"))
+        self.assertEqual((again["om_a"]["text"], again["om_b"]["text"]), ("1 合并", "2 合并"))
 
     # ---------- 翻页（P2-05） ----------
 
@@ -772,7 +955,7 @@ class Cli(unittest.TestCase):
     def test_commands_sent_in_parallel_all_land(self):
         self.ok("start", "--by", "Claude 会话「测试」", "--at", "12:00")
         procs = [subprocess.Popen(self.cmd("done", "--project", "磁盘瘦身", "--text", f"第 {i} 件。"),
-                                  env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(8)]
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(8)]
         self.assertEqual([p.wait(timeout=60) for p in procs], [0] * 8)
         for p in procs:
             p.stdout.close()
@@ -801,10 +984,6 @@ class Cli(unittest.TestCase):
         self.ok("push")
         self.assertIn("单号 2026-11-21-1200 · 第 2 版", self.ok("build"))
         self.assertEqual(self.sheet()["rev"], 1)
-
-    def test_script_runs_as_a_command(self):
-        r = subprocess.run([sys.executable, "-B", str(SCRIPT), "show"], capture_output=True, text=True, env=self.env(), timeout=60)
-        self.assertEqual((r.returncode, r.stdout.strip()), (1, "托管单没办成：还没有托管单，先跑 start"))
 
     def test_inner_jargon_in_title_gets_a_warning(self):
         self.ok("start", "--by", "Claude 会话「测试」", "--at", "12:00")

@@ -22,25 +22,34 @@
   push                             第一次是发卡片，之后是原地更新；回读；新冒出的事另发一句提醒
   adopt --message-id <消息号>       发了却没拿到消息号、飞书上又不止一张时，人工指定哪一张是这张单子
   replies                          打印常浩引用这张单子（或提醒）回的话和每句现在的状态；只读，不记账
-  ack <消息号> --version <版本> --result <一句话>   这句话办完了（或处理过了）才记账
+  ack <消息号> --version <版本> --result <一句话>   照这句话办完了；只收还没办、没改过的原话
+  dismiss <消息号> --version <版本> --result <一句话>   这句不当授权（改过、撤回、不是文字）或者记过之后变了：记下怎么处理的
   show                             打印这张单子现在记了什么
 
 除 start 外都对当前这张单子操作（要指定别的，把 --sheet <单号> 写在子命令前面）。时间用 --at（HH:MM 或 ISO），不写就是现在；
 HH:MM 比现在还晚就算昨天的。要常浩做的事不能排到已有编号的前面（编号和流水里的先后要一致）。
 改单子的命令当场检查卡片装不装得下（飞书卡片正文最多 199 个组件），装不下就不收这一条。
 同一时间只有一条命令在改（文件锁），几条命令并行发也不丢。
-状态在 ~/Library/Application Support/DigitalTwin/away/：state.json 记当前是哪张，<单号>/ 下是 sheet.json、
+状态只在 <系统账号家目录>/Library/Application Support/DigitalTwin/away/（L3 审查 P1-08：位置写死，
+不认 HOME、不认环境变量，账本和锁只有这一套）：state.json 记当前是哪张，<单号>/ 下是 sheet.json、
 runs.jsonl（每次推送、认领、ack 各一条；推送分开记卡片、提醒、回读三步）、card.json（最近一次推的卡片）。
 
-发到哪、认谁（L3 审查 P1-03）：只认本机固定位置的两个文件 owner_open_id、owner_chat_id（twin_identity.py setup /
-setup-chat 写的；位置按系统账号的家目录算，不认环境变量、不认 HOME；必须是本人名下的普通文件、权限 600），
-并向飞书核实那个会话是单聊。已知局限：同一个 macOS 账号下的进程仍然改得了这两个文件，和本项目其他脚本一样，
-真隔离要等独立账号（ADR-015）。
+发到哪、认谁、用哪个程序（L3 审查 P1-03）：只认 <系统账号家目录>/Library/Application Support/DigitalTwin/ 下的三个文件：
+owner_open_id、owner_chat_id（twin_identity.py setup / setup-chat 写的）和 lark_cli（一行，lark-cli 的绝对路径）。
+位置按系统账号的家目录算，不认环境变量、不认 HOME；三个都必须是本人名下的普通文件、权限 600。lark-cli 本身要是
+本人或 root 名下、别人写不了的文件，不从 PATH 找、不认 DT_LARK_CLI，跑的时候只给它最小环境（家目录、固定的 PATH）。
+发之前、读之前都向飞书核实那个会话是单聊。已知局限：同一个 macOS 账号下的进程仍然改得了这些文件和 lark-cli 本身，
+和本项目其他脚本一样，真隔离要等独立账号（ADR-015）。
+
+开单（P1-07）：只有从没开过单（state.json 不存在、目录里也没有以前的单子）才算第一张；state.json 或上一张单子
+读不了、格式不对，都拒绝开新的。上一张没结束、发卡片结果不明、结束状态没推到、还有提醒没确认发到，也都不开，出路都是先 push。
 
 发卡片（P1-02）：发之前先把「要发」记进单子；发了却没拿到消息号算结果不明，这张单子冻结：不能开下一张，
 下次 push 先去飞书找（机器人发的、页脚带这张单子单号的卡片）：找到一张就认领、接着原地更新；一张都没有，
 要离上次发满 120 秒才重发；不止一张就停下，用 adopt 指定。每次 push 版本号加一，写在页脚「单号 … · 第 N 版」，
-回读要对上这一版才算推到了（P2-01）。提醒按批记账（P2-02）：每批先记再发，结果不明的下次先对账。
+回读要对上标题和卡片最后一行的这一版才算推到了（P2-01；最后一行是脚本写的，托管会话填的文字到不了那里）。
+提醒按批记账（P2-02）：每批先记再发，结果不明的下次先对账（机器人发的、引用这张卡、文字相同；文字里有这批的编号，
+编号不重复，所以每批的文字都不一样）；找到不止一句就都记下并报出来。卡片回读对上之后才发提醒（P2-09）。
 push 一次最多要跑七八条飞书命令（每条最多 60 秒），都在文件锁里；外层给它的超时不要短于 10 分钟。
 
 回话（P1-04、P1-05、P2-03、P2-04、P2-05）：replies 只认常浩本人（发送人是用户、ID 类型 open_id、ID 对得上）
@@ -49,16 +58,20 @@ push 一次最多要跑七八条飞书命令（每条最多 60 秒），都在�
   edited              他改过这句：改过的不当授权，请他重发一条新的
   recalled            他撤回了，不用办
   other_type          不是文字（图片、合并转发等）：不当指令，内容不给
-  acked               办过了，之后没变
+  acked               照这句办过了，之后没变
+  dismissed           不当授权的或变了的那句，处理过了（ack 里的 was 写着当时是哪种），之后没变
   edited_after_ack    办过之后他又改了
   recalled_after_ack  办过之后他撤回了
   missing_after_ack   办过的那句现在读不到了
-读了不算办了：办完（或处理过）才 ack，带上 replies 给的 version；ack 时那句已经变了就不收，重新 replies。
+读了不算办了：照办完了才 ack，带上 replies 给的 version；ack 只收 pending 的原话，改过的、撤回的、不是文字的
+只能 dismiss（P1-05：改过的话不会变成「已照办」）。ack / dismiss 时那句已经变了就不收，重新 replies。
+版本里的更新时间取原始接口的毫秒值（列消息给的只到分钟），同一分钟里改了又改回去也认得出来。
 托管会话中途断了，没 ack 的下次还是 pending：合并这类动作，办之前先查是不是已经办过。
 只读引用回复；在话题里回的不读（飞书把话题回复放在另一处），卡片上写的就是「引用这张单子」。
 撤回、编辑还没有常浩本人的真实样本，字段按 lark-cli 列消息的输出（deleted、updated、update_time）处理。
 
-环境变量：DT_AWAY_DIR 换目录；DT_NOW（ISO 时间）指定现在；DT_LARK_CLI 换 lark-cli。
+没有环境变量开关：状态目录、现在几点、lark-cli 的位置都不认环境变量。测试在同一进程里改模块属性
+（OWNER_DIR、AWAY_DIR、LARK、NOW、PAGE_MAX）。
 """
 import argparse
 import contextlib
@@ -70,11 +83,9 @@ import os
 import pwd
 import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from aihot_hot import Fail, lark  # noqa: E402  以猛鬼兽机器人跑 lark-cli（去掉会让它改读别的配置的环境变量）
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_TAGS = 180     # 飞书卡片正文最多 199 个组件（2026-11-21 实测：195 能发，200 报 element exceeds the limit），留余量
@@ -82,7 +93,14 @@ END_TAGS = 195     # 结束时多一行「托管结束」：进行中每次改�
 QUIET = 120        # 发了却没拿到消息号：离上次发满这么多秒、去飞书对账也没找到，才重发
 PAGE_MAX = 200     # 读私聊最多翻这么多页（每页 50 条）；翻不完就报错，不截断着用
 TEXT_TYPES = ("text", "post")
-OWNER_DIR = Path(pwd.getpwuid(os.getuid()).pw_dir) / "Library" / "Application Support" / "DigitalTwin"   # 不认 HOME
+HOME_DIR = Path(pwd.getpwuid(os.getuid()).pw_dir)          # 按系统账号取，不认 HOME
+OWNER_DIR = HOME_DIR / "Library" / "Application Support" / "DigitalTwin"
+AWAY_DIR = OWNER_DIR / "away"      # 唯一的账本和锁都在这里
+PROFILE = "cli_a96f5f9ac63adcd4"   # 猛鬼兽应用（PRD D12）
+LARK = None                        # lark-cli 的位置；None 就读 OWNER_DIR/lark_cli
+NOW = None                         # 现在几点；None 就是真的现在
+SHEET_ID = re.compile(r"\d{4}-\d\d-\d\d-\d{4}")
+MESSAGE_ID = re.compile(r"om_[A-Za-z0-9_]+")
 NUMS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 ORDER = {"done": 1, "note": 2, "ask": 3}
 INNER = re.compile(r"#\d|(?<![A-Za-z])(PR|issue)(?![A-Za-z])", re.I)
@@ -92,11 +110,14 @@ HOW_ENDED = "托管已经结束，这张单子不再更新，引用它回话也�
 FOOT = "单子只有这一张，有进展就在原地更新；只有新冒出要你做的事才另发一句提醒。办完的事是灰字，要你做的是黑字加红字。"
 
 
+class Fail(Exception):
+    """办不成；原因是一句给人看的话。"""
+
+
 # ---------- 时间和文件 ----------
 
 def current():
-    raw = os.environ.get("DT_NOW")
-    return dt.datetime.fromisoformat(raw).astimezone(TZ) if raw else dt.datetime.now(TZ)
+    return dt.datetime.fromisoformat(NOW).astimezone(TZ) if NOW else dt.datetime.now(TZ)
 
 
 def iso(t):
@@ -127,7 +148,7 @@ def hm(s):
 
 
 def base():
-    return Path(os.environ.get("DT_AWAY_DIR", "~/Library/Application Support/DigitalTwin/away")).expanduser()
+    return AWAY_DIR
 
 
 @contextlib.contextmanager
@@ -146,12 +167,26 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
+def current_id():
+    """当前是哪张单子。state.json 不存在返回 None；在但读不了、看不懂就报错，不当成没有（L3 审查 P1-07）。"""
+    p = base() / "state.json"
+    try:
+        sheet_id = json.loads(p.read_text(encoding="utf-8"))["current"]
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        raise Fail(f"状态文件 {p} 读不了或者坏了")
+    if not isinstance(sheet_id, str) or not SHEET_ID.fullmatch(sheet_id):
+        raise Fail(f"状态文件 {p} 里的单号不对")
+    return sheet_id
+
+
 def load(sheet_id=None):
+    sheet_id = sheet_id or current_id()
     if not sheet_id:
-        try:
-            sheet_id = json.loads((base() / "state.json").read_text(encoding="utf-8"))["current"]
-        except (OSError, ValueError, KeyError):
-            raise Fail("还没有托管单，先跑 start")
+        raise Fail("还没有托管单，先跑 start")
+    if not SHEET_ID.fullmatch(sheet_id):
+        raise Fail(f"单号不对：{sheet_id}")
     try:
         sheet = json.loads((base() / sheet_id / "sheet.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -313,16 +348,19 @@ def build_card(sheet, now):
 def start(by, now, raw_at=None):
     if not (by or "").strip():
         raise Fail("要写谁在托管（--by）")
-    try:
-        last = load()
-    except Fail:
-        last = None
+    sheet_id = current_id()
+    if sheet_id is None and any(base().glob("*/sheet.json")):
+        raise Fail("状态文件 state.json 不见了，可目录里有以前的单子：不知道上一张是哪张、推没推完，不开新的；"
+                   "人工核对后把 state.json 恢复成 {\"current\": \"<单号>\"}")
+    last = load(sheet_id) if sheet_id else None    # 上一张读不了、格式不对都报错：状态不明不等于没有
     if last and not last.get("ended_at"):
         raise Fail(f"托管单 {last['id']} 还没结束，先 end（再 push 一次，把结束状态推到飞书）")
     if last and last.get("sending"):       # 发了却没拿到消息号：飞书上可能已经有那张单子，先对清楚
         raise Fail(f"托管单 {last['id']} 上次发卡片结果不明（飞书上可能已经有这张单子），先 push 对账")
     if last and last.get("message_id") and last.get("dirty"):
         raise Fail(f"托管单 {last['id']} 的结束状态还没推到飞书，先 push")
+    if last and any(not b.get("message_id") and not b.get("dropped") for b in last["reminders"]):
+        raise Fail(f"托管单 {last['id']} 还有提醒没确认发到，先 push")
     t = when(raw_at, now)
     sheet_id = at(t).strftime("%Y-%m-%d-%H%M")
     if (base() / sheet_id / "sheet.json").exists():
@@ -408,24 +446,57 @@ def set_doing(sheet, items):
     sheet["doing"] = doing
 
 
-# ---------- 发到哪、认谁 ----------
+# ---------- 发到哪、认谁、用哪个程序 ----------
+
+def protected(name, what, prefix):
+    """OWNER_DIR 下的一项本机配置：必须是本人名下的普通文件、权限 600，第一行以 prefix 开头。不认环境变量。"""
+    p = OWNER_DIR / name
+    try:
+        st = os.lstat(p)
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except (OSError, ValueError):
+        raise Fail(f"本机没配置{what}（{p}），不发也不读")
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
+        raise Fail(f"{what}的配置文件 {p} 必须是本人名下的普通文件、权限 600，否则不认")
+    if not lines or not lines[0].startswith(prefix):
+        raise Fail(f"{what}的配置文件 {p} 里不是 {prefix} 开头的")
+    return lines[0]
+
 
 def owner():
-    """常浩的 open_id 和他与猛鬼兽的私聊号：只认 OWNER_DIR 下的两个文件，不认环境变量。"""
-    out = []
-    for name, what, prefix in (("owner_open_id", "常浩的 open_id", "ou_"), ("owner_chat_id", "常浩的私聊号", "oc_")):
-        p = OWNER_DIR / name
+    """常浩的 open_id 和他与猛鬼兽的私聊号。"""
+    return [protected("owner_open_id", "常浩的 open_id", "ou_"), protected("owner_chat_id", "常浩的私聊号", "oc_")]
+
+
+def lark(args, what):
+    """以猛鬼兽机器人跑一条 lark-cli，返回 data；出错抛 Fail（原因里不含凭据）。
+    程序位置只认本机配置（不认 DT_LARK_CLI、不从 PATH 找），只给它最小环境：调用方的环境变量换不了程序，
+    也换不了它读哪套配置（L3 审查 P1-03：身份核对靠它的回话，它本身得是可信的）。"""
+    path = LARK or protected("lark_cli", "lark-cli 的位置", "/")
+    try:
+        st = os.stat(path)
+    except OSError:
+        raise Fail(f"{what}：lark-cli 不在 {path}")
+    if not stat.S_ISREG(st.st_mode) or st.st_uid not in (0, os.getuid()) or st.st_mode & 0o022:
+        raise Fail(f"{what}：{path} 必须是本人或 root 名下、别人写不了的文件")
+    env = {"HOME": str(HOME_DIR), "PATH": f"{os.path.dirname(path)}:/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8"}
+    try:
+        r = subprocess.run([path, "--profile", PROFILE, *args, "--as", "bot", "--format", "json"],
+                           capture_output=True, text=True, timeout=60, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Fail(f"{what}：lark-cli 跑不起来（{type(e).__name__}）")
+    d = None
+    for raw in (r.stdout, r.stderr):      # lark-cli 的错误 JSON 走 stderr
         try:
-            st = os.lstat(p)
-            lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        except (OSError, ValueError):
-            raise Fail(f"本机没配置{what}（{p}，用 twin_identity.py setup / setup-chat 写），不发也不读")
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
-            raise Fail(f"{what}的配置文件 {p} 必须是本人名下的普通文件、权限 600，否则不认")
-        if not lines or not lines[0].startswith(prefix):
-            raise Fail(f"{what}的配置文件 {p} 里不是 {prefix} 开头的 ID")
-        out.append(lines[0])
-    return out
+            d = json.loads(raw)
+            break
+        except ValueError:
+            pass
+    if not isinstance(d, dict):
+        raise Fail(f"{what}：lark-cli 输出不是 JSON（退出码 {r.returncode}）")
+    if not d.get("ok", True):
+        raise Fail(f"{what}失败：{str((d.get('error') or {}).get('message', '未知错误'))[:200]}")
+    return d.get("data") or {}
 
 
 def private_chat():
@@ -466,8 +537,14 @@ def before(t):
     return iso(at(t) - dt.timedelta(minutes=5))
 
 
+def last_line(content):
+    """回读内容里卡片的最后一行：页脚第二行，脚本自己写的，托管会话填的文字到不了这里。"""
+    return str(content).rsplit("</card>", 1)[0].rstrip().rsplit("\n", 1)[-1]
+
+
 def is_card(sheet, m):
-    return m.get("msg_type") == "interactive" and from_bot(m) and f"单号 {sheet['id']} ·" in str(m.get("content"))
+    return (m.get("msg_type") == "interactive" and from_bot(m)
+            and re.search(rf"｜单号 {re.escape(sheet['id'])} · 第 \d+ 版$", last_line(m.get("content"))) is not None)
 
 
 # ---------- 推送 ----------
@@ -536,6 +613,10 @@ def remind(sheet, now, rec, problems):
             if hit:                                                  # 上次其实发出去了
                 b["message_id"] = hit[0]["message_id"]
                 how.append("found")
+                if len(hit) > 1:                                     # 同一批发出去不止一句：都记下（引用哪一句回话都认），并报出来
+                    b["also"] = [m["message_id"] for m in hit[1:]]
+                    problems.append(f"第 {b['batch']} 批提醒在飞书上有 {len(hit)} 句（重复发出过）："
+                                    + "、".join(m["message_id"] for m in hit))
                 continue
             if not any(is_open(find_ask(sheet, n)) for n in b["asks"]):
                 b["dropped"] = True                                  # 这一批的事都办完了，不用再提醒
@@ -563,7 +644,7 @@ def remind(sheet, now, rec, problems):
 
 
 def push(sheet, now):
-    """发卡片或原地更新，回读；新冒出要他做的事另发一句提醒。返回记进 runs.jsonl 的一条（卡片、提醒、回读分开记）。"""
+    """发卡片或原地更新，回读；回读对上之后，新冒出要他做的事另发一句提醒。返回记进 runs.jsonl 的一条（卡片、提醒、回读分开记）。"""
     sheet["rev"] += 1
     save(sheet)
     rec = {"at": iso(now), "rev": sheet["rev"], "card": "failed", "remind": "none", "readback": "skipped", "result": "failed"}
@@ -577,32 +658,37 @@ def push(sheet, now):
             lark(["im", "messages", "patch", "--message-id", sheet["message_id"],
                   "--data", json.dumps({"content": content}, ensure_ascii=False)], "更新托管单")
             rec["card"] = "patched"
-            remind(sheet, now, rec, problems)
         sheet["pushed_at"] = iso(now)
         rec.update(message_id=sheet["message_id"], tags=tags(card["body"]))
         save(sheet)                        # 「飞书上已是最新」要等回读对上才记（dirty 留着）
         write_json(base() / sheet["id"] / "card.json", card)
         try:
             seen = one_message(sheet["message_id"], "回读")
-            ok = seen.get("msg_type") == "interactive" and all(
-                x in str(seen.get("content")) for x in (card["header"]["title"]["content"], mark(sheet)))
+            text = str(seen.get("content"))
+            ok = (seen.get("msg_type") == "interactive" and text.startswith(f'<card title="{card["header"]["title"]["content"]}"')
+                  and last_line(text).endswith("｜" + mark(sheet)))
             rec["readback"] = "ok" if ok else "mismatch"
         except Fail as e:
             rec["readback"] = "failed"
-            problems.insert(0, str(e))
+            problems.append(str(e))
         if rec["readback"] == "mismatch":
-            problems.insert(0, "回读对不上卡片内容")
+            problems.append("回读对不上卡片内容")
         if rec["readback"] == "ok":        # 回读对上这一版才算推到了：没对上就保持「没确认」，不让开下一张，下次 push 重推重核
             sheet["dirty"] = False
             save(sheet)
+            remind(sheet, now, rec, problems)      # 卡片确实是这一版了才提醒：不然他点回卡片看不到新加的事（P2-09）
+        elif any((is_open(r) and not r["notified"]) for r in sheet["rows"]) or any(
+                not b.get("message_id") and not b.get("dropped") for b in sheet["reminders"]):
+            rec["remind"] = "held"         # 有提醒要发，但卡片没确认更新上去，先不发
         if problems:
-            rec["result"] = "partial"
             raise Fail(f"托管单已{'发' if rec['card'] == 'sent' else '更新'}（{sheet['message_id']}），但" + "；".join(problems))
         rec["result"] = "ok"
         return rec
     except Fail as e:
         if sheet["sending"]:               # 要发的记下了，却没拿到消息号：发没发出去不知道
             rec["card"] = "unknown"
+        if rec["card"] in ("sent", "patched"):
+            rec["result"] = "partial"
         rec["error"] = str(e)
         raise
     finally:
@@ -627,12 +713,6 @@ def adopt(sheet, mid, now):
 
 # ---------- 回话 ----------
 
-def version(m):
-    """一条消息现在这一版的指纹：改过、撤回过都会变。"""
-    raw = json.dumps([bool(m.get("deleted")), m.get("update_time"), m.get("msg_type"), m.get("content")], ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-
-
 def reads(sheet):
     """读回话前的检查：单子发过，而且就是发在常浩的单聊里。返回他的 open_id、私聊号、这张单子在飞书上的消息号（卡片和提醒）。"""
     if not sheet["message_id"]:
@@ -640,7 +720,10 @@ def reads(sheet):
     who, chat = private_chat()
     if sheet["chat_id"] != chat:
         raise Fail("这张单子不是发在常浩私聊里的，不读回复")
-    return who, chat, {sheet["message_id"]} | {b["message_id"] for b in sheet["reminders"] if b.get("message_id")}
+    mine = {sheet["message_id"]}
+    for b in sheet["reminders"]:
+        mine |= {x for x in [b.get("message_id")] + (b.get("also") or []) if x}
+    return who, chat, mine
 
 
 def his(m, who, mine):
@@ -649,55 +732,83 @@ def his(m, who, mine):
     return (s.get("sender_type"), s.get("id_type"), s.get("id")) == ("user", "open_id", who) and m.get("reply_to") in mine
 
 
-def state(m, ack):
-    if ack:
-        if ack["version"] == version(m):
-            return "acked"
-        return "recalled_after_ack" if m.get("deleted") else "edited_after_ack"
-    if m.get("deleted"):
+def look(m):
+    """一条消息现在的样子：撤没撤回、改没改过、这一版的指纹（改过、撤回过都会变）。
+    更新时间取原始接口的毫秒值：列消息给的只到分钟，同一分钟里改了又改回去会看不出来（11-22 实测两边的精度）。"""
+    mid, stamp = str(m.get("message_id")), ["deleted"]
+    if not m.get("deleted"):
+        if not MESSAGE_ID.fullmatch(mid):
+            raise Fail(f"消息号不对：{mid}")
+        raw = (lark(["api", "GET", f"/open-apis/im/v1/messages/{mid}"], "读消息版本").get("items") or [{}])[0]
+        if raw.get("message_id") != mid:
+            raise Fail(f"读不到消息 {mid} 的版本")
+        if not raw.get("deleted"):
+            stamp = [bool(raw.get("updated")) or bool(m.get("updated")), str(raw.get("update_time"))]
+    deleted = stamp == ["deleted"]
+    body = json.dumps([stamp, m.get("msg_type"), None if deleted else m.get("content")], ensure_ascii=False)
+    return {"deleted": deleted, "edited": not deleted and stamp[0], "version": hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]}
+
+
+def state(m, seen, rec):
+    """这句话现在算什么。rec 是上次 ack / dismiss 记下的；没记过就是 None。"""
+    if rec:
+        if rec["version"] == seen["version"]:
+            return "acked" if rec.get("how") == "ack" else "dismissed"
+        return "recalled_after_ack" if seen["deleted"] else "edited_after_ack"
+    if seen["deleted"]:
         return "recalled"
     if m.get("msg_type") not in TEXT_TYPES:
         return "other_type"
-    return "edited" if m.get("updated") else "pending"
+    return "edited" if seen["edited"] else "pending"
 
 
 def replies(sheet):
     """常浩引用这张单子（或它下面的提醒）回的话，旧的在前，每句带现在的状态和版本。只读，不记账。
-    字段以 2026-11-22 实测的 lark-cli 输出为准：sender.{sender_type,id_type,id}、reply_to、msg_type、deleted、updated、update_time。"""
+    字段以 2026-11-22 实测的 lark-cli 输出为准：sender.{sender_type,id_type,id}、reply_to、msg_type、deleted、updated。"""
     who, chat, mine = reads(sheet)
     acks, out = sheet["acks"], []
     for m in chat_messages(chat, sheet["started_at"]):
         mid = m.get("message_id")
-        if not his(m, who, mine) and mid not in acks:        # 办过的那句即使撤回后变了样子，也要报出来
+        if not his(m, who, mine) and mid not in acks:        # 记过的那句即使撤回后变了样子，也要报出来
             continue
-        st = state(m, acks.get(mid))
-        shown = m.get("msg_type") in TEXT_TYPES and not m.get("deleted")
-        out.append({"message_id": mid, "at": m.get("create_time"), "state": st, "version": version(m),
-                    "msg_type": m.get("msg_type"), "text": m.get("content") if shown else None, "ack": acks.get(mid)})
+        seen = look(m)
+        shown = m.get("msg_type") in TEXT_TYPES and not seen["deleted"]
+        out.append({"message_id": mid, "at": m.get("create_time"), "state": state(m, seen, acks.get(mid)),
+                    "version": seen["version"], "msg_type": m.get("msg_type"),
+                    "text": m.get("content") if shown else None, "ack": acks.get(mid)})
     for mid in sorted(set(acks) - {m["message_id"] for m in out}):
-        gone = "acked" if acks[mid]["version"] == "missing" else "missing_after_ack"       # 读不到这件事本身也 ack 过了
+        gone = "dismissed" if acks[mid]["version"] == "missing" else "missing_after_ack"       # 读不到这件事本身也记过了
         out.append({"message_id": mid, "at": None, "state": gone, "version": "missing",
                     "msg_type": None, "text": None, "ack": acks[mid]})
     return out
 
 
-def ack(sheet, mid, ver, result, now):
-    """这句话办完了（或处理过了）。先向飞书核实它还是 replies 给的那一版；变了就不收，重新 replies。"""
+def settle(sheet, mid, ver, result, now, how):
+    """记一句话的处理结果。how 是 ack：照这句办完了，只收还没办、没改过的原话（P1-05：改过的话不能变成「已照办」）；
+    是 dismiss：这句不当授权，或者记过之后变了，记下怎么处理的。都先向飞书核实它还是 replies 给的那一版；变了就不收。"""
     if not (result or "").strip():
         raise Fail("要写一句怎么办的（--result）")
     who, chat, mine = reads(sheet)
+    rec = sheet["acks"].get(mid)
     if ver == "missing":
-        if mid not in sheet["acks"]:
-            raise Fail("只有办过、现在读不到的那句才能这样记")
+        if how != "dismiss" or not rec:
+            raise Fail("只有记过、现在读不到的那句才能这样记（用 dismiss）")
+        was = "missing_after_ack"
     else:
         m = one_message(mid, "读这句话")
-        if m.get("chat_id") != chat or not (his(m, who, mine) or mid in sheet["acks"]):
+        if m.get("chat_id") != chat or not (his(m, who, mine) or rec):
             raise Fail("这条不是常浩引用这张单子回的话")
-        if version(m) != ver:
+        seen = look(m)
+        if seen["version"] != ver:
             raise Fail("这句话在你读过之后变了（改过或撤回了），重新跑 replies 看它现在的状态")
-    sheet["acks"][mid] = {"version": ver, "at": iso(now), "result": result.strip()}
+        was = state(m, seen, rec)
+        if was in ("acked", "dismissed"):
+            raise Fail("这句已经记过了，之后没变")
+        if how == "ack" and was != "pending":
+            raise Fail(f"这句现在是 {was}，不能记成照办了：改过的、撤回的、不是文字的都不算授权；处理完用 dismiss 记")
+    sheet["acks"][mid] = {"version": ver, "at": iso(now), "result": result.strip(), "how": how, "was": was}
     save(sheet)
-    log(sheet, {"at": iso(now), "ack": mid, "version": ver, "result": result.strip()})
+    log(sheet, {"at": iso(now), how: mid, "version": ver, "was": was, "result": result.strip()})
 
 
 def show(sheet):
@@ -749,10 +860,11 @@ def main(argv=None):
     s.add_argument("--at")
     s = sub.add_parser("adopt")
     s.add_argument("--message-id", required=True)
-    s = sub.add_parser("ack")
-    s.add_argument("message_id")
-    s.add_argument("--version", required=True, help="replies 给的 version")
-    s.add_argument("--result", required=True)
+    for name in ("ack", "dismiss"):
+        s = sub.add_parser(name)
+        s.add_argument("message_id")
+        s.add_argument("--version", required=True, help="replies 给的 version")
+        s.add_argument("--result", required=True)
     for name in ("build", "push", "replies", "show"):
         sub.add_parser(name)
     a = ap.parse_args(argv)
@@ -777,8 +889,8 @@ def main(argv=None):
             if a.cmd == "adopt":
                 adopt(sheet, a.message_id, now)
                 return 0
-            if a.cmd == "ack":
-                ack(sheet, a.message_id, a.version, a.result, now)
+            if a.cmd in ("ack", "dismiss"):
+                settle(sheet, a.message_id, a.version, a.result, now, a.cmd)
                 return 0
             if sheet.get("ended_at"):
                 raise Fail(f"托管单 {sheet['id']} 已经结束，不能再改")
