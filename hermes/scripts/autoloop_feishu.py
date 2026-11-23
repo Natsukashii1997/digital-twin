@@ -73,6 +73,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoloop_config as C  # noqa: E402
+import hub_listener  # noqa: E402
 from tidings_weekly import SendError, lark  # noqa: E402
 
 CHANNEL = "feishu"
@@ -234,6 +235,10 @@ def hub(method, path, body=None, timeout=20, channel=CHANNEL):
     req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        hub_listener.check(url)                  # dt-gate 里：端口上不是 dt-gate 在听就不带通道钥匙去（0E-2）
+    except OSError as e:
+        raise HubError(str(e), sent=False)
     try:
         with opener.open(req, timeout=timeout) as r:
             raw = r.read().decode()

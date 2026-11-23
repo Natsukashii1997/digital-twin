@@ -31,8 +31,11 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
 派单事件（autoloop_grants 的 hub_events）不在这里补发：中台按同一来源同一 id 去重，开闸后照常 send-pending 补发。
 
 **按「将来在 dt-gate 里运行」设计**（ADR-015）：闸的状态和出口账本在同一个库（运行账号的 DigitalTwin/autoloop/exits.db），
-另有库旁的关闸标记目录 gate-dirty.d/（L3 第 4 轮 P1-08：关闸先建标记、不靠数据库锁；有标记就当关着）——0E-2 搬进 dt-gate
-时两者要一起搬，只搬库会把只靠标记关着的闸搬成开着；
+另有库旁的关闸标记目录 gate-dirty.d/（L3 第 4 轮 P1-08：关闸先建标记、不靠数据库锁；有标记就当关着）。0E-2 搬进 dt-gate 时
+两者都不搬（和 0D 会话 11-22 对过）：dt-gate 从空库开始，闸在新库里「还没对过账」、天然关着，要重新 pin 并对账才开；
+搬之前主账号 hold、writes 排空、leftovers 为空（结果不明、核不清、在做的、关闸标记、凭证、派单事件、点击、秘书、托管、
+任务锁都清零）才搬，搬完主账号保持停写；回滚时主账号 release rolled_back 之前，搬家脚本先以 dt-gate 身份跑 cards-after，
+补 mismatched_after 看不到的 dt-gate 那一半（dt-gate 开闸后发过的卡片号会被退回旧快照的中台复用）；
 凭证库、卡片库、中台目录、锁定版本文件都从运行账号的家目录或环境变量取，不写死主账号路径。恢复闸本身不签、不用中台钥匙
 （中台只读 /healthz 和 up.pid）；但外部回读**有认证依赖**（审查 P2-02）：回读卡片用 autoloop_answer 的只读窗口（通道钥匙），
 回读 GitHub 用运行账号的 gh 登录，回读飞书用 DT_EXITS_LARK_PROFILE 指定的机器人登录配置——0E-2 要把这些放在 dt-gate 自己名下
@@ -47,6 +50,8 @@ admit(con, 纪元)——出口账本落盘 executing、派单事件领取、本�
   autoloop_recovery.py pin --commit <40 位> --confirm   锁定中台版本（安装 / 升级验证通过后，常浩说了才跑）
   autoloop_recovery.py hold --point P --snapshot 目录 --commit C --max-card N --confirm    维护开始（停写、登记恢复点）
   autoloop_recovery.py writes                    只读：还在做的写（排空了才能快照）
+  autoloop_recovery.py leftovers                 只读：控制面账本里还没结清的东西（0E-2 搬家前核；不建库）
+  autoloop_recovery.py cards-after --max-card N  只读：本账号账本里卡片号大于 N 的（0E-2 回滚前以 dt-gate 身份核；不建库）
   autoloop_recovery.py release --point P --outcome retired|rolled_back --confirm          维护结束
 环境变量：DT_HUB（中台地址，没有就读中台 config.json）、DT_HUB_PIN（锁定版本文件）、AGENT_AUTOLOOP_HOME，
 以及 autoloop_exits、autoloop_grants、autoloop_feishu 的路径变量。不调用 AI。
@@ -59,6 +64,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -581,6 +587,212 @@ def reconcile(readers=None):
     return {"open": why is None, "why": why, "frozen": frozen, "steps": steps, "epoch": epoch}
 
 
+# ---------- 搬家前的只读汇总（0E-2；和 0D 会话 11-22 对过口径） ----------
+def _ro(path):
+    """只读打开（不建库、不建表、不等写锁太久）。"""
+    import urllib.parse
+    return sqlite3.connect(f"file:{urllib.parse.quote(str(path))}?mode=ro", uri=True, timeout=RO_TIMEOUT)
+
+
+def _rows(path, table, sql, args=()):
+    """库或表不在就是没有；读不了返回 None（调用方当作有）。"""
+    if not Path(path).exists():
+        return []
+    try:
+        con = _ro(path)
+        try:
+            if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone():
+                return []
+            return con.execute(sql, args).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def leftovers():
+    """只读：这个账号的控制面账本里还没结清的东西（0E-2 搬家用：dt-gate 从空的新账本开始，这些搬过去就忘了）。
+    不依赖出口账本在不在、不新建任何库。返回 {"hold": 维护中的恢复点或 None, "items": [说明…]}；读不了的库记一条「读不了」。
+    列的是：出口账本里结果不明 / 核不清 / 在做的、关闸标记、本人或秘书的点击排队 / 在发 / 结果不明的、托管和秘书账本里排空证明不过的、
+    派单事件没确认送达而凭证这一代还有效的、还有效或冻结着的任务凭证。"""
+    items, hold = [], None
+    p = E.db_path()
+    r = _rows(p, "gate", "SELECT hold FROM gate WHERE id = 1")
+    if r is None:
+        items.append("出口账本读不了")
+    elif r:
+        hold = r[0][0]
+    r = _rows(p, "exits", f"SELECT key, state FROM exits WHERE state IN ({','.join('?' * len(E.UNSETTLED))})",
+              E.UNSETTLED)
+    items += ["出口账本读不了"] if r is None else [f"出口 {k}（{s}）" for k, s in r]
+    m = E.read_markers()
+    if m:
+        items.append(f"关闸标记 {len(m)} 个")
+    try:
+        import autoloop_feishu as F
+        r = _rows(F.db_file(), "claims", "SELECT card_id, who, state FROM claims WHERE state IN ('queued', 'inflight', 'unknown')")
+        items += ["卡片库读不了"] if r is None else [f"{'本人' if w == 'owner' else '秘书'}点击 卡片 {c}（{s}）" for c, w, s in r]
+    except ImportError:
+        pass
+    items += _ledger_leftovers("secretary")
+    g = G.db_path()
+    r = _rows(g, "grants", "SELECT task_id, status FROM grants WHERE status IN ('active', 'frozen')")
+    items += ["凭证库读不了"] if r is None else [f"任务凭证 {t}（{s}）" for t, s in r]
+    r = _rows(g, "hub_events", "SELECT e.event_key FROM hub_events e JOIN grants g ON g.task_id = e.task_id "
+                               "WHERE e.sent != 1 AND g.status IN ('active', 'frozen')")   # 凭证已结束的补发不了，不算
+    items += ["凭证库读不了"] if r is None else [f"派单事件 {k}（没确认送达）" for (k,) in r]
+    items += _ledger_leftovers("custody")
+    items += _held_task_locks(g.parent / "task-locks")
+    return {"hold": hold, "items": list(dict.fromkeys(items))}
+
+
+def _ledger_leftovers(kind):
+    """托管 / 秘书账本没收完的：和排空证明同一个判定，逐个会话查（L3 第 2 轮 P1-02、第 3 轮 P1-04 / P1-05）。
+    - 判定：custody_ledger.drain_blockers（issued / executing / 结果不明 / 对账不清的决定、额度没跟着决定收口的、
+      有原文账本里却没有的）；状态文件里登记着的会话（开着、排空中、冻结中）另按 check_session 核账本身份和开启登记，
+      和 custody.drain_proof 走的 drain() 一样——库被换成别的账本、旧备份、或库不在，都列出来。
+    - 会话号：状态文件当前会话 ∪ 决定表 ∪ 会话表 ∪ 原文目录下的会话目录。
+    - 只读：不用 open_store（它会迁移、写库），mode=ro 的连接包一层给 drain_blockers / check_session，一个读事务读完。
+    - 核不清一律当作有：路径只有确实不存在（FileNotFoundError）才算没有，查不了、类型不对（链接、文件当目录）、读不了、
+      状态文件坏、库读不了都记一条（调用方当作有）。"""
+    import types
+    who = "秘书" if kind == "secretary" else "托管"
+    try:
+        import custody_ledger as L
+        if kind == "secretary":
+            import secretary as ST
+            import secretary_ledger as SL
+            use = SL.SECRETARY
+        else:
+            import custody as ST
+            use = L.CUSTODY
+    except Exception as e:                                   # 脚本缺了也不能当成「没有」
+        return [f"{who}账本核不了（{type(e).__name__}）"]
+    out = []
+    expect = None                                            # 状态文件里登记着的会话：(会话号, 账本身份)
+    try:
+        sess = ST.load().get("session")
+        if sess:
+            expect = (sess["id"], (sess.get("ledger") or {}).get("id"))
+    except Exception as e:
+        out.append(f"{who}状态文件读不了（{type(e).__name__}），核不了开着的会话")
+
+    def kind_of(path):
+        """None = 确实不存在；否则 lstat 的 st_mode。查不了抛 OSError。"""
+        try:
+            return os.lstat(path).st_mode
+        except FileNotFoundError:
+            return None
+
+    raw = []
+    try:
+        rd = L.raw_dir(use)
+        m = kind_of(rd)
+        if m is not None and not stat.S_ISDIR(m):
+            out.append(f"{who}原文目录 {rd} 不是目录")
+        elif m is not None:
+            for name in sorted(os.listdir(rd)):
+                mm = kind_of(rd / name)
+                if mm is None:
+                    continue
+                if not stat.S_ISDIR(mm):
+                    if use.session_id.match(name):           # 会话号形状的却不是目录（被换成文件、链接）
+                        out.append(f"{who}原文目录 {name} 不是目录")
+                    continue
+                try:
+                    if any(n.endswith(".json") and L.DECISION_ID.match(n[:-5]) for n in os.listdir(rd / name)):
+                        raw.append(name)
+                except OSError:
+                    out.append(f"{who}原文目录 {name} 读不了")
+    except OSError as e:
+        out.append(f"{who}原文目录查不了（{type(e).__name__}）")
+    try:
+        db = L.db_path()
+        m = kind_of(db)
+        if m is None:
+            out += [f"{who}会话 {s} 有原文、账本库不在" for s in raw]
+            if expect:
+                out.append(f"{who}会话 {expect[0]} 还开着（账本 {expect[1]}），账本库不在")
+            return out
+        if not stat.S_ISREG(m):
+            return out + [f"{who}账本库 {db} 不是普通文件"]
+        con = _ro(db)
+        try:
+            con.row_factory = sqlite3.Row
+            con.execute("BEGIN")                             # 一个读事务：各会话读的是同一个快照
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if use.decisions not in tables:
+                out += [f"{who}会话 {s} 有原文、账本表不在" for s in raw]
+                if expect:
+                    out.append(f"{who}会话 {expect[0]} 还开着（账本 {expect[1]}），账本表不在")
+                return out
+            store = types.SimpleNamespace(conn=con)
+            if expect:
+                try:
+                    L.check_session(store, expect[0], expect[1], use)
+                except L.LedgerError as e:
+                    out.append(f"{who}会话 {expect[0]}：账本对不上（{e}）")
+            sids = {r[0] for r in con.execute(f"SELECT DISTINCT session_id FROM {use.decisions}")}
+            if use.sessions in tables:
+                sids |= {r[0] for r in con.execute(f"SELECT session_id FROM {use.sessions}")}
+            if expect:
+                sids.add(expect[0])
+            for sid in sorted(sids | set(raw)):
+                try:
+                    out += [f"{who}会话 {sid}：{x}" for x in L.drain_blockers(store, sid, use)]
+                except L.LedgerError as e:                   # 这个会话的原文目录查不清：记下、接着查别的会话
+                    out.append(f"{who}会话 {sid}：核不清（{e}）")
+            return out
+        finally:
+            con.close()
+    except Exception as e:                                   # 账本坏行、表结构不对、库锁着、路径查不了：查不清一律拦
+        return out + [f"{who}账本读不了（{type(e).__name__}）"]
+
+
+def _held_task_locks(d):
+    """任务锁被持着（受信发布、秘书 ② / ③ 或续接正在处理这张单）：试拿一下，拿得到马上放（0D 会话 11-22）。
+    目录不在就是没有；只开已有的锁文件，不新建。"""
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith(".lock"))
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return ["任务锁目录读不了"]
+    for n in names:
+        try:
+            fd = os.open(d / n, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            out.append(f"任务锁 {n} 打不开")
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            out.append(f"任务锁 {n[:-5]} 正被持着")
+        finally:
+            os.close(fd)
+    return out
+
+
+def cards_after(max_card):
+    """只读：本账号出口账本、卡片库里卡片号大于 max_card 的（0E-2 回滚前以 dt-gate 身份查，补主账号 mismatched_after
+    看不到的那一半）。不建库。读不了的记一条。"""
+    bad = []
+    r = _rows(E.db_path(), "exits", "SELECT key FROM exits WHERE kind = 'send_feishu' AND key LIKE 'send_feishu:card-%'")
+    if r is None:
+        bad.append("出口账本读不了")
+    else:
+        bad += [k for (k,) in r if k.rsplit("-", 1)[-1].isdigit() and int(k.rsplit("-", 1)[-1]) > max_card]
+    try:
+        import autoloop_feishu as F
+        r = _rows(F.db_file(), "feishu_cards", "SELECT card_id FROM feishu_cards WHERE card_id > ?", (max_card,))
+        bad += ["卡片库读不了"] if r is None else [f"cards.db 卡片 {c}" for (c,) in r]
+    except ImportError:
+        pass
+    return bad
+
+
 def status():
     """只读：闸、原因、冻结的范围、上次对账报告。"""
     row = gate_row()
@@ -609,6 +821,9 @@ def main(argv=None):
     h.add_argument("--max-card", type=int, required=True)
     h.add_argument("--confirm", action="store_true")
     sub.add_parser("writes")
+    sub.add_parser("leftovers")
+    c = sub.add_parser("cards-after")
+    c.add_argument("--max-card", type=int, required=True)
     r = sub.add_parser("release")
     r.add_argument("--point", required=True)
     r.add_argument("--outcome", required=True)
@@ -627,6 +842,10 @@ def main(argv=None):
             out = hold(a.point, a.snapshot, a.commit, a.max_card)
         elif a.cmd == "writes":
             out = {"in_flight": in_flight_writes()}
+        elif a.cmd == "leftovers":
+            out = leftovers()
+        elif a.cmd == "cards-after":
+            out = {"cards": cards_after(a.max_card)}
         elif a.cmd == "release":
             out = release(a.point, a.outcome, a.note)
         else:

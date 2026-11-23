@@ -6,9 +6,12 @@
 
 hermes/scripts/autoloop_answer.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/autoloop_config.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/autoloop_grants.py @1ecd294cfda93f1ead750e8620a0e372d0bd7b3e  # 首单「先跑后搬」装的版本（11-22，镜像和任务单在 /Users/Shared/dt-autoloop/，和装着的工人启动脚本一致）；0E-2（#268）起默认改到 /Users/Shared/dt-gate/，单独重装会和启动脚本对不上、派单停下；搬家时随 dt-gate 的 root 副本一起换（命令清单「开始前」先换启动脚本），搬完删掉这行
 hermes/scripts/autoloop_feishu.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/autoloop_publish.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
 hermes/scripts/autoloop_readonly.py  # 秘书代批 / 执行底座（#195），各批写着「未安装」，等 ADR-015 的 dt-gate 账号就绪再装
+hermes/scripts/gate_intake.py  # 秘书窄窗口（ADR-015 0E-2）：只装进 dt-gate 的 root 副本（dt_gate_hub.py stage），不装 ~/.hermes
+hermes/scripts/hub_listener.py  # 监听核对（ADR-015 0E-2）：随 autoloop_* 一起只装进 dt-gate 的 root 副本，不装 ~/.hermes
 hermes/scripts/button_probe.py  # 按钮实测探针（#195 0B-3），只在实测时手动跑
 hermes/scripts/custody.py @648658c0e795e1a6043abb4f85686051f84904e5  # 托管开关（#131）；main 版开启托管要 custody_ledger（11-15 定暂不装），单独装开启会被拒；随秘书代批 #195 上线再装
 hermes/scripts/custody_impact.py  # 托管（#133 等），常浩 11-15 定并入秘书代批重做，暂不装
