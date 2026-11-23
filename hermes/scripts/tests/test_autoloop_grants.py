@@ -24,6 +24,7 @@ from unittest import mock
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
+import autoloop_config as C  # noqa: E402
 import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
@@ -61,10 +62,12 @@ class Base(unittest.TestCase):
         for p in (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(G, "ROSTER", self.roster),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
                   mock.patch.object(G, "notify_owner", side_effect=self._notify),
-                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 RecoveryGate）
+                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit"),   # 恢复闸放行（关着见 RecoveryGate）
+                  mock.patch.object(C, "loaded_rules", side_effect=lambda: self.hub_rules)):   # 中台在用的规则（HubRule）
             p.start()
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted, self.notices = {}, 0, [], []
+        self.hub_rules = {"rules": [C.dispatch_rule(r, x) for r in ("dt-sandbox", "digital-twin") for x in G.EXECUTORS]}
 
     def write_roster(self, sandbox, twin_write=True):
         inv = [{"path": "github:o/old", "category": "待删"}]
@@ -237,6 +240,29 @@ class Approval(Base):
         with self.assertRaises(G.Rejected):
             G.propose("dt-sandbox", "claude", SCOPE, actions=("edit", "merge"), now=T0)
         self.assertEqual(G.propose("digital-twin", "codex", SCOPE, now=T0)["github"], "o/digital-twin")
+
+    def test_hub_without_dispatch_rule_rejects_at_propose(self):
+        """常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝并说清原因；不记提议、不发私聊。"""
+        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude")]}
+        with self.assertRaisesRegex(G.Rejected, "名册放行了写入，但中台没有接 codex 派单的规则 dispatch-digital-twin-codex"):
+            G.propose("digital-twin", "codex", SCOPE, now=T0)
+        with self.assertRaisesRegex(G.Rejected, "dispatch-dt-sandbox-codex"):
+            G.propose("dt-sandbox", "codex", SCOPE, now=T0)     # 同一仓库另一个执行方没有规则也拦
+        wrong = C.dispatch_rule("dt-sandbox", "claude") | {"when": {"source": "hermes", "types": ["dispatch.other.claude.write"]}}
+        self.hub_rules = {"rules": [wrong]}
+        with self.assertRaisesRegex(G.Rejected, "中台没有"):
+            G.propose("dt-sandbox", "claude", SCOPE, now=T0)    # 同名规则接的不是这类事件
+        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude") | {"paused": True}]}
+        self.assertTrue(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"])   # 暂停着不拦
+        self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
+        self.assertEqual(len(self.notices), 1)
+
+    def test_hub_unreadable_rejects_at_propose(self):
+        with mock.patch.object(C, "loaded_rules", side_effect=C.Rejected("读不到中台正在用的规则（OperationalError），不放行")):
+            with self.assertRaisesRegex(G.Rejected, "查不了中台有没有 dispatch-dt-sandbox-claude"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        self.assertFalse(self.db.exists() and self.sql("SELECT code FROM proposals"))
+        self.assertEqual(self.notices, [])
 
     def test_files_are_private_and_shared_files_are_readable(self):
         old = os.umask(0o077)                                    # 严格 umask 下共享目录也要显式给 755

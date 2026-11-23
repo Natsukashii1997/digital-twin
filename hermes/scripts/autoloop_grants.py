@@ -54,6 +54,8 @@
   autoloop_grants.py show [--task T] | send-pending
 环境变量：DT_GRANTS_DB（默认 DigitalTwin/autoloop/grants.db）、DT_GRANTS_STATUS（共享镜像）、DT_GRANTS_TASKS（任务单目录）、
 DT_HUB（中台地址）、DT_HERMES_SOURCE_KEY_FILE（hermes 来源密钥文件，600；0B-2 建）。
+propose 先只读查中台正在用的规则（AGENT_AUTOLOOP_HOME 下的 hub.db）里有没有 dispatch-<仓库>-<执行方>，没有、或接的事件
+类型对不上、或读不到，就拒绝并写明原因（常浩 11-23 定）；规则暂停着不拦。
 任务锁（task_lock）不另设环境变量：固定在凭证库旁边的 task-locks/<单号>.lock（跟着 DT_GRANTS_DB 走），续接、受信发布、
 秘书 ② / ③ 共用这一把（续审第 3 轮）；拿到后交出 TaskLock 凭证，已持锁的调用方把凭证传给 resume_dispatch（续审第 4 轮）。
 """
@@ -585,6 +587,22 @@ def _notify_once(code, text):
         raise Rejected(str(e))
 
 
+def require_hub_rule(repo, executor):
+    """中台正在用的规则里要有接这一单的派单规则（常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝）。
+    没有它，批准后凭证照签、事件发出去却没有规则接，悄悄丢掉。只读中台库里它当前载入的配置（和 autoloop_config 核对装机
+    同一个读法），读不到不放行；规则暂停着不拦（现在的流程是先暂停、批准前由常浩恢复）。"""
+    import autoloop_config as C
+    name, etype = rule_name(repo, executor), event_type(repo, executor)
+    try:
+        live = C.dispatch_rules_of(C.loaded_rules())
+    except C.Rejected as e:
+        raise Rejected(f"{e}；查不了中台有没有 {name} 这条派单规则，不提议")
+    when = (live.get(name) or {}).get("when") or {}
+    if when.get("source") != C.SOURCE or etype not in (when.get("types") or []):
+        raise Rejected(f"{repo} 名册放行了写入，但中台没有接 {executor} 派单的规则 {name}（中台配置现在只给沙盒生成派单规则），"
+                       f"这一单批准了也派不出去；要派，先由常浩决定给 {repo} 加派单规则")
+
+
 def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None):
     now = now or now_tz()
     if not REPO_NAME.match(repo or ""):
@@ -602,6 +620,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
         raise Rejected(f"五要素不能为空，最多 {MAX_SCOPE} 字")
     if not 0 < hours <= MAX_HOURS:
         raise Rejected(f"有效期 1 到 {MAX_HOURS} 小时")
+    require_hub_rule(repo, executor)
     valid_until = iso(now + dt.timedelta(hours=hours))
     h = content_hash(repo, github, executor, actions, valid_until, scope_text)
     require_recovery()                         # 确认消息是往私聊发飞书：恢复闸关着就不提议
