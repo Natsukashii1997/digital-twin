@@ -103,6 +103,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # 零件只从本脚本所在的目录取，不看当前目录和 PYTHONPATH
+from card_parts import grey, hr, md, panel  # noqa: E402  卡片零件（#333）；它不 import 任何模块、不读环境
+
 TZ = dt.timezone(dt.timedelta(hours=8))
 MAX_TAGS = 180     # 飞书卡片正文最多 199 个组件（2026-11-21 实测：195 能发，200 报 element exceeds the limit），留余量
 END_TAGS = 195     # 结束时多一行「托管结束」：进行中每次改动都保证不超过 MAX_TAGS，所以结束状态一定推得出去
@@ -403,22 +406,8 @@ def log(sheet, rec):
 
 # ---------- 卡片 ----------
 
-def md(text, size=None):
-    e = {"tag": "markdown", "content": text}
-    if size:
-        e["text_size"] = size
-    return e
-
-
 def red(text):
     return f"<font color='red'>**{text}**</font>"
-
-
-def grey(text):
-    return md(f"<font color='grey'>{text}</font>", "notation")
-
-
-HR = {"tag": "hr"}
 
 
 def line(time, right):
@@ -428,15 +417,6 @@ def line(time, right):
                          "elements": [md(f"<font color='grey'>{time}</font>")]},
                         {"tag": "column", "width": "weighted", "weight": 1, "vertical_align": "top",
                          "vertical_spacing": "4px", "elements": right}]}
-
-
-def panel(title, text):
-    return {"tag": "collapsible_panel", "expanded": False, "background_color": "grey-50",
-            "border": {"color": "grey", "corner_radius": "6px"}, "padding": "4px 10px 8px 10px", "vertical_spacing": "8px",
-            "header": {"title": {"tag": "plain_text", "content": title}, "width": "fill", "vertical_align": "center",
-                       "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "color": "grey", "size": "16px 16px"},
-                       "icon_position": "right", "icon_expanded_angle": -180},
-            "elements": [md(text)]}
 
 
 def num(n):
@@ -482,10 +462,10 @@ def elements(sheet, fold):
         top = md(red(f"还等你 {len(waiting)} 件") + "　往下找红字。每件开头的圆圈数字是它的编号，按冒出来的先后编，回话时带上编号就行。")
     else:
         top = md("**现在没有要你做的事**　下面是已经办的和正在办的。")
-    els = [top, HR, line(hm(sheet["started_at"]), [md("▶ 托管开始")])]
+    els = [top, hr(), line(hm(sheet["started_at"]), [md("▶ 托管开始")])]
     if old:
         els.append(panel(f"✅ {hm(old[0]['at'])}–{hm(old[-1]['at'])}　办完 {len(old)} 件（点开看）",
-                         "\n".join(f"- {hm(r['at'])} {plain(r)[2:]}" for r in old)))
+                         [md("\n".join(f"- {hm(r['at'])} {plain(r)[2:]}" for r in old))]))
     day = at(sheet["started_at"]).date()
     for r in rows:
         if any(r is o for o in old):
@@ -505,7 +485,7 @@ def elements(sheet, fold):
             els.append(line(t, [md(f"<font color='grey'>{plain(r)}</font>")]))
     if sheet.get("ended_at"):
         els.append(line(hm(sheet["ended_at"]), [md("■ 托管结束")]))
-    els.append(HR)
+    els.append(hr())
     if sheet.get("doing") and not sheet.get("ended_at"):
         els.append(md("**⏳ 正在办，不用你管**\n" + "\n".join(
             f"- **{d['task']}**" + (f"（{d['about']}）" if d.get("about") else "") + f"：{d['text']}" for d in sheet["doing"])))

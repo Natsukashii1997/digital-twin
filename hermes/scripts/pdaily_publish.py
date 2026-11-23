@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+from card_parts import grey, hr, md, panel, table  # noqa: E402  卡片零件（#333）：表格是 2026-11-10 定稿的写法，折叠面板同群学习报告
 import pdaily_data  # noqa: E402
 import pdaily_facts  # noqa: E402
 import pdaily_act  # noqa: E402  拍板账（#235）；它反过来 import 本模块，Python 会给它半初始化的本模块，它只在函数里用
@@ -397,7 +398,7 @@ def auto_merge_panel(facts):
                      f"- ⚠️ 结果不明：**{ref_of(m)}** {clip(m.get('title'), 60)}，"
                      "合并请求发了、还没核对清楚，合并官下一轮只读核对")
     lines.append("<font color='grey'>不同意哪条，回「撤回 仓库#号」，猛鬼兽开撤回 PR 并合并；装过机的另外问你要不要重装。</font>")
-    return panel(f"替你合并了什么 · {len(merged)} 个 · 展开", lines)
+    return panel(f"替你合并了什么 · {len(merged)} 个 · 展开", [md(x) for x in lines])
 
 
 def header_numbers(card):
@@ -806,29 +807,6 @@ def window_text(facts):
     return f"{st:%m-%d %H:%M} → {en:%m-%d %H:%M}"
 
 
-def md(text):
-    return {"tag": "markdown", "content": text}
-
-
-def table(cols, rows):
-    """卡片表格：表头灰底加粗、自动行高、换行不溢出（常浩 2026-11-10 定稿的写法）。cols = [(字段, 表头, 宽度)]。"""
-    return {"tag": "table", "page_size": 10, "row_height": "auto", "row_max_height": "999px",
-            "header_style": {"text_align": "left", "text_size": "normal", "background_style": "grey", "bold": True, "lines": 1},
-            "columns": [{"name": k, "display_name": n, "data_type": "lark_md", "width": w, "vertical_align": "top"}
-                        for k, n, w in cols],
-            "rows": rows}
-
-
-def panel(title, blocks):
-    """折叠面板，默认收起（写法同 groupdigest 的「原文与译文 · 展开」）。"""
-    return {"tag": "collapsible_panel", "expanded": False, "background_color": "grey-50",
-            "border": {"color": "grey", "corner_radius": "6px"}, "padding": "4px 10px 8px 10px", "vertical_spacing": "8px",
-            "header": {"title": {"tag": "plain_text", "content": title}, "width": "fill", "vertical_align": "center",
-                       "icon": {"tag": "standard_icon", "token": "down-small-ccm_outlined", "color": "grey", "size": "16px 16px"},
-                       "icon_position": "right", "icon_expanded_angle": -180},
-            "elements": [md(x) for x in blocks]}
-
-
 def project_label(v):
     """事项前的项目名：一两个照写，三个以上写「N 个项目」（明细在风险的折叠面板里）。"""
     names = split_names(v)
@@ -905,7 +883,7 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None,
     ach = dicts(card, "achievements")
     unknown = delta_unknown(facts)
     empty = f"未知：{len(unknown)} 个项目 GitHub 取不到，没法判断昨天有没有成果" if unknown else "昨天没有新成果"
-    els += [{"tag": "hr"}, md("**✅ 昨日关键成果**"),
+    els += [hr(), md("**✅ 昨日关键成果**"),
             md("\n".join(f"{i}. **{a.get('project')}**：{a.get('text')}" for i, a in enumerate(ach, 1)) or empty)]
     risks = dicts(card, "risks")
     rows = risk_rows(risks, degraded)
@@ -914,15 +892,15 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None,
         first = selfcheck.strip().splitlines()[0]
         rows.append({"c": "🟠 猛鬼兽自检有问题", "w": cut(first, 45) if len(first) > 45 else first, "g": "处理办法见明细"})
         details.append(f"**猛鬼兽自检**\n{selfcheck.strip()}")
-    els += [{"tag": "hr"}, md(f"**⚠️ 风险与阻塞 · {len(rows)} 类**" if rows else "**⚠️ 风险与阻塞**")]
+    els += [hr(), md(f"**⚠️ 风险与阻塞 · {len(rows)} 类**" if rows else "**⚠️ 风险与阻塞**")]
     if rows:
         els.append(table((("c", "问题", "30%"), ("w", "涉及", "45%"), ("g", "去向", "25%")), rows))
         if details:
-            els.append(panel("每类涉及哪些项目 · 展开", details))
+            els.append(panel("每类涉及哪些项目 · 展开", [md(x) for x in details]))
     else:
         els.append(md("没有风险和阻塞"))
     decs = dicts(card, "decisions")
-    els += [{"tag": "hr"}, md(f"**🎯 需要你拍板 · {len(decs)} 件**" if decs else "**🎯 需要你拍板**")]
+    els += [hr(), md(f"**🎯 需要你拍板 · {len(decs)} 件**" if decs else "**🎯 需要你拍板**")]
     if decs:
         els.append(table((("n", "#", "8%"), ("i", "事项", "34%"), ("r", "推荐", "43%"), ("a", "已挂", "15%")),
                          decision_rows(facts, decs)))
@@ -936,7 +914,7 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None,
                           "回了才算你定了，只管点到的那几条。</font>"))
     else:
         els.append(md("今天没有要你拍板的事"))
-    els.append({"tag": "hr"})
+    els.append(hr())
     if doc_url:
         els.append({"tag": "button", "text": {"tag": "plain_text", "content": "📄 查看完整报告"},
                     "type": "primary_filled", "size": "medium",
@@ -948,7 +926,7 @@ def build_card(facts, card, trace, doc_url=None, doc_error=None, selfcheck=None,
         trace += "｜工程自检：正常"
     if token:
         trace += f"｜{card_mark(token)}"
-    els.append({"tag": "markdown", "content": f"<font color='grey'>{trace}</font>", "text_size": "notation"})
+    els.append(grey(trace))
     return {"schema": "2.0", "config": {"update_multi": True},
             "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(facts['stat_day'])}"},
                        "subtitle": {"tag": "plain_text", "content": "｜".join(sub)}, "template": "blue"},
@@ -961,8 +939,7 @@ def failure_card(day, reason):
             "header": {"title": {"tag": "plain_text", "content": f"📅 猛鬼兽日报 · {short_day(day)}"},
                        "subtitle": {"tag": "plain_text", "content": "今天的日报没出成"}, "template": "red"},
             "body": {"elements": [md(f"**⚠️ 日报没出成**\n{reason}\n今天的项目情况请直接问我，或等修好后补发。"),
-                                  {"tag": "markdown", "content": "<font color='grey'>生成：本机脚本｜接入：本机脚本</font>",
-                                   "text_size": "notation"}]}}
+                                  grey("生成：本机脚本｜接入：本机脚本")]}}
 
 
 def who(model, degraded):
