@@ -67,9 +67,14 @@ def strip_env():
 
 def lark(args, what, cwd=None):
     """跑一条 bot 身份的 lark-cli 命令，返回 data；出错抛 SendError（原因里不含凭据）。"""
-    cmd = [LARK, "--profile", PROFILE, *args, "--as", "bot", "--format", "json"]
+    return run_lark([LARK, "--profile", PROFILE, *args, "--as", "bot", "--format", "json"], what, strip_env(), cwd)
+
+
+def run_lark(cmd, what, env, cwd=None):
+    """跑一条 lark-cli 命令（cmd 已带身份和 --format json），按 lark-cli 的输出约定取 data。门卫（gatekeeper.py）
+    用自己的应用凭据和环境也走这里，输出解析只有这一份。"""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, env=strip_env(), cwd=cwd)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, env=env, cwd=cwd)
     except (OSError, subprocess.SubprocessError) as e:
         raise SendError(f"{what}：lark-cli 跑不起来（{type(e).__name__}）")
     d = None
