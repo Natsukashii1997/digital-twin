@@ -8,6 +8,7 @@
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import hashlib
+import errno
 import io
 import json
 import os
@@ -73,6 +74,7 @@ class FakeHost(H.Host):
         self.calls = []
         self.guard_fail = set()                # 要判不过的 (函数, 参数)
         self.chowns = []
+        self.stuck = set()                     # launchctl print 一直说还在的标签（卸不掉，L3 第 2 轮 P1-01）
 
     def is_root(self):
         return True
@@ -130,6 +132,8 @@ class FakeHost(H.Host):
                 p.wait()
             return 0, ""
         if verb == "print":
+            if label in self.stuck:
+                return 0, "state = running"
             p = self.procs.get(label, (None,))[0]
             return (0, f"state = running\n\tpid = {p.pid}") if p and p.poll() is None else (113, "not found")
         return 0, ""                            # enable / disable
@@ -321,7 +325,8 @@ class ChecksTest(unittest.TestCase):
         # 脚本里每个有真机默认值的目录都指到临时目录（11-22 漏了启动脚本目录：首单在真机装了 dt-worktree-*，这里就读到了）
         for k, v in {"DT_GATE_ROOT": root, "DT_GATE_SHARED": self.d / "shared/dt-gate", "DT_GATE_USERS": self.d / "users",
                      "DT_GATE_ANY_COPY": "1", "DT_PF_DIR": self.d / "pf", "DT_GATE_LAUNCHERS": self.d / "launchers",
-                     "DT_GATE_LOGS": self.d / "logs", "DT_GATE_DAEMONS": self.d / "daemons"}.items():
+                     "DT_GATE_LOGS": self.d / "logs", "DT_GATE_DAEMONS": self.d / "daemons",
+                     "DT_GATE_READONLY_PORT": free_port(), "DT_GATE_INTAKE_PORT": free_port()}.items():
             p = mock.patch.dict(os.environ, {k: str(v)})
             p.start()
             self.addCleanup(p.stop)
@@ -641,7 +646,7 @@ class ChecksTest(unittest.TestCase):
         def snap(*a):                                  # 停中台之前最大号 5；停下以后多出卡片 6，还开着
             return self.snap(max_card=6, live_cards=1) if stopped["v"] else self.snap(max_card=5)
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "snapshot_as", snap), \
-                mock.patch.object(H, "unload", lambda *a: stopped.update(v=True)), \
+                mock.patch.object(H, "unload", lambda *a: (stopped.update(v=True), True)[1]), \
                 mock.patch.object(H, "wait_port_free"), mock.patch.object(H, "start_owner_agent"), \
                 mock.patch("sys.stdout", io.StringIO()):
             with self.assertRaisesRegex(H.Stop, "没答完的卡片"):
@@ -902,6 +907,139 @@ class ChecksTest(unittest.TestCase):
         start.assert_called_once()
         self.assertIsNone(run.state["hold"])
         self.assertIsNone(H.load_state())
+
+    # ---------- L3 第 2 轮 P1-01：服务卸不掉、端口还有人听，回滚 / 退回 / 搬家都停下 ----------
+    def plists(self):
+        d = self.d / "daemons"
+        d.mkdir(exist_ok=True)
+        for which in ("hub", "readonly", "intake"):
+            (d / f"{H.LABEL[which]}.plist").write_text("x")
+        return d
+
+    def guarded(self):
+        """搬完的门卫：标记在、状态 guard=yes。"""
+        H.hub_mark().write_text("dt-gate S\n")
+        self.pf("at=x state=ok enabled=yes boot=1795000000 guard=yes\n")
+
+    def test_remove_daemon_keeps_plist_when_launchctl_still_shows_it(self):
+        d = self.plists()
+        self.host.stuck.add(H.LABEL["hub"])
+        self.host.sleep = lambda s: None
+        with self.assertRaisesRegex(H.Stop, "卸不下来"):
+            H.remove_daemon(self.host, "hub")
+        self.assertTrue((d / f"{H.LABEL['hub']}.plist").exists())
+        H.remove_daemon(self.host, "intake")                                          # 卸得掉的照常删 plist
+        self.assertFalse((d / f"{H.LABEL['intake']}.plist").exists())
+
+    def rollback_blocked(self, w, setup, word, plist_kept):
+        """回滚被卡住：门卫不关、plist 和说明文件都在、目录不放回、不启用主账号中台、停写和 state 留着；修好再跑一次接着来。"""
+        self.rollback_state(w)
+        d = self.plists()
+        self.guarded()
+        run = self.fake_recovery(hold="gate-migrate-S")
+        unmark = mock.Mock(side_effect=lambda *a: (w / "hub").unlink())
+        start = mock.Mock()
+        self.host.sleep = lambda s: None
+        undo_setup = setup()
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
+                mock.patch.object(H, "unmark_owner", unmark), mock.patch.object(H, "now_stamp", return_value="P"), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(H.Stop, word):
+                H.cmd_rollback(self.host, self.a())
+            self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
+            self.assertTrue(os.path.lexists(H.hub_mark()))
+            self.assertEqual((d / f"{H.LABEL['hub']}.plist").exists(), plist_kept)
+            unmark.assert_not_called()
+            start.assert_not_called()
+            self.assertTrue((w / "hub").read_text().startswith(H.MARK))
+            self.assertTrue((Path(os.environ["DT_GATE_ROOT"]) / "state.json").exists())
+            self.assertEqual(run.state["hold"], "gate-migrate-S")
+            undo_setup()                                                              # 修好了，再跑一次
+            self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
+        self.assertFalse(os.path.lexists(H.hub_mark()))
+        self.assertFalse((d / f"{H.LABEL['hub']}.plist").exists())
+        start.assert_called_once()
+        self.assertIsNone(run.state["hold"])
+
+    def test_rollback_stops_when_a_service_will_not_unload(self):
+        def setup():
+            self.host.stuck.add(H.LABEL["hub"])
+            return self.host.stuck.clear
+        self.rollback_blocked(self.d / "rbs", setup, "卸不下来", plist_kept=True)
+
+    def test_rollback_stops_while_a_service_port_is_still_listened(self):
+        def setup():
+            srv = socket.socket()
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(128)
+            self.addCleanup(srv.close)
+            os.environ["DT_GATE_INTAKE_PORT"] = str(srv.getsockname()[1])            # setUp 的 patch.dict 会还原
+            return srv.close
+        self.rollback_blocked(self.d / "rbp", setup, "还有人在听", plist_kept=False)
+
+    def test_wait_port_free_only_trusts_a_refused_connection(self):
+        """连上了、超时（监听队列满）都不算空；连接被拒才算。"""
+        self.host.sleep = lambda s: None
+        H.wait_port_free(self.host, f"127.0.0.1:{free_port()}")
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(1)
+            with mock.patch.object(H.socket.socket, "connect_ex", return_value=errno.ETIMEDOUT), \
+                    self.assertRaisesRegex(H.Stop, "还有人在听"):
+                H.wait_port_free(self.host, "127.0.0.1:%d" % srv.getsockname()[1], seconds=1)
+            with self.assertRaisesRegex(H.Stop, "还有人在听"):
+                H.wait_port_free(self.host, "127.0.0.1:%d" % srv.getsockname()[1], seconds=1)
+
+    def test_undo_with_a_stuck_daemon_keeps_guard_hold_and_progress(self):
+        """搬家中途出错、dt-gate 的中台卸不掉：目录不挪、门卫不关、主账号中台不启用、停写保持，返回 False（进度记录由调用方留着）。"""
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
+        d = self.plists()
+        self.guarded()
+        gate_hub = self.users["dt-gate"] / ".agent-autoloop"
+        gate_hub.mkdir()
+        self.host.stuck.add(H.LABEL["hub"])
+        self.host.sleep = lambda s: None
+        log = []
+        run = self.fake_recovery(hold="gate-migrate-S", log=log)
+        start = mock.Mock()
+        done = {"held": True, "stopped": True, "gate_hub": True, "daemon": True, "guard_on": True}
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertFalse(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S", done))
+        start.assert_not_called()
+        self.assertTrue(gate_hub.is_dir())
+        self.assertTrue((d / f"{H.LABEL['hub']}.plist").exists())
+        self.assertTrue(os.path.lexists(H.hub_mark()))
+        self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
+        self.assertEqual(run.state["hold"], "gate-migrate-S")
+        self.assertNotIn("release", [c[1] for c in log])
+
+    def test_migrate_stops_before_backup_when_owner_hub_will_not_unload(self):
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
+        run = self.fake_recovery()
+        cli = mock.Mock()
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "snapshot_as", return_value=self.snap(max_card=5)), \
+                mock.patch.object(H, "unload", return_value=False), mock.patch.object(H, "run_cli", cli), \
+                mock.patch.object(H, "wait_port_free") as wpf, mock.patch.object(H, "start_owner_agent"), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(H.Stop, "主账号中台卸不下来"):
+                H.cmd_migrate(self.host, self.a())
+        cli.assert_not_called()
+        wpf.assert_not_called()
+        self.assertIsNone(run.state["hold"])                                           # 什么都没动：退回、结束停写
+        self.assertTrue(list(H.gate_root().glob("migrating.undone-*.json")))
+
+    def test_guard_off_checks_the_directory_before_deleting_the_mark(self):
+        """L3 第 2 轮 P2-01：门卫目录不是只有 root 能改的，标记一个字节都不动、不跑门卫，返回 False。"""
+        H.hub_mark().write_text("dt-gate S\n")
+        self.host.guard_fail.add(("root_path", os.environ["DT_PF_DIR"]))
+        with mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertFalse(H.guard_off(self.host))
+        self.assertEqual(H.hub_mark().read_text(), "dt-gate S\n")
+        self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
+        self.assertIn("只有 root 能改", out.getvalue())
 
     def test_rollback_refuses_before_touching_anything_when_note_is_not_ours(self):
         w = self.d / "rbn"

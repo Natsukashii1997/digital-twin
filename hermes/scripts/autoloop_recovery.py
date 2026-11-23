@@ -612,7 +612,7 @@ def _rows(path, table, sql, args=()):
 def leftovers():
     """只读：这个账号的控制面账本里还没结清的东西（0E-2 搬家用：dt-gate 从空的新账本开始，这些搬过去就忘了）。
     不依赖出口账本在不在、不新建任何库。返回 {"hold": 维护中的恢复点或 None, "items": [说明…]}；读不了的库记一条「读不了」。
-    列的是：出口账本里结果不明 / 核不清 / 在做的、关闸标记、本人或秘书的点击排队 / 在发 / 结果不明的、秘书代批没结清的、
+    列的是：出口账本里结果不明 / 核不清 / 在做的、关闸标记、本人或秘书的点击排队 / 在发 / 结果不明的、托管和秘书账本里排空证明不过的、
     派单事件没确认送达而凭证这一代还有效的、还有效或冻结着的任务凭证。"""
     items, hold = [], None
     p = E.db_path()
@@ -633,22 +633,61 @@ def leftovers():
         items += ["卡片库读不了"] if r is None else [f"{'本人' if w == 'owner' else '秘书'}点击 卡片 {c}（{s}）" for c, w, s in r]
     except ImportError:
         pass
-    import twin_state as TS
-    r = _rows(Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser(), "secretary_decisions",
-              "SELECT id, status FROM secretary_decisions WHERE action != 'handoff' "
-              "AND status IN ('executing', 'unknown', 'unreconciled')")
-    items += ["秘书账本读不了"] if r is None else [f"秘书代批 {d}（{s}）" for d, s in r]
+    items += _ledger_leftovers("secretary")
     g = G.db_path()
     r = _rows(g, "grants", "SELECT task_id, status FROM grants WHERE status IN ('active', 'frozen')")
     items += ["凭证库读不了"] if r is None else [f"任务凭证 {t}（{s}）" for t, s in r]
     r = _rows(g, "hub_events", "SELECT e.event_key FROM hub_events e JOIN grants g ON g.task_id = e.task_id "
                                "WHERE e.sent != 1 AND g.status IN ('active', 'frozen')")   # 凭证已结束的补发不了，不算
     items += ["凭证库读不了"] if r is None else [f"派单事件 {k}（没确认送达）" for (k,) in r]
-    r = _rows(Path(os.environ.get("DT_STATE_DB", TS.DEFAULT_DB)).expanduser(), "custody_decisions",
-              "SELECT id, status FROM custody_decisions WHERE status IN ('issued', 'executing', 'unknown', 'unreconciled')")
-    items += ["托管账本读不了"] if r is None else [f"托管决定 {d}（{s}）" for d, s in r]   # 0D 会话 11-22：表存在就查
+    items += _ledger_leftovers("custody")
     items += _held_task_locks(g.parent / "task-locks")
     return {"hold": hold, "items": list(dict.fromkeys(items))}
+
+
+def _ledger_leftovers(kind):
+    """托管 / 秘书账本没收完的：和排空证明同一个判定（custody_ledger.drain_blockers：issued / executing / 结果不明 /
+    对账不清的决定、额度没跟着决定收口的、有原文账本里却没有的），逐个会话查（L3 第 2 轮 P1-02）。
+    只读：不用 open_store（它会迁移、写库），只读连接包一层给 drain_blockers 用。会话号取会话表、决定表和原文目录三处的并集；
+    库或表不在而原文在，照样列出；任何一处读不了、查不清都记一条（调用方当作有）。"""
+    import types
+    try:
+        import custody_ledger as L
+        use = L.CUSTODY
+        if kind == "secretary":
+            import secretary_ledger as SL
+            use = SL.SECRETARY
+    except Exception as e:                                   # 脚本缺了也不能当成「没有」
+        return [f"{'秘书' if kind == 'secretary' else '托管'}账本核不了（{type(e).__name__}）"]
+    who = use.who
+    try:
+        rd = L.raw_dir(use)
+        raw = sorted(p.name for p in rd.iterdir()
+                     if p.is_dir() and any(L.DECISION_ID.match(f.stem) for f in p.glob("d-*.json"))) if rd.is_dir() else []
+    except OSError:
+        return [f"{who}原文目录读不了"]
+    db = L.db_path()
+    try:
+        if not db.exists():
+            return [f"{who}会话 {s} 有原文、账本库不在" for s in raw]
+        con = _ro(db)
+        try:
+            con.row_factory = sqlite3.Row
+            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if use.decisions not in tables:
+                return [f"{who}会话 {s} 有原文、账本表不在" for s in raw]
+            sids = {r[0] for r in con.execute(f"SELECT DISTINCT session_id FROM {use.decisions}")}
+            if use.sessions in tables:
+                sids |= {r[0] for r in con.execute(f"SELECT session_id FROM {use.sessions}")}
+            store = types.SimpleNamespace(conn=con)
+            out = []
+            for sid in sorted(sids | set(raw)):
+                out += [f"{who}会话 {sid}：{x}" for x in L.drain_blockers(store, sid, use)]
+            return out
+        finally:
+            con.close()
+    except Exception as e:                                   # 账本坏行、表结构不对、库锁着：查不清一律拦
+        return [f"{who}账本读不了（{type(e).__name__}）"]
 
 
 def _held_task_locks(d):

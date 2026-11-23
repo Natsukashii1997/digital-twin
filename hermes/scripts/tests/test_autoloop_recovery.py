@@ -602,12 +602,99 @@ class Leftovers(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         isolate(self, self.root, open_gate=False)
-        p = mock.patch.dict(os.environ, {"DT_STATE_DB": str(self.root / "twin-state.db")})
+        p = mock.patch.dict(os.environ, {"DT_STATE_DB": str(self.root / "twin-state.db"),
+                                         "DT_CUSTODY_DIR": str(self.root / "custody"),
+                                         "DT_SECRETARY_DIR": str(self.root / "secretary")})
         p.start()
         self.addCleanup(p.stop)
 
     def files(self):
         return sorted(str(f.relative_to(self.root)) for f in self.root.rglob("*") if f.is_file())
+
+    SS, CS = "s-20261122-101010-aaaaaaaaaaaa", "c-20261122-101010-bbbbbbbbbbbb"
+
+    def ledger(self):
+        """真的 twin-state 库（twin_state 的迁移建表，和正式账本同一套结构）。"""
+        import twin_state as TS
+        st = TS.Store(self.root / "twin-state.db").open()
+        self.addCleanup(st.close)
+        return st.conn
+
+    def sec(self, con, did, status, action="ask", sid=SS, quota=None):
+        con.execute("INSERT INTO secretary_decisions (id, session_id, project, action, category, target, task_id,"
+                    " policy_version, policy_sha256, basis, revocability, status, created_at, updated_at)"
+                    " VALUES (?, ?, 'dt-sandbox', ?, 'ask', ?, 't-20261122-aaaaaa', 1, ?, 'b', ?, ?, 'x', 'x')",
+                    (did, sid, action, json.dumps({"task": "t-20261122-aaaaaa", "generation": 1}), "f" * 64,
+                     "revertible" if action == "merge" else "correctable", status))
+        if quota:
+            con.execute("INSERT INTO secretary_quota (session_id, kind, decision_id, state, created_at, updated_at)"
+                        " VALUES (?, 'day', ?, ?, 'x', 'x')", (sid, did, quota))
+
+    def cus(self, con, did, status, sid=CS):
+        con.execute("INSERT INTO custody_decisions (id, session_id, project, action, target, basis, revocability, status,"
+                    " created_at, updated_at) VALUES (?, ?, 'dt-sandbox', 'reply', '{}', 'b', 'correctable', ?, 'x', 'x')",
+                    (did, sid, status))
+
+    def raw(self, kind, sid, did):
+        d = self.root / kind / sid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{did}.json").write_text("{}")
+
+    def ledger_items(self):
+        return [x for x in R.leftovers()["items"] if x.startswith(("秘书", "托管")) and "点击" not in x]
+
+    def test_ledger_leftovers_use_the_drain_proof(self):
+        """L3 第 2 轮 P1-02：和排空证明同一个判定——秘书 issued 也算、额度没跟着收口、有原文账本里没有，都列出来。"""
+        con = self.ledger()
+        self.sec(con, "d-000001-aaaaa1", "issued")                       # 原来只查 executing / unknown / unreconciled，漏了
+        self.sec(con, "d-000002-aaaaa2", "done", quota="reserved")       # 决定收口了、额度还占着
+        self.sec(con, "d-000003-aaaaa3", "done", quota="used")           # 干净的
+        self.sec(con, "d-000004-aaaaa4", "handoff")                      # 交常浩：不算没收完
+        self.raw("secretary", self.SS, "d-000005-aaaaa5")                # 有原文、账本没有
+        self.raw("secretary", self.SS, "d-000003-aaaaa3")                # 原文、账本都有
+        self.cus(con, "d-000006-bbbbb6", "issued")
+        self.cus(con, "d-000007-bbbbb7", "void")
+        self.raw("custody", "c-20261121-090909-cccccccccccc", "d-000008-ccccc8")   # 账本里连这次会话都没有，只剩原文
+        con.commit()
+        got = self.ledger_items()
+        self.assertEqual(len(got), 5, got)
+        for did, word in (("d-000001-aaaaa1", "已出未送达"), ("d-000002-aaaaa2", "reserved"),
+                          ("d-000005-aaaaa5", "有原文"), ("d-000006-bbbbb6", "已出未送达"), ("d-000008-ccccc8", "有原文")):
+            self.assertEqual(len([x for x in got if did in x and word in x]), 1, (did, got))
+        for did in ("d-000003-aaaaa3", "d-000004-aaaaa4", "d-000007-bbbbb7"):
+            self.assertFalse([x for x in got if did in x], did)
+        self.assertTrue(all(x.startswith(("秘书会话 ", "托管会话 ")) for x in got), got)
+
+    def test_raw_without_ledger_or_table_is_listed(self):
+        """库不在、或库在而账本表不在：只要原文目录里有决定，就列出来（不当成「没有账本就没事」）。"""
+        self.raw("secretary", self.SS, "d-000001-aaaaa1")
+        (self.root / "custody" / "not-a-session").mkdir(parents=True)  # 没有决定原文的目录不算
+        self.assertEqual(self.ledger_items(), [f"秘书会话 {self.SS} 有原文、账本库不在"])
+        import sqlite3
+        with sqlite3.connect(self.root / "twin-state.db") as con:
+            con.execute("CREATE TABLE other (x)")
+        self.assertEqual(self.ledger_items(), [f"秘书会话 {self.SS} 有原文、账本表不在"])
+
+    def test_unreadable_or_odd_ledger_counts_as_unsettled(self):
+        """读不了、表结构不对（drain_blockers 查不了）：一律记一条，调用方当作有。"""
+        (self.root / "twin-state.db").write_bytes(b"not a sqlite file at all" * 100)
+        self.assertEqual(self.ledger_items(), ["秘书账本读不了（DatabaseError）", "托管账本读不了（DatabaseError）"])
+        (self.root / "twin-state.db").unlink()
+        import sqlite3
+        with sqlite3.connect(self.root / "twin-state.db") as con:        # 只有决定表、没有额度表
+            con.execute("CREATE TABLE custody_decisions (id TEXT, session_id TEXT, action TEXT, status TEXT, target TEXT,"
+                        " cites TEXT, outcome TEXT)")
+            con.execute("INSERT INTO custody_decisions VALUES ('d-000001-aaaaa1', 'c-1', 'reply', 'done', '{}', '[]', '{}')")
+        self.assertEqual(self.ledger_items(), ["托管账本读不了（OperationalError）"])
+
+    def test_ledger_check_is_read_only(self):
+        con = self.ledger()
+        self.sec(con, "d-000001-aaaaa1", "issued")
+        con.commit()
+        db = self.root / "twin-state.db"
+        before = (self.files(), db.read_bytes(), con.execute("PRAGMA user_version").fetchone()[0])
+        self.ledger_items()
+        self.assertEqual((self.files(), db.read_bytes(), con.execute("PRAGMA user_version").fetchone()[0]), before)
 
     def test_nothing_installed_is_clean_and_creates_nothing(self):
         self.assertEqual(R.leftovers(), {"hold": None, "items": []})
@@ -635,12 +722,13 @@ class Leftovers(unittest.TestCase):
                                     ("ev-dead", "t-20261122-bbbbbb", 0)):
                 con.execute("INSERT INTO hub_events (event_key, task_id, rule, executor, generation, kind, at, sent) "
                             "VALUES (?, ?, 'r', 'claude', 1, 'start', 'x', ?)", (key, task, sent))
-        with sqlite3.connect(self.root / "twin-state.db") as con:
-            con.execute("CREATE TABLE secretary_decisions (id TEXT, status TEXT, action TEXT)")
-            con.executemany("INSERT INTO secretary_decisions VALUES (?, ?, ?)",
-                            [("sd-1", "unknown", "ask"), ("sd-2", "unknown", "handoff"), ("sd-3", "done", "merge")])
-            con.execute("CREATE TABLE custody_decisions (id TEXT, status TEXT)")
-            con.executemany("INSERT INTO custody_decisions VALUES (?, ?)", [("cd-1", "executing"), ("cd-2", "void")])
+        tw = self.ledger()                                            # 真的 twin-state 结构（原来手写的两张表不像正式账本）
+        self.sec(tw, "d-000001-aaaaa1", "unknown")
+        self.sec(tw, "d-000002-aaaaa2", "handoff", action="handoff")
+        self.sec(tw, "d-000003-aaaaa3", "done", action="merge")
+        self.cus(tw, "d-000004-bbbbb4", "executing")
+        self.cus(tw, "d-000005-bbbbb5", "void")
+        tw.commit()
         locks = G.db_path().parent / "task-locks"
         locks.mkdir()
         (locks / "t-20261122-cccccc.lock").write_text("")
@@ -652,8 +740,10 @@ class Leftovers(unittest.TestCase):
         self.assertEqual(got["hold"], "gate-migrate-S")
         self.assertEqual(got["items"], [
             "出口 push_branch:t1:b:h（unknown）", "出口 open_pr:t1:b:h（executing）", "出口 merge:o/r:1:h（unreconciled）",
-            "关闸标记 1 个", "本人点击 卡片 3（queued）", "秘书点击 卡片 4（inflight）", "秘书代批 sd-1（unknown）",
-            "任务凭证 t-20261122-aaaaaa（active）", "派单事件 ev-live（没确认送达）", "托管决定 cd-1（executing）",
+            "关闸标记 1 个", "本人点击 卡片 3（queued）", "秘书点击 卡片 4（inflight）",
+            f"秘书会话 {self.SS}：d-000001-aaaaa1（答提问卡 t-20261122-aaaaaa 第 1 代）结果不明",
+            "任务凭证 t-20261122-aaaaaa（active）", "派单事件 ev-live（没确认送达）",
+            f"托管会话 {self.CS}：d-000004-bbbbb4（回复 ?）进行中",
             "任务锁 t-20261122-dddddd 正被持着"])
         fcntl.flock(fd, fcntl.LOCK_UN)                                # 放了就不算
         self.assertNotIn("任务锁 t-20261122-dddddd 正被持着", R.leftovers()["items"])

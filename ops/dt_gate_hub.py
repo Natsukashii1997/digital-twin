@@ -50,6 +50,7 @@ DT_GATE_ANY_COPY（测试里允许从仓库跑 stage 以外的命令）。
 """
 import argparse
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -830,7 +831,10 @@ def install_daemon(host, current, which, hub_url):
 
 
 def remove_daemon(host, which):
-    unload(host, f"system/{LABEL[which]}")
+    """卸掉服务再删 plist。卸不掉（launchctl 一直说还在）就停下、plist 留着：服务是 KeepAlive 的，plist 删了它照样跑，
+    也就没人知道它还在（L3 第 2 轮 P1-01）。"""
+    if not unload(host, f"system/{LABEL[which]}"):
+        raise Stop(f"{LABEL[which]} 卸不下来（launchctl 一直显示还在），plist 留着；看清原因后再来")
     f = daemons() / f"{LABEL[which]}.plist"
     if f.exists() and not f.is_symlink():
         f.unlink()
@@ -892,15 +896,17 @@ def wait_answering(host, port_no, uid, seconds=30):
     raise Stop(f"127.0.0.1:{port_no} 没有起来：{last}")
 
 
-def wait_port_free(host, hostport, seconds=30):
+def wait_port_free(host, hostport, seconds=30, what="主账号中台"):
+    """只有「连接被拒」才算没人在听；连上了、超时、别的错误都算还没空（超时可能是监听队列满了，L3 第 2 轮 P1-01 补测时发现）。"""
     h, _, p = hostport.rpartition(":")
+    h = h.strip("[]") or "127.0.0.1"
     for _ in range(int(seconds * 2)):
-        with socket.socket() as s:
+        with socket.socket(socket.AF_INET6 if ":" in h else socket.AF_INET) as s:
             s.settimeout(1)
-            if s.connect_ex((h.strip("[]") or "127.0.0.1", int(p))) != 0:
+            if s.connect_ex((h, int(p))) == errno.ECONNREFUSED:
                 return
         host.sleep(0.5)
-    raise Stop(f"主账号中台停了以后 {hostport} 还有人在听")
+    raise Stop(f"{what}停了以后 {hostport} 还有人在听（或核不清）")
 
 
 # ---------- migrate ----------
@@ -964,7 +970,8 @@ def cmd_migrate(host, a):
 
         say("1. 停主账号的中台")
         prog.mark("stopped")
-        unload(host, agent)
+        if not unload(host, agent):                       # 真退了才备份：还在跑的中台备份出来的不是停下时的样子（P1-01）
+            raise Stop(f"主账号中台卸不下来（launchctl 一直显示 {OWNER_AGENT} 还在）")
         host.launchctl("disable", agent)
         wait_port_free(host, before["listen"])
         stopped = snapshot_as(host, current, a.owner_account, ohub)
@@ -1088,9 +1095,14 @@ def unmark_owner(host, current, owner_account):
 def undo(host, current, owner_account, stamp, done):
     """migrate 中途出错或被打断：dt-gate 这边停掉、挪开留证，主账号中台原样放回、重新启用。尽力做完每一步。"""
     gp = gate_paths(host)
+    daemon_ok = True
     if done.get("daemon"):
-        remove_daemon(host, "hub")
-    if done.get("gate_hub"):
+        try:
+            remove_daemon(host, "hub")
+        except Stop as e:                                # 卸不掉：dt-gate 的中台可能还在跑（P1-01）。目录不挪、门卫不关、
+            say(f"  {e}")                                # 主账号中台不启用、保持停写和进度记录，rollback 再收拾
+            daemon_ok = False
+    if done.get("gate_hub") and daemon_ok:
         host.as_user(gate_account(), ["/bin/mv", "-n", str(gp["hub"]), str(gp["hub"]) + f".failed-{stamp}"])
     ohub = owner_hub(host, owner_account)
     if done.get("moved"):
@@ -1104,8 +1116,8 @@ def undo(host, current, owner_account, stamp, done):
         state = gate_root() / "state.json"
         if state.exists():
             os.replace(state, gate_root() / f"state.undone-{stamp}.json")
-    guard_ok = True
-    if done.get("guard_on"):                             # 先关门卫监听者规则，再启用主账号中台（#313）
+    guard_ok = daemon_ok
+    if done.get("guard_on") and daemon_ok:               # 先关门卫监听者规则，再启用主账号中台（#313）
         guard_ok = guard_off(host)
     if done.get("stopped") and guard_ok:
         start_owner_agent(host, owner_account)
@@ -1240,8 +1252,11 @@ def guard_on(host, stamp):
 
 
 def guard_off(host):
-    """删标记（不在也算成功；是链接就删链接本身）、apply，核 guard=no。成功返回 True，失败说清原因返回 False。"""
+    """先核目录只有 root 能改、再删标记（不在也算成功；是链接就删链接本身）、apply，核 guard=no。
+    成功返回 True，失败说清原因返回 False；目录核不过就什么都不删（L3 第 2 轮 P2-01）。"""
     try:
+        if host.guard("root_path", str(pf_dir())) != 0:
+            raise Stop(f"{pf_dir()} 不是从 / 起只有 root 能改的目录，不动里面的门卫标记")
         if os.path.lexists(hub_mark()):
             os.unlink(hub_mark())
         pf_apply(host, "no")
@@ -1406,8 +1421,13 @@ def cmd_rollback(host, a):
         except Stop as e:
             say(f"  备份没做成（{e}），继续回滚；dt-gate 的中台目录整个改名留着")
     say("2. 停掉 dt-gate 的三个服务，关掉门卫监听者规则")
-    for which in ("intake", "readonly", "hub"):
+    for which in ("intake", "readonly", "hub"):          # 卸不掉就停在这里：plist、门卫、目录、停写都不动（P1-01）
         remove_daemon(host, which)
+    u = urllib.parse.urlsplit(s["hub_url"])
+    hub_addr = f"{u.hostname or '127.0.0.1'}:{u.port or 3350}"
+    for addr in (hub_addr, f"127.0.0.1:{port('DT_GATE_READONLY_PORT', 3352)}",
+                 f"127.0.0.1:{port('DT_GATE_INTAKE_PORT', 3353)}"):
+        wait_port_free(host, addr, what="dt-gate 的服务")   # 三个端口都没人听了才关门卫
     if not guard_off(host):                              # 关掉之前不动目录、不启用主账号中台；再跑一次 rollback 接着来
         raise Stop("门卫监听者规则没关掉（见上），没有放回主账号中台；看清原因后再跑一次 rollback --confirm")
     try:
