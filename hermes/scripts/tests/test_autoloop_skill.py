@@ -109,8 +109,9 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [6, 8], tables)
-        reach = [inspect.getsource(G.propose) + inspect.getsource(G.notify_owner) + inspect.getsource(RV.ensure_open),
+        self.assertEqual([len(t) for t in tables], [8, 8], tables)
+        reach = [inspect.getsource(G.propose) + inspect.getsource(G.notify_owner) + inspect.getsource(RV.ensure_open)
+                 + inspect.getsource(G.require_hub_rule),
                  inspect.getsource(G.approve) + inspect.getsource(G.verify_owner)]
         for table, src in zip(tables, reach):
             for words in table:
@@ -204,6 +205,14 @@ class OneSentenceToDispatch(Base):
         self.propose(now=now)
         mid = self.say(reply_line(self.notices[-1][0]), now)
         return cli(["approve", "--message-id", mid], now)[1]["task_id"]
+
+    def test_project_without_dispatch_rule_is_refused_at_propose(self):
+        """常浩 11-23 定（#346）：中台没有这条派单规则，网关提议时就拒绝，不发【派单确认】；技能第 3 节的表认得这句原话。"""
+        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude")]}
+        code, out = self.propose(executor="codex")
+        self.assertEqual(code, 1)
+        self.assertIn("名册放行了写入，但中台没有接", out["why"])
+        self.assertEqual(self.notices, [])
 
     def test_five_elements_to_event(self):
         code, out = self.propose()
