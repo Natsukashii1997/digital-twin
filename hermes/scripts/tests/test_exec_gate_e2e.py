@@ -63,14 +63,14 @@ def prod_snapshot():
     return snap
 
 
-@unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
-
 def click_card(G, code):
     """模拟门卫：发确认卡（登记消息号）、常浩点「批准派单」（0E-3b 起批准只认门卫卡上的点击）。"""
     (p,) = [x for x in G.cards_to_send() if x["code"] == code]
     G.mark_card(code, f"om_card_{code}")
     return G.decide(p["card_token"], "ok", f"om_card_{code}", f"ev-{code}")
 
+
+@unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
 class ExecGateEndToEnd(HubFixture):
     def setUp(self):
         self.prod_before = prod_snapshot()
