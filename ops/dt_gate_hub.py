@@ -136,8 +136,22 @@ def worker_account():
     return os.environ.get("DT_GATE_WORKER_ACCOUNT") or "dt-worker"
 
 
+def check_port(v, what):
+    """端口只认 1–65535 的整数（0 会让服务绑随机端口、核的却是 0，L3 第 3 轮 P2-02）；不合格停下，不猜。"""
+    if isinstance(v, bool):
+        raise Stop(f"{what} 不是端口号：{v!r}")
+    try:
+        p = int(v)
+    except (TypeError, ValueError):
+        raise Stop(f"{what} 不是端口号：{v!r}")
+    if not 1 <= p <= 65535 or str(v).strip() != str(p):
+        raise Stop(f"{what} 不是 1–65535 的端口号：{v!r}")
+    return p
+
+
 def port(name, default):
-    return int(os.environ.get(name) or default)
+    v = os.environ.get(name)
+    return check_port(default if v in (None, "") else v, name)
 
 
 def now_stamp():
@@ -840,12 +854,21 @@ def remove_daemon(host, which):
     if not unload(host, f"system/{LABEL[which]}"):
         raise Stop(f"{LABEL[which]} 卸不下来（launchctl 一直显示还在），plist 留着；看清原因后再来")
     f = daemons() / f"{LABEL[which]}.plist"
-    if f.exists() and not f.is_symlink():
-        f.unlink()
+    try:
+        st = os.lstat(f)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        raise Stop(f"核不了 {f}（{type(e).__name__}）")
+    if not stat.S_ISREG(st.st_mode):                     # 链接、目录：不删也不跳过（L3 第 3 轮 P2-03）
+        raise Stop(f"{f} 不是普通文件（链接或目录），没删；请人工查看")
+    f.unlink()
+    if os.path.lexists(f):
+        raise Stop(f"{f} 删了以后还在")
 
 
 def installed(which):
-    return (daemons() / f"{LABEL[which]}.plist").exists()
+    return os.path.lexists(daemons() / f"{LABEL[which]}.plist")   # 失效的链接也算还在
 
 
 def http_get(url, timeout=3):
@@ -913,14 +936,15 @@ def wait_port_free(host, hostport, seconds=30, what="主账号中台"):
     raise Stop(f"{what}停了以后 {hostport} 还有人在听（或核不清）")
 
 
-def wait_no_listener(host, port_no, seconds=30):
+def wait_no_listener(host, port_no, seconds=30, allow=()):
     """回滚关门卫前用：以 root 用 lsof 看这个端口上有没有任何账号在听（门卫开着时，别的账号在听和没人在听连过去都是
-    「被拒」，连接分不清，L3 第 2 轮返修审查）。lsof 查不了算没空。"""
+    「被拒」，连接分不清，L3 第 2 轮返修审查）。lsof 查不了算没空。allow 里的 uid 在听不算（退回再跑时主账号中台
+    可能已经起来了）。"""
     last = ""
     for _ in range(int(seconds * 2)):
         try:
             uids = host.listeners(port_no)
-            if not uids:
+            if all(u in allow for u in uids):
                 return
             last = f"uid {sorted(set(uids))} 在听"
         except (OSError, subprocess.SubprocessError) as e:
@@ -930,7 +954,60 @@ def wait_no_listener(host, port_no, seconds=30):
 
 
 def hub_port_of(url):
-    return urllib.parse.urlsplit(url).port or 3350
+    try:
+        p = urllib.parse.urlsplit(url).port
+    except ValueError:
+        p = "超出范围"
+    if p is None:
+        raise Stop(f"中台地址 {url} 没写端口")
+    return check_port(p, f"中台地址 {url} 的端口")
+
+
+def wait_only_listener(host, port_no, uid, seconds=60):
+    """以 root 用 lsof 核：这个端口上有人在听，而且全是 uid 的进程。查不清不算。"""
+    last = ""
+    for _ in range(int(seconds * 2)):
+        try:
+            uids = host.listeners(port_no)
+            if uids and all(u == uid for u in uids):
+                return
+            last = f"在听的是 uid {sorted(set(uids))}" if uids else "还没人在听"
+        except (OSError, subprocess.SubprocessError) as e:
+            last = f"查不清（{type(e).__name__}）"
+        host.sleep(0.5)
+    raise Stop(f"{port_no} 端口上不是只有主账号中台（uid {uid}）在听：{last}")
+
+
+def owner_health(host, url, seconds=30):
+    last = ""
+    for _ in range(int(seconds * 2)):
+        try:
+            code, body = http_get(url.rstrip("/") + "/healthz")
+            if code == 200 and json.loads(body or b"{}").get("ok"):
+                return
+            last = f"HTTP {code}"
+        except (OSError, ValueError) as e:
+            last = type(e).__name__
+        host.sleep(0.5)
+    raise Stop(f"主账号中台健康检查没过：{last}")
+
+
+def owner_takeover(host, owner_account, hub_url, guard=True):
+    """回滚 / 退回的最后一段（L3 第 3 轮 P1-03）：门卫还开着时先启用主账号中台，让它先占住中台端口；以 root 的 lsof
+    核端口上只有主账号在听，才关门卫；关了再核一次，再做健康检查。门卫开着时别的账号就算抢先绑了端口也收不到连接，
+    核出来就停。任何一步不过都 Stop：门卫保持开着（或已关但核不过）、停写不结束、state / 进度记录留着，再跑一次接着来。
+    主账号自己的进程抢先绑上端口分辨不出来：回滚后本来就回到主账号运行中台的信任边界（搬家前也一样）。"""
+    if not hub_url:
+        raise Stop("没有中台地址，核不了端口上是谁在听；主账号中台先不启用")
+    uid = host.account(owner_account)["uid"]
+    p = hub_port_of(hub_url)
+    start_owner_agent(host, owner_account)
+    wait_only_listener(host, p, uid)
+    if guard and not guard_off(host):
+        raise Stop("门卫监听者规则没关掉（见上）。主账号中台已起、只有它在听，门卫开着时谁都连不上它；"
+                   "看清原因后再跑一次 rollback --confirm")
+    wait_only_listener(host, p, uid)
+    owner_health(host, hub_url)
 
 
 # ---------- migrate ----------
@@ -940,9 +1017,9 @@ FACTS = ("runs", "cards", "pauses", "max_event", "rules_sha256")
 class Progress:
     """搬家进度记在 root 目录的 migrating.json：进程被杀、关了终端，rollback 能照着收拾（独立审查 P2-2）。"""
 
-    def __init__(self, stamp, owner_account):
+    def __init__(self, stamp, owner_account, hub_url):
         self.f = gate_root() / "migrating.json"
-        self.data = {"stamp": stamp, "owner_account": owner_account, "hub_url": None,     # 退回时核中台端口用
+        self.data = {"stamp": stamp, "owner_account": owner_account, "hub_url": hub_url,  # 退回时核中台端口、监听者用
                      "done": {"held": False, "stopped": False, "gate_hub": False, "daemon": False, "guard_on": False,
                               "moved": False}}
         write_json(self.f, self.data)
@@ -984,7 +1061,7 @@ def cmd_migrate(host, a):
     tmp = owner_evidence(host, a.owner_account, stamp)
     signal.signal(signal.SIGHUP, signal.SIG_IGN)       # 关终端不打断（被打断也有进度记录）
     signal.signal(signal.SIGTERM, _on_term)
-    prog = Progress(stamp, a.owner_account)
+    prog = Progress(stamp, a.owner_account, before["url"])
     point = f"gate-migrate-{stamp}"
     try:
         say(f"0. 主账号控制面停写、排空（0D 恢复门，恢复点 {point}）")
@@ -1050,7 +1127,6 @@ def cmd_migrate(host, a):
             host.chown(d, g["uid"], g["gid"])
             os.chmod(d, 0o755)
         url = before["url"]
-        prog.data["hub_url"] = url                       # 和下一行一起写盘
         prog.mark("daemon")                              # 先记：plist 写了但没装上，也要收拾（独立审查 P2-1）
         install_daemon(host, current, "hub", url)
         wait_health(host, url, current["engine"]["commit"], guid)
@@ -1128,7 +1204,7 @@ def undo(host, current, owner_account, stamp, done, hub_url=None):
             remove_daemon(host, "hub")
             if not hub_url:
                 raise Stop("进度记录里没有中台地址，核不了端口上还有没有人在听")
-            wait_no_listener(host, hub_port_of(hub_url))
+            wait_no_listener(host, hub_port_of(hub_url), allow={host.account(owner_account)["uid"]})
         except Stop as e:
             say(f"  {e}")
             daemon_ok = False
@@ -1146,11 +1222,13 @@ def undo(host, current, owner_account, stamp, done, hub_url=None):
         state = gate_root() / "state.json"
         if state.exists():
             os.replace(state, gate_root() / f"state.undone-{stamp}.json")
-    guard_ok = daemon_ok
-    if done.get("guard_on") and daemon_ok:               # 先关门卫监听者规则，再启用主账号中台（#313）
-        guard_ok = guard_off(host)
-    if done.get("stopped") and guard_ok:
-        start_owner_agent(host, owner_account)
+    up_ok = daemon_ok
+    if done.get("stopped") and daemon_ok:                # 主账号中台先占住端口、核过监听者，再关门卫（P1-03）
+        try:
+            owner_takeover(host, owner_account, hub_url, guard=bool(done.get("guard_on")))
+        except Stop as e:
+            say(f"  {e}")
+            up_ok = False
     # 核结果（复核 P2-c）：主账号中台目录回来了、dt-gate 的中台目录已挪开、服务卸了
     ok = True
     if not exists_as(host, owner_account, ohub / "config.json"):
@@ -1162,7 +1240,7 @@ def undo(host, current, owner_account, stamp, done, hub_url=None):
     if done.get("daemon") and installed("hub"):
         say(f"  {LABEL['hub']} 没有卸掉")
         ok = False
-    ok = ok and guard_ok
+    ok = ok and up_ok
     if done.get("held"):                                 # 别的都放回去了才结束停写；没放回的保持停写，rollback 再收拾
         if not ok:
             say("  主账号控制面保持停写，等上面的收拾好再结束（rollback --confirm）")
@@ -1176,9 +1254,9 @@ def start_owner_agent(host, owner_account):
     agent = f"gui/{owner['uid']}/{OWNER_AGENT}"
     host.launchctl("enable", agent)
     code, msg = host.launchctl("bootstrap", f"gui/{owner['uid']}", str(owner_agent_plist(host, owner_account)))
-    if code != 0:
-        say(f"  主账号中台已重新启用，但这次没起来（{msg[:120]}）；主账号下次登录会自动起，或在主账号终端跑："
-            f"launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{OWNER_AGENT}.plist")
+    if code != 0 and host.launchctl("print", agent)[0] != 0:   # 已经装着（上次起过）不算没起来
+        say(f"  主账号中台已重新启用，但这次没起来（{msg[:120]}）；要主账号登录着才起得来，"
+            "登录后再跑一次 rollback --confirm")
 
 
 # ---------- windows / rotate-worker / update / run ----------
@@ -1422,9 +1500,21 @@ def cmd_status(host, a):
 
 
 # ---------- rollback ----------
+def rollback_ports(s):
+    """回滚要核的三个端口：中台按 state 的地址；两个窗口按 windows 装的时候记下的（记了就只认它，不合格停下），
+    没记的（没装窗口、或旧 state）按现在的设置（L3 第 3 轮 P2-02）。"""
+    ports = s.get("ports") or {}
+    out = [hub_port_of(s["hub_url"])]
+    for which, env, default in (("readonly", "DT_GATE_READONLY_PORT", 3352), ("intake", "DT_GATE_INTAKE_PORT", 3353)):
+        v = ports.get(which)
+        out.append(port(env, default) if v is None else check_port(v, f"state 里记的 {which} 端口"))
+    return out
+
+
 def _rollback_move(host, current, s, gp, gate, stamp):
-    """回滚的前三步：留备份、停服务、关门卫、主账号中台目录放回。"""
-    # 先只读核对，再停服务、关门卫，最后才删说明文件、放回目录：关门卫停下时说明文件还在，主账号命令行不会新建空中台，
+    """回滚的前几步：留备份、停服务、核端口、主账号中台目录放回。门卫这时还开着，由 owner_takeover 在主账号中台
+    占住端口、核过监听者之后才关（L3 第 3 轮 P1-03）。"""
+    # 先只读核对，再停服务，最后才删说明文件、放回目录；中途停下时说明文件还在，主账号命令行不会新建空中台，
     # 再跑一次 rollback 能接着来（独立审查第 2 轮 P2-2）
     if not owner_note_ok(host, s["owner_account"], s["owner_hub"]):
         raise Stop(f"主账号里 {s['owner_hub']} 不是搬家时放的说明文件，没法放回：请人工查看")
@@ -1436,15 +1526,11 @@ def _rollback_move(host, current, s, gp, gate, stamp):
             run_cli(host, current, gate, gp["hub"], ["backup", str(gp["home"] / f".agent-autoloop-rollback-{stamp}")])
         except Stop as e:
             say(f"  备份没做成（{e}），继续回滚；dt-gate 的中台目录整个改名留着")
-    say("2. 停掉 dt-gate 的三个服务，关掉门卫监听者规则")
+    say("2. 停掉 dt-gate 的三个服务，核三个端口都没人在听（门卫先开着）")
     for which in ("intake", "readonly", "hub"):          # 卸不掉就停在这里：plist、门卫、目录、停写都不动（P1-01）
         remove_daemon(host, which)
-    ports = s.get("ports") or {}                         # windows 装的时候记下的端口；没记的按现在的设置
-    for p in (hub_port_of(s["hub_url"]), ports.get("readonly") or port("DT_GATE_READONLY_PORT", 3352),
-              ports.get("intake") or port("DT_GATE_INTAKE_PORT", 3353)):
-        wait_no_listener(host, int(p))                   # 三个端口都没有任何账号在听了才关门卫
-    if not guard_off(host):                              # 关掉之前不动目录、不启用主账号中台；再跑一次 rollback 接着来
-        raise Stop("门卫监听者规则没关掉（见上），没有放回主账号中台；看清原因后再跑一次 rollback --confirm")
+    for p in rollback_ports(s):
+        wait_no_listener(host, p)                        # 三个端口都没有任何账号在听了才往下
     try:
         unmark_owner(host, current, s["owner_account"])
     except Stop as e:
@@ -1452,7 +1538,7 @@ def _rollback_move(host, current, s, gp, gate, stamp):
     if exists_as(host, s["owner_account"], s["owner_hub"]):
         raise Stop(f"主账号里已经有 {s['owner_hub']}，没法放回：请人工查看")
     host.as_user(gate, ["/bin/mv", "-n", str(gp["hub"]), str(gp["hub"]) + f".rolled-back-{stamp}"])
-    say("3. 主账号的中台放回去、重新启用")
+    say("3. 主账号的中台放回去")
     code, _, err = host.as_user(s["owner_account"], ["/bin/mv", "-n", s["owner_moved"], s["owner_hub"]])
     if code != 0:
         raise Stop(f"放不回去：{err[:200]}")
@@ -1476,17 +1562,17 @@ def cmd_rollback(host, a):
     gp = gate_paths(host)
     gate = gate_account()
     stamp = now_stamp()
-    # 上次回滚已经把主账号中台目录放回、还没来得及归档 state 就被打断（独立审查）：放回之前一定关过门卫，接着做剩下的
+    # 上次回滚已经把主账号中台目录放回、还没走完就停了（独立审查；L3 第 3 轮起启用、关门卫、核监听者都在放回之后）：
+    # 放回之前一定卸过三个服务、核过端口，接着做剩下的
     restored = (not exists_as(host, s["owner_account"], s["owner_moved"])
                 and exists_as(host, s["owner_account"], Path(s["owner_hub"]) / "config.json"))
     if restored:
-        say("上次回滚已把主账号中台目录放回，接着做剩下的（确认门卫关着、重新启用、结束停写）")
-        if not guard_off(host):
-            raise Stop("门卫监听者规则没关掉（见上），先不启用主账号中台；看清原因后再跑一次 rollback --confirm")
+        say("上次回滚已把主账号中台目录放回，接着做剩下的（启用、核监听者、关门卫、结束停写）")
     else:
         _rollback_move(host, current, s, gp, gate, stamp)
     host.as_user(s["owner_account"], ["/bin/mv", "-n", s["plist_moved"], s["plist_home"]])
-    start_owner_agent(host, s["owner_account"])
+    say("4. 门卫开着时启用主账号中台，核过端口上只有它在听再关门卫，关了再核一次、做健康检查")
+    owner_takeover(host, s["owner_account"], s["hub_url"])
     if s.get("owner_hold") and not gate_cards_clean(host, current, s.get("owner_hold_max_card")):
         s["owner_hold_left"] = s["owner_hold"]
         write_json(gate_root() / "state.json", s)

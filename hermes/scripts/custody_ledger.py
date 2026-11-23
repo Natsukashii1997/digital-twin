@@ -75,6 +75,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 
@@ -217,8 +218,16 @@ def check_session(store, session_id, expected_ledger, use=CUSTODY):
 def raw_orphans(store, session_id, use=CUSTODY):
     """原文目录里有、账本里没有的决定（P0-02：库被旧备份覆盖后，之后记的决定会只剩原文）。"""
     d = raw_dir(use) / session_id
-    if not d.is_dir():
+    # 不用 is_dir()：它把「不是目录」「失效链接」都说成 False，会被当成没有原文（0E-2 L3 第 3 轮 P1-04）。
+    # 只有确实不存在（FileNotFoundError）才算没有；查不了、不是目录（含链接）、读不了一律报错
+    try:
+        st = os.lstat(d)
+    except FileNotFoundError:
         return []
+    except OSError as e:
+        raise LedgerError(f"{use.who}原文目录 {d} 查不了（{type(e).__name__}），核不了有没有账本里没有的决定", "RawUnreadable")
+    if not stat.S_ISDIR(st.st_mode):
+        raise LedgerError(f"{use.who}原文目录 {d} 不是目录（链接或文件），核不了有没有账本里没有的决定", "RawUnreadable")
     try:                                # glob 碰到读不了的目录会静默返回空，读不了必须报出来（0E-2 返修审查）
         names = os.listdir(d)
     except OSError as e:

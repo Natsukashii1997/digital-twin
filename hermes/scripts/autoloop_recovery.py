@@ -64,6 +64,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -646,58 +647,106 @@ def leftovers():
 
 
 def _ledger_leftovers(kind):
-    """托管 / 秘书账本没收完的：和排空证明同一个判定（custody_ledger.drain_blockers：issued / executing / 结果不明 /
-    对账不清的决定、额度没跟着决定收口的、有原文账本里却没有的），逐个会话查（L3 第 2 轮 P1-02）。
-    只读：不用 open_store（它会迁移、写库），只读连接包一层给 drain_blockers 用。会话号取会话表、决定表和原文目录三处的并集；
-    库或表不在而原文在，照样列出；任何一处读不了、查不清都记一条（调用方当作有）。"""
+    """托管 / 秘书账本没收完的：和排空证明同一个判定，逐个会话查（L3 第 2 轮 P1-02、第 3 轮 P1-04 / P1-05）。
+    - 判定：custody_ledger.drain_blockers（issued / executing / 结果不明 / 对账不清的决定、额度没跟着决定收口的、
+      有原文账本里却没有的）；状态文件里登记着的会话（开着、排空中、冻结中）另按 check_session 核账本身份和开启登记，
+      和 custody.drain_proof 走的 drain() 一样——库被换成别的账本、旧备份、或库不在，都列出来。
+    - 会话号：状态文件当前会话 ∪ 决定表 ∪ 会话表 ∪ 原文目录下的会话目录。
+    - 只读：不用 open_store（它会迁移、写库），mode=ro 的连接包一层给 drain_blockers / check_session，一个读事务读完。
+    - 核不清一律当作有：路径只有确实不存在（FileNotFoundError）才算没有，查不了、类型不对（链接、文件当目录）、读不了、
+      状态文件坏、库读不了都记一条（调用方当作有）。"""
     import types
+    who = "秘书" if kind == "secretary" else "托管"
     try:
         import custody_ledger as L
-        use = L.CUSTODY
         if kind == "secretary":
+            import secretary as ST
             import secretary_ledger as SL
             use = SL.SECRETARY
+        else:
+            import custody as ST
+            use = L.CUSTODY
     except Exception as e:                                   # 脚本缺了也不能当成「没有」
-        return [f"{'秘书' if kind == 'secretary' else '托管'}账本核不了（{type(e).__name__}）"]
-    who = use.who
-    raw, bad = [], []
+        return [f"{who}账本核不了（{type(e).__name__}）"]
+    out = []
+    expect = None                                            # 状态文件里登记着的会话：(会话号, 账本身份)
+    try:
+        sess = ST.load().get("session")
+        if sess:
+            expect = (sess["id"], (sess.get("ledger") or {}).get("id"))
+    except Exception as e:
+        out.append(f"{who}状态文件读不了（{type(e).__name__}），核不了开着的会话")
+
+    def kind_of(path):
+        """None = 确实不存在；否则 lstat 的 st_mode。查不了抛 OSError。"""
+        try:
+            return os.lstat(path).st_mode
+        except FileNotFoundError:
+            return None
+
+    raw = []
     try:
         rd = L.raw_dir(use)
-        subs = sorted(p for p in rd.iterdir() if p.is_dir()) if rd.is_dir() else []
-        for p in subs:                                       # glob 碰到读不了的目录会静默返回空：逐个显式读
-            try:
-                if any(n.endswith(".json") and L.DECISION_ID.match(n[:-5]) for n in os.listdir(p)):
-                    raw.append(p.name)
-            except OSError:
-                bad.append(f"{who}原文目录 {p.name} 读不了")
-    except OSError:
-        return [f"{who}原文目录读不了"]
-    db = L.db_path()
+        m = kind_of(rd)
+        if m is not None and not stat.S_ISDIR(m):
+            out.append(f"{who}原文目录 {rd} 不是目录")
+        elif m is not None:
+            for name in sorted(os.listdir(rd)):
+                mm = kind_of(rd / name)
+                if mm is None:
+                    continue
+                if not stat.S_ISDIR(mm):
+                    if use.session_id.match(name):           # 会话号形状的却不是目录（被换成文件、链接）
+                        out.append(f"{who}原文目录 {name} 不是目录")
+                    continue
+                try:
+                    if any(n.endswith(".json") and L.DECISION_ID.match(n[:-5]) for n in os.listdir(rd / name)):
+                        raw.append(name)
+                except OSError:
+                    out.append(f"{who}原文目录 {name} 读不了")
+    except OSError as e:
+        out.append(f"{who}原文目录查不了（{type(e).__name__}）")
     try:
-        if not db.exists():
-            return bad + [f"{who}会话 {s} 有原文、账本库不在" for s in raw]
+        db = L.db_path()
+        m = kind_of(db)
+        if m is None:
+            out += [f"{who}会话 {s} 有原文、账本库不在" for s in raw]
+            if expect:
+                out.append(f"{who}会话 {expect[0]} 还开着（账本 {expect[1]}），账本库不在")
+            return out
+        if not stat.S_ISREG(m):
+            return out + [f"{who}账本库 {db} 不是普通文件"]
         con = _ro(db)
         try:
             con.row_factory = sqlite3.Row
             con.execute("BEGIN")                             # 一个读事务：各会话读的是同一个快照
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             if use.decisions not in tables:
-                return bad + [f"{who}会话 {s} 有原文、账本表不在" for s in raw]
+                out += [f"{who}会话 {s} 有原文、账本表不在" for s in raw]
+                if expect:
+                    out.append(f"{who}会话 {expect[0]} 还开着（账本 {expect[1]}），账本表不在")
+                return out
+            store = types.SimpleNamespace(conn=con)
+            if expect:
+                try:
+                    L.check_session(store, expect[0], expect[1], use)
+                except L.LedgerError as e:
+                    out.append(f"{who}会话 {expect[0]}：账本对不上（{e}）")
             sids = {r[0] for r in con.execute(f"SELECT DISTINCT session_id FROM {use.decisions}")}
             if use.sessions in tables:
                 sids |= {r[0] for r in con.execute(f"SELECT session_id FROM {use.sessions}")}
-            store = types.SimpleNamespace(conn=con)
-            out = list(bad)
+            if expect:
+                sids.add(expect[0])
             for sid in sorted(sids | set(raw)):
                 try:
                     out += [f"{who}会话 {sid}：{x}" for x in L.drain_blockers(store, sid, use)]
-                except L.LedgerError as e:                   # 这个会话的原文目录读不了：记下、接着查别的会话
+                except L.LedgerError as e:                   # 这个会话的原文目录查不清：记下、接着查别的会话
                     out.append(f"{who}会话 {sid}：核不清（{e}）")
             return out
         finally:
             con.close()
-    except Exception as e:                                   # 账本坏行、表结构不对、库锁着：查不清一律拦
-        return bad + [f"{who}账本读不了（{type(e).__name__}）"]
+    except Exception as e:                                   # 账本坏行、表结构不对、库锁着、路径查不了：查不清一律拦
+        return out + [f"{who}账本读不了（{type(e).__name__}）"]
 
 
 def _held_task_locks(d):

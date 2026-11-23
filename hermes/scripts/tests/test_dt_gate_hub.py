@@ -343,12 +343,24 @@ class ChecksTest(unittest.TestCase):
         (users["nat"] / "Library/LaunchAgents/agent-autoloop.plist").write_text("x")
         self.users = users
         self.host.listening = {}                                         # 端口上默认没人在听（不跑真的 lsof）
+        self.real_owner_health = H.owner_health
+        q = mock.patch.object(H, "owner_health")                         # 主账号中台健康检查：有专门的用例
+        q.start()
+        self.addCleanup(q.stop)
         q = mock.patch.object(H, "recovery_as", self.fake_recovery())    # 主账号恢复闸默认干净；要测的用例自己再换
         q.start()
         self.addCleanup(q.stop)
 
     def a(self):
         return mock.Mock(owner_account="nat", confirm=True)
+
+    def starter(self, also=None, port=1):
+        """假的启用主账号中台：起来以后它（uid = 本进程，FakeHost 里每个账号都是）在中台端口上听。"""
+        def start(*a):
+            if also:
+                also(*a)
+            self.host.listening[port] = [os.getuid()]
+        return start
 
     def snap(self, **kw):
         base = {"live_runs": 0, "live_cards": 0, "dispatch_rules": ["dispatch-x"], "pauses": ["dispatch-x"],
@@ -556,7 +568,7 @@ class ChecksTest(unittest.TestCase):
         with mock.patch.object(H, "recovery_as", recovery), \
                 mock.patch.object(H, "snapshot_as", return_value=self.snap(max_card=5)), \
                 mock.patch.object(H, "unload", unload), \
-                mock.patch.object(H, "start_owner_agent"), mock.patch("sys.stdout", io.StringIO()):
+                mock.patch.object(H, "start_owner_agent", self.starter()), mock.patch("sys.stdout", io.StringIO()):
             with self.assertRaisesRegex(H.Stop, "故意停不下"):
                 H.cmd_migrate(self.host, self.a())
         return order
@@ -583,7 +595,7 @@ class ChecksTest(unittest.TestCase):
         self.assertTrue((H.gate_root() / "migrating.json").exists())             # 没收拾干净：进度记录留着
         log = []                                                                  # rollback 照记录再收拾一次，这次结束停写
         run2 = self.fake_recovery(hold=run.state["hold"], log=log)
-        with mock.patch.object(H, "recovery_as", run2), mock.patch.object(H, "start_owner_agent"), \
+        with mock.patch.object(H, "recovery_as", run2), mock.patch.object(H, "start_owner_agent", self.starter()), \
                 mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "exists_as", return_value=True), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
@@ -607,7 +619,7 @@ class ChecksTest(unittest.TestCase):
         point = run.state["hold"]
         self.assertTrue(point.startswith("gate-migrate-"))
         self.assertTrue(json.loads((H.gate_root() / "migrating.json").read_text())["done"]["held"])
-        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent"), \
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", self.starter()), \
                 mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "exists_as", return_value=True), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)
@@ -621,6 +633,7 @@ class ChecksTest(unittest.TestCase):
                  (("cards-after",), (), "gate-migrate-S", 5))         # 查不了：保持停写
         for n, (fail, cards, left, max_card) in enumerate(cases):
             with self.subTest(fail=fail, cards=cards, max_card=max_card):
+                self.host.listening.clear()                                   # 上一个用例启用过的主账号中台不算
                 w = self.d / f"rb{n}"
                 (w / "moved").mkdir(parents=True)
                 base = {"owner_account": "nat", "owner_hub": str(w / "hub"), "owner_moved": str(w / "moved"),
@@ -629,7 +642,7 @@ class ChecksTest(unittest.TestCase):
                 (root / "state.json").write_text(json.dumps(base))
                 log = []
                 run = self.fake_recovery(hold="gate-migrate-S", fail=fail, cards=cards, log=log)
-                with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent"), \
+                with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", self.starter()), \
                         mock.patch.object(H, "unmark_owner"), mock.patch.object(H, "remove_daemon"), \
                         mock.patch.object(H, "installed", return_value=False), \
                         mock.patch.object(H, "now_stamp", return_value=f"R{n}"), \
@@ -657,7 +670,7 @@ class ChecksTest(unittest.TestCase):
             return self.snap(max_card=6, live_cards=1) if stopped["v"] else self.snap(max_card=5)
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "snapshot_as", snap), \
                 mock.patch.object(H, "unload", lambda *a: (stopped.update(v=True), True)[1]), \
-                mock.patch.object(H, "wait_port_free"), mock.patch.object(H, "start_owner_agent"), \
+                mock.patch.object(H, "wait_port_free"), mock.patch.object(H, "start_owner_agent", self.starter()), \
                 mock.patch("sys.stdout", io.StringIO()):
             with self.assertRaisesRegex(H.Stop, "没答完的卡片"):
                 H.cmd_migrate(self.host, self.a())
@@ -772,25 +785,27 @@ class ChecksTest(unittest.TestCase):
         r = self.run_checks(self.snap())
         self.assertEqual([m for m, ok in r.items() if not ok], [m for m in r if "门卫标记" in m])
 
-    def test_undo_turns_guard_off_before_starting_owner_hub(self):
-        """第 4b 步之后出错：先关监听者规则再启用主账号中台；关不掉就不启用。"""
+    def test_undo_starts_owner_hub_behind_the_guard_then_turns_it_off(self):
+        """第 4b 步之后出错（L3 第 3 轮 P1-03）：门卫开着时先启用主账号中台、核过只有它在听，再关门卫；关不掉返回 False。"""
         order = []
         (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
         (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
         H.hub_mark().write_text("dt-gate S\n")
         real_apply = self.host.pf_apply
         self.host.pf_apply = lambda script: (order.append("pf_apply"), real_apply(script))[1]
-        with mock.patch.object(H, "start_owner_agent", lambda *a: order.append("start")), \
+        url = "http://127.0.0.1:1"
+        with mock.patch.object(H, "start_owner_agent", self.starter(lambda *a: order.append("start"))), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertTrue(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S",
-                                   {"stopped": True, "guard_on": True}))
-            self.assertEqual(order, ["pf_apply", "start"])
+                                   {"stopped": True, "guard_on": True}, url))
+            self.assertEqual(order, ["start", "pf_apply"])
             order.clear()
+            self.host.listening.clear()
             H.hub_mark().write_text("dt-gate S\n")
             self.host.pf_fail = 3
             self.assertFalse(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S",
-                                    {"stopped": True, "guard_on": True}))
-            self.assertNotIn("start", order)
+                                    {"stopped": True, "guard_on": True}, url))
+            self.assertNotIn("guard=no", (Path(os.environ["DT_PF_DIR"]) / "pf-dt-worker.status").read_text())   # 门卫没切过去
 
     def test_preflight_needs_new_guard_loaded_and_listener_rule_off(self):
         """独立审查第 2 轮 P2-1：门卫不在生效、是旧版（没有 guard=）、监听者规则已经开着，preflight 各拦一条。"""
@@ -857,30 +872,32 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, set()) & {signal.SIGTERM, signal.SIGINT}, set())
 
     def test_undo_after_guard_on_releases_hold_only_when_guard_is_off(self):
-        """第 4b 步之后出错：关门卫 → 启用主账号中台 → 结束停写；门卫关不掉就不启用、保持停写。"""
+        """第 4b 步之后出错：启用主账号中台 → 核监听者 → 关门卫 → 结束停写；门卫关不掉就保持停写（主账号中台在门卫后面，谁都连不上）。"""
         (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
         (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
         done = {"held": True, "stopped": True, "guard_on": True}
-        for pf_fail, started, held in ((0, True, None), (3, False, "gate-migrate-S")):
+        for pf_fail, ok, held in ((0, True, None), (3, False, "gate-migrate-S")):
             with self.subTest(pf_fail=pf_fail):
                 H.hub_mark().write_text("dt-gate S\n")
                 self.host.pf_fail = pf_fail
+                self.host.listening.clear()
                 order = []
                 run = self.fake_recovery(hold="gate-migrate-S")
                 real_apply = self.host.pf_apply
                 with mock.patch.object(self.host, "pf_apply", lambda s: (order.append("pf_apply"), real_apply(s))[1]), \
                         mock.patch.object(H, "recovery_as", lambda *a: (order.append(a[3][0]), run(*a))[1]), \
-                        mock.patch.object(H, "start_owner_agent", lambda *a: order.append("start")), \
+                        mock.patch.object(H, "start_owner_agent", self.starter(lambda *a: order.append("start"))), \
                         mock.patch("sys.stdout", io.StringIO()):
-                    self.assertEqual(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S", done), started)
-                self.assertEqual("start" in order, started)
+                    self.assertEqual(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S", done,
+                                            "http://127.0.0.1:1"), ok)
                 self.assertEqual(run.state["hold"], held)
-                if started:
-                    self.assertLess(order.index("pf_apply"), order.index("start"))
-                    self.assertLess(order.index("start"), order.index("release"))
+                self.assertLess(order.index("start"), order.index("pf_apply"))
+                if ok:
+                    self.assertLess(order.index("pf_apply"), order.index("release"))
                     self.assertFalse(os.path.lexists(H.hub_mark()))
                 else:
                     self.assertNotIn("release", order)
+                    self.assertNotIn("guard=no", (Path(os.environ["DT_PF_DIR"]) / "pf-dt-worker.status").read_text())   # 门卫没切过去
 
     def rollback_state(self, w):
         """搬完的样子：主账号原位置是说明文件，原目录改了名。"""
@@ -893,28 +910,30 @@ class ChecksTest(unittest.TestCase):
         (Path(os.environ["DT_GATE_ROOT"]) / "state.json").write_text(json.dumps(s))
         return s
 
-    def test_rollback_keeps_note_and_dir_when_guard_off_fails_then_resumes(self):
-        """独立审查第 2 轮 P2-2：关门卫失败时说明文件不删、目录不放回、state 留着、不结束停写；修好再跑一次接着来。"""
+    def test_rollback_keeps_hold_and_state_when_guard_off_fails_then_resumes(self):
+        """L3 第 3 轮 P1-03：主账号中台放回、在门卫后面先起来，门卫关不掉就停：state、停写留着，门卫开着（谁都连不上它）；
+        修好再跑一次从「已放回」接着来。"""
         w = self.d / "rbg"
         self.rollback_state(w)
         run = self.fake_recovery(hold="gate-migrate-S")
         unmark = mock.Mock(side_effect=lambda *a: (w / "hub").unlink())
-        start = mock.Mock()
+        start = mock.Mock(side_effect=self.starter())
+        H.hub_mark().write_text("dt-gate S\n")
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
                 mock.patch.object(H, "unmark_owner", unmark), mock.patch.object(H, "installed", return_value=False), \
-                mock.patch.object(H, "now_stamp", return_value="G"), mock.patch("sys.stdout", io.StringIO()):
+                mock.patch.object(H, "now_stamp", return_value="G"), mock.patch("sys.stdout", io.StringIO()) as out:
             self.host.pf_fail = 3
             with self.assertRaisesRegex(H.Stop, "门卫监听者规则没关掉"):
                 H.cmd_rollback(self.host, self.a())
-            unmark.assert_not_called()
-            start.assert_not_called()
-            self.assertTrue((w / "hub").read_text().startswith(H.MARK))
-            self.assertTrue((w / "moved/config.json").exists())
+            start.assert_called_once()
+            self.assertNotIn("guard=no", (Path(os.environ["DT_PF_DIR"]) / "pf-dt-worker.status").read_text())   # 门卫没切过去
+            self.assertEqual((w / "hub/config.json").read_text(), "{}")
             self.assertTrue((Path(os.environ["DT_GATE_ROOT"]) / "state.json").exists())
             self.assertEqual(run.state["hold"], "gate-migrate-S")
             self.assertEqual(H.cmd_rollback(self.host, self.a()), 0)                  # 门卫好了，再跑一次
-        self.assertEqual((w / "hub/config.json").read_text(), "{}")
-        start.assert_called_once()
+        self.assertIn("接着做剩下的", out.getvalue())
+        unmark.assert_called_once()
+        self.assertFalse(os.path.lexists(H.hub_mark()))
         self.assertIsNone(run.state["hold"])
         self.assertIsNone(H.load_state())
 
@@ -948,7 +967,7 @@ class ChecksTest(unittest.TestCase):
         self.guarded()
         run = self.fake_recovery(hold="gate-migrate-S")
         unmark = mock.Mock(side_effect=lambda *a: (w / "hub").unlink())
-        start = mock.Mock()
+        start = mock.Mock(side_effect=self.starter())
         self.host.sleep = lambda s: None
         undo_setup = setup()
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
@@ -1026,7 +1045,7 @@ class ChecksTest(unittest.TestCase):
                 self.host.listening = dict(listening)
                 self.host.calls.clear()
                 run = self.fake_recovery(hold="gate-migrate-S")
-                start = mock.Mock()
+                start = mock.Mock(side_effect=self.starter())
                 with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
                         mock.patch("sys.stdout", io.StringIO()):
                     self.assertFalse(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S", done, url))
@@ -1043,7 +1062,7 @@ class ChecksTest(unittest.TestCase):
         (w / "hub").unlink()
         (w / "moved").rename(w / "hub")                                              # 上次已放回
         run = self.fake_recovery(hold="gate-migrate-S")
-        start = mock.Mock()
+        start = mock.Mock(side_effect=self.starter())
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
                 mock.patch.object(H, "now_stamp", return_value="Q"), mock.patch("sys.stdout", io.StringIO()) as out:
             self.assertEqual(H.cmd_rollback(self.host, self.a()), 0, out.getvalue())
@@ -1080,7 +1099,7 @@ class ChecksTest(unittest.TestCase):
         self.host.sleep = lambda s: None
         log = []
         run = self.fake_recovery(hold="gate-migrate-S", log=log)
-        start = mock.Mock()
+        start = mock.Mock(side_effect=self.starter())
         done = {"held": True, "stopped": True, "gate_hub": True, "daemon": True, "guard_on": True}
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
                 mock.patch("sys.stdout", io.StringIO()):
@@ -1100,7 +1119,7 @@ class ChecksTest(unittest.TestCase):
         cli = mock.Mock()
         with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "snapshot_as", return_value=self.snap(max_card=5)), \
                 mock.patch.object(H, "unload", return_value=False), mock.patch.object(H, "run_cli", cli), \
-                mock.patch.object(H, "wait_port_free") as wpf, mock.patch.object(H, "start_owner_agent"), \
+                mock.patch.object(H, "wait_port_free") as wpf, mock.patch.object(H, "start_owner_agent", self.starter()), \
                 mock.patch("sys.stdout", io.StringIO()):
             with self.assertRaisesRegex(H.Stop, "主账号中台卸不下来"):
                 H.cmd_migrate(self.host, self.a())
@@ -1118,6 +1137,115 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(H.hub_mark().read_text(), "dt-gate S\n")
         self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
         self.assertIn("只有 root 能改", out.getvalue())
+
+    # ---------- L3 第 3 轮 P1-03：主账号中台先在门卫后面占住端口、核过监听者，才关门卫 ----------
+    def takeover_blocked(self, w, start_effect, word, guard_kept=True, health=None):
+        """回滚走到最后一段被拦：门卫开着（或关了但核不过）、停写和 state 都留着。"""
+        self.rollback_state(w)
+        self.plists()
+        self.guarded()
+        self.host.sleep = lambda s: None
+        log = []
+        run = self.fake_recovery(hold="gate-migrate-S", log=log)
+        unmark = mock.Mock(side_effect=lambda *a: (w / "hub").unlink())
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start_effect), \
+                mock.patch.object(H, "unmark_owner", unmark), mock.patch.object(H, "now_stamp", return_value="T"), \
+                mock.patch.object(H, "owner_health", side_effect=health), mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(H.Stop, word):
+                H.cmd_rollback(self.host, self.a())
+        self.assertEqual(os.path.lexists(H.hub_mark()), guard_kept)
+        self.assertEqual(bool([c for c in self.host.calls if c[0] == "pf_apply"]), not guard_kept)
+        self.assertTrue((Path(os.environ["DT_GATE_ROOT"]) / "state.json").exists())
+        self.assertEqual(run.state["hold"], "gate-migrate-S")
+        self.assertNotIn("release", [c[1] for c in log])
+        self.host.listening.clear()
+
+    def test_rollback_keeps_guard_when_another_account_took_the_hub_port(self):
+        """门卫关之前另一个账号抢先绑了中台端口（主账号中台没起来或和它一起在听）：门卫保持开着，冒充者收不到连接。"""
+        def grabbed(*a):
+            self.host.listening[1] = [os.getuid() + 1]
+        self.takeover_blocked(self.d / "tk1", grabbed, "不是只有主账号中台")
+
+        def both(*a):
+            self.host.listening[1] = [os.getuid(), os.getuid() + 1]
+        self.host.calls.clear()
+        self.takeover_blocked(self.d / "tk2", both, "不是只有主账号中台")
+
+    def test_rollback_keeps_guard_when_owner_hub_does_not_come_up_or_lsof_fails(self):
+        self.takeover_blocked(self.d / "tk3", lambda *a: None, "还没人在听")         # 没登录之类，bootstrap 没起来
+
+        def unclear(*a):
+            self.host.listening[1] = OSError("lsof 出错")
+        self.host.calls.clear()
+        self.takeover_blocked(self.d / "tk4", unclear, "查不清")
+
+    def test_rollback_keeps_hold_when_checks_after_guard_off_fail(self):
+        """门卫关了以后又冒出别的账号在听、或健康检查不过：停下，不结束停写、不归档 state。"""
+        real_off = H.guard_off
+
+        def off_then_grabbed(host):
+            ok = real_off(host)
+            self.host.listening[1] = [os.getuid(), os.getuid() + 1]
+            return ok
+        with mock.patch.object(H, "guard_off", off_then_grabbed):
+            self.takeover_blocked(self.d / "tk5", self.starter(), "不是只有主账号中台", guard_kept=False)
+        self.host.calls.clear()
+        self.takeover_blocked(self.d / "tk6", self.starter(), "健康检查没过", guard_kept=False,
+                              health=H.Stop("主账号中台健康检查没过：HTTP 503"))
+
+    def test_owner_health_needs_ok_from_healthz(self):
+        self.host.sleep = lambda s: None
+        for got, ok in (((200, b'{"ok": true}'), True), ((200, b'{"ok": false}'), False), ((503, b""), False),
+                        (OSError("refused"), False), ((200, b"not json"), False)):
+            effect = got if isinstance(got, Exception) else (lambda *a, g=got, **k: g)
+            with self.subTest(got=got), mock.patch.object(H, "http_get", side_effect=effect):
+                if ok:
+                    self.real_owner_health(self.host, "http://127.0.0.1:1", seconds=1)
+                else:
+                    with self.assertRaisesRegex(H.Stop, "健康检查没过"):
+                        self.real_owner_health(self.host, "http://127.0.0.1:1", seconds=1)
+
+    # ---------- L3 第 3 轮 P2-02：端口只认 1–65535 ----------
+    def test_ports_must_be_real_port_numbers(self):
+        for bad in (0, 65536, -1, "abc", "08", True, 1.5, None):
+            with self.subTest(bad=bad), self.assertRaises(H.Stop):
+                H.check_port(bad, "x")
+        self.assertEqual(H.check_port("3352", "x"), 3352)
+        for url in ("http://127.0.0.1:0", "http://127.0.0.1", "http://127.0.0.1:99999"):
+            with self.subTest(url=url), self.assertRaises(H.Stop):
+                H.hub_port_of(url)
+        with mock.patch.dict(os.environ, {"DT_GATE_INTAKE_PORT": "0"}), self.assertRaises(H.Stop):
+            H.port("DT_GATE_INTAKE_PORT", 3353)
+        s = {"hub_url": "http://127.0.0.1:3350", "ports": {"readonly": 40001}}
+        self.assertEqual(H.rollback_ports(s), [3350, 40001, int(os.environ["DT_GATE_INTAKE_PORT"])])   # 没记的按设置
+        for bad in (0, "x", False):
+            with self.subTest(recorded=bad), self.assertRaises(H.Stop):                 # 记了不合格：不猜、不回退
+                H.rollback_ports({"hub_url": "http://127.0.0.1:3350", "ports": {"readonly": bad}})
+
+    # ---------- L3 第 3 轮 P2-03：plist 是链接、目录：停下，不跳过 ----------
+    def test_remove_daemon_stops_on_a_plist_that_is_not_a_regular_file(self):
+        d = self.plists()
+        f = d / f"{H.LABEL['hub']}.plist"
+        target = self.d / "real.plist"
+        target.write_text("x")
+        for name, make in (("有效链接", lambda: f.symlink_to(target)), ("失效链接", lambda: f.symlink_to(self.d / "nope")),
+                           ("目录", lambda: f.mkdir())):
+            with self.subTest(name=name):
+                if f.is_dir() and not f.is_symlink():
+                    f.rmdir()
+                elif os.path.lexists(f):
+                    f.unlink()
+                make()
+                self.assertTrue(H.installed("hub"))                                    # 失效链接也算还在
+                with self.assertRaisesRegex(H.Stop, "不是普通文件"):
+                    H.remove_daemon(self.host, "hub")
+                self.assertTrue(os.path.lexists(f))
+        self.assertTrue(target.exists())
+        f.rmdir()
+        f.write_text("x")
+        H.remove_daemon(self.host, "hub")
+        self.assertFalse(os.path.lexists(f))
+        self.assertFalse(H.installed("hub"))
 
     def test_rollback_refuses_before_touching_anything_when_note_is_not_ours(self):
         w = self.d / "rbn"

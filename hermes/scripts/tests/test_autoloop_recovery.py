@@ -604,7 +604,9 @@ class Leftovers(unittest.TestCase):
         isolate(self, self.root, open_gate=False)
         p = mock.patch.dict(os.environ, {"DT_STATE_DB": str(self.root / "twin-state.db"),
                                          "DT_CUSTODY_DIR": str(self.root / "custody"),
-                                         "DT_SECRETARY_DIR": str(self.root / "secretary")})
+                                         "DT_SECRETARY_DIR": str(self.root / "secretary"),
+                                         "DT_CUSTODY_FILE": str(self.root / "custody.json"),
+                                         "DT_SECRETARY_FILE": str(self.root / "secretary.json")})
         p.start()
         self.addCleanup(p.stop)
 
@@ -721,6 +723,111 @@ class Leftovers(unittest.TestCase):
         self.assertIn(f"秘书原文目录 {self.SS} 读不了", got)
         self.assertTrue([x for x in got if x.startswith(f"秘书会话 {self.SS}：核不清")], got)   # 账本里有的会话：drain_blockers 也拦
         self.assertIn("托管原文目录 c-20261121-090909-cccccccccccc 读不了", got)
+
+    # ---------- L3 第 3 轮 P1-04：查不了、类型不对的路径不当成「不存在」 ----------
+    def locked(self, d):
+        os.chmod(d, 0)
+        self.addCleanup(lambda: os.path.lexists(d) and os.chmod(d, 0o700))
+
+    def test_inaccessible_or_wrong_type_paths_count(self):
+        import custody_ledger as L
+        import secretary_ledger as SL
+
+        def raw_root_locked(c):                                       # 原文根目录读不了（会话目录的上级）
+            (c / "custody" / self.CS).mkdir(parents=True)
+            (c / "custody" / self.CS / "d-000001-aaaaa1.json").write_text("{}")
+            self.locked(c / "custody")
+
+        def session_is_file(c):                                       # 会话目录被换成普通文件
+            (c / "secretary").mkdir()
+            (c / "secretary" / self.SS).write_text("x")
+
+        def session_dangling_link(c):
+            (c / "secretary").mkdir()
+            (c / "secretary" / self.SS).symlink_to(c / "nope")
+
+        def raw_root_is_file(c):
+            (c / "custody").write_text("x")
+
+        def db_parent_locked(c):                                      # 账本库的上级目录不可访问
+            (c / "db").mkdir()
+            (c / "db" / "twin-state.db").write_text("")
+            self.locked(c / "db")
+
+        def db_is_dir(c):
+            (c / "db" / "twin-state.db").mkdir(parents=True)
+        for n, (name, make, word) in enumerate((
+                ("原文根目录读不了", raw_root_locked, "托管原文目录查不了（PermissionError）"),
+                ("会话目录是文件", session_is_file, f"秘书原文目录 {self.SS} 不是目录"),
+                ("会话目录是失效链接", session_dangling_link, f"秘书原文目录 {self.SS} 不是目录"),
+                ("原文根目录是文件", raw_root_is_file, "托管原文目录"),
+                ("账本库上级目录不可访问", db_parent_locked, "账本读不了（PermissionError）"),
+                ("账本库是目录", db_is_dir, "不是普通文件"))):
+            c = self.root / f"case{n}"
+            c.mkdir()
+            env = {"DT_CUSTODY_DIR": str(c / "custody"), "DT_SECRETARY_DIR": str(c / "secretary"),
+                   "DT_STATE_DB": str(c / "db" / "twin-state.db")}
+            with self.subTest(name=name), mock.patch.dict(os.environ, env):
+                make(c)
+                got = self.ledger_items()
+                self.assertTrue([x for x in got if word in x], got)
+        c = self.root / "orphans"
+        with mock.patch.dict(os.environ, {"DT_SECRETARY_DIR": str(c)}):      # raw_orphans 自己也不当成「没有」
+            for name, make in (("文件", lambda d: d.write_text("x")), ("失效链接", lambda d: d.symlink_to(c / "nope")),
+                               ("上级不可访问", lambda d: (d.mkdir(), self.locked(c)))):
+                with self.subTest(raw_orphans=name):
+                    if c.exists():
+                        os.chmod(c, 0o700)
+                        for f in c.iterdir():
+                            f.rmdir() if f.is_dir() and not f.is_symlink() else f.unlink()
+                    c.mkdir(exist_ok=True)
+                    make(c / self.SS)
+                    with self.assertRaises(L.LedgerError) as cm:
+                        L.raw_orphans(None, self.SS, SL.SECRETARY)
+                    self.assertEqual(cm.exception.code, "RawUnreadable")
+
+    # ---------- L3 第 3 轮 P1-05：开着的会话要核账本身份和开启登记 ----------
+    def with_state(self, kind, session):
+        """只让 kind 那边的状态文件有开着的会话（secretary.load 内部调 custody.load，所以两边各自打桩）。"""
+        import contextlib
+        import custody
+        import secretary
+        stack = contextlib.ExitStack()
+        for k, mod in (("custody", custody), ("secretary", secretary)):
+            doc = {"state": "on", "session": session} if k == kind else {"state": "off", "session": None}
+            stack.enter_context(mock.patch.object(mod, "load", return_value=doc))
+        return stack
+
+    def test_open_session_must_match_the_ledger(self):
+        con = self.ledger()
+        la, lb = "L-" + "a" * 16, "L-" + "b" * 16
+        con.execute("INSERT INTO meta (key, value) VALUES ('custody_ledger_id', ?)", (la,))
+        con.execute("INSERT INTO custody_sessions VALUES (?, ?, 'x')", (self.CS, la))
+        self.cus(con, "d-000001-bbbbb1", "done")
+        with self.with_state("custody", {"id": self.CS, "ledger": {"id": la}}):
+            self.assertEqual(self.ledger_items(), [])                          # 对得上、收完了：干净
+        with self.with_state("custody", {"id": self.CS, "ledger": {"id": lb}}):   # 库被换成别的账本
+            got = self.ledger_items()
+            self.assertEqual(len(got), 1, got)
+            self.assertIn(f"托管会话 {self.CS}：账本对不上", got[0])
+        other = "c-20261123-111111-dddddddddddd"
+        with self.with_state("custody", {"id": other, "ledger": {"id": la}}):   # 账本里没有这次的开启登记（旧备份）
+            got = self.ledger_items()
+            self.assertTrue([x for x in got if other in x and "账本对不上" in x], got)
+
+    def test_open_session_without_ledger_or_readable_state_counts(self):
+        la = "L-" + "a" * 16
+        with self.with_state("secretary", {"id": self.SS, "ledger": {"id": la}}):   # 库不在
+            self.assertEqual(self.ledger_items(), [f"秘书会话 {self.SS} 还开着（账本 {la}），账本库不在"])
+        import sqlite3
+        with sqlite3.connect(self.root / "twin-state.db") as con:
+            con.execute("CREATE TABLE other (x)")
+        with self.with_state("secretary", {"id": self.SS, "ledger": {"id": la}}):   # 库在、表不在
+            self.assertEqual(self.ledger_items(), [f"秘书会话 {self.SS} 还开着（账本 {la}），账本表不在"])
+        import secretary
+        with mock.patch.object(__import__("custody"), "load", side_effect=ValueError("坏了")), \
+                mock.patch.object(secretary, "load", return_value={"session": None}):
+            self.assertIn("托管状态文件读不了（ValueError），核不了开着的会话", self.ledger_items())
 
     def test_nothing_installed_is_clean_and_creates_nothing(self):
         self.assertEqual(R.leftovers(), {"hold": None, "items": []})
