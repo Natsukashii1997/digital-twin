@@ -14,6 +14,9 @@ DigitalTwin/openloop/（ledger.json 当前账本、history/<日期>.json 每天�
   桌面会话   最后一次答复写着「当前状态：〔…〕」的 Claude 桌面会话：复用拍板清单脚本（my-skills 的 decision_inbox.py）的
              scan()、sift()，按原样调用、不改它；会话在哪个项目、记着哪些 PR，另从会话元数据里读
   驿窗送审   每一次送 ChatGPT 审查的接力：只读驿窗的 handoffs.json（字段以驿窗 handoffs.rs 为准，它改结构这里要跟着改）
+  新通道派单 派单网关签出的每张写入任务凭证一行（#195 缺口 3）：凭证库 grants.db、中台库 hub.db 都只读打开（库不在不建库，
+             算「还没装」），PR 按固定分支 <执行方>/<单号> 现查；只收名册里沙盒和活跃项目的单。分支上有 PR 时另出一行 PR，
+             并成一行（PR 的状态照 GitHub 那一列判）
 同一件事并成一行（规格第 7 节）：主线项、会话、接力里明文写的 PR 号，正好指到一个开着的 PR 就并到那个 PR；接力还并到发起它的会话。
 并到一起后状态取最需要人的，其余来源记在 links。提到不止一个开着的 PR 的不并，只在两边的 links 里互相记一笔（related）。
 
@@ -30,8 +33,10 @@ import importlib.util
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -66,10 +71,16 @@ WAIT = {
     "reply_not_returned": 30,   # 回信没送回会话（规格第 6 节）
     "relay_wait": 120,      # 送出去等 ChatGPT 回信：规格没写，按「会话没下文」
     "relay_failed": 30,     # 送审没送成：规格没写，按「回信没送回会话」
+    # 新通道派单（#195 缺口 3，规格第 6 节；推断，先跑一周再调）
+    "dispatch_unsent": 30,  # 派单事件记了账、没确认送到中台
+    "worker_queue": 15,     # 中台排上了、没有工人接：规格第 6 节「派单建了没启动」
+    "worker_run": 150,      # 工人在跑：每张单累计上限 2 小时，再留半小时
+    "publish_wait": 120,    # 工人交接了、还没推分支开 PR：按「会话没下文」
+    "dispatch_idle": 240,   # 这一轮结束了，既没交接也没 PR：按「PR 提交了没人审」
 }
 SESSION_DAYS = 14                       # 只看最近这么多天动过的会话（和拍板清单脚本的默认一样）
 RELAY_DAYS = dt.timedelta(days=7)       # 已结束的接力只往回看这么久
-PRIMARY = ("pr", "session", "relay", "mainline")   # 并成一行时，行的编号和名字用哪个来源的
+PRIMARY = ("pr", "dispatch", "session", "relay", "mainline")   # 并成一行时，行的编号和名字用哪个来源的
 RECENT_WINS = ("等外部", "在做")         # 并在一起的几条状态相同时：这两种取最近有动静的那条，其余取最先到点的
 # 会话自己写的预计时间：「约 40 分钟」「再等 2 小时」「大约半小时」。「已跑了约 30 分钟」说的是过去，不算
 ETA = re.compile(r"(?<![了已过大])(?:约|大约|大概|预计|再等?|再过)\s*(半|\d+(?:\.\d+)?)\s*(分钟|个?小时)")
@@ -80,13 +91,20 @@ FILES_MAX = 100                         # 文件列表只取前 100 个：取不
 FETCH_TIMEOUT = 60                      # 拉一个项目最多等这么多秒：代理没通时不让整本账挂着
 LOOKUP_MAX = 60                         # 每个仓库一次最多核这么多个「待合并」里提到的号
 
-PR_QUERY = """query($o:String!,$n:String!,$c:String){repository(owner:$o,name:$n){pullRequests(states:OPEN,first:%d,after:$c,
-orderBy:{field:CREATED_AT,direction:ASC}){pageInfo{hasNextPage endCursor}nodes{
-number title url isDraft createdAt updatedAt headRefName headRefOid mergeable changedFiles
+PR_NODE = """number title url isDraft createdAt updatedAt headRefName headRefOid mergeable changedFiles
 files(first:%d){nodes{path}}
 commits(last:1){nodes{commit{oid committedDate statusCheckRollup{contexts(first:100){nodes{__typename
 ... on CheckRun{name status conclusion completedAt} ... on StatusContext{context state createdAt}}}}}}}
-reviews(last:50){nodes{state submittedAt commit{oid}}}}}}}""" % (PR_PAGE, FILES_MAX)
+reviews(last:50){nodes{state submittedAt commit{oid}}}""" % FILES_MAX     # pr_row 要的字段：开着的 PR 和派单分支上的 PR 共用
+PR_QUERY = """query($o:String!,$n:String!,$c:String){repository(owner:$o,name:$n){pullRequests(states:OPEN,first:%d,after:$c,
+orderBy:{field:CREATED_AT,direction:ASC}){pageInfo{hasNextPage endCursor}nodes{%s}}}}""" % (PR_PAGE, PR_NODE)
+TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")     # 和 autoloop_grants.TASK_ID 同一写法
+DISPATCH_OWNER = {"claude": "Claude", "codex": "Codex"}
+STOPPED = "停下了"      # 工人侧启动脚本没交接的一轮，结论以它开头（ops/dt_worktree.stop_text、autoloop_publish.STOPPED）
+EVENT_GRACE = dt.timedelta(minutes=2)    # 派单事件发出去这么久还没确认送到，才算没送到（网关 60 秒后补发）
+DISPATCH_OLD = dt.timedelta(days=7)      # 已撤销 / 收掉 / 过期这么久、上一份账本里也没有的单不再查（查询量不随历史单越涨越多）
+HUB_MISSING = "中台库不在（还没装）"
+SQL_CHUNK = 500                          # 一条 IN 查询最多带几个单号（老版本 sqlite 一条语句最多 999 个参数）
 LOOKUP = ("i%d: issueOrPullRequest(number:%d){__typename ... on PullRequest{state mergedAt closedAt} "
           "... on Issue{state closedAt closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state mergedAt closedAt}}}}")
 
@@ -348,6 +366,355 @@ def github_source(projects, hub, rules, reviews=None, known=True, now=None):
         if capped:
             cover["capped"].append(name)
         rows += [pr_row(repo, n, rules, reviews.get(f"pr:{name}#{n['number']}", ()), known, now) for n in nodes]
+    return rows, cover
+
+
+# ---------- 新通道派单（#195 缺口 3） ----------
+
+def grants_db():
+    """同 autoloop_grants.db_path()（测试核两边一致）；不导入它：它不和本脚本装在一起，导入还会带进飞书身份模块。"""
+    return Path(os.environ.get("DT_GRANTS_DB") or "~/Library/Application Support/DigitalTwin/autoloop/grants.db").expanduser()
+
+
+def hub_db():
+    """同 autoloop_publish.hub_db()。"""
+    return Path(os.environ.get("AGENT_AUTOLOOP_HOME") or "~/.agent-autoloop").expanduser() / "hub.db"
+
+
+def dispatch_outbox():
+    """同 autoloop_publish.outbox()：工人交接包放这里，主账号能读。"""
+    return Path(os.environ.get("DT_PUBLISH_OUTBOX") or "/Users/dt-worker/dt-outbox")
+
+
+def read_only(path):
+    """只读打开：库不在就报错，不建库（sqlite 默认会建一个空库）。"""
+    con = sqlite3.connect(f"file:{urllib.parse.quote(str(path))}?mode=ro", uri=True, timeout=5)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def hub_ts(v):
+    """中台库里的时间：ISO 文字或毫秒数。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return dt.datetime.fromtimestamp(v / 1000 if v > 1e11 else v, TZ)
+    return parse_ts(v)
+
+
+def sandboxes():
+    """名册 inventory 里标了 sandbox 的仓库 {仓库名: owner/仓库}（同 autoloop_grants.allowed_repos 的认法）。"""
+    try:
+        inv = json.loads(progress_data.ROSTER.read_text(encoding="utf-8")).get("inventory") or []
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for x in inv:
+        path = str(x.get("path") or "")
+        if x.get("sandbox") and path.startswith("github:"):
+            out[path.split("/")[-1]] = path[len("github:"):]
+    return out
+
+
+def read_grants():
+    """凭证库：(凭证列表, {单号: 派单事件列表})。库不在返回 None。"""
+    db = grants_db()
+    if not db.exists():
+        return None
+    try:
+        con = read_only(db)
+        try:
+            grants = [dict(r) for r in con.execute(
+                "SELECT task_id, repo, github, executor, rule, status, generation, valid_until, scope_text, created_at, "
+                "updated_at FROM grants ORDER BY created_at")]
+            events = {}
+            for e in con.execute("SELECT task_id, generation, kind, sent, at, claimed_at FROM hub_events ORDER BY at"):
+                events.setdefault(e["task_id"], []).append(dict(e))
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        raise Fail(f"凭证库读不了（{type(e).__name__}）")
+    return grants, events
+
+
+def read_runs(task_ids):
+    """中台库：{单号: [这张单的轮次]}；库不在返回 None，读不了抛 Fail。"""
+    db = hub_db()
+    if not db.exists():
+        return None
+    out = {t: [] for t in task_ids}
+    ids = list(out)
+    try:
+        con = read_only(db)
+        try:
+            for i in range(0, len(ids), SQL_CHUNK):   # runs 是视图，每查一次都扫一遍：按批一条 IN 查询，不按单号逐条查
+                part = ids[i:i + SQL_CHUNK]
+                for r in con.execute("SELECT id, rule, lane, state, attempts, created_at, claimed_at, seen_at, finished_at, summary "
+                                     f"FROM runs WHERE lane IN ({','.join('?' * len(part))}) ORDER BY id", part):
+                    out[r["lane"]].append(dict(r))
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        raise Fail(f"中台库读不了（{type(e).__name__}）")
+    return out
+
+
+def branch_prs(hub, repo, branches):
+    """{分支: [这条分支上的 PR，新的在前]}，开着、合并、关掉的都要。"""
+    owner, name = repo.split("/", 1)
+    fields = " ".join(f'b{i}: pullRequests(headRefName:"{b}",states:[OPEN,MERGED,CLOSED],first:5,'
+                      f'orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{state mergedAt closedAt isCrossRepository {PR_NODE}}}}}'
+                      for i, b in enumerate(branches))
+    data = hub._run("api", "graphql", "-f", f"query=query($o:String!,$n:String!){{repository(owner:$o,name:$n){{{fields}}}}}",
+                    "-f", f"o={owner}", "-f", f"n={name}")
+    got = ((data or {}).get("data") or {}).get("repository")
+    if got is None:
+        raise Fail("GitHub 没有返回这个仓库的 PR")
+    # 别人从 fork 开的同名分支 PR 不是工人交的（合并官对 fork 来的 PR 也一律问常浩）：只认来源是本仓库的
+    return {b: [x for x in ((got.get(f"b{i}") or {}).get("nodes")) or [] if not x.get("isCrossRepository")]
+            for i, b in enumerate(branches)}
+
+
+def handed_off(task_id, since=None):
+    """工人交接包的头提交（交接清单 handoff.json 里的 head）；没有、读不了返回 None（只当线索，不当证据）。
+    since：最后一轮开跑的时间。交接清单比它旧的是上一轮留下的，不算这一轮交接了。"""
+    f = dispatch_outbox() / task_id / "handoff.json"
+    try:
+        head = json.loads(f.read_text(encoding="utf-8")).get("head")
+        if since and dt.datetime.fromtimestamp(f.stat().st_mtime, TZ) < since:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    return head if isinstance(head, str) and re.match(r"^[0-9a-f]{40}$", head) else None
+
+
+def finished(g, now):
+    """这张凭证已经完了：撤销、收掉，或过了有效期（开着的、冻结的都算）。"""
+    until = parse_ts(g["valid_until"])
+    return g["status"] in ("revoked", "done") or (g["status"] in ("active", "frozen") and until is not None and until <= now)
+
+
+def slip_after(at):
+    """「等你」的行按证据时间算下次检查：过了下一张单还没动静就算停了（规格第 6 节）；证据时间取不到就不催。"""
+    return next_slip(at) if at else None
+
+
+def parts_of(prev):
+    """上一份账本里的每一部分（并成一行的拆开）：{编号: 那一部分}。"""
+    return {m["id"]: m for x in (prev or {}).get("rows", []) for m in (x.get("parts") or [x])}
+
+
+def carry_task(prev, task_id, with_pr=True):
+    """上一份账本里这张单的那部分，原样带回来、标沿用；with_pr：连同它指到的 PR 那部分（沙盒的 PR 行只有派单来源会出；
+    这次 PR 查到了就不带旧的，由调用方照这次的实况出）。上一份里没有返回 []。"""
+    old = parts_of(prev)
+    me = old.get(f"dispatch:{task_id}")
+    if not me or "state" not in me:
+        return []
+    out = []
+    for i in [me["id"]] + [r for r in me.get("refs") or [] if r.startswith("pr:") and with_pr]:
+        m = old.get(i)
+        if m:
+            kept = {k: v for k, v in m.items() if k != "parts"}
+            out.append({**kept, "links": [], "carried": True, "carried_from": m.get("carried_from") or prev.get("generated_at")})
+    return out
+
+
+def dispatch_row(g, events, runs, prs, now, hub_ok=True, pr_ok=True):
+    """一张派单现在是哪种状态（规格第 5 节「新通道派单」一列）。返回 None 表示这张单已经完了、不进账本。
+    按下面的顺序，先成立的算数：
+    撤销 / 完成 / 过期：还有开着的 PR → 等你（合并或关掉）；还有活着的轮次 → 卡住；其余不收。
+    冻结 → 等你（恢复还是撤销）；派单事件发出 2 分钟还没确认送到中台 → 卡住；轮次 unknown → 卡住；
+    轮次在跑 / 排队 → 在做；分支上的 PR 合并了 → 等你（收掉这张单）；PR 关了没合并 → 等你（续接还是停单）；
+    PR 开着 → 在做（照 PR 那一行判，两行并成一行）；最后一轮「停下了」或被取消 → 卡住；
+    最后一轮正常结束、有交接包 → 等外部（推分支开 PR，首单由常浩在场手动做）；正常结束、没交接包 → 待验证；
+    派单送到了中台却没有轮次 → 卡住（通道暂停或没有派单规则，中台只记不接）。"""
+    tid, gen = g["task_id"], g["generation"]
+    worker = DISPATCH_OWNER.get(g["executor"], UNKNOWN)
+    first = clip((g["scope_text"] or "").strip().splitlines()[0] if (g["scope_text"] or "").strip() else "", 50)
+    base = dict(id_=f"dispatch:{tid}", source="dispatch", project=g["repo"], what=f"{tid}（{worker}）：{first}",
+                done_when="PR 合并后收掉这张单，或停单")
+    mine = [r for r in runs if r.get("rule") == g["rule"]]
+    live = [r for r in mine if r["state"] in ("queued", "claimed", "unknown")]
+    last = mine[-1] if mine else None
+    open_pr = next((x for x in prs if x.get("state") == "OPEN"), None)
+    merged = next((x for x in prs if x.get("state") == "MERGED"), None)
+    closed = next((x for x in prs if x.get("state") == "CLOSED"), None)
+    pr_id = lambda x: f"pr:{g['repo']}#{x['number']}"   # noqa: E731
+    refs = {"_refs": [pr_id(open_pr)]} if open_pr else {}
+    note = "" if hub_ok else "；中台库这次没读到，轮次不明"
+    note += "" if pr_ok else "；PR 这次没查到"
+    if finished(g, now):    # 冻结的过期了也算完：过期后恢复一律被拒（autoloop_grants.unfreeze）
+        word = {"revoked": "已撤销", "done": "已收掉"}.get(g["status"], "凭证已过期")
+        if open_pr:
+            at = parse_ts(g["updated_at"])
+            return make(state="等你", owner=OWNER, at=at, evidence=f"{word}，分支上的 PR #{open_pr['number']} 还开着{note}",
+                        next_="常浩决定合并还是关掉这个 PR", check_at=slip_after(at), ask="合并", **refs, **base)
+        if live:
+            r = live[-1]
+            return make(state="卡住", owner=UNKNOWN, at=parse_ts(g["updated_at"]), evidence=f"{word}，中台里轮次 {r['id']} 还是 {r['state']}{note}",
+                        next_=f"在电脑上用 agent-autoloop stop {r['id']} 停掉", wait="worker_queue", blocked="停单后轮次还活着", **base)
+        return None
+    if g["status"] == "frozen":
+        at = parse_ts(g["updated_at"])
+        return make(state="等你", owner=OWNER, at=at, evidence=f"已冻结（第 {gen} 代作废）{note}",
+                    next_="常浩决定恢复（私聊「恢复 <单号> <冻结码>」）还是撤销", check_at=slip_after(at), ask="拍板", **refs, **base)
+    # -2 是作废前已领取的事件（可能已送到，靠代次拦截），send-pending 不会再发：不算「没送到」
+    pending = [e for e in events if e["generation"] == gen and e["sent"] in (0, 2)]
+    stuck = [e for e in pending if (hub_ts(e.get("claimed_at") or e["at"]) or now) <= now - EVENT_GRACE]
+    if stuck:
+        e = stuck[0]
+        return make(state="卡住", owner="猛鬼兽", at=hub_ts(e.get("claimed_at") or e["at"]),
+                    evidence=f"派单事件（{e['kind']}）没确认送到中台{note}", next_="猛鬼兽跑 autoloop_grants.py send-pending 补发",
+                    wait="dispatch_unsent", blocked="派单事件没送到中台", **base)
+    if live:
+        r = live[-1]
+        if r["state"] == "unknown":
+            return make(state="卡住", owner=UNKNOWN, at=hub_ts(r.get("seen_at") or r.get("claimed_at")),
+                        evidence=f"中台轮次 {r['id']}：接单程序 5 分钟没报，不确定还在不在跑", next_="在电脑上看 dt-worker 的工人进程",
+                        wait="worker_queue", blocked="接单程序没消息", **base)
+        if r["state"] == "claimed":
+            return make(state="在做", owner=worker, at=hub_ts(r.get("claimed_at") or r.get("created_at")),
+                        evidence=f"中台轮次 {r['id']} 在跑", next_=f"等{worker}这一轮做完", wait="worker_run", **refs, **base)
+        retry = f"（没跑成 {r['attempts']} 次，等重试）" if r.get("attempts") else ""
+        return make(state="在做", owner=worker, at=hub_ts(r.get("created_at")), evidence=f"中台轮次 {r['id']} 排队等工人接{retry}",
+                    next_=f"等工人接单（{worker}）", wait="worker_queue", **refs, **base)
+    if merged and not open_pr:
+        at = parse_ts(merged.get("mergedAt"))
+        return make(state="等你", owner=OWNER, at=at, evidence=f"PR #{merged['number']} 已合并，凭证还开着",
+                    next_="常浩说「<单号> 做完了，收掉」，猛鬼兽跑 complete", check_at=slip_after(at), ask="拍板", **base)
+    closed_at = parse_ts(closed.get("closedAt")) if closed else None
+    reworked = last and closed_at and (hub_ts(last.get("finished_at")) or closed_at) > closed_at   # PR 关掉之后又续接做了一轮
+    if closed and not open_pr and not reworked:
+        return make(state="等你", owner=OWNER, at=closed_at, evidence=f"PR #{closed['number']} 关了、没合并",
+                    next_="常浩决定续接返修还是停单", check_at=slip_after(closed_at), ask="拍板", **base)
+    if open_pr:   # 照 PR 那一行判；这一行只是挂着，不另催
+        return make(state="在做", owner=worker, at=parse_ts(open_pr.get("updatedAt")), evidence=f"工人已交付，PR #{open_pr['number']} 开着",
+                    next_="按 PR 的状态办", **refs, **base)
+    if last and (last["state"] == "cancelled" or (last["state"] in ("done", "nothing") and str(last.get("summary") or "").startswith(STOPPED))):
+        why = clip(str(last.get("summary") or "").splitlines()[0] if last.get("summary") else "被取消", 80)
+        return make(state="卡住", owner=UNKNOWN, at=hub_ts(last.get("finished_at")), evidence=f"中台轮次 {last['id']}：{why}",
+                    next_="看停下的原因，处理后续接或停单", wait="dispatch_idle", blocked=why, **base)
+    if last:
+        if handed_off(tid, hub_ts(last.get("claimed_at") or last.get("created_at"))):
+            return make(state="等外部", owner="受信发布", at=hub_ts(last.get("finished_at")),
+                        evidence=f"中台轮次 {last['id']} 做完，工人已交接{note}",
+                        next_="推分支、开 PR（受信发布还没接通时，由常浩在场手动做）", wait="publish_wait", **base)
+        return make(state="待验证", owner=UNKNOWN, at=hub_ts(last.get("finished_at")),
+                    evidence=f"中台轮次 {last['id']} 结束了，没有交接包也没有 PR（可能只提了问题，看中台卡片）{note}",
+                    next_="看这一轮的结论", wait="dispatch_idle", **base)
+    if pending:   # 刚记账、还在送：没到 2 分钟不催
+        e = pending[0]
+        return make(state="在做", owner="猛鬼兽", at=hub_ts(e.get("claimed_at") or e["at"]), evidence=f"派单事件（{e['kind']}）正在送往中台",
+                    next_="等送到中台", wait="dispatch_unsent", **base)
+    sent = [e for e in events if e["generation"] == gen and e["sent"] == 1]
+    if sent and hub_ok:
+        return make(state="卡住", owner=UNKNOWN, at=hub_ts(sent[-1].get("claimed_at") or sent[-1]["at"]),
+                    evidence="中台收到了派单，但没有排出轮次（通道暂停或没有这条派单规则，中台只记不接）",
+                    next_="看通道（autoloop_config.py status），恢复后续接，或停单", wait="dispatch_unsent",
+                    blocked="中台没有接这张单", **base)
+    said = "派单已送到中台" if sent else "凭证已签，还没有派单事件或轮次"
+    return make(state="待验证", owner=UNKNOWN, at=parse_ts(g["created_at"]), evidence=f"{said}{note}",
+                next_="看派单事件（autoloop_grants.py show --task <单号>）", wait="dispatch_unsent", **base)
+
+
+def gone(part):
+    """带回来的那部分指到的 PR 已经不开着了：证据后面补一句，午晚单把它归进「可能已过期」，不再催合并。"""
+    ev = part.get("evidence") or ""
+    return part if GONE_NOTE in ev else {**part, "evidence": ev + GONE_NOTE}
+
+
+def check_carried(rows, open_now, checked, hub):
+    """带回来的 PR 行核一次现状（复审 P1）：这个仓库这次 GitHub 那一类取到了而它不在开着的里面，或者是沙盒、按号查到已合并 /
+    已关闭，就去掉它，指着它的派单那部分补「可能已过期」；查不了的照旧带着。open_now：这次新取到的开着的 PR 编号。"""
+    boxes, dropped = sandboxes(), set()
+    for x in rows:
+        if x.get("source") != "pr" or not x.get("carried") or x["id"] in open_now:
+            continue
+        name, _, n = x["id"][len("pr:"):].rpartition("#")
+        if name in checked:
+            dropped.add(x["id"])
+        elif name in boxes and n.isdigit():
+            try:
+                node = lookup(hub, boxes[name], [int(n)]).get(int(n)) or {}
+            except Exception:   # 查不了：照旧带着，不当成已经合了
+                continue
+            if node.get("state") in ("MERGED", "CLOSED"):
+                dropped.add(x["id"])
+    out = []
+    for x in rows:
+        if x["id"] in dropped:
+            continue
+        refs = [r for r in x.get("refs") or [] if r.startswith("pr:")]
+        out.append(gone(x) if x.get("carried") and refs and all(r in dropped for r in refs) else x)
+    return out
+
+
+def dispatch_source(projects, hub, rules, reviews=None, known=True, now=None, prev=None):
+    """（行，覆盖情况）。行里有派单分支上开着的 PR 时，另出一行 PR（pr_row），派单那一行带 _refs 指过去，合并时并成一行。
+    中台库或这个仓库的 PR 这次没取到的单：上一份账本里有它，就把它那部分（连同它的 PR 行）原样带回来、标沿用，不按缺的数据重判；
+    上一份里没有才照现有数据判，证据里写明缺了什么。"""
+    now = now or current()
+    cover = {"installed": True, "rows": 0, "skipped": 0, "old": 0, "carried": 0, "hub": "ok", "pr_failed": {}}
+    got = read_grants()
+    if got is None:
+        if ((prev or {}).get("coverage") or {}).get("dispatch", {}).get("installed"):   # 装过又不在了（比如搬进 dt-gate）：不当没装
+            raise Fail("凭证库不在了（上一份账本里还读得到）")
+        cover["installed"] = False
+        return [], cover
+    grants, events = got
+    old, pc = parts_of(prev), ((prev or {}).get("coverage") or {}).get("dispatch") or {}
+    allowed = {key_of(p): p.get("github") for p in projects if p.get("github")}
+    allowed.update(sandboxes())
+    mine = [g for g in grants if TASK_ID.match(str(g.get("task_id") or "")) and g.get("repo") in allowed
+            and g.get("executor") in DISPATCH_OWNER]
+    cover["skipped"] = len(grants) - len(mine)
+    trust = pc.get("installed") and not pc.get("failed") and "old" in pc   # 上一份是这个版本完整扫出来的，「上一份没有」才说明它完了
+    stale = [g for g in mine if trust and f"dispatch:{g['task_id']}" not in old and finished(g, now - DISPATCH_OLD)
+             and (parse_ts(g["updated_at"]) or now) <= now - DISPATCH_OLD]   # 完了一周、上一份也没有的：不再查
+    cover["old"] = len(stale)
+    mine = [g for g in mine if g not in stale]
+    try:
+        runs = read_runs([g["task_id"] for g in mine])
+    except Fail as e:
+        runs, cover["hub"] = None, str(e)
+    if runs is None and cover["hub"] == "ok":   # 装过又不在了按读坏了办，同凭证库
+        cover["hub"] = "中台库不在了（上一份账本里还读得到）" if pc.get("hub") == "ok" else HUB_MISSING
+    by_repo = {}
+    for g in mine:
+        by_repo.setdefault(g["github"], []).append(f"{g['executor']}/{g['task_id']}")
+    prs = {}
+    for repo, branches in by_repo.items():
+        try:
+            prs.update({(repo, b): v for b, v in branch_prs(hub, repo, branches).items()})
+        except (pdaily_data.Fail, Fail) as e:
+            cover["pr_failed"][repo.split("/")[-1]] = str(e)
+    rows = []
+    for g in mine:
+        branch = f"{g['executor']}/{g['task_id']}"
+        on_branch = prs.get((g["github"], branch), [])
+        hub_ok, pr_ok = runs is not None, g["github"].split("/")[-1] not in cover["pr_failed"]
+        hub_broken = not hub_ok and cover["hub"] != HUB_MISSING   # 中台库读坏了才沿用；库不在（还没装）照现有数据判，不一直沿用旧行
+        live_pr = next((x for x in on_branch if x.get("state") == "OPEN"), None)
+        # 冻结、停了单而 PR 还开着：只看凭证和 PR 就判得出，不用轮次，PR 查到了就现判
+        by_grant = pr_ok and ((g["status"] == "frozen" and not finished(g, now)) or (finished(g, now) and live_pr))
+        kept = carry_task(prev, g["task_id"], with_pr=not pr_ok) if (hub_broken or not pr_ok) and not by_grant else []
+        if kept:
+            if pr_ok:   # 只是中台库没读到：PR 照这次的实况，派单那部分指到这次开着的 PR；原来指的 PR 不开了补「可能已过期」
+                me, live = kept[0], f"pr:{g['repo']}#{live_pr['number']}" if live_pr else None
+                if not live and any(r.startswith("pr:") for r in me.get("refs") or []):
+                    me = gone(me)
+                kept = [{**me, "refs": [live] if live else []}]
+            rows += kept
+            cover["carried"] += 1
+        else:
+            row = dispatch_row(g, events.get(g["task_id"], []), (runs or {}).get(g["task_id"], []), on_branch, now,
+                               hub_ok=hub_ok, pr_ok=pr_ok)
+            if row is None:
+                continue
+            rows.append(row)
+        if live_pr and pr_ok:
+            name = g["repo"]
+            rows.append(pr_row(g["github"], live_pr, rules, (reviews or {}).get(f"pr:{name}#{live_pr['number']}", ()), known, now))
+    cover["rows"] = len(rows)
     return rows, cover
 
 
@@ -831,6 +1198,9 @@ def merge(rows, since, now):
         old = {m["id"] for m in members[1:] if active and parse_ts(m.get("evidence_at")) and parse_ts(m["evidence_at"]) < active}
         lead = min((m for m in members if m["id"] not in old), key=need)
         row = {**lead, **{k: main.get(k) for k in ("id", "what", "source", "project", "done_when", "refs", "session_ref")}}
+        asks = [m["ask"] for m in members if m.get("ask") and m["state"] == lead["state"] and m["id"] not in old]
+        if asks:   # 新通道派单自己说了要他做哪种（冻结单并进只改文档的 PR，两行都是等你、PR 行当了主导）：拍板优先
+            row["ask"] = "拍板" if "拍板" in asks else asks[0]
         if len(members) > 1:
             row.pop("url", None)
             row.pop("line", None)
@@ -925,6 +1295,8 @@ def ask_kind(r):
     """一行「等你」的事要常浩做哪种：合并 / 点卡 / 亲手做 / 拍板。午晚单收前三种，日报的拍板候选收最后一种。
     PR 行的「下一步」可能来自并进来的会话：写着合并才算合并，别的是要他亲手做的事。"""
     ev, nx = r.get("evidence") or "", r.get("next") or ""
+    if r.get("ask") in HANDS + ["拍板"]:     # 来源自己说了要他做哪种（新通道派单：停了单而 PR 还开着是合并，冻结、收掉是拍板）
+        return r["ask"]                     # 先看这个：冻结的单并进它开着的 PR 那一行，行的来源是 pr，却是要他拍板
     if r.get("source") == "pr":
         return "合并" if "合并" in nx else "亲手做"
     if re.search("交接卡|任务卡", nx):
@@ -999,6 +1371,18 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
     relays = [r for r in relays if r not in done]
     if "rows" in r_cover:
         r_cover.update(rows=len(relays), pr_done=len(done))   # 它审的 PR 已经合并或关了：送审这件事不再算没完
+    try:
+        dispatch, d_cover = dispatch_source(projects, hub, rules, reviews, known, now, prev)
+    except Exception as e:   # 凭证库读坏了、或出了没料到的错：只让这一个来源取不到，沿用上一份账本里它的行
+        d_cover = {"failed": f"出错（{type(e).__name__}：{e}）" if not isinstance(e, Fail) else str(e),
+                   "installed": ((prev.get("coverage") or {}).get("dispatch") or {}).get("installed")}   # 记着装过，下次库不在也不当没装
+        tasks = [i.split(":", 1)[1] for i, m in parts_of(prev).items() if m.get("source") == "dispatch"]
+        dispatch = [x for t in tasks for x in carry_task(prev, t)]   # 连同沙盒的 PR 行（GitHub 那一类不补它）
+        d_cover["carried"] = sum(1 for x in dispatch if x["source"] == "dispatch")
+    gh_old = carry(prev, "rows", gh_cover["failed"], "pr")
+    dispatch = check_carried(dispatch, {r["id"] for r in prs}, gh_cover.get("ok") or [], hub)
+    seen_prs = {r["id"] for r in prs + gh_old}
+    dispatch = [r for r in dispatch if not (r["source"] == "pr" and r["id"] in seen_prs)]   # 活跃项目的 PR 上面已经有了（新取的或沿用的）
     lines, parked, unparsed, candidates, ml_cover = mainline_source(projects, fetch)
     mismatches, unchecked = mismatches_of(candidates, hub)
     parked += carry(prev, "parked", ml_cover["failed"])
@@ -1007,7 +1391,7 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
     s_cover["carried"], r_cover["carried"] = len(old_sessions), len(old_relays)
     since = {x["id"]: x.get("since") for kind in ("rows", "parked", "mismatches") for x in prev.get(kind, [])}
     since.update({x["id"]: x["since"] for r in prev.get("rows", []) for x in (r.get("parts") or []) + (r.get("links") or []) if x.get("since")})
-    rows = merge(prs + carry(prev, "rows", gh_cover["failed"], "pr") + sessions + old_sessions + relays + old_relays
+    rows = merge(prs + gh_old + dispatch + sessions + old_sessions + relays + old_relays
                  + lines + carry(prev, "rows", ml_cover["failed"], "mainline"), since, now)
     for x in parked + mismatches:
         x["since"] = since.get(x["id"]) or iso(now)
@@ -1024,6 +1408,7 @@ def build(now, projects, hub, rules, prev=None, fetch=True):
         "mismatches": mismatches, "unparsed": unparsed,
         "reviews": {k: [{**r, "at": iso(r["at"])} for r in v] for k, v in reviews.items()},
         "coverage": {"projects": len(projects), "github": gh_cover, "mainline": ml_cover, "sessions": s_cover, "relays": r_cover,
+                     "dispatch": d_cover,
                      "mismatch_unchecked": unchecked, "rules": None if rules else "合并规则读不了，没判 L0（不用审）"},
     }
 
@@ -1074,7 +1459,15 @@ def gaps(ledger):
         if name in (cov["mainline"].get("failed") or {}):   # 整个没读到的上面已经说了，这里不再说「读的是本机已有的版本」
             continue
         out.append(f"拉取·{name}：{why}（CURRENT 读的是本机已有的版本，可能旧）")
-    for src, label in (("sessions", "会话"), ("relays", "驿窗送审")):
+    d = cov.get("dispatch") or {}
+    if d.get("installed") is not False and not d.get("failed"):
+        if d.get("hub") not in (None, "ok"):
+            out.append(f"新通道派单：{d['hub']}（轮次不明：上一份账本里有的单沿用，其余只按凭证和 PR 判）")
+        for name, why in (d.get("pr_failed") or {}).items():
+            out.append(f"新通道派单·{name}：PR 没查到（{why}）")
+        if d.get("carried"):
+            out.append(f"新通道派单：{d['carried']} 张单这次缺数据，沿用上一份账本里的")
+    for src, label in (("sessions", "会话"), ("relays", "驿窗送审"), ("dispatch", "新通道派单")):
         if (cov.get(src) or {}).get("failed"):
             kept = cov[src].get("carried")
             out.append(f"{label}：{cov[src]['failed']}（" + (f"沿用上一份账本里的 {kept} 条" if kept else "上一份账本里也没有，这一类这次是空的") + "）")
