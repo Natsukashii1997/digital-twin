@@ -198,18 +198,21 @@ def from_ledger(day, w, dec, projects, notes):
               for n in re.findall(r"#(\d+)", " ".join(str(x) for x in (c.get("item"), c.get("source"), *(c.get("evidence") or []))))}
 
     def repeated(r):
-        for ref in r.get("refs") or []:
+        for ref in [r.get("id")] + list(r.get("refs") or []):   # 新通道派单并进 PR 行时，这一行自己就是 pr:…
             m = re.match(r"pr:(.+)#(\d+)$", str(ref))
             if m and (ids.get(m.group(1)), m.group(2)) in listed:
                 return True
         return False
+
+    DECIDE_WHY = {"dispatch": "账本里等常浩拍板（新通道派单：冻结了恢复还是撤销、PR 合并了收不收掉、PR 关了续接还是停单）",
+                  None: "账本里等常浩拍板（会话停在〔等你决定〕，或主线清单的 ❓）"}
 
     def title(r):   # 主线清单的项常常只有几个字（「常浩决定」），带上是哪条主线
         m = re.match(r"mainline:[^/]+/([^/]+)/", str(r.get("id") or ""))
         return f"{m.group(1)}：{r.get('what')}" if m else r.get("what")
     decide = openloop.waiting(led)[1]
     fresh = sorted((r for r in decide if not repeated(r)), key=lambda r: r.get("evidence_at") or "")
-    cands = [cand("openloop", ids.get(r.get("project")) or "hermes", title(r), "账本里等常浩拍板（会话停在〔等你决定〕，或主线清单的 ❓）",
+    cands = [cand("openloop", ids.get(r.get("project")) or "hermes", title(r), DECIDE_WHY["dispatch" if r.get("ask") else None],   # 只有新通道派单的行带 ask（并进 PR 行时也跟着它）
                   f"未闭环账本 {r.get('id')}", [r.get("evidence") or "", f"下一步：{r.get('next') or ''}"], since=r.get("evidence_at"))
              for r in fresh[:LEDGER_DECISIONS]]
     if len(decide) > len(fresh):

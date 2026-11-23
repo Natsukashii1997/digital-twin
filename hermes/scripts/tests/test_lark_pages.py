@@ -59,6 +59,20 @@ class ReadAll(unittest.TestCase):
             lp.read_all(fetch, "读", Boom, rounds=5)
         self.assertEqual(len(calls), 5)
 
+    def test_exhausted_can_raise_its_own_error(self):
+        """#338：调用方可以把「翻到上限」单独认出来（连得上、确定读不全），其他读不全照旧抛 error。"""
+        class Exhausted(Exception):
+            pass
+        fetch, calls = paged(list(range(100)), 1)
+        with self.assertRaisesRegex(Exhausted, "翻了 5 轮还没到底，没读全"):
+            lp.read_all(fetch, "读", Boom, rounds=5, exhausted=Exhausted)
+        self.assertEqual(len(calls), 5)
+        for bad in ({"messages": [1]}, {"messages": [1], "has_more": True}, None):
+            with self.subTest(bad=bad), self.assertRaises(Boom):
+                lp.read_all(lambda extra: bad, "读", Boom, rounds=5, exhausted=Exhausted)
+        with self.assertRaisesRegex(Boom, "翻页标记和前面重复"):
+            lp.read_all(lambda extra: {"messages": [1], "has_more": True, "page_token": "same"}, "读", Boom, exhausted=Exhausted)
+
     def test_empty_result_with_has_more_false_is_complete(self):
         """空结果：真的 lark-cli 也带 has_more=false 和空列表（2026-11-22 实测六个命令），算读完。"""
         self.assertEqual(lp.read_all(lambda extra: {"messages": [], "has_more": False, "page_token": ""}, "读"), {"messages": []})
