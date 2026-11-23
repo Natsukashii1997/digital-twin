@@ -4,7 +4,7 @@
 用飞书「门卫」应用的身份把中台 feishu 通道的卡片发到常浩私聊，自己经飞书长连接直接收卡片点击（不经 Hermes 网关、
 不经秘书），核对点击人是绑定的常浩、聊天是绑定的私聊、点的是登记的那条卡片消息、令牌和版本都对，再用 feishu 通道钥匙
 把回答交给中台。发卡、改卡、报送达、本人点击状态机、对账、卡片库全部复用 autoloop_feishu / autoloop_answer（换成
-GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击。
+GateBot），这里只多四样：门卫应用凭据、身份绑定、收点击、派单确认卡（批 0E-3b）。
 
 凭据（常浩 11-19 定：真凭据存成账号家目录里只有它能读的文件，不用钥匙串）：
   应用编号  DigitalTwin/gate/app.json（setup --app-id 写）
@@ -27,9 +27,18 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
 断开、重连、lark-cli 或总线报丢事件时暂停领卡（丢事件还私聊提醒常浩再点），领到卡、发出去之前再看一次（L3 P1-03、P2-02）。
 点击在长连接断开期间点的，飞书会在卡片上提示失败，常浩再点一次即可。每条回调核对：
   - event_id 第一次见（gate.db 的 events 表，先记再办：同一条回调最多办一次）；host = im_message；只认按钮，不认表单；
-  - 按钮值只有两种：{"autoloop": 令牌, "o": 选项号, "v": 版本号}（中台卡片）、{"gate_bind": 绑定码}（绑定卡），多一个字段都不认；
+  - 按钮值只有三种：{"autoloop": 令牌, "o": 选项号, "v": 版本号}（中台卡片）、{"gate_bind": 绑定码}（绑定卡）、
+    {"gate_grant": 卡片令牌, "a": "ok" | "no"}（派单确认卡），多一个字段都不认；
   - 中台卡片：回调必须带消息号，交给 autoloop_answer.answer 核点击人 = 绑定的 open_id、聊天 = 绑定的私聊、消息号 = 登记的
     卡片消息、令牌、选项、版本，之后照 0B-4a 的状态机走（排队、在途、结果不明、对账、本人优先）。
+派单确认卡（批 0E-3b，ADR-015 §3.3：派单批准只认门卫卡上的点击，常浩 11-23 定删掉打字批准、卡片沿用丙版、要「不派」）：
+  秘书经 3353 窄窗口递的提议由 autoloop_grants.propose 登记（不发消息）；run 里的派单卡线程每 2 秒（同领中台卡片：绑定了、
+  收点击在线才做）把过期的提议标成作废，给还没发卡的提议以门卫身份发确认卡（autoloop_cardview.render_grant，按钮只带
+  卡片令牌和批准 / 不派；走出口账本，幂等键 send_feishu:grant-card-<提议号>，结果不明不重发），把定了结果的卡原地改成结果。
+  点击：核过点击人 = 绑定的 open_id、聊天 = 绑定的私聊、回调带消息号，交 autoloop_grants.decide 核令牌、消息号 = 登记的卡片
+  消息、没过期没定过，批准时再核内容哈希、名册、中台派单规则，才签凭证、发中台事件；之后马上把卡改成结果。卫士的凭据只在
+  本进程里，网关脚本和 3353 窗口碰不到。凭证库、名册、镜像的位置照 autoloop_grants 的环境变量（DT_GRANTS_DB、DT_ROSTER …），
+  0E-3c 装门卫时写进入口脚本。
 身份绑定（ADR-015 §3.2：门卫的 open_id 由 dt-gate 自己从常浩的一次点击取得并登记，不从猛鬼兽配置复制、不接受秘书声明）：
   分两步（L3 第 1 轮 P1-01：不能谁点了绑定卡就算常浩，要点卡的人和操作 dt-gate 终端的人是同一个人）：
   ① bind start --email <常浩的飞书邮箱> | --open-id <ou_…>：只有 dt-gate 账号里能发起；发一张绑定卡（按钮带一次性绑定码，
@@ -171,7 +180,9 @@ if __name__ == "__main__":                       # 作为主程序：导入同�
 
 sys.path.insert(0, str(HERE))
 import autoloop_answer as A  # noqa: E402
+import autoloop_cardview as CV  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
+import autoloop_grants as AG  # noqa: E402
 import tidings_weekly as TW  # noqa: E402
 
 EVENT_KEY = "card.action.trigger"
@@ -812,6 +823,13 @@ def _handle(ev):
             return {"ok": False, "pending_confirm": True, "notify_error": str(e)[:120]}
         except F.Fail as e:
             return {"ok": False, "quiet": True, "why": str(e)}
+    if set(value) == {"gate_grant", "a"}:
+        if not AG.CARD_TOKEN.match(str(value["gate_grant"])) or value["a"] not in AG.CHOICES:
+            return {"ok": False, "quiet": True, "why": "派单确认卡的按钮值不对"}
+        try:
+            return handle_grant(ev, value["gate_grant"], value["a"])
+        except Quiet as e:
+            return {"ok": False, "quiet": True, "why": str(e)}
     if set(value) != {"autoloop", "o", "v"} or type(value["o"]) is not int or type(value["v"]) is not int \
             or not F.TOKEN_RE.match(str(value["autoloop"])):
         return {"ok": False, "quiet": True, "why": "不是门卫认的按钮"}
@@ -823,6 +841,170 @@ def _handle(ev):
     if said:
         A.tell(A.identities()[1], said)          # 只回绑定的私聊
     return {**rec, "said": bool(said)}
+
+
+# ---------- 派单确认卡（批 0E-3b）----------
+GRANT_EVERY = 2                                  # 秒：派单卡线程多久看一次凭证库
+GRANT_RETRY = 30                                 # 秒：同一张卡发不出去（或结果不明在对账）隔多久再试
+_GRANT_TRIED = {}
+
+
+def grant_content(p):
+    token = p["card_token"]
+    return CV.render_grant(p, lambda a: {"gate_grant": token, "a": a}, mark=f"令牌尾号 {token[-4:]}")
+
+
+def send_grant_card(p, chat):
+    """以门卫身份把一张派单确认卡发到绑定的私聊，走出口账本（先记账再发，结果不明不重发、对上账回原消息号）。
+    发成了记消息号；确定没发出去的下一轮再试；结果不明记 unsure（之后每轮照样交出口账本，由它对账）。"""
+    import autoloop_exits as E
+    code, token = p["code"], p["card_token"]
+    content = grant_content(p)
+
+    def do():
+        try:
+            return {"message_id": F.send_card(chat, content, f"dt-grant-card-{code}")}
+        except F.SendError as e:                 # 同中台卡片：只有 lark-cli 根本没跑起来才算确定没发出去（审查 P1-05）
+            if "跑不起来" in str(e) and "Timeout" not in str(e):
+                raise E.Definite(str(e))
+            raise
+    try:
+        got = E.guard("send_feishu", f"send_feishu:grant-card-{code}", f"chat:grant-{code}",
+                      {"chat": chat, "marker": token, "marker_key": "gate_grant", "msg_type": "interactive"}, do)
+    except (E.Definite, E.Refused) as e:          # 没发出去 / 闸关着、范围冻着：留着下一轮再试
+        return {"code": code, "ok": False, "why": str(e)[:200]}
+    except Exception as e:                       # noqa: BLE001  结果不明：出口账本已记、闸已关
+        AG.mark_card(code, unsure=f"{type(e).__name__}: {str(e)[:200]}")
+        return {"code": code, "ok": False, "unsure": True}
+    mid = got.get("message_id")
+    if not MSG_RE.match(mid or ""):              # 账本说发过却没有消息号（人工结算没填）：不猜
+        AG.mark_card(code, unsure="出口账本记这张卡已发出，但没有消息号，请常浩按消息号结算")
+        return {"code": code, "ok": False, "unsure": True}
+    AG.mark_card(code, mid)
+    return {"code": code, "ok": True, "message_id": mid}
+
+
+def close_grant_card(p):
+    """定了结果的卡原地改成结果（没有按钮）。改成了记 closed；改不成下一轮再试，过了通知重试窗口就不再改、只记日志。"""
+    try:
+        GATE.lark(["im", "messages", "patch", "--message-id", p["card_message"],
+                   "--data", json.dumps({"content": json.dumps(grant_content(p), ensure_ascii=False)}, ensure_ascii=False)],
+                  "改派单确认卡")
+    except F.SendError as e:
+        if A._age(p["decided_at"]) > NOTICE_RETRY_WINDOW:
+            AG.card_closed(p["code"])
+            return {"code": p["code"], "ok": False, "gave_up": True, "why": str(e)[:200]}
+        return {"code": p["code"], "ok": False, "why": str(e)[:200]}
+    AG.card_closed(p["code"])
+    return {"code": p["code"], "ok": True, "closed": p["decision"]}
+
+
+def settle_unsent_card(p):
+    """过期作废、但卡片消息号一直没登记上的提议（#369 P2-01）：只看出口账本、只读对账，不再发卡。
+    账本记着发成了 → 补登记消息号（下一步按 cards_to_close 改成灰卡）；确定没发出去或根本没发过 → 收尾，没有卡要改；
+    在做或结果不明 → 对一次账（对账先把进程确认已结束的「在做」扫成不明；进程还在或查不清的保持在做），对不上留到下一轮；核不清 → 私聊提醒常浩一次，留着等他在 dt-gate 用 autoloop_exits settle 结算。"""
+    import autoloop_exits as E
+    code = p["code"]
+    key = f"send_feishu:grant-card-{code}"
+    row = E.attempt(key)
+    if row and row["state"] in ("executing", "unknown"):   # 「在做」可能是强杀留下的：reconcile 先按进程在不在扫成不明（#369 第 4 轮 P2-01）
+        E.reconcile(scope=f"chat:grant-{code}")
+        row = E.attempt(key)
+    if row is None:
+        AG.card_closed(code, note="没发过确认卡")
+        return {"code": code, "ok": True, "settled": "never_sent"}
+    if row["state"] == "failed":
+        AG.card_closed(code, note="确认卡确定没发出去")
+        return {"code": code, "ok": True, "settled": "not_sent"}
+    if row["state"] == "done" and MSG_RE.match(row["outcome"].get("message_id") or ""):
+        AG.mark_card(code, row["outcome"]["message_id"])
+        return {"code": code, "ok": True, "settled": "found", "message_id": row["outcome"]["message_id"]}
+    if row["state"] in ("unreconciled", "done"):           # done 却没有消息号：同核不清，不猜
+        F.alert(f"gate-grant-unsure-{code}", f"派单确认卡（提议 {code}）发没发出去核不清，提议已过期作废、不会签凭证；"
+                f"如果私聊里有这张卡，它的按钮点了也不认。请在 dt-gate 核实后用 autoloop_exits settle --key {key} 结算。",
+                every=None)
+        return {"code": code, "ok": False, "unreconciled": True}
+    return {"code": code, "ok": False, "state": row["state"]}     # 还在不明或在做：下一轮再对
+
+
+def grant_cards_once():
+    """派单卡线程的一轮：没绑定、收点击不在线就不做；先把过期的标成作废，再发该发的卡，过期但消息号没登记上的只对账收尾，
+    最后改该改的卡。返回这一轮做了什么。"""
+    if not_ready():
+        return []
+    AG.expire_due()
+    chat = binding()["chat_id"]
+    done = []
+    for p in AG.cards_to_send():
+        if time.monotonic() - _GRANT_TRIED.get(p["code"], -GRANT_RETRY) < GRANT_RETRY:
+            continue
+        _GRANT_TRIED[p["code"]] = time.monotonic()
+        done.append(send_grant_card(p, chat))
+    for p in AG.cards_to_settle():
+        key = f"settle-{p['code']}"
+        if time.monotonic() - _GRANT_TRIED.get(key, -GRANT_RETRY) < GRANT_RETRY:
+            continue
+        _GRANT_TRIED[key] = time.monotonic()
+        done.append(settle_unsent_card(p))
+    for p in AG.cards_to_close():
+        key = f"close-{p['code']}"
+        if time.monotonic() - _GRANT_TRIED.get(key, -GRANT_RETRY) < GRANT_RETRY:
+            continue
+        _GRANT_TRIED[key] = time.monotonic()
+        done.append(close_grant_card(p))
+    return done
+
+
+def grant_loop():
+    """常驻：每 GRANT_EVERY 秒一轮；一轮出错只记日志，不弄死线程。"""
+    while True:
+        try:
+            for rec in grant_cards_once():
+                print(json.dumps({"at": F.now(), "grant_card": rec}, ensure_ascii=False), flush=True)
+        except Exception as e:                   # noqa: BLE001
+            print(json.dumps({"at": F.now(), "ok": False, "why": f"派单卡出错：{type(e).__name__}: {str(e)[:200]}"},
+                             ensure_ascii=False), flush=True)
+        time.sleep(GRANT_EVERY)
+
+
+def handle_grant(ev, token, choice):
+    """常浩点了派单确认卡。点击人、私聊不是绑定的就不认（不回话）；令牌、消息号对不上也不回话；其余交网关定结果，
+    然后马上把卡改成结果（改不成由派单卡线程补改，并回一句文字）。"""
+    b = binding()
+    if not b:
+        raise Quiet(GATE.unbound)
+    if ev.get("operator_id") != b["open_id"] or ev.get("chat_id") != b["chat_id"]:
+        raise Quiet("不是绑定的常浩在绑定的私聊里点的")
+    mid = ev.get("message_id")
+    if not MSG_RE.match(mid or ""):
+        raise Quiet("回调没带消息号")
+    try:
+        res = AG.decide(token, choice, mid, ev["event_id"])
+    except AG.CardNotReady:                      # 卡到了、消息号还没登记（同中台卡片 P2-7）：只回点卡的本人，请他再点
+        GATE.send_text(b["chat_id"], "派单确认卡还在登记，请几秒后在卡片上再点一次。", f"gate-grant-retry-{secrets.token_hex(8)}")
+        return {"ok": False, "why": "派单确认卡还在登记，请他稍后再点"}
+    except AG.HubBusy:                           # 中台配置正在变更（#369 第 4 轮 P1-01）：这次不定结果，请他过一会儿再点
+        GATE.send_text(b["chat_id"], "中台配置正在变更，这次点击没有生效，请过一会儿在卡片上再点一次。",
+                       f"gate-grant-busy-{secrets.token_hex(8)}")
+        return {"ok": False, "why": "中台配置正在变更，请他稍后再点"}
+    except AG.Rejected as e:
+        raise Quiet(str(e))
+    if res.get("already"):
+        GATE.send_text(b["chat_id"], f"这张派单确认已经定过了：{grant_words(res)}", f"gate-grant-again-{secrets.token_hex(8)}")
+        return {"ok": False, **res}
+    (p,) = [x for x in AG.cards_to_close() if x["code"] == res["code"]] or [None]
+    closed = close_grant_card(p) if p else {"ok": True}
+    if not closed["ok"]:
+        GATE.send_text(b["chat_id"], f"派单确认：{grant_words(res)}（卡片没改成，稍后自动补改）",
+                       f"gate-grant-said-{secrets.token_hex(8)}")
+    return {"ok": res["decision"] == "approved", **{k: res[k] for k in ("code", "decision", "note") if k in res},
+            **({"task_id": res["task_id"]} if res.get("task_id") else {})}
+
+
+def grant_words(res):
+    if res["decision"] == "approved":
+        return f"已批准，单号 {res.get('task_id')}；{res.get('note') or ''}".rstrip("；")
+    return {"rejected": "不派了", "expired": "已作废（过期）"}.get(res["decision"], f"已作废：{res.get('note') or ''}")
 
 
 LISTENING = threading.Event()                    # 收点击这一端确实在线：这时发出去的卡点了才有人收
@@ -1108,19 +1290,22 @@ def cards_ready():
 
 
 def run():
-    """常驻：后台线程领中台卡片（没绑定、收点击没在线时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟；
+    """常驻：后台线程领中台卡片、发派单确认卡（没绑定、收点击没在线时暂停），前台收点击；长连接断了退避重连（10 秒起，最多 5 分钟；
     在线与否看 bus.log，不用等旧总线退出）。
-    领卡线程死了就整个退出（退出码 3），交给系统服务重启，不留一个只收点击、不发卡的半死进程（审查 P2-3）。
+    领卡或派单卡线程死了就整个退出（退出码 3），交给系统服务重启，不留一个只收点击、不发卡的半死进程（审查 P2-3）。
     启动前核启动方式、代码属 root、卡片库（P1-04、P1-02），不过就不起。"""
     launch_ok()
     cards_trusted()
     F.use(GATE)
     cards = threading.Thread(target=F.run, kwargs={"ready": cards_ready}, daemon=True, name="gate-cards")
     cards.start()
+    grants = threading.Thread(target=grant_loop, daemon=True, name="gate-grants")
+    grants.start()
     wait = 10
     while True:
-        if not cards.is_alive():
-            print(json.dumps({"at": F.now(), "ok": False, "why": "领卡线程停了，退出等重启"}, ensure_ascii=False), flush=True)
+        if not cards.is_alive() or not grants.is_alive():
+            print(json.dumps({"at": F.now(), "ok": False, "why": "领卡或派单卡线程停了，退出等重启"}, ensure_ascii=False),
+                  flush=True)
             sys.exit(3)
         started = time.monotonic()
         try:
