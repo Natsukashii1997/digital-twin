@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 import netwait  # noqa: E402
 
 LARK = os.environ.get("DT_LARK_CLI", "lark-cli")
@@ -55,6 +56,11 @@ def lark(*args):
     if not d.get("ok", True):
         raise Fail(f"{args[0]} {args[1]}：{d.get('error', {}).get('message', '未知错误')[:200]}")
     return d.get("data")
+
+
+def listing(what, *args, key="messages"):
+    """读一个列表并翻到底（#312）：lark-cli 到了页数上限、或只回第一页时不报错，这里接着翻，翻不完报错。"""
+    return lark_pages.read_all(lambda extra: lark(*args, *extra), what, Fail, (key,))[key]
 
 
 def fetch_doc(token):
@@ -140,9 +146,8 @@ def day_range(d):
 
 def messages(d):
     s, e = day_range(d)
-    data = lark("im", "+messages-search", "--start", s, "--end", e, "--page-all", "--page-size", "50",
-                "--no-reactions", "--exclude-sender-type", "bot")
-    return data.get("messages") or []
+    return listing("读当天消息", "im", "+messages-search", "--start", s, "--end", e, "--page-all", "--page-size", "50",
+                   "--no-reactions", "--exclude-sender-type", "bot")
 
 
 def prior_daily(content, d):
@@ -166,14 +171,16 @@ def daily(d):
     msgs = messages(d)
     keep, skipped_groups, skipped_p2p = pick_chats(msgs)
     s, e = day_range(d)
-    meetings = (lark("vc", "+search", "--start", d.isoformat(), "--end", d.isoformat(), "--participant-ids", ME) or {}).get("items") or []
-    minutes = (lark("minutes", "+search", "--start", d.isoformat(), "--end", (d + dt.timedelta(days=1)).isoformat(),
-                    "--participant-ids", "me") or {}).get("items") or []
+    meetings = listing("读会议记录", "vc", "+search", "--start", d.isoformat(), "--end", d.isoformat(), "--participant-ids", ME, key="items")
+    minutes = listing("读妙记", "minutes", "+search", "--start", d.isoformat(), "--end", (d + dt.timedelta(days=1)).isoformat(),
+                      "--participant-ids", "me", key="items")
     agenda = lark("calendar", "+agenda", "--start", s, "--end", e) or []
     mine_spoke = sum(1 for m in msgs if m["sender"].get("id") == ME)
     if d.weekday() >= 5 and not mine_spoke and not meetings and not minutes:
         print(f"SKIP：{wd(d)} 是周末，常浩没有发言、没有会议，不生成（不算断档）")
         return
+
+    related = listing("读任务", "task", "+get-related-tasks", "--include-complete=false", key="items")   # 先取完再输出：读不全时不留半截材料（PR #335 审查）
 
     print(f"# 日报材料：{wd(d)}\n")
     print("## 前一篇的台账\n")
@@ -214,7 +221,7 @@ def daily(d):
     print()
 
     tasks = []   # 只要常浩是负责人、当天新建或截止在 D-7～D+14 的；只关注的、远期的不算
-    for t in (lark("task", "+get-related-tasks", "--include-complete=false") or {}).get("items") or []:
+    for t in related:
         if not any(x.get("id") == ME and x.get("role") == "assignee" for x in t.get("members") or []):
             continue
         due = (t.get("due") or {}).get("timestamp")
