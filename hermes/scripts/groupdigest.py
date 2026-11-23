@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).parent))
+import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 from feishu_home import home_chat  # noqa: E402
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -213,9 +214,11 @@ def locate(mat, ref):
 def fetch_messages(day):
     start = dt.datetime.combine(day, dt.time(0), TZ)
     end = start + dt.timedelta(days=1)
-    data = lark(["im", "+chat-messages-list", "--chat-id", GROUP, "--start", start.isoformat(), "--end", end.isoformat(),
-                 "--order", "asc", "--page-all", "--no-reactions"], "读群消息", "user", wait=WAIT)
-    msgs = [m for m in data.get("messages") or [] if not m.get("deleted")]
+    args = ["im", "+chat-messages-list", "--chat-id", GROUP, "--start", start.isoformat(), "--end", end.isoformat(),
+            "--order", "asc", "--page-all", "--no-reactions"]
+    # --page-all 默认只翻 10 页（约 500 条），到顶不报错；这里接着翻到底，翻不完报错（#312）
+    data = lark_pages.read_all(lambda extra: lark(args + extra, "读群消息", "user", wait=WAIT), "读群消息", Fail)
+    msgs = [m for m in data["messages"] if not m.get("deleted")]
     return [parse_message(m, i) for i, m in enumerate(msgs, 1)]
 
 

@@ -37,7 +37,7 @@ class FakeRun:
         if verb == "+messages-mget":
             return {"messages": [{"content": self.content, "mentions": [{"id": i} for i in (self.mentions or [])]}]}
         if verb == "+chat-members-list":
-            return {"users": [{"member_id": i} for i in self.members]}
+            return {"users": [{"member_id": i} for i in self.members], "has_more": False, "truncations": []}
         if verb == "+chat-messages-list":
             if isinstance(self.group, Exception):
                 raise self.group
@@ -46,6 +46,27 @@ class FakeRun:
 
     def verbs(self):
         return [a[1] for a, _ in self.calls]
+
+
+class PagedRun(FakeRun):
+    """像真的 lark-cli 那样分轮回话（#312）：列表一轮只给 per 条、has_more=true 并给 page_token，后面的要带 --page-token 才给。
+    lose_token：还有下一页却不给标记。truncations：群成员名单被飞书按安全设置截断时带的字段。"""
+    def __init__(self, per, lose_token=False, truncations=None, **kw):
+        super().__init__(**kw)
+        self.per, self.lose_token, self.truncations = per, lose_token, truncations
+
+    def __call__(self, *args, **kw):
+        data = super().__call__(*args, **kw)
+        key = next((k for k in ("messages", "users") if k in data and args[1] in ("+chat-messages-list", "+chat-members-list")), None)
+        if not key:
+            return data
+        start = int(args[args.index("--page-token") + 1]) if "--page-token" in args else 0
+        page = {key: data[key][start:start + self.per], "has_more": start + self.per < len(data[key])}
+        if page["has_more"] and not self.lose_token:
+            page["page_token"] = str(start + self.per)
+        if self.truncations is not None:
+            page["truncations"] = self.truncations
+        return page
 
 
 class Base(unittest.TestCase):
@@ -267,6 +288,51 @@ class TestFeedbackGroup(Base):
             sr.fb_send(self.draft_file(self.d), run=run)
 
 
+class TestGroupMembersReadToTheEnd(Base):
+    """#312：读群成员 --page-all 有页数上限，到顶不报错。只看第一轮会把在群里的人说成不在。"""
+    def setUp(self):
+        super().setUp()
+        self.d = fx("feedback-2026-11-18.draft.json")
+        self.ids = sorted({q["open_id"] for i in self.d["items"] for q in i["quotes"]})
+        sr.save(sr.HOME / "feedback/2026-11-18.json", {**self.d, "dm_message_id": "om_dm"})
+        self.everyone = [f"ou_filler{i}" for i in range(25)] + self.ids   # 被 @ 的人排在第一轮之后
+
+    def test_member_beyond_first_round_is_in_the_group(self):
+        run = PagedRun(10, members=self.everyone, mentions=self.ids)
+        sr.fb_group("2026-11-18", run=run)
+        self.assertIn("+messages-send", run.verbs())
+        members = [a for a, _ in run.calls if a[1] == "+chat-members-list"]
+        self.assertEqual([a[a.index("--page-token") + 1] if "--page-token" in a else None for a in members],
+                         [None] + [str(n) for n in range(10, len(self.everyone), 10)])
+
+    def test_member_list_not_read_to_the_end_does_not_send(self):
+        run = PagedRun(10, lose_token=True, members=self.everyone)
+        with self.assertRaisesRegex(sr.md.Fail, "读群成员：还有下一页，但飞书没给翻页标记，没读全"):
+            sr.fb_group("2026-11-18", run=run)
+        self.assertNotIn("+messages-send", run.verbs())
+
+    def test_truncated_member_list_does_not_send(self):
+        run = PagedRun(100, truncations=[{"bucket": "users"}], members=self.ids[1:])
+        with self.assertRaisesRegex(sr.md.Fail, "读群成员：飞书按安全设置截断了名单"):   # 不报成「某某不在群里」
+            sr.fb_group("2026-11-18", run=run)
+        self.assertNotIn("+messages-send", run.verbs())
+
+    def test_member_list_without_has_more_does_not_send(self):
+        class NoFlag(FakeRun):
+            def __call__(self, *args, **kw):
+                data = super().__call__(*args, **kw)
+                return {"users": data["users"]} if args[1] == "+chat-members-list" else data
+        run = NoFlag(members=self.ids)
+        with self.assertRaisesRegex(sr.md.Fail, "读群成员：返回里没有有效的 has_more，没法确认读没读全"):
+            sr.fb_group("2026-11-18", run=run)
+        self.assertNotIn("+messages-send", run.verbs())
+
+    def test_untruncated_list_still_reports_missing_member(self):
+        run = PagedRun(10, truncations=[], members=self.everyone[:-1])
+        with self.assertRaises(sr.Invalid):
+            sr.fb_group("2026-11-18", run=run)
+
+
 class TestPreviousFromGroup(Base):
     """上一期以群里实际发出的版本为准（2026-11-20 常浩定）：11-19 他自己发群时删了 ✴️ 微信支付截图、加了两条 ♐，
     亚古兽只看私聊存档，把删掉的又带了回来。"""
@@ -336,6 +402,35 @@ class TestPreviousFromGroup(Base):
                  "content": self.msg["content"].split("\n⬆️")[0]}
         st = self.status([first, self.msg])
         self.assertEqual(len(st["carry"]), 3)
+
+    def test_group_post_beyond_first_round_is_found(self):
+        """#312：从上一期那天读到现在，消息多了以后常浩发的那期排在第一轮之后。原来只取第一轮，认不到、退回私聊存档。"""
+        import datetime as dt
+        chatter = [{"message_id": f"om_c{i}", "msg_type": "text", "content": "闲聊", "sender": {"id": "ou_someone"}} for i in range(12)]
+        run = PagedRun(5, group=chatter + [self.msg])
+        st = sr.fb_status(dt.date(2026, 11, 20), run=run)
+        self.assertTrue(st["previous_group_sent"])
+        self.assertEqual([c["type"] for c in st["carry"]], ["planned"] * 3)
+        reads = [a for a, _ in run.calls if a[1] == "+chat-messages-list"]
+        self.assertEqual([a[a.index("--page-token") + 1] if "--page-token" in a else None for a in reads][:3], [None, "5", "10"])
+        self.assertTrue(all(who == "user" for a, who in run.calls if a[1] == "+chat-messages-list"))   # 续翻也用常浩的用户身份
+
+    def test_group_not_read_to_the_end_fails_closed(self):
+        import datetime as dt
+        chatter = [{"message_id": f"om_c{i}", "msg_type": "text", "content": "闲聊", "sender": {"id": "ou_someone"}} for i in range(12)]
+        with self.assertRaisesRegex(sr.md.Fail, "读群里上一期：还有下一页，但飞书没给翻页标记，没读全"):   # 不退回私聊存档
+            sr.fb_status(dt.date(2026, 11, 20), run=PagedRun(5, lose_token=True, group=chatter + [self.msg]))
+
+    def test_group_read_without_has_more_fails_closed(self):
+        """PR #335 审查 P1-01：返回里没有 has_more 时没法证明读全了，不能当成「群里没找到」退回私聊存档。"""
+        import datetime as dt
+
+        class NoFlag(FakeRun):
+            def __call__(self, *args, **kw):
+                data = super().__call__(*args, **kw)
+                return {"messages": data["messages"]} if args[1] == "+chat-messages-list" else data
+        with self.assertRaisesRegex(sr.md.Fail, "读群里上一期：返回里没有有效的 has_more，没法确认读没读全"):
+            sr.fb_status(dt.date(2026, 11, 20), run=NoFlag(group=[]))
 
     def test_group_read_failure_fails_closed(self):
         with self.assertRaises(sr.md.Fail):
