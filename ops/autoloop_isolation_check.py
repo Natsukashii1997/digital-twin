@@ -66,7 +66,7 @@ def try_append(path):
         return ERROR, f"{type(e).__name__}: {e}"
 
 
-def file_checks(main_home):
+def file_checks(main_home, gate_home="/Users/dt-gate"):
     h = Path(main_home)
     out = []
     for name, path in [
@@ -81,6 +81,12 @@ def file_checks(main_home):
         out.append(item("文件", name, r, d))
     r, d = try_append(h / ".agent-autoloop/rules.json")
     out.append(item("文件", "改主账号 rules.json", r, d))
+    g = Path(gate_home)                      # 0E-2 起中台、凭证库、钥匙都在 dt-gate 家里
+    for name, path in [("列出 dt-gate 家目录", g), ("读 dt-gate 中台本人密钥 config.json", g / ".agent-autoloop/config.json")]:
+        r, d = try_read(path)
+        out.append(item("文件", name, r, d))
+    r, d = try_append(g / ".agent-autoloop/rules.json")
+    out.append(item("文件", "改 dt-gate 的 rules.json", r, d))
     return out
 
 
