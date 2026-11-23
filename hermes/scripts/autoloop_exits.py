@@ -38,7 +38,8 @@ executing 先落盘 → 这个动作已经开始（撤不回），冻结的输�
 
   autoloop_exits.py show [--json]                       只读：账本、冻结的范围
   autoloop_exits.py settle --key K --result done|failed --note 说明 --confirm   常浩核实后手动结算一条核不清的
-环境变量：DT_EXITS_DB、DT_GH、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置）。不调用 AI。
+环境变量：DT_EXITS_DB、DT_GH、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置；门卫进程里改由
+autoloop_feishu.use 经 use_reader 换成门卫自己的身份，不看这个变量）。不调用 AI。
 """
 import argparse
 import contextlib
@@ -446,9 +447,23 @@ def read_merge(t, row, now):
     return None, {"state": p.get("state"), "head": p.get("headRefOid")}
 
 
+_READER = [None]
+
+
+def use_reader(fn):
+    """换对账读飞书的机器人（autoloop_feishu.use 换成门卫时调）：fn(args, what) 以那个机器人的身份跑只读 lark-cli、
+    返回 data，出错抛异常。门卫发的消息只有门卫看得到，对账必须用同一个机器人读（#255 L3 P2-22）。"""
+    _READER[0] = fn
+
+
 def lark_read(args, what):
-    """以机器人身份只读调 lark-cli。用哪个机器人的登录配置由 DT_EXITS_LARK_PROFILE 定（默认猛鬼兽应用；0E 搬进 dt-gate 后
-    改成门卫应用——对账读的必须是**发这条消息的那个机器人**能看到的会话，不为对账把别的机器人凭据复制过来，审查 P2-02）。"""
+    """以机器人身份只读调 lark-cli。换过机器人（门卫，use_reader）就用它，否则用 DT_EXITS_LARK_PROFILE 指的登录配置
+    （默认猛鬼兽应用）——对账读的必须是**发这条消息的那个机器人**能看到的会话，不为对账把别的机器人凭据复制过来，审查 P2-02。"""
+    if _READER[0] is not None:
+        try:
+            return _READER[0](args, what)
+        except Exception as e:                   # 门卫的 lark-cli 跑不起来、报错、输出读不懂：一律当读不到（保持不明）
+            raise Unreachable(f"{what}：{str(e)[:200] or type(e).__name__}")
     import tidings_weekly as W
     profile = os.environ.get("DT_EXITS_LARK_PROFILE") or W.PROFILE
     try:
