@@ -90,7 +90,7 @@ class Base(unittest.TestCase):
         self.vault.mkdir()
         (self.vault / "关于我.md").write_text("---\nsensitivity: 受限\n---\n常浩，一个人推进十几个个人项目。", encoding="utf-8")
         (self.tmp / "CLAUDE.md").write_text("# 规则\n## 0. 回复语言\n## 2. Simplicity First\n", encoding="utf-8")
-        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": raw_msgs()}},
+        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": raw_msgs(), "has_more": False}},
                     "docs +create": {"ok": True, "data": {"document": {"url": "https://x.feishu.cn/docx/abc"}}},
                     "+messages-send": {"ok": True, "data": {"message_id": "om_sent"}},
                     "+messages-mget": {"ok": True, "data": {"messages": [{"msg_type": "interactive",
@@ -125,6 +125,33 @@ class Base(unittest.TestCase):
     def collected(self):
         gd.collect(gd.dt.date.fromisoformat(DAY))
         return json.loads((self.dir / f"{DAY}.material.json").read_text(encoding="utf-8"))
+
+
+class ReadToTheEnd(Base):
+    """#312：读群消息 --page-all 默认只翻 10 页，到顶不报错、只留 has_more=true。原来只取第一轮的 messages。"""
+    @staticmethod
+    def rounds(pages):
+        calls = []
+
+        def lark(args, what, identity, cwd=None, wait=0):
+            calls.append((args, what, identity))
+            return pages[args[args.index("--page-token") + 1] if "--page-token" in args else None]
+        return lark, calls
+
+    def test_messages_beyond_first_round_are_read(self):
+        lark, calls = self.rounds({None: {"messages": raw_msgs()[:1], "has_more": True, "page_token": "t2"},
+                                   "t2": {"messages": raw_msgs()[1:3], "has_more": True, "page_token": "t3"},
+                                   "t3": {"messages": raw_msgs()[3:], "has_more": False}})
+        with mock.patch.object(gd, "lark", lark):
+            msgs = gd.fetch_messages(gd.dt.date.fromisoformat(DAY))
+        self.assertEqual([m["id"] for m in msgs], ["M1", "M2", "M3"])          # 三轮都读到；撤回的那条照旧去掉
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(c[0][:2] == ["im", "+chat-messages-list"] and c[2] == "user" for c in calls))   # 续翻也用常浩的用户身份
+
+    def test_not_read_to_the_end_fails_instead_of_truncating(self):
+        lark, _ = self.rounds({None: {"messages": raw_msgs()[:1], "has_more": True}})
+        with mock.patch.object(gd, "lark", lark), self.assertRaisesRegex(gd.Fail, "读群消息：还有下一页，但飞书没给翻页标记，没读全"):
+            gd.fetch_messages(gd.dt.date.fromisoformat(DAY))
 
 
 class Collect(Base):
@@ -292,7 +319,7 @@ class Build(Base):
         self.assertEqual(meta["degraded"], "模型没写成")
 
     def test_没有消息的日子不调模型(self):
-        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": []}}})
+        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": [], "has_more": False}}})
         self.collected()
         with mock.patch.object(gd, "generate") as g:
             meta = gd.build(gd.dt.date.fromisoformat(DAY))
@@ -487,6 +514,115 @@ class Original(unittest.TestCase):
         self.assertEqual(len(panel["elements"]), gd.ORIG_REFS)   # 群消息在前，最多 3 条
         self.assertTrue(panel["elements"][0]["content"].startswith("<font color='grey'>M3"))
         self.assertIsNone(gd.orig_panel(["S2"], self.MAT, 100))
+
+
+# 2026-11-18 真实材料的最小片段（DigitalTwin/groupdigest/2026-11-18.material.json 的 M1、M9，删掉了无关的行）
+ZH4 = "\n".join([
+    "「4条新帖」 「开源」 「播客」",
+    "—— **1/4** · 2026-11-17 23:24:16 北京时间 ——", "**What's going on · 1/4**",
+    "SubCast 开源播客学习工具：能搜索订阅国内外播客、本地 ASR 转写无字幕音视频。",
+    "▶ 1/4 · 原文 · 展开", "    **原文**", "    SubCast 帮你解决播客学习痛点，边听、边问、边学。", "▲",
+    "[查看第 1 条原帖 ↗](https://x.com/vista8/status/2122712433441849731)",
+    "—— **2/4** · 2026-11-18 01:52:45 北京时间 ——", "**What's going on · 2/4**",
+    "想让 AI 写的网站不带「AI 味」：配色学 Vercel 的黑白灰，再用给 Agent 用的组件库。",
+    "▶ 2/4 · 原文 · 展开", "    **原文**", "    想让 AI Coding 出来的网站或工具没有明显的 Slop 味？",
+    "    最佳配色是学 Vercel 风格：黑白灰，永远不会错。", "    推荐还是用 Vercel 做的给 Agent 用的组件库。", "▲",
+    "[查看第 2 条原帖 ↗](https://x.com/vista8/status/2122749798348698021)",
+    "—— **3/4** · 2026-11-18 02:11:13 北京时间 ——", "**What's going on · 3/4**", "Zoom 上线 AI PPT。",
+    "▶ 3/4 · 原文 · 展开", "    **原文**", "    Zoom 也推出 AI PPT 功能了。", "▲",
+    "[查看第 3 条原帖 ↗](https://x.com/vista8/status/2122754446023401868)",
+    "—— **4/4** · 2026-11-18 02:21:17 北京时间 ——", "**What's going on · 4/4**", "一个手写字体 Skill。",
+    "▶ 4/4 · 原文 · 展开", "    **原文**", "    npx skills add byrishi/punchcutter", "▲",
+    "[查看第 4 条原帖 ↗](https://x.com/vista8/status/2122756978216976509)"])
+EN2 = "\n".join([
+    "「2条新帖」 「额度」 「Codex」",
+    "—— **1/2** · 2026-11-18 02:09:24 北京时间 ——", "**What's going on · 1/2**", "Tibo 确认 Pro 200 套餐也加上了 Ultrafast。",
+    "▶ 1/2 · 原文与译文 · 展开", "    **中文**", "    GPT-6.2 Sol 和 Astra *终于*来了。", "    **Original**",
+    "    GPT-6.2 Sol & Astra are *finally* here.", "▲", "[查看第 1 条原帖 ↗](https://x.com/thsottiaux/status/2122753991000133943)",
+    "—— **2/2** · 2026-11-18 02:11:38 北京时间 ——", "**What's going on · 2/2**", "Tibo 补一句：新模型很高效。",
+    "▶ 2/2 · 原文与译文 · 展开", "    **中文**", "    这些模型极其高效，你能从完成任务的速度、成本以及额度能用多久上感受到。",
+    "    **Original**", "    These models are extremely efficient, which you feel in speed to complete tasks", "▲",
+    "[查看第 2 条原帖 ↗](https://x.com/thsottiaux/status/2122754551187132438)"])
+ZH1 = ("「新帖」\n**What's going on**\n宝玉整理 GPT-6.2 发布要点。\n▶ 原文 · 展开\n    **原文**\n"
+       "    OpenAI 发布 GPT-6.2 Astra 和 Sol\n▲\n📝 时间\n[查看 X 原帖 ↗](https://x.com/dotey/status/2122755808689549335)")
+
+
+class MultiPost(unittest.TestCase):
+    """11-19 常浩投诉「总结和原文根本对不上」：多帖卡片按帖拆子编号，面板和链接按子帖取，只写 M1 不放第 1 帖冒充。"""
+
+    @staticmethod
+    def item(i, text, title, kind="card"):
+        links = list(dict.fromkeys(gd.strip_url(u) for u in gd.URL.findall(text)))
+        gist = gd.GIST.search(text)
+        return {"id": f"M{i}", "time": "08:00", "sender": "X.COM", "kind": kind, "title": title, "subtitle": "",
+                "gist": gist.group(1).strip() if gist else None, "text": text, "links": links,
+                "x_url": next((u for u in links if "/status/" in u), None), "app_link": f"https://applink.feishu.cn/x?position={i}"}
+
+    def setUp(self):
+        self.mat = {"items": [self.item(1, ZH4, "向阳乔木 @vista8"), self.item(9, EN2, "Tibo @thsottiaux"),
+                              self.item(10, ZH1, "宝玉 @dotey"),
+                              dict(self.item(3, "这个 prompt-audit 我试了", None, kind="text"), sender="张三")],
+                    "sources": []}
+
+    def test_拆帖_子编号_摘要_原帖链接(self):
+        posts = gd.posts_of(self.mat["items"][0])
+        self.assertEqual([p["id"] for p in posts], ["M1.1", "M1.2", "M1.3", "M1.4"])
+        self.assertIn("黑白灰", posts[1]["gist"])
+        self.assertEqual(posts[1]["x_url"], "https://x.com/vista8/status/2122749798348698021")
+        self.assertEqual(gd.posts_of(self.mat["items"][2]), [])   # 单帖卡片
+        self.assertEqual(gd.posts_of(self.mat["items"][3]), [])   # 成员发言
+        links = gd.link_of(self.mat)
+        self.assertEqual(links["M1.2"], "https://x.com/vista8/status/2122749798348698021")
+        self.assertEqual(links["M9.2"], "https://x.com/thsottiaux/status/2122754551187132438")
+        view = gd.model_view(dict(self.mat, group={"name": "群"}, day="d", context={}, coverage={}))
+        self.assertEqual([p["id"] for p in view["items"][0]["posts"]], ["M1.1", "M1.2", "M1.3", "M1.4"])
+        self.assertNotIn("posts", view["items"][2])
+
+    def test_中文多帖_M1点2_面板是第2帖原文(self):
+        t = gd.original_md("M1.2", self.mat, 700)
+        self.assertIn("M1.2 · 向阳乔木 @vista8", t)
+        self.assertIn("**原文**", t)
+        self.assertIn("黑白灰", t)
+        self.assertNotIn("SubCast", t)
+        self.assertNotIn("Zoom", t)
+
+    def test_英文多帖_M9点2_面板是第2帖中文和Original(self):
+        t = gd.original_md("M9.2", self.mat, 700)
+        for want in ("**中文**", "这些模型极其高效", "**Original**", "These models are extremely efficient"):
+            self.assertIn(want, t)
+        self.assertNotIn("Ultrafast", t)
+        self.assertNotIn("finally", t)
+
+    def test_多帖卡片只写M1_不放第1帖冒充_核对打回(self):
+        self.assertIsNone(gd.original_md("M1", self.mat, 700))
+        self.assertIsNone(gd.orig_panel(["M1"], self.mat, 700))
+        self.assertIsNone(gd.original_md("M1.9", self.mat, 700))   # 没有这一帖
+        fields = {"highlights": [{"title": "去 AI 味", "detail": "黑白灰", "refs": ["M1"]}], "todo": [], "consider": []}
+        report = "\n\n".join(f"## {s}\n内容 [M1.2] [M9]" for s in gd.SECTIONS)
+        errs, _, _ = gd.check(self.mat, fields, report)
+        self.assertTrue(any("highlights 第 1 条只写了 M1" in e and "M1.1 到 M1.4" in e for e in errs), errs)
+        self.assertTrue(any("完整报告只写了 M9" in e for e in errs), errs)
+        fields["highlights"][0]["refs"] = ["M1.2"]
+        errs, _, _ = gd.check(self.mat, fields, report.replace("[M9]", "[M9.2][M10][M3]"))
+        self.assertEqual(errs, [])
+        self.assertEqual(gd.render_refs("见 [M1.2][M3]", gd.link_of(self.mat)),
+                         "见 [M1.2](https://x.com/vista8/status/2122749798348698021)[M3](https://applink.feishu.cn/x?position=3)")
+
+    def test_单帖卡片和成员发言不变_中文单帖认原文段(self):
+        t = gd.original_md("M10", self.mat, 700)
+        self.assertIn("OpenAI 发布 GPT-6.2 Astra 和 Sol", t)
+        self.assertIn("**原文**", t)
+        self.assertIn("张三", gd.original_md("M3", self.mat, 700))
+        self.assertIn("prompt-audit", gd.original_md("M3", self.mat, 700))
+
+    def test_事实版和材料目录按帖列(self):
+        fields, _ = gd.fallback(self.mat, "核对没通过")
+        self.assertEqual([h["refs"] for h in fields["highlights"]][:6],
+                         [["M1.1"], ["M1.2"], ["M1.3"], ["M1.4"], ["M9.1"], ["M9.2"]])
+        self.assertIn("黑白灰", fields["highlights"][1]["detail"])
+        idx = gd.material_index(self.mat)
+        self.assertIn("- M1 08:00 向阳乔木 @vista8：共 4 帖", idx)
+        self.assertIn("  - [M1.2](https://x.com/vista8/status/2122749798348698021) 想让 AI 写的网站", idx)
 
 
 class Dispatch(Base):

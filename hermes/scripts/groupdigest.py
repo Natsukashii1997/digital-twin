@@ -10,6 +10,7 @@
 定时任务：10:00 groupdigest_build_job.py（collect + build），10:45 groupdigest_send_job.py（send）。
 
 防编造：模型只写材料编号（M3 是第 3 条群消息，S2 是第 2 个源头），链接由脚本按编号填；报告里出现材料以外的网址就不通过。
+多帖卡片（一张卡片里「—— **1/4** · 时间 ——」分好几帖）按帖拆子编号 M1.2，出处必须写到帖子一级，原文面板和链接都按子帖取。
 统计日是前一天 00:00 到 24:00（北京时间）。群内容是外部群里的公开分享，只发常浩私聊。
 Vault 个人上下文是受限内容：只交给模型读，报告里只写结论，不贴原文（PRD 8.3）；material.json 权限 600。
 
@@ -36,6 +37,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).parent))
+import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 from feishu_home import home_chat  # noqa: E402
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -78,8 +80,13 @@ LISTS = {"highlights": (("title", "detail"), (), 0, 6),   # 常浩 11-17：只�
 EMPTY_FIELDS = {"highlights": [], "todo": [], "consider": []}
 DONE_CLAIM = re.compile(r"已(?:经)?(?:帮你)?(?:写入|采纳|加进|加入|改好|装好|安装|落地)")
 URL = re.compile(r"https?://[^\s<>\"'()\[\]（）【】，。；！？]+")
-REF = re.compile(r"\[([MS])(\d+)\](?!\()")
+REF = re.compile(r"\[([MS]\d+(?:\.\d+)?)\](?!\()")   # [M3]、[M1.2]、[S2]，后面紧跟 ( 的是已填链接
 CARD_HEAD = re.compile(r'<card title="([^"]*)"(?: subtitle="([^"]*)")?>')
+GIST = re.compile(r"\*\*What's going on[^*\n]*\*\*\s*\n(.+)")      # 多帖卡片写「What's going on · 1/2」
+POST_HEAD = re.compile(r"^—— \*\*(\d+)/(\d+)\*\*")                   # 多帖卡片每帖开头：—— **2/4** · 时间 ——
+POST_LINK = re.compile(r"\[查看第 \d+ 条原帖 ↗\]\((https?://[^)\s]+)\)")
+ORIG_HEAD = re.compile(r"原文(?:与译文)?\s*·\s*展开")                 # 中文博主「原文 · 展开」，英文博主「原文与译文 · 展开」
+ORIG_LABELS = ("**原文**", "**中文**", "**Original**")
 
 
 class Fail(Exception):
@@ -167,7 +174,7 @@ def parse_message(m, i):
     body = html.unescape(re.sub(r"</?card[^>]*>", "", content)).strip()
     links = list(dict.fromkeys(strip_url(u) for u in URL.findall(body)))
     x = next((u for u in links if host_of(u) in ("x.com", "twitter.com") and "/status/" in u), None)
-    gist = re.search(r"\*\*What's going on[^*\n]*\*\*\s*\n(.+)", body)   # 多帖卡片写「What's going on · 1/2」
+    gist = GIST.search(body)
     sender = m.get("sender") or {}
     return {"id": f"M{i}", "time": str(m.get("create_time") or "")[-5:], "sender": sender.get("name") or "群成员",
             "kind": kind, "title": html.unescape(head.group(1)) if head else None,
@@ -176,12 +183,42 @@ def parse_message(m, i):
             "links": links, "x_url": x, "app_link": m.get("message_app_link")}
 
 
+def posts_of(item):
+    """多帖卡片按帖拆开：[{id: M1.2, gist, text, x_url}]，text 是这一帖的整段；单帖卡片、成员发言返回 []。
+    从 text 现拆，不写进材料文件，旧的 material.json 也能用（11-19 修面板放错帖子）。"""
+    if item.get("kind") != "card":
+        return []
+    lines = (item.get("text") or "").splitlines()
+    marks = [(k, m.group(1)) for k, l in enumerate(lines) if (m := POST_HEAD.match(l.strip()))]
+    if len(marks) < 2:
+        return []
+    out = []
+    for n, (k, num) in enumerate(marks):
+        seg = "\n".join(lines[k:marks[n + 1][0] if n + 1 < len(marks) else len(lines)])
+        gist, link = GIST.search(seg), POST_LINK.search(seg)
+        out.append({"id": f"{item['id']}.{num}", "gist": gist.group(1).strip() if gist else None, "text": seg,
+                    "x_url": strip_url(link.group(1)) if link else None})
+    return out
+
+
+def locate(mat, ref):
+    """编号 → (群消息条目, 子帖)。M3 → (条目, None)；M1.2 → (条目, 第 2 帖)；找不到 → (None, None)。"""
+    base = ref.split(".")[0]
+    item = next((i for i in mat["items"] if i["id"] == base), None)
+    if item is None or base == ref:
+        return item, None
+    post = next((p for p in posts_of(item) if p["id"] == ref), None)
+    return (item, post) if post else (None, None)
+
+
 def fetch_messages(day):
     start = dt.datetime.combine(day, dt.time(0), TZ)
     end = start + dt.timedelta(days=1)
-    data = lark(["im", "+chat-messages-list", "--chat-id", GROUP, "--start", start.isoformat(), "--end", end.isoformat(),
-                 "--order", "asc", "--page-all", "--no-reactions"], "读群消息", "user", wait=WAIT)
-    msgs = [m for m in data.get("messages") or [] if not m.get("deleted")]
+    args = ["im", "+chat-messages-list", "--chat-id", GROUP, "--start", start.isoformat(), "--end", end.isoformat(),
+            "--order", "asc", "--page-all", "--no-reactions"]
+    # --page-all 默认只翻 10 页（约 500 条），到顶不报错；这里接着翻到底，翻不完报错（#312）
+    data = lark_pages.read_all(lambda extra: lark(args + extra, "读群消息", "user", wait=WAIT), "读群消息", Fail)
+    msgs = [m for m in data["messages"] if not m.get("deleted")]
     return [parse_message(m, i) for i, m in enumerate(msgs, 1)]
 
 
@@ -337,7 +374,12 @@ def collect(day):
 
 def model_view(mat):
     """交给模型的材料：去掉网址（模型只认编号），留下判断要用的东西。"""
-    items = [{k: v for k, v in i.items() if k not in ("links", "x_url", "app_link")} for i in mat["items"]]
+    items = []
+    for i in mat["items"]:
+        row = {k: v for k, v in i.items() if k not in ("links", "x_url", "app_link")}
+        if posts_of(i):   # 多帖卡片列出每帖的编号和摘要，出处要写到帖子一级
+            row["posts"] = [{"id": p["id"], "gist": p["gist"]} for p in posts_of(i)]
+        items.append(row)
     srcs = [{"id": s["id"], "from": s["from"], "title": s["title"], "host": host_of(s["url"]), "text": s["text"]}
             for s in mat["sources"] if s["ok"]]
     return {"day": mat["day"], "group": mat["group"]["name"], "items": items, "sources": srcs,
@@ -406,6 +448,8 @@ def link_of(mat):
     out = {}
     for i in mat["items"]:
         out[i["id"]] = i["x_url"] or (i["links"][0] if i["links"] else None) or i["app_link"]
+        for p in posts_of(i):   # 子帖指向这一帖的原帖；没有就指飞书消息，不借第 1 帖的链接
+            out[p["id"]] = p["x_url"] or i["app_link"]
     for s in mat["sources"]:
         out[s["id"]] = s["url"]
     return out
@@ -431,7 +475,14 @@ def check(mat, fields, report):
     """核对模型稿。返回 (问题清单, 提醒清单, 规整后的卡片要素)。问题清单不空就不能发。"""
     errs, warns = [], []
     ids = set(link_of(mat))
+    multi = {i["id"]: len(posts_of(i)) for i in mat["items"] if posts_of(i)}   # 多帖卡片 → 帖数
     out = {}
+
+    def whole(refs, where):
+        # 多帖卡片只写 M1 分不出讲的是哪一帖（11-18 面板放错帖子），打回重写；再不过出事实版
+        for x in refs:
+            if x in multi:
+                errs.append(f"{where}只写了 {x}：它是 {multi[x]} 帖的多帖卡片，要写到具体哪一帖（{x}.1 到 {x}.{multi[x]}）")
 
     def too_long(v, limit_key, name):
         # 字数是给模型的上限；略超照用（截在半句话上更难读，11-13 实测），超过 1.5 倍才打回重写
@@ -467,6 +518,7 @@ def check(mat, fields, report):
                 errs.append(f"{key} 第 {n} 条没有出处编号")
             if bad:
                 errs.append(f"{key} 第 {n} 条引用了材料里没有的编号 {'、'.join(bad)}")
+            whole(refs, f"{key} 第 {n} 条")
             row["refs"] = refs
             if key == "highlights":
                 row["read"] = r.get("read") is True
@@ -496,9 +548,10 @@ def check(mat, fields, report):
         errs.append(f"完整报告缺板块：{'、'.join(missing)}")
     elif pos != sorted(pos):
         errs.append("完整报告的板块顺序不对")
-    bad_refs = sorted({f"{k}{n}" for k, n in REF.findall(report)} - ids)
+    bad_refs = sorted(set(REF.findall(report)) - ids)
     if bad_refs:
         errs.append(f"完整报告引用了材料里没有的编号 {'、'.join(bad_refs)}")
+    whole(sorted(set(REF.findall(report))), "完整报告")
     ok_urls = allowed_urls(mat)
     card_text = json.dumps(out, ensure_ascii=False)
     foreign = sorted({u for u in (strip_url(x) for x in URL.findall(report + "\n" + card_text))
@@ -515,8 +568,7 @@ def check(mat, fields, report):
 
 
 def render_refs(text, links):
-    return REF.sub(lambda m: f"[{m.group(1)}{m.group(2)}]({links[m.group(1) + m.group(2)]})"
-                   if links.get(m.group(1) + m.group(2)) else m.group(0), text)
+    return REF.sub(lambda m: f"[{m.group(1)}]({links[m.group(1)]})" if links.get(m.group(1)) else m.group(0), text)
 
 
 def coverage_md(mat):
@@ -531,7 +583,7 @@ def coverage_md(mat):
         lines.append("- 没读到的源头：" + "；".join(f"[{s['id']}]({s['url']})（{s['error']}）" for s in failed))
     if mat["context"]["errors"]:
         lines.append("- 你的坐标没读全：" + "；".join(mat["context"]["errors"]))
-    lines.append("- 链接都由脚本按材料编号填；M 是群消息（优先指向 X 原帖），S 是源头原文。")
+    lines.append("- 链接都由脚本按材料编号填；M 是群消息（优先指向 X 原帖，多帖卡片的 M1.2 指向第 2 帖），S 是源头原文。")
     return "\n".join(lines)
 
 
@@ -541,6 +593,12 @@ def material_index(mat):
     rows = ["## 附：材料目录", ""]
     for i in mat["items"]:
         name = i["title"] or i["sender"]
+        posts = posts_of(i)
+        if posts:   # 多帖卡片：卡片一行，每帖一行
+            rows.append(f"- {i['id']} {i['time']} {name}：共 {len(posts)} 帖")
+            rows += [f"  - [{p['id']}]({links[p['id']]}) {clip(p['gist'] or '', 80)}" if links[p["id"]]
+                     else f"  - {p['id']} {clip(p['gist'] or '', 80)}" for p in posts]
+            continue
         rows.append(f"- [{i['id']}]({links[i['id']]}) {i['time']} {name}：{clip(i['gist'] or i['text'].splitlines()[0], 80)}"
                     if links[i["id"]] else f"- {i['id']} {i['time']} {name}：{clip(i['gist'] or i['text'], 80)}")
     for s in mat["sources"]:
@@ -551,9 +609,10 @@ def material_index(mat):
 def fallback(mat, reason):
     """事实版：模型没写成或核对不过时，只列原始内容和链接，不做分析。"""
     cards = [i for i in mat["items"] if i["kind"] == "card"] or mat["items"]
+    rows = [(i, p) for i in cards for p in (posts_of(i) or [i])]   # 多帖卡片每帖一条，出处写到子帖
     fields = dict(EMPTY_FIELDS, highlights=[{"title": clip(i["title"] or i["sender"], LIMITS["title"]),
-                               "detail": clip(i["gist"] or i["text"].splitlines()[0], LIMITS["detail"]),
-                               "read": False, "refs": [i["id"]]} for i in cards[:8]])
+                               "detail": clip(p["gist"] or p["text"].splitlines()[0], LIMITS["detail"]),
+                               "read": False, "refs": [p["id"]]} for i, p in rows[:8]])
     report = "\n\n".join([f"> 这是事实版：{reason}。下面只列原始内容和链接，没有分析。",
                           "## 昨天群里的全部内容", material_index(mat).split("\n", 2)[2]])
     return fields, report
@@ -673,20 +732,24 @@ CARD_MAX = 27000    # 卡片 JSON 字节上限（飞书卡片约 30KB，留余�
 
 def original_md(ref, mat, n):
     """一条出处的原文（常浩 11-17：要群里 X 卡片那种「原文与译文 · 展开」）。
-    X 卡片取「原文与译文」那段（中文 + Original），没有就取摘要；群成员发言取原话；源头取标题加开头一段。"""
-    item = next((i for i in mat["items"] if i["id"] == ref), None)
+    X 卡片取「原文 · 展开」（中文博主，只有原文）或「原文与译文 · 展开」（中文 + Original）那段，没有就取同一帖的摘要；
+    多帖卡片按子编号 M1.2 只取那一帖，只写 M1 的不放（分不出讲的是哪一帖，宁缺不错）；群成员发言取原话；源头取标题加开头一段。"""
+    item, post = locate(mat, ref)
     if item:
+        if post is None and posts_of(item):
+            return None
+        seg = post or item
         who = item.get("title") or item.get("sender") or ""
-        lines = (item.get("text") or "").splitlines()
-        start = next((k for k, l in enumerate(lines) if "原文与译文" in l), None)
+        lines = (seg.get("text") or "").splitlines()
+        start = next((k for k, l in enumerate(lines) if ORIG_HEAD.search(l)), None)
         if start is not None:
             end = next((k for k in range(start + 1, len(lines)) if lines[k].strip() == "▲"), len(lines))
             body = [l.strip() for l in lines[start + 1:end] if l.strip()]
         else:
-            body = [item.get("gist") or item.get("text") or ""]
+            body = [seg.get("gist") or seg.get("text") or ""]
         out, used = [], 0
         for l in body:
-            if l in ("**中文**", "**Original**"):
+            if l in ORIG_LABELS:
                 out.append(f"**{l.strip('*')}**")
                 continue
             if used >= n:
