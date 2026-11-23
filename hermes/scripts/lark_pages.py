@@ -23,13 +23,14 @@ class Incomplete(Exception):
     pass
 
 
-def read_all(fetch, what, error=Incomplete, keys=("messages",), optional=(), rounds=ROUNDS):
+def read_all(fetch, what, error=Incomplete, keys=("messages",), optional=(), rounds=ROUNDS, exhausted=None):
     """把一个列表读全，返回 {键: [全部条目]}。
 
     fetch(extra)：跑一次 lark-cli 读命令并返回它的 data；extra 是要追加的参数（第一轮是 []，之后是 ["--page-token", 标记]）。
     what：报错时说在读什么。error：没法证明读全时抛哪种异常（各脚本传自己的 Fail，沿用它们已有的失败处理）。
     keys：data 里要攒起来的列表字段，每一轮都必须有、必须是列表。
-    optional：可以没有（或是 null）的列表字段，有就必须是列表（群成员的 truncations）。"""
+    optional：可以没有（或是 null）的列表字段，有就必须是列表（群成员的 truncations）。
+    exhausted：翻到 rounds 轮上限时抛哪种异常（连得上、确定读不全，#338 出口账本要单独认出来）；不给就用 error。"""
     out, token, seen = {k: [] for k in (*keys, *optional)}, None, set()
     for _ in range(rounds):
         data = fetch(["--page-token", token] if token else [])
@@ -54,4 +55,4 @@ def read_all(fetch, what, error=Incomplete, keys=("messages",), optional=(), rou
         if token in seen:
             raise error(f"{what}：翻页标记和前面重复，没读全")
         seen.add(token)
-    raise error(f"{what}：翻了 {rounds} 轮还没到底，没读全，不截断着用")
+    raise (exhausted or error)(f"{what}：翻了 {rounds} 轮还没到底，没读全，不截断着用")

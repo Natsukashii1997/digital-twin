@@ -55,6 +55,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoloop_grants as G  # noqa: E402
+import hub_listener  # noqa: E402
 
 SOURCE = "hermes"
 WORKER = "dt-worker"
@@ -63,8 +64,8 @@ PROGRAM_DIR = "/Users/Shared/dt-autoloop/bin"     # 工人侧启动脚本（ops/
 NEW_CHANNELS = ("feishu", "secretary")
 SECRETARY = "秘书"
 PAUSE_REASON = "0C 启动脚本就绪前暂停（#195 0B-2），由常浩决定恢复"
-PROMPT = ("这一轮的事件对象是任务单号。任务的五要素在 /Users/Shared/dt-autoloop/tasks/<任务单号>.md；"
-          "开工前核对 /Users/Shared/dt-autoloop/grants/status.json 里这张单有效、动作在列。"
+PROMPT = ("这一轮的事件对象是任务单号。任务的五要素在 /Users/Shared/dt-gate/tasks/<任务单号>.md；"
+          "开工前核对 /Users/Shared/dt-gate/grants/status.json 里这张单有效、动作在列。"
           "只做任务单写明的范围，只改文件、推非 main 分支、开 PR，不合并。")
 KEY_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 LOCK_WAIT = 10.0                          # 等另一个配置操作结束的最长秒数
@@ -220,6 +221,7 @@ def hub(method, path, body=None):
                                  headers={"Authorization": f"Bearer {owner}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
+        hub_listener.check(url)                  # dt-gate 里：端口上不是 dt-gate 在听就不带本人密钥去（0E-2）
         with opener.open(req, timeout=15) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:

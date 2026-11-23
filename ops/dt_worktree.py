@@ -13,7 +13,7 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
      正在重新加载、刚唤醒没刷新、刚开机还没核对这三种临时情况给「没跑成」由中台重派，其余给「停下了」（审查第 4 轮 P2-1）。
      这一轮的事件都来自 hermes 来源、事项（subject）是同一个任务单号；派单事件的类型是
      dispatch.<仓库>.<执行方>.write、detail 里的单号对得上；回答和复查事件沿用这张单上次派单的代次。
-     读工人只读的凭证镜像（/Users/Shared/dt-autoloop/grants/status.json）和任务单（tasks/<单号>.md）：凭证有效、没过期、
+     读工人只读的凭证镜像（/Users/Shared/dt-gate/grants/status.json，0E-2 起由 dt-gate 写）和任务单（tasks/<单号>.md）：凭证有效、没过期、
      允许改文件、代次是当前的且没作废、执行方 / 仓库 / 规则名对得上、任务单五要素的哈希等于凭证记的范围哈希；
      续接时还要和第一轮钉下的范围哈希、仓库、执行方一致（续接后范围不扩大）；这张单累计用时没到上限（2 小时）。
   2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 <执行方>/<单号>（如 claude/t-…），基线是第一轮时的 origin/main；
@@ -37,7 +37,7 @@ PR 审查、常浩合并兜底，0D 的结果账本记「轮次 × 交接头提�
 这里的检查只防正常流程出错，不当作不可绕过的边界：脚本归主账号所有、工人只能运行不能改，但工人账号的进程能伪造镜像
 路径之类；真正的边界在主账号的受信发布（再按凭证库核一遍）和 GitHub 保护（方案 5.1 第 3 条）。
 
-只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_AUTOLOOP_SHARED、DT_GRANTS_STATUS、
+只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_GATE_SHARED、DT_GRANTS_STATUS、
 DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET、DT_PF_STATUS。
 """
 import datetime as dt
@@ -106,16 +106,17 @@ def stopped():
 
 
 # ---------- 路径 ----------
-def shared():
-    return Path(os.environ.get("DT_AUTOLOOP_SHARED") or "/Users/Shared/dt-autoloop")
+def gate_shared():
+    """dt-gate 的共享目录（ADR-015 0E-2）：root 建、grants/ 和 tasks/ 只有 dt-gate 能写，工人只读。"""
+    return Path(os.environ.get("DT_GATE_SHARED") or "/Users/Shared/dt-gate")
 
 
 def status_path():
-    return Path(os.environ.get("DT_GRANTS_STATUS") or shared() / "grants/status.json")
+    return Path(os.environ.get("DT_GRANTS_STATUS") or gate_shared() / "grants/status.json")
 
 
 def tasks_dir():
-    return Path(os.environ.get("DT_GRANTS_TASKS") or shared() / "tasks")
+    return Path(os.environ.get("DT_GRANTS_TASKS") or gate_shared() / "tasks")
 
 
 def work_root():

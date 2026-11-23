@@ -14,7 +14,7 @@
 
 网关只有两个入口往中台发 hermes 来源的事件：approve（本人批准建任务）和 resume（凭证有效时续接：重派、返修、更正）。
 事件只带单号、代次和类别（方案 5.1 第 1 条「凭证内容不进事件」）；五要素原文写在工人只读的任务单
-/Users/Shared/dt-autoloop/tasks/<单号>.md（644，不含消息号），0C 的启动脚本据此取任务。
+/Users/Shared/dt-gate/tasks/<单号>.md（644，不含消息号；0E-2 起在 dt-gate 的共享目录），0C 的启动脚本据此取任务。
 
 发事件（send_pending）：先记账后发。每个事件在一个写事务里：先按已提交的状态重写镜像（写不成就不领取、不发），
 再现读凭证判定（状态、到期、作废代次、代次）后领取（在途），提交后才 POST；送达后条件更新为已送达。所以发出去的每个事件，
@@ -35,7 +35,7 @@
 关着就不发（事件留在账里，开闸后 send-pending 补发）；冻结、撤销照常立刻生效，输出里的 in_flight 列出冻结前已经开始的
 受保护动作（出口账本 autoloop_exits 在凭证库写锁里落盘 executing，所以和冻结有先后，见那边的头注释）。
 
-工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-autoloop/grants/status.json（状态、代次、到期、动作）和
+工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-gate/grants/status.json（状态、代次、到期、动作）和
 任务单，读不到凭证库，也改不了镜像。check() 是主账号出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
 工人侧按镜像做的检查只防正常流程误操作，不当作不可绕过的边界；权威判定在主账号的出口（方案 5.1 第 3 条）。
 
@@ -78,6 +78,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import hub_listener  # noqa: E402
 import twin_identity as I  # noqa: E402
 
 TZ = dt.timezone(dt.timedelta(hours=8))
@@ -197,11 +198,11 @@ def db_path():
 
 
 def status_path():
-    return Path(os.environ.get("DT_GRANTS_STATUS") or "/Users/Shared/dt-autoloop/grants/status.json").expanduser()
+    return Path(os.environ.get("DT_GRANTS_STATUS") or "/Users/Shared/dt-gate/grants/status.json").expanduser()
 
 
 def tasks_dir():
-    return Path(os.environ.get("DT_GRANTS_TASKS") or "/Users/Shared/dt-autoloop/tasks").expanduser()
+    return Path(os.environ.get("DT_GRANTS_TASKS") or "/Users/Shared/dt-gate/tasks").expanduser()
 
 
 def now_tz():
@@ -396,6 +397,7 @@ def post_event(body):
                                  headers={"Authorization": f"Bearer {source_key()}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
+        hub_listener.check(hub_url())            # dt-gate 里：端口上不是 dt-gate 在听就不带来源钥匙去（0E-2）
         with opener.open(req, timeout=15) as r:
             return json.loads(r.read().decode())["event"]
     except urllib.error.HTTPError as e:
@@ -873,7 +875,14 @@ def unfreeze(message_id, now=None, path=None):
     return _publish_after_commit({"task_id": row["task_id"], "status": "active", "generation": gen}, path, now)
 
 
-def show(task_id=None, path=None):
+SENT_WORDS = {0: "待发", 2: "在途或结果不明", 1: "已送到中台", -1: "作废没发", -2: "作废前已领取（可能已送达，靠代次拦）"}
+
+
+def show(task_id=None, path=None, now=None):
+    """不改任何数据（但走的是写事务 tx：会短暂拿凭证库写锁，库不存在时会新建空库）。除了凭证字段，另给两样查进度要用的（autoloop 技能读）：usable / why_not 是按现在的时间现判的
+    「这张凭证现在还能不能用」（status 写着 active 的凭证过了 valid_until 也不能用，和 check() 同一套判定）；
+    events 是这张单每个派单事件送没送到中台。"""
+    now = now or now_tz()
     with tx(path) as con:
         rows = [grant_row(con, task_id)] if task_id else list(con.execute("SELECT * FROM grants ORDER BY created_at"))
         out = []
@@ -881,12 +890,18 @@ def show(task_id=None, path=None):
             d = {k: r[k] for k in r.keys() if k not in ("scope_text", "approval_message", "freeze_code")}
             d["actions"] = json.loads(r["actions"])
             d["voided_generations"] = sorted(voided_of(con, r["task_id"]))
+            d["why_not"] = check_row(r, None, r["generation"], now, d["voided_generations"])
+            d["usable"] = d["why_not"] is None
+            d["events"] = [{"event_key": e["event_key"], "kind": e["kind"], "generation": e["generation"],
+                            "state": SENT_WORDS[e["sent"]], "hub_event": e["hub_event"], "at": e["at"]}
+                           for e in con.execute("SELECT * FROM hub_events WHERE task_id = ? ORDER BY at, rowid",
+                                                (r["task_id"],))]
             out.append(d)
         return out
 
 
 # ---------- 命令行 ----------
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("propose")
@@ -913,7 +928,11 @@ def main(argv=None):
     p.add_argument("--generation", type=int, required=True)
     sub.add_parser("show").add_argument("--task")
     sub.add_parser("send-pending")
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
     try:
         if a.cmd == "propose":
             out = propose(a.repo, a.executor, Path(a.scope_file).read_text(encoding="utf-8"), a.hours)
