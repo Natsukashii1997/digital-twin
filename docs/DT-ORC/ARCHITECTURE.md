@@ -1,10 +1,10 @@
 # Hermes Digital Twin × Multica｜数字分身工程化整合总架构
 
 > **项目代号**：DT-ORC（沿用代号，不再指 ORCA）  
-> **架构版本**：**V5.3.0**（按策略合并后的主目录拉齐按名单，ADR-016 修订 1；V5.2.0 合并放权：L0–L2 由合并执行器按策略合并、影子门槛废止，ADR-016；V5.1.1 #132 合并隔离实测后的事实更新，ADR-014 修订 2；V5.1.0 托管通道改走 Multica issue，ADR-014 修订 1；V5.0.0 新增托管状态 `custody_state`，ADR-014）  
-> **发布日期**：2026-11-23（V5.3.0）；2026-11-20（V5.2.0）；2026-11-10（V5.1.1）；2026-11-09（V5.1；V5.0 同日）  
+> **架构版本**：**V5.4.0**（Skills 体系改按 [`docs/技能架构.md`](../技能架构.md)：8.3「初期六个精简 Skills」由技能架构基线 v2 取代，8.4 改成三层治理，不改变任何授权档位，#357；V5.3.0 按策略合并后的主目录拉齐按名单，ADR-016 修订 1；V5.2.0 合并放权：L0–L2 由合并执行器按策略合并、影子门槛废止，ADR-016；V5.1.1 #132 合并隔离实测后的事实更新，ADR-014 修订 2；V5.1.0 托管通道改走 Multica issue，ADR-014 修订 1；V5.0.0 新增托管状态 `custody_state`，ADR-014）  
+> **发布日期**：2026-11-23（V5.4.0、V5.3.0）；2026-11-20（V5.2.0）；2026-11-10（V5.1.1）；2026-11-09（V5.1；V5.0 同日）  
 > **唯一正式路径**：`docs/DT-ORC/ARCHITECTURE.md`  
-> **上一版**：V5.2.0（2026-11-20，PR #260）；V5.1.1（2026-11-10，#132）；V5.1.0（2026-11-09，PR #139）；V5.0.0（2026-11-09，PR #128、#129，Git 历史）；V4.0.0（2026-11-07，ADR-013，最后修订提交 `e95bb4a`）；更早的 V3.1.0 · A+ 原件见 [`history/2026-11-02-V3.1-A+-基于ORCA的总架构.md`](history/2026-11-02-V3.1-A+-基于ORCA的总架构.md)  
+> **上一版**：V5.3.0（2026-11-23，PR #350）；V5.2.0（2026-11-20，PR #260）；V5.1.1（2026-11-10，#132）；V5.1.0（2026-11-09，PR #139）；V5.0.0（2026-11-09，PR #128、#129，Git 历史）；V4.0.0（2026-11-07，ADR-013，最后修订提交 `e95bb4a`）；更早的 V3.1.0 · A+ 原件见 [`history/2026-11-02-V3.1-A+-基于ORCA的总架构.md`](history/2026-11-02-V3.1-A+-基于ORCA的总架构.md)  
 > **决议**：[ADR-013 项目协同改用 Multica，移除 ORCA](adr/ADR-013-项目协同改用Multica.md)；[ADR-014 托管](adr/ADR-014-托管模式.md)（V5.0，2026-11-09，按 12.3 属 MAJOR：授权体系变化）；[ADR-016 合并放权](adr/ADR-016-合并放权.md)（V5.2，2026-11-20，按 12.3 属 MAJOR：授权体系变化；V6.0 的编号 ADR-015 已留给底座改版，所以记为 V5.2）  
 > **版本状态**：**待 GitHub PR 合并后生效**。本文是目标架构与执行约定，**不代表 Multica 已部署、任何 agent 已建立、任何真实动作已放行**。  
 > **适用边界**：仅限**个人 Hermes Digital Twin、本机自托管 Multica、个人 Obsidian 知识库及其个人工程协作链**；**不适用于企业数字分身、企业业务数据或企业营销/多维表格项目**。
@@ -102,7 +102,7 @@ flowchart TB
     H <-->|"Multica CLI / API：建单 · 指派 · 读 runs"| S
     GH["GitHub · 交付事实<br/>Issue · 分支 · PR · HEAD/base · 合并"]
     OB["Obsidian Vault · 长期知识"]
-    SK["my-skills · 唯一 Skill 来源<br/>导入 Multica 时存快照"]
+    SK["my-skills · 共享 Skill 唯一来源<br/>导入 Multica 时存快照<br/>（Hermes 自己的技能以安装副本为准，8.4）"]
     C -->|"只推 agent/ 分支 · 开 PR"| GH
     H -->|"合并官判定 → 合并执行器按策略合并"| GH
     H <-->|"授权检索 / 受控写入"| OB
@@ -120,7 +120,7 @@ flowchart TB
 | 工程交付 | Git / GitHub | 分支、HEAD/base、Diff、GitHub Issue、PR、审核证据引用、实际合并 | Hermes 的业务判断、Multica 的执行状态 |
 | 审核往返 | 驿窗 `handoffs.json` | 接力的阶段、每步时间、送出原话摘录、回信、结论 | 合并许可 |
 | 长期知识 | Obsidian | 决策缘由、项目背景、跨任务经验 | 实时进程、完整敏感日志 |
-| 可复用方法 | my-skills | 工作方法、触发条件、标准脚本 | Task 状态、授权令牌 |
+| 可复用方法 | my-skills（共享技能）；猛鬼兽、亚古兽自己的技能以安装副本为准（8.4） | 工作方法、触发条件、标准脚本 | Task 状态、授权令牌 |
 
 **只同步 ID、摘要、事实快照与证据位置**。业务目标与执行状态矛盾时标记 `UNRECONCILED`，不由模型“选一个看起来合理的”覆盖。
 
@@ -140,7 +140,7 @@ flowchart TB
 | Coordinator | **Squad**（leader 必须是 agent） | `multica squad create --name --leader`；SUPERVISED 下只在一次性授权里列明时使用 |
 | ORCA 自动化 / 定时 | **Autopilot** | cron（5 段加 IANA 时区）、webhook、手动；模式 `create_issue` 或 `run_only` |
 | Worker 完成后续跑 | **Wakeup**（含系统内置的 **Child-Done** 规则） | 挂在 issue 上的规则，类型 `event / at / every / cron` 或 `--until-*` 条件；条件满足时唤醒指定 agent 在该 issue 上开一次普通 run；agent 可在 run 里给自己排下一次。父 issue 有子 issue 时自带系统规则：某个 stage 的子 issue 全部关闭时唤醒父 issue 的负责人（7.3） |
-| ORCA 的 Skill 加载 | **Skill** | 主文件 `SKILL.md`，可挂到多个 agent；来源只认 my-skills（8.4） |
+| ORCA 的 Skill 加载 | **Skill** | 主文件 `SKILL.md`，可挂到多个 agent；导入 Multica 的共享 Skill 来源只认 my-skills（8.4） |
 
 ### 2.4 必须有的跨系统映射
 
@@ -638,7 +638,7 @@ multica issue run-messages <run-id> --output json   # 每个 run 一次，可用
 
 - **GitHub**：Issue/PR/Commit/ADR、可入库的测试、验收结果和证据引用。敏感密钥、真实状态库、run-log 原文、私人 Vault 正文不入库。
 - **Obsidian Vault**：项目认知、经验、决策缘由、知识索引。正式 Vault 的读写受 Obsidian 主线已有权限约束。
-- **my-skills**：经过检验可复用的方法、角色工作流、脚本和参考资料。Skill 不是 agent、状态机或执行授权来源。
+- **Skills**：经过检验可复用的方法、角色工作流、脚本和参考资料。共享技能在 my-skills；猛鬼兽、亚古兽自己的技能源文件在本仓库 `hermes/skills/`，以安装副本为准（8.4）。Skill 不是 agent、状态机或执行授权来源。
 
 ### 8.2 知识与方法闭环图
 
@@ -651,29 +651,37 @@ flowchart LR
     D -->|"可复用执行方法"| F["Skill 候选"]
     E --> G["按 Obsidian 已授权流程写入"]
     F --> H["Claude 编写 · 盲测 · 按风险复核"]
-    H --> I["my-skills（唯一来源）"]
+    H --> I["my-skills（共享技能唯一来源）"]
     I -.->|"导入快照"| J["Multica Skill"]
     J -.->|"下个任务按需加载"| A
 ```
 
 不是每次完成任务都必须写 Vault 或建 Skill。长期记忆保留**为什么、是什么**，Skill 保留**怎样做**，GitHub 保留**哪个版本实际发生了什么**，run-log 保留**这次跑了多久、出了什么事**。
 
-### 8.3 初期六个精简 Skills
+### 8.3 Skills 体系：以 `docs/技能架构.md` 为准
 
-| Skill | 使用者 | 关键任务 |
+技能怎么划分、谁来加载、什么归技能什么归脚本，以 [`docs/技能架构.md`](../技能架构.md)（技能架构基线 v2，常浩 2026-11-23 定，#357）为准。要点：
+
+- 判断在技能，闸门在脚本，状态在中台，时机在流程，事实在账本。
+- 四种宿主：猛鬼兽、亚古兽、工人（Claude / Codex / ChatGPT）、确定性系统。猛鬼兽不能直接调用工人的技能，跨宿主靠派单和回执。
+- 技能按触发场景切分；好几个场景共用的方法做成能力模块，由场景技能按需读。
+- 第一批是批 5b 的技能部分 5b-1～5b-6（#358～#363）。
+
+V4.0 定的「初期六个精简 Skills」（`dt-orchestrate`、`dt-develop`、`dt-verify`、`dt-review`、`dt-dispute`、`dt-closeout`）是 Multica 时期的设计，从来没有写出来，执行底座 11-15 也已改为 agent-autoloop，11-23 由上面的基线取代；这些名字现在只当逻辑能力名用，映射关系见技能架构第 5 节。
+
+真实外部动作仍由代码和可验证授权检查实现，**不能因为 Skill 写了“可以执行”就跳过门禁**。闸门也不能只写在技能自带的 `scripts/` 里，必须放在动作真正发生的出口上。
+
+### 8.4 Skills 来源与治理：三层
+
+| 治理对象 | 能不能改 | 以什么为准 |
 |---|---|---|
-| `dt-orchestrate` | Hermes | 识别类型/风险/模式、建单与指派、读 runs 对账、晨报 |
-| `dt-develop` | Claude 开发 agent | 设计、编码、自测、交接、返修 |
-| `dt-verify` | Codex 验证 agent | 独立诊断、复现、反向测试 |
-| `dt-review` | 审查员 / 桌面 Claude 会话 | 送审包、版本绑定、驿窗送审、结论回写 |
-| `dt-dispute` | Claude / ChatGPT / Codex | 技术异议、取证、收敛 |
-| `dt-closeout` | Hermes | 收口、依赖释放、知识/Skill 候选 |
+| 猛鬼兽、亚古兽自己的技能（源文件在本仓库 `hermes/skills/`） | 可以自己改，必须留痕：改前存快照、改后写 CHANGELOG（技能架构第 6 节） | 安装副本（常浩 2026-11-20 定）；Claude / Codex 改它之前先把安装副本收回仓库 |
+| Claude、Codex 等用的共享技能 | 走 my-skills 的七站两闸 | my-skills 的正式发布版本 |
+| 全局规则、工作流注册表、SOUL、HERMES.md | 只提候选，常浩批准才生效 | 批准后的正式版本 |
 
-真实外部动作仍由代码和可验证授权检查实现，**不能因为 Skill 写了“可以执行”就跳过门禁**。
+共享技能导入 Multica 时：
 
-### 8.4 Skills 来源与快照
-
-- **my-skills 是唯一来源**；Multica 里的 Skill 只是快照，**不在 Multica 里直接改 Skill**。
+- **my-skills 是共享技能的唯一来源**；Multica 里的 Skill 只是快照，**不在 Multica 里直接改 Skill**。
 - 导入用 `multica skill import --file <打包的 .zip 或 .skill>`（不用 `--url` 拉线上最新版），冲突策略用 `--on-conflict fail`，避免静默覆盖。
 - 每次导入记下 Skill 的版本（SKILL.md frontmatter 的 `metadata.version`，批 C 引入）和 my-skills 的提交号，写进该 Skill 的 CHANGELOG（“已导入 Multica：版本 / 提交 / 日期”）。
 - 挂到 agent 用 `multica agent skills …`；跨项目复用前审查权限差异，不把个人权限用于企业业务。
