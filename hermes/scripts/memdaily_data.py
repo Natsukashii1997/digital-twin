@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 import netwait  # noqa: E402  唤醒后等网络、网络错误判断的共用实现（P9）
 from report_data import clean, wd  # noqa: E402  消息清洗、星期写法和工作日报共用
 
@@ -67,6 +68,11 @@ def lark(*args, identity="user", cwd=None, tries=None, sleep=time.sleep, clock=t
         msg = str(err.get("message", "未知错误"))
         if not (err.get("retryable") or netwait.is_net_error(msg)) or not budget.retry():
             raise Fail(f"{args[0]} {args[1]}：{msg[:200]}")
+
+
+def listing(run, what, *args, key="messages", **kw):
+    """读一个列表并翻到底（#312）：lark-cli 到了页数上限、或只回第一页时不报错，这里接着翻，翻不完报错。"""
+    return lark_pages.read_all(lambda extra: run(*args, *extra, **kw), what, Fail, (key,))[key]
 
 
 def legacy():
@@ -180,8 +186,8 @@ def collect(d, run=lark, config=None):
     if prev:
         facts["prev"] = {"date": prev[0], "actions": tidy(section(prev[1], "四、"))}
 
-    msgs = (run("im", "+messages-search", "--start", s, "--end", e, "--page-all", "--page-size", "50",
-                "--no-reactions", "--exclude-sender-type", "bot") or {}).get("messages") or []
+    msgs = listing(run, "读当天消息", "im", "+messages-search", "--start", s, "--end", e, "--page-all", "--page-size", "50",
+                   "--no-reactions", "--exclude-sender-type", "bot")
     p2p, groups = {}, {}
     for m in msgs:
         (p2p if m.get("chat_type") == "p2p" else groups).setdefault(m["chat_id"], []).append(m)
@@ -208,15 +214,15 @@ def collect(d, run=lark, config=None):
         else:
             skipped += 1
     for cid, name in white.items():
-        ms = (run("im", "+chat-messages-list", "--chat-id", cid, "--start", s, "--end", e, "--order", "asc",
-                  "--page-all", "--no-reactions") or {}).get("messages") or []
+        ms = listing(run, f"读白名单群「{name}」", "im", "+chat-messages-list", "--chat-id", cid, "--start", s, "--end", e,
+                     "--order", "asc", "--page-all", "--no-reactions")
         ms = [x for x in ms if (x.get("sender") or {}).get("sender_type", "user") != "app"]
         if ms:
             kept.append({"name": name, "whitelist": True, "messages": ms})
 
-    meetings = (run("vc", "+search", "--start", d.isoformat(), "--end", d.isoformat(), "--participant-ids", ME) or {}).get("items") or []
-    minutes = (run("minutes", "+search", "--start", d.isoformat(), "--end", (d + dt.timedelta(days=1)).isoformat(),
-                   "--participant-ids", "me") or {}).get("items") or []
+    meetings = listing(run, "读会议记录", "vc", "+search", "--start", d.isoformat(), "--end", d.isoformat(), "--participant-ids", ME, key="items")
+    minutes = listing(run, "读妙记", "minutes", "+search", "--start", d.isoformat(), "--end", (d + dt.timedelta(days=1)).isoformat(),
+                      "--participant-ids", "me", key="items")
     tokens = [t.group(1) for t in (re.search(r"/minutes/(\w+)", (x.get("meta_data") or {}).get("app_link", "")) for x in minutes) if t]
     minute_detail = run("minutes", "+detail", "--minute-tokens", ",".join(tokens), "--summary", "--todo") if tokens else None
     excluded = config.get("excluded_meetings") or []
@@ -228,7 +234,7 @@ def collect(d, run=lark, config=None):
                        "rsvp": ev.get("self_rsvp_status", ""), "excluded": any(k in summary for k in excluded)})
 
     tasks = []   # 常浩负责、当天新建或截止在 D-7～D+14 的未完成任务
-    for t in (run("task", "+get-related-tasks", "--include-complete=false") or {}).get("items") or []:
+    for t in listing(run, "读任务", "task", "+get-related-tasks", "--include-complete=false", key="items"):
         if not any(x.get("id") == ME and x.get("role") == "assignee" for x in t.get("members") or []):
             continue
         due = (t.get("due") or {}).get("timestamp")

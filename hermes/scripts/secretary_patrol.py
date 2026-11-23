@@ -31,6 +31,10 @@
 常驻（每分钟一轮）是 D 档，本批不装；不签钥匙、不发飞书。不调用 AI 以外的外部服务。
 环境变量：DT_SECRETARY_DIR（同 secretary_ledger，默认 DigitalTwin/secretary）、DT_SECRETARY_GATE（控制面脚本，默认同目录）、
 HERMES_BIN（默认 hermes）、AGENT_AUTOLOOP_HOME（只读窗口）。
+控制面搬进 dt-gate 以后（ADR-015 0E-2），本账号没有本人密钥、碰不到控制面，改走 dt-gate 开的两个本机窗口：
+DT_READONLY_URL（如 http://127.0.0.1:3352，设了就经只读窗口看卡，令牌文件同 autoloop_readonly 的 DT_READONLY_TOKEN_FILE）、
+DT_SECRETARY_INTAKE（如 http://127.0.0.1:3353，设了就经秘书窄窗口交提议，令牌文件 DT_SECRETARY_INTAKE_TOKEN_FILE，
+默认 DigitalTwin/autoloop/intake.token）。都不设时和原来一样：本机读中台、本机调控制面脚本。
 """
 import argparse
 import contextlib
@@ -43,6 +47,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -114,11 +119,34 @@ def save_state(state):
     os.replace(tmp, f)
 
 
+# ---------- dt-gate 的两个本机窗口（0E-2） ----------
+def window(name):
+    return (os.environ.get(name) or "").rstrip("/")
+
+
+def intake_token_file():
+    return Path(os.environ.get("DT_SECRETARY_INTAKE_TOKEN_FILE") or R.G.SUPPORT / "autoloop/intake.token").expanduser()
+
+
+def call_window(url, token_file, data=None, timeout=30):
+    """带令牌访问 dt-gate 的本机窗口（不走代理）；返回解析好的 JSON。连不上、HTTP 出错都抛 OSError。"""
+    token = Path(token_file).read_text(encoding="utf-8").strip()
+    req = urllib.request.Request(url, data=data, method="GET" if data is None else "POST",
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def read_snapshot():
+    url = window("DT_READONLY_URL")
+    return call_window(url + "/v1/snapshot", R.token_file()) if url else R.read()
+
+
 # ---------- 看卡、分类 ----------
 def candidates():
     """只读窗口里开着的提问卡、通知卡：[(类别, 卡片)]。"""
     out = []
-    for c in R.read().get("cards", []):
+    for c in read_snapshot().get("cards", []):
         if c.get("state") != "open" or type(c.get("id")) is not int or type(c.get("version")) is not int:
             continue
         cat = {"ask": "ask", "notice": "redispatch"}.get(c.get("kind"))
@@ -230,10 +258,15 @@ def submit(p, cat, card):
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(data)
     try:
-        r = subprocess.run([sys.executable, str(gate_script()), "submit", "--file", str(f)],
-                           capture_output=True, text=True, timeout=600)
-        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
-        out = json.loads(lines[-1]) if lines else None
+        intake = window("DT_SECRETARY_INTAKE")
+        if intake:                                     # 控制面在 dt-gate：经秘书窄窗口交同一份内容
+            resp = call_window(intake + "/v1/secretary/proposal", intake_token_file(), data.encode("utf-8"), timeout=620)
+            out = resp.get("result") if isinstance(resp, dict) else None
+        else:
+            r = subprocess.run([sys.executable, str(gate_script()), "submit", "--file", str(f)],
+                               capture_output=True, text=True, timeout=600)
+            lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+            out = json.loads(lines[-1]) if lines else None
     except (OSError, subprocess.SubprocessError, ValueError) as e:
         return {"result": "unreachable", "msg": f"控制面跑不起来（{type(e).__name__}）"}
     if not isinstance(out, dict) or out.get("result") not in FINAL + ("not_ready",):

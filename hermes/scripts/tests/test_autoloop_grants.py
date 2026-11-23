@@ -24,6 +24,7 @@ from unittest import mock
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
+import autoloop_config as C  # noqa: E402
 import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
@@ -61,10 +62,12 @@ class Base(unittest.TestCase):
         for p in (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(G, "ROSTER", self.roster),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
                   mock.patch.object(G, "notify_owner", side_effect=self._notify),
-                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit")):   # 恢复闸放行（关着见 RecoveryGate）
+                  mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit"),   # 恢复闸放行（关着见 RecoveryGate）
+                  mock.patch.object(C, "loaded_rules", side_effect=lambda: self.hub_rules)):   # 中台在用的规则（HubRule）
             p.start()
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted, self.notices = {}, 0, [], []
+        self.hub_rules = {"rules": [C.dispatch_rule(r, x) for r in ("dt-sandbox", "digital-twin") for x in G.EXECUTORS]}
 
     def write_roster(self, sandbox, twin_write=True):
         inv = [{"path": "github:o/old", "category": "待删"}]
@@ -237,6 +240,37 @@ class Approval(Base):
         with self.assertRaises(G.Rejected):
             G.propose("dt-sandbox", "claude", SCOPE, actions=("edit", "merge"), now=T0)
         self.assertEqual(G.propose("digital-twin", "codex", SCOPE, now=T0)["github"], "o/digital-twin")
+
+    def test_hub_without_dispatch_rule_rejects_at_propose(self):
+        """常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝并说清原因；不记提议、不发私聊。"""
+        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude")]}
+        with self.assertRaisesRegex(G.Rejected, "名册放行了写入，但中台没有接 codex 派单的规则 dispatch-digital-twin-codex"):
+            G.propose("digital-twin", "codex", SCOPE, now=T0)
+        with self.assertRaisesRegex(G.Rejected, "dispatch-dt-sandbox-codex"):
+            G.propose("dt-sandbox", "codex", SCOPE, now=T0)     # 同一仓库另一个执行方没有规则也拦
+        wrong = C.dispatch_rule("dt-sandbox", "claude") | {"when": {"source": "hermes", "types": ["dispatch.other.claude.write"]}}
+        self.hub_rules = {"rules": [wrong]}
+        with self.assertRaisesRegex(G.Rejected, "中台没有"):
+            G.propose("dt-sandbox", "claude", SCOPE, now=T0)    # 同名规则接的不是这类事件
+        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude") | {"paused": True}]}
+        self.assertTrue(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"])   # 暂停着不拦
+        self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
+        self.assertEqual(len(self.notices), 1)
+
+    def test_hub_unreadable_rejects_at_propose(self):
+        with mock.patch.object(C, "loaded_rules", side_effect=C.Rejected("读不到中台正在用的规则（OperationalError），不放行")):
+            with self.assertRaisesRegex(G.Rejected, "查不了中台有没有 dispatch-dt-sandbox-claude"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        for bad in ({"rules": "坏的"}, {"rules": [{"name": "dispatch-dt-sandbox-claude", "when": "坏的"}]},
+                    {"rules": [{"name": "dispatch-dt-sandbox-claude", "when": {"source": "hermes", "types": "dispatch.dt-sandbox.claude.write"}}]}):
+            self.hub_rules = bad                       # 配置形状不对：说清原因，不吐 Python 报错
+            with self.subTest(bad=bad), self.assertRaisesRegex(G.Rejected, "dispatch-dt-sandbox-claude"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        with mock.patch.dict(sys.modules, {"autoloop_config": None}):   # 装机目录缺 autoloop_config.py（审查 P1）
+            with self.assertRaisesRegex(G.Rejected, "查不了中台有没有 dispatch-dt-sandbox-claude"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        self.assertFalse(self.db.exists() and self.sql("SELECT code FROM proposals"))
+        self.assertEqual(self.notices, [])
 
     def test_files_are_private_and_shared_files_are_readable(self):
         old = os.umask(0o077)                                    # 严格 umask 下共享目录也要显式给 755
@@ -735,6 +769,29 @@ class Cli(Base):
         with mock.patch.object(G, "now_tz", return_value=expired), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(G.main(["check", "--task", tid, "--action", "edit", "--generation", "1"]), 1)
         self.assertEqual(json.loads(out.getvalue()), {"ok": False, "why": "凭证已过期"})
+
+    def test_show_tells_usable_now_and_event_delivery(self):
+        """查进度用的两样只读输出（autoloop 技能读）：现在能不能用、每个派单事件送没送到中台。"""
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        tid = G.approve(self.say(f"派单 {code}"), now=T0, post=down)["task_id"]
+        (g,) = G.show(tid, now=T0)
+        self.assertEqual((g["usable"], g["why_not"]), (True, None))
+        self.assertEqual([(e["event_key"], e["kind"], e["state"], e["hub_event"]) for e in g["events"]],
+                         [(f"{tid}:g1:start", "start", "在途或结果不明", None)])
+        G.send_pending(post=self.post, now=LATER)
+        G.resume_dispatch(tid, "redispatch", "常浩说再跑一次", now=LATER, post=self.post)
+        (g,) = G.show(tid, now=LATER)
+        self.assertEqual([(e["kind"], e["state"], e["hub_event"]) for e in g["events"]],
+                         [("start", "已送到中台", 101), ("redispatch", "已送到中台", 102)])
+        (g,) = G.show(tid, now=T0 + dt.timedelta(hours=13))       # status 还写着 active，但已过期
+        self.assertEqual((g["status"], g["usable"], g["why_not"]), ("active", False, "凭证已过期"))
+        G.revoke(tid, now=LATER)
+        (g,) = G.show(tid, now=LATER)
+        self.assertEqual((g["usable"], g["why_not"]), (False, "凭证已撤销"))
+        for hidden in ("scope_text", "approval_message", "freeze_code"):      # 原来不给的三样照旧不给
+            self.assertNotIn(hidden, g)
+        other = self.new_task(when=LATER)
+        self.assertEqual([e["event_key"] for e in G.show(other, now=LATER)[0]["events"]], [f"{other}:g1:start"])
 
     def test_no_cli_entry_for_resolution(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
