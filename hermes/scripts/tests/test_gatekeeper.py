@@ -69,6 +69,8 @@ def event(value, eid="ev_1", operator=OWNER, chat=CHAT, mid="om_gate_msg_0001", 
 
 REAL_CODE_TRUSTED = G.code_trusted
 FAKE_TAT = "t-fake-tenant-token"
+ENTRY_DT = {"DT_ROSTER": G.GATE_ROOT + "/repo/" + "a" * 40 + "/projects.json", "DT_HUB": "http://127.0.0.1:3350",
+            "DT_GRANTS_STATUS": G.GATE_SHARED + "/grants/status.json", "DT_GRANTS_TASKS": G.GATE_SHARED + "/tasks"}
 
 
 def fake_tat(test):
@@ -324,7 +326,7 @@ class Config(Base):
                 with self.assertRaisesRegex(F.Fail, "-I -S -B"):
                     G.launch_ok()
             entry_env = {"PATH": G.ENTRY_PATH, "LANG": "en_US.UTF-8", "SDKROOT": "/x", "__CF_USER_TEXT_ENCODING": "0x0",
-                         "DT_HUB_LISTENER_UID": str(os.geteuid())}
+                         "DT_HUB_LISTENER_UID": str(os.geteuid()), **ENTRY_DT}
             with mock.patch.object(G.sys, "flags", flags):
                 with self.assertRaisesRegex(F.Fail, "环境没被清空"):   # L3 第 2 轮 P1-04：没经入口的 env -i
                     G.launch_ok()
@@ -332,6 +334,16 @@ class Config(Base):
                 for env in (no_listener, {**entry_env, "DT_HUB_LISTENER_UID": str(os.geteuid() + 1)}):
                     with mock.patch.dict(os.environ, env, clear=True):   # 中台监听核对没写、或不是运行账号：不起
                         with self.assertRaisesRegex(F.Fail, "DT_HUB_LISTENER_UID"):
+                            G.launch_ok()
+                bad = [{k: v for k, v in entry_env.items() if k != name} for name in ENTRY_DT]   # 派单卡要的位置少一个都不起
+                bad += [{**entry_env, "DT_ROSTER": "/Library/Application Support/projects.json"},   # autoloop_grants 的落空默认
+                        {**entry_env, "DT_ROSTER": G.GATE_ROOT + "/repo/../../x/projects.json"},
+                        {**entry_env, "DT_HUB": "http://10.0.0.2:3350"},
+                        {**entry_env, "DT_GRANTS_STATUS": "/tmp/status.json"},
+                        {**entry_env, "DT_GRANTS_TASKS": "/tmp/tasks"}]
+                for env in bad:
+                    with mock.patch.dict(os.environ, env, clear=True):
+                        with self.assertRaisesRegex(F.Fail, "名册、中台地址"):
                             G.launch_ok()
                 with mock.patch.dict(os.environ, entry_env, clear=True):
                     with self.assertRaisesRegex(F.Fail, "不属 root"):        # 临时目录属本账号，不属 root
@@ -407,8 +419,41 @@ class Config(Base):
         self.assertIn("exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin", sh)
         self.assertIn("GATE_UID=$(/usr/bin/id -u dt-gate)", sh)          # 中台监听核对写死成 dt-gate 的 uid
         self.assertIn('DT_HUB_LISTENER_UID="$GATE_UID"', sh)
+        self.assertIn('GATE_ROOT="%s"' % G.GATE_ROOT, sh)                # 入口和门卫核的是同一个位置
+        self.assertIn('GATE_SHARED="%s"' % G.GATE_SHARED, sh)
+        for name in ENTRY_DT:
+            self.assertIn(f'{name}="', sh)
         self.assertIn('/usr/bin/python3 -I -S -B "$GATE_DIR/gatekeeper.py" "$@"', sh)
         self.assertEqual(subprocess.run(["/bin/sh", "-n", str(HERE.parent.parent.parent / "ops/dt_gatekeeper.sh")]).returncode, 0)
+
+    def test_entry_reads_roster_and_hub_from_the_gate_copy(self):
+        """0E-3c：入口每次启动从 dt_gate_hub 的 current.json / state.json 现读名册和中台地址（副本按提交号分目录，
+        stage / update 换了也跟得上）；不在 GATE_ROOT/repo/ 下、名册不是普通文件、中台不是 127.0.0.1 就不起。"""
+        sh = (HERE.parent.parent.parent / "ops/dt_gatekeeper.sh").read_text(encoding="utf-8")
+        code = sh.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        root = Path(self.tmp.name) / "gate"
+        repo = root / "repo" / ("b" * 40)
+        repo.mkdir(parents=True)
+        (repo / "projects.json").write_text("{}")
+
+        def run(cur, state):
+            (root / "current.json").write_text(json.dumps(cur))
+            (root / "state.json").write_text(json.dumps(state))
+            return subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", "-", str(root)], input=code, text=True,
+                                  capture_output=True, env={"PATH": "/usr/bin:/bin"})
+        r = run({"repo": {"dir": str(repo)}}, {"hub_url": "http://127.0.0.1:3350"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [os.path.realpath(repo / "projects.json"), "http://127.0.0.1:3350"])
+        other = Path(self.tmp.name) / "elsewhere"
+        other.mkdir()
+        (other / "projects.json").write_text("{}")
+        (root / "repo" / "link").symlink_to(other)
+        for cur, state in (({"repo": {"dir": str(other)}}, {"hub_url": "http://127.0.0.1:3350"}),   # 副本不在 repo/ 下
+                           ({"repo": {"dir": str(root / "repo" / "link")}}, {"hub_url": "http://127.0.0.1:3350"}),  # 链接出去
+                           ({"repo": {"dir": str(root / "repo" / "nope")}}, {"hub_url": "http://127.0.0.1:3350"}),  # 没有名册
+                           ({"repo": {"dir": str(repo)}}, {"hub_url": "http://10.0.0.2:3350"}),
+                           ({"repo": {"dir": str(repo)}}, {})):
+            self.assertNotEqual(run(cur, state).returncode, 0, (cur, state))
 
     def test_daemon_runs_the_entry_as_dt_gate_and_sets_no_environment(self):
         """0E-3c 常驻：LaunchDaemon 以 dt-gate 身份跑 root 装的入口 run，不写环境变量（入口 env -i 自己定，写了门卫也会拒起），
