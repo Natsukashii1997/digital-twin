@@ -1554,11 +1554,11 @@
    ],
    "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
    "coverage": {
-    "messages": 3,
-    "cards": 2,
-    "member_posts": 1,
-    "sources": 1,
-    "sources_ok": 1,
+    "messages": 0,
+    "cards": 0,
+    "member_posts": 0,
+    "sources": 0,
+    "sources_ok": 0,
     "sources_skipped": 0,
     "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
    }
@@ -1594,11 +1594,11 @@
     "errors": []
    },
    "coverage": {
-    "messages": 3,
-    "cards": 2,
-    "member_posts": 1,
-    "sources": 1,
-    "sources_ok": 1,
+    "messages": 0,
+    "cards": 0,
+    "member_posts": 0,
+    "sources": 0,
+    "sources_ok": 0,
     "sources_skipped": 0,
     "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
    }
@@ -2062,11 +2062,11 @@
    ],
    "trace": "生成：Hermes（模型未知）｜接入：Hermes 派单｜2026-11-14 10:00",
    "coverage": {
-    "messages": 3,
-    "cards": 2,
+    "messages": 4,
+    "cards": 3,
     "member_posts": 1,
-    "sources": 1,
-    "sources_ok": 1,
+    "sources": 0,
+    "sources_ok": 0,
     "sources_skipped": 0,
     "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
    }
@@ -2165,11 +2165,11 @@
     "errors": []
    },
    "coverage": {
-    "messages": 3,
-    "cards": 2,
+    "messages": 4,
+    "cards": 3,
     "member_posts": 1,
-    "sources": 1,
-    "sources_ok": 1,
+    "sources": 0,
+    "sources_ok": 0,
     "sources_skipped": 0,
     "not_covered": "X 推文的回复和引用推文没抓（agent-reach 的 X 渠道没装），只用卡片里的推文原文"
    }
