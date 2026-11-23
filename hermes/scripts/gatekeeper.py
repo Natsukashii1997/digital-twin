@@ -9,8 +9,11 @@ GateBot），这里只多三样：门卫应用凭据、身份绑定、收点击�
 凭据（常浩 11-19 定：真凭据存成账号家目录里只有它能读的文件，不用钥匙串）：
   应用编号  DigitalTwin/gate/app.json（setup --app-id 写）
   应用密钥  ~/.dt/gate-app.secret（常浩亲手贴进 dt-gate，600、属 dt-gate、不能是链接；不经任何 AI）
-  lark-cli 经环境变量 LARKSUITE_CLI_APP_ID / LARKSUITE_CLI_APP_SECRET 拿凭据（本机 1.0.96 实测认这两个变量、
-  不碰钥匙串），配置目录单独放 DigitalTwin/gate/lark-cli/。lark-cli 本体必须是绝对路径、从 / 起每一级只有 root 或
+  lark-cli 经环境变量拿凭据，配置目录单独放 DigitalTwin/gate/lark-cli/，不碰钥匙串：LARKSUITE_CLI_APP_ID /
+  LARKSUITE_CLI_APP_SECRET 之外还要 LARKSUITE_CLI_TENANT_ACCESS_TOKEN——1.0.96 的环境变量凭据只读现成的租户令牌、
+  不会拿密钥自己换（11-23 真机 doctor 报 no access token available；实测发消息、查机器人、event consume 启动都要它，
+  consume 拉起的事件总线再用 App ID 和密钥连长连接）。所以门卫在进程里用密钥向飞书换租户令牌（tenant_token：
+  直连、不经代理，缓存到过期前 10 分钟，不落盘、不打印），换不到按「发不出去」处理。lark-cli 本体必须是绝对路径、从 / 起每一级只有 root 或
   dt-gate 能改（DT_GATE_LARK_CLI，默认 /Library/Application Support/DigitalTwin/bin/lark-cli）：别人能换掉它就能偷密钥。
 代码信任（L3 P1-04）：真正的保证在部署：门卫脚本装在 root 所有、只有 root 能改的目录（不许有符号链接，导入前递归核）；所有命令（常驻的 run 和
   手动的 setup、doctor、bind）都只经 root 装的入口 ops/dt_gatekeeper.sh 跑：清空环境、用 /usr/bin/python3 -I -S -B、
@@ -62,6 +65,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -398,6 +402,44 @@ def lark_cli():
 _LARK_OK = set()
 
 
+# ---------- 租户令牌 ----------
+TAT_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"   # LARKSUITE_CLI_BRAND=feishu
+TAT_MARGIN = 600                          # 秒：离过期不到这么久就重新换（飞书在剩不到 30 分钟时才发新令牌）
+_TAT = {}                                 # 应用编号 -> (令牌, 过期的 monotonic 时刻)；只在内存里
+_TAT_LOCK = threading.Lock()
+
+
+def tenant_token():
+    """门卫应用的租户令牌（tenant_access_token），给 lark-cli 子进程用。直连飞书（不经代理：代理解 TLS 就能看到密钥，
+    同 lark-cli 子进程不传代理变量），缓存到过期前 TAT_MARGIN 秒；不落盘、不打印、不进日志。换不到抛 SendError。"""
+    app = app_id()
+    with _TAT_LOCK:
+        hit = _TAT.get(app)
+        now = time.monotonic()
+        if hit and hit[1] - now > TAT_MARGIN:
+            return hit[0]
+        body = json.dumps({"app_id": app, "app_secret": read_secret()}).encode()
+        req = urllib.request.Request(TAT_URL, data=body, method="POST",
+                                     headers={"Content-Type": "application/json; charset=utf-8"})
+        try:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=15) as r:
+                d = json.loads(r.read().decode())
+        except (OSError, ValueError) as e:      # 连不上、超时、HTTP 错误、回的不是 JSON
+            raise F.SendError(f"换门卫的租户令牌失败（{type(e).__name__}）")
+        tok, exp = (d.get("tenant_access_token"), d.get("expire")) if isinstance(d, dict) else (None, None)
+        if not isinstance(d, dict) or d.get("code") != 0 or not isinstance(tok, str) or not tok \
+                or type(exp) is not int or exp <= 0:
+            code = d.get("code") if isinstance(d, dict) else None
+            raise F.SendError(f"换门卫的租户令牌失败（飞书返回 code {code}）")   # 不带 msg：只给错误码
+        _TAT[app] = (tok, now + exp)
+        return tok
+
+
+def drop_tenant_token():
+    with _TAT_LOCK:
+        _TAT.clear()
+
+
 # ---------- 门卫机器人 ----------
 class GateBot(F.Bot):
     name = "门卫"
@@ -410,6 +452,7 @@ class GateBot(F.Bot):
         home = private_dir(gate_home())
         env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8",
                "LARKSUITE_CLI_APP_ID": app_id(), "LARKSUITE_CLI_APP_SECRET": read_secret(),
+               "LARKSUITE_CLI_TENANT_ACCESS_TOKEN": tenant_token(),
                "LARKSUITE_CLI_BRAND": "feishu", "LARKSUITE_CLI_CONFIG_DIR": str(private_dir(home / "lark-cli")),
                "LARKSUITE_CLI_LOG_DIR": str(private_dir(home / "lark-cli-log")),
                "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1", "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1"}
@@ -424,7 +467,12 @@ class GateBot(F.Bot):
 
     def lark(self, args, what):
         cmd, env = self.command([*args, "--as", "bot", "--format", "json"])
-        return TW.run_lark(cmd, what, env)
+        try:
+            return TW.run_lark(cmd, what, env)
+        except F.SendError as e:
+            if "access token" in str(e).lower():  # 飞书说令牌不对（被提前作废等）：丢掉缓存，下一次重新换
+                drop_tenant_token()
+            raise
 
     def send_text(self, chat, text, key):
         self.lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "text",

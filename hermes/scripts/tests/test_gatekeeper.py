@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -67,6 +68,14 @@ def event(value, eid="ev_1", operator=OWNER, chat=CHAT, mid="om_gate_msg_0001", 
 
 
 REAL_CODE_TRUSTED = G.code_trusted
+FAKE_TAT = "t-fake-tenant-token"
+
+
+def fake_tat(test):
+    """换租户令牌要连飞书：除专测 tenant_token 的用例外一律换成假令牌（测试隔离也不许对外连）。"""
+    p = mock.patch.object(G, "tenant_token", lambda: FAKE_TAT)
+    p.start()
+    test.addCleanup(p.stop)
 
 
 def skip_code_trust(test):
@@ -77,9 +86,95 @@ def skip_code_trust(test):
     test.addCleanup(p.stop)
 
 
+class TenantToken(unittest.TestCase):
+    """11-23 真机：lark-cli 1.0.96 的环境变量凭据只读现成的租户令牌，门卫在进程里用密钥换（直连、缓存、不外露）。"""
+    def setUp(self):
+        skip_code_trust(self)
+        G.drop_tenant_token()
+        self.addCleanup(G.drop_tenant_token)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        sec = t / "home/.dt/gate-app.secret"
+        sec.parent.mkdir(parents=True)
+        sec.write_text("topsecret\n")
+        os.chmod(sec, 0o600)
+        env = mock.patch.dict(os.environ, {"DT_GATE_HOME": str(t / "gate"), "DT_GATE_SECRET_FILE": str(sec)})
+        env.start()
+        self.addCleanup(env.stop)
+        G.setup(APP)
+        self.reqs, self.replies, self.handlers = [], [], []
+
+    def opener(self, *handlers):
+        self.handlers.append(handlers)
+        test = self
+
+        class Resp:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return self.body
+
+        class Opener:
+            def open(self, req, timeout=None):
+                test.reqs.append((req.full_url, req.get_method(), json.loads(req.data), timeout))
+                got = test.replies.pop(0)
+                if isinstance(got, BaseException):
+                    raise got
+                return Resp(json.dumps(got).encode() if isinstance(got, dict) else got)
+        return Opener()
+
+    def call(self):
+        with mock.patch.object(G.urllib.request, "build_opener", self.opener):
+            return G.tenant_token()
+
+    def test_exchanges_directly_and_caches_until_near_expiry(self):
+        self.replies = [{"code": 0, "msg": "ok", "tenant_access_token": "t-1", "expire": 7200},
+                        {"code": 0, "msg": "ok", "tenant_access_token": "t-2", "expire": 7200}]
+        self.assertEqual(self.call(), "t-1")
+        url, method, body, timeout = self.reqs[0]
+        self.assertEqual((url, method), (G.TAT_URL, "POST"))
+        self.assertEqual(body, {"app_id": APP, "app_secret": "topsecret"})
+        proxy = [h for h in self.handlers[0] if isinstance(h, G.urllib.request.ProxyHandler)]
+        self.assertEqual([h.proxies for h in proxy], [{}])               # 不经代理（代理解 TLS 能看到密钥）
+        self.assertEqual(self.call(), "t-1")                             # 缓存着：没再请求
+        self.assertEqual(len(self.reqs), 1)
+        base = time.monotonic()
+        with mock.patch.object(G.time, "monotonic", lambda: base + 7200 - G.TAT_MARGIN + 1):
+            self.assertEqual(self.call(), "t-2")                         # 快过期了：重新换
+        self.assertEqual(len(self.reqs), 2)
+
+    def test_failures_are_send_errors_without_secrets(self):
+        for reply in ({"code": 10014, "msg": "app secret invalid topsecret"}, {"code": 0, "expire": 7200},
+                      {"code": 0, "tenant_access_token": "t", "expire": "7200"}, b"not json",
+                      OSError("timed out")):
+            self.replies = [reply]
+            with self.assertRaises(F.SendError) as e:
+                self.call()
+            self.assertNotIn("topsecret", str(e.exception))
+            self.assertIn("租户令牌", str(e.exception))
+        self.assertEqual(G._TAT, {})                                     # 失败不缓存
+
+    def test_invalid_token_reply_from_lark_cli_drops_the_cache(self):
+        G._TAT[APP] = ("t-old", time.monotonic() + 7200)
+        with mock.patch.object(G.GATE, "command", lambda args: (["x"], {})), \
+                mock.patch.object(G.TW, "run_lark", side_effect=F.SendError("查机器人失败：Invalid access token for authorization")):
+            with self.assertRaises(F.SendError):
+                G.GATE.lark(["api", "GET", "/open-apis/bot/v3/info"], "查机器人")
+        self.assertEqual(G._TAT, {})
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         skip_code_trust(self)
+        fake_tat(self)
         G._BUS.clear()
         self.addCleanup(G._BUS.clear)
         G._OFFLINE[0] = None
@@ -367,6 +462,7 @@ class RealCommand(unittest.TestCase):
     """GateBot 真的起 lark-cli 子进程：凭据只经环境变量给，不继承别的环境，身份固定 --as bot。"""
     def setUp(self):
         skip_code_trust(self)
+        fake_tat(self)
 
     def test_env_carries_only_credentials_and_bot_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,6 +491,7 @@ class RealCommand(unittest.TestCase):
             self.assertEqual(seen["argv"][:2], ["im", "+messages-send"])
             self.assertEqual(seen["env"]["LARKSUITE_CLI_APP_ID"], APP)
             self.assertEqual(seen["env"]["LARKSUITE_CLI_APP_SECRET"], "topsecret")
+            self.assertEqual(seen["env"]["LARKSUITE_CLI_TENANT_ACCESS_TOKEN"], FAKE_TAT)   # 1.0.96 只认现成令牌（11-23 真机）
             self.assertEqual(seen["env"]["LARKSUITE_CLI_CONFIG_DIR"], str(t / "gate/lark-cli"))
             self.assertNotIn("HTTPS_PROXY", seen["env"])                  # 不经代理（审查 P2-10：代理解 TLS 能看到密钥）
             self.assertNotIn("DT_SHOULD_NOT_LEAK", seen["env"])
