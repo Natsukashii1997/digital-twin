@@ -208,5 +208,60 @@ class HubEndToEnd(HubFixture):
         self.assertTrue(C.issue_source_key(confirm=True, target=self.home)["ok"])
 
 
+@unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
+class StopRunsEndToEnd(HubFixture):
+    """停单掐断（方案 5.1 第 4 条）：真的派一单到临时中台，命令行撤销之后，中台里这张单排着队的轮次被取消。"""
+
+    def test_cli_revoke_cancels_the_queued_run_in_the_hub(self):
+        import io
+        import autoloop_recovery as RV
+        import test_autoloop_grants as TG
+        root = self.roster.parent
+        msgs, notices = {}, []
+
+        def fetch(mid):
+            m = msgs.get(mid)
+            return None if m is None else G.I.normalize(m) | {"text": m["content"]}
+
+        def notify(text, key):
+            notices.append(text)
+            return f"om_notice{len(notices):04d}"
+
+        for p in (mock.patch.dict(os.environ, {"DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"),
+                                               "DT_GRANTS_STATUS": str(root / "shared/grants/status.json"),
+                                               "DT_GRANTS_TASKS": str(root / "shared/tasks"), "DT_OWNER_CHAT_ID": TG.CHAT}),
+                  mock.patch.object(G, "fetch_message", side_effect=fetch), mock.patch.object(G, "notify_owner", side_effect=notify),
+                  mock.patch.object(RV, "ensure_open"), mock.patch.object(RV, "admit"),       # 恢复闸放行，同 TG.Base
+                  mock.patch.object(G, "now_tz", return_value=TG.T0)):
+            p.start()
+            self.addCleanup(p.stop)
+        C.install(confirm=True, target=self.home)
+        C.issue_source_key(confirm=True, target=self.home)
+        C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})
+
+        def dispatch():
+            code = G.propose("dt-sandbox", "claude", TG.SCOPE)["code"]
+            mid = f"om_fixturemsg{len(msgs) + 1:04d}"
+            msgs[mid] = TG.raw_msg(mid, f"派单 {code}", TG.T0)
+            out = G.approve(mid)
+            self.assertTrue(out["send"][-1]["sent"], out)
+            return out["task_id"]
+
+        def runs(tid):
+            return {r["id"]: r["state"] for r in C.state()["runs"] if any(e.get("subject") == tid for e in r["events"])}
+
+        a, b = dispatch(), dispatch()
+        (run_a,), (run_b,) = runs(a), runs(b)                 # 临时中台没有工人接单：各有一轮排着队
+        self.assertEqual((runs(a)[run_a], runs(b)[run_b]), ("queued", "queued"))
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(G.main(["revoke", "--task", a, "--reason", "常浩说停"]), 0)
+        got = json.loads(out.getvalue())
+        self.assertEqual((got["status"], got["runs_stopped"]), ("revoked", [run_a]))
+        self.assertNotIn("runs_stop_error", got)
+        self.assertEqual(runs(a)[run_a], "cancelled")         # 排队的直接取消
+        self.assertEqual(runs(b)[run_b], "queued")            # 另一张单不受影响
+        self.assertEqual(G.stop_runs(a), {"stopped": [], "finished": [], "failed": {}, "in_transit": 0})      # 再停一次：已经没有活着的轮次
+
+
 if __name__ == "__main__":
     unittest.main()
