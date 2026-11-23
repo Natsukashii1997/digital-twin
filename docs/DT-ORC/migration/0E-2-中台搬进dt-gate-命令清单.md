@@ -14,7 +14,7 @@ ADR-015 批 0E-2。脚本是 `ops/dt_gate_hub.py`（root 跑）和 `ops/dt_gate_
 | 只读窗口 3352 | 没装 | 系统服务 `cn.digital-twin.gate.readonly`（dt-gate），主账号拿令牌副本 |
 | 秘书窄窗口 3353 | 没有 | 系统服务 `cn.digital-twin.gate.intake`（dt-gate），只收秘书提议、关秘书、撤销单三件事 |
 | 主账号原来的中台 | — | 改名为 `~/.agent-autoloop.moved-to-gate-<时间>` 留着（里面的钥匙已作废），回滚用；原位置放一个说明文件 |
-| 凭证库、出口账本和关闸标记、飞书桥接登记、秘书开关与账本、托管账本 | 主账号 DigitalTwin/ 下（11-22 首单「先跑后搬」起凭证库、出口账本在用） | 不搬：dt-gate 里从空的新库开始。搬之前主账号这边必须收尾干净（preflight 硬核对，见「开始前」）；主账号的账本原样留在原处，不删不动 |
+| 凭证库、出口账本和关闸标记、中台版本锁定（`hub-pin.json`）、飞书桥接登记、秘书开关与账本、托管账本 | 主账号 DigitalTwin/ 下（11-22 首单「先跑后搬」起凭证库、出口账本、`hub-pin.json` 在用） | 不搬（常浩 11-23 定，DECIDED 11-23 第 5 条：出口账本、hub-pin 都不带，dt-gate 从新账本开始、搬完重新锁版本；凭证库同样不搬）：dt-gate 里从空的新库开始，`hub-pin.json` 搬完按「以后要用到的」重新 `pin`。搬之前主账号这边必须收尾干净（preflight 硬核对，见「开始前」）；主账号的账本原样留在原处，不删不动 |
 | 0D 恢复闸 | 主账号的（闸的状态在出口账本里） | 主账号控制面停写（恢复点 `gate-migrate-<时间>`），搬完保持停写、回滚时结束；dt-gate 的闸从新账本开始、关着，锁定中台版本并对账后才开（见「以后要用到的」） |
 | 工人侧启动脚本 | `/Users/Shared/dt-autoloop/bin/dt-worktree-*`（首单装的 main 版，读 `/Users/Shared/dt-autoloop/` 的镜像） | 换成本 PR 之后的版本（读 `/Users/Shared/dt-gate/`），搬之前换（见「开始前」）；位置不变，中台 Agent 的 program 不用改 |
 
