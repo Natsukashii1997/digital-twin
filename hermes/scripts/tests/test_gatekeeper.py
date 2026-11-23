@@ -315,6 +315,24 @@ class Config(Base):
         self.assertIn('/usr/bin/python3 -I -S -B "$GATE_DIR/gatekeeper.py" "$@"', sh)
         self.assertEqual(subprocess.run(["/bin/sh", "-n", str(HERE.parent.parent.parent / "ops/dt_gatekeeper.sh")]).returncode, 0)
 
+    def test_daemon_runs_the_entry_as_dt_gate_and_sets_no_environment(self):
+        """0E-3c 常驻：LaunchDaemon 以 dt-gate 身份跑 root 装的入口 run，不写环境变量（入口 env -i 自己定，写了门卫也会拒起），
+        开机自起、退出了重起，日志在 root 预先建好的目录里。"""
+        import plistlib
+        with open(HERE.parent.parent.parent / "ops/cn.digital-twin.gate.gatekeeper.plist", "rb") as f:
+            p = plistlib.load(f)
+        sh = (HERE.parent.parent.parent / "ops/dt_gatekeeper.sh").read_text(encoding="utf-8")
+        entry = "/Library/Application Support/DigitalTwin/bin/gatekeeper"
+        self.assertIn(entry, sh)                                       # 和入口脚本里写的装法同一个位置
+        self.assertEqual(p["Label"], "cn.digital-twin.gate.gatekeeper")
+        self.assertEqual(p["UserName"], "dt-gate")
+        self.assertEqual(p["ProgramArguments"], [entry, "run"])
+        self.assertNotIn("EnvironmentVariables", p)
+        self.assertTrue(p["RunAtLoad"] and p["KeepAlive"])
+        self.assertEqual(p["Umask"], 0o077)
+        self.assertEqual(p["StandardOutPath"], "/Library/Logs/DigitalTwin/gate/gatekeeper.log")
+        self.assertEqual(p["StandardErrorPath"], p["StandardOutPath"])
+
     @unittest.skipUnless(sys.platform == "darwin", "ACL 只在 macOS 上核")
     def test_acl_allow_entry_is_detected(self):
         f = Path(self.tmp.name) / "acl-file"
