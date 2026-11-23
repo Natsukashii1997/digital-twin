@@ -279,7 +279,7 @@ class RecoveryGate(Base):
         card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": tok, "o": 0}}]}]}}
         msg = {"message_id": "om_found", "msg_type": "interactive", "sender": {"sender_type": "app"},
                "body": {"content": json.dumps(card)}}
-        with mock.patch.object(E, "lark_read", return_value={"messages": [msg]}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg], "has_more": False}):
             notes = E.reconcile()
         self.assertEqual(notes[0]["state"], "done")
         self.assertEqual(self.register(), "om_found")                # 用对账找到的消息号，不再发
