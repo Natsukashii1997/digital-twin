@@ -93,7 +93,7 @@ sudo "$GATE" status
 三个服务都应是「在跑」，中台健康检查报出 `abc8d41efdc9…`（即第 1 步填的引擎提交）。再跑一次门卫的越权测试（约 5 分钟），看「监听者规则」一段全部符合：
 
 ```bash
-sudo bash "/Library/Application Support/DigitalTwin/dt_worker_pf.sh" verify
+sudo bash ops/dt_worker_pf.sh verify
 ```
 
 把两段输出发回 Claude 会话，由 Claude 对照验收句判断。

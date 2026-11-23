@@ -6,6 +6,20 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-23 · 第二天落地：下午到 23:40（协调会话 dt-coord-4）——中台搬进 dt-gate 完成，门卫停在第 4 步
+
+- **搬家做完了，真机验收通过**（常浩亲手敲 sudo，17:44–23:00；照抄清单 `evidence/2026-11-23-0e2-migration/claude-01-搬家照抄清单.md`）：门卫换成 #313 后的新版 → 换工人启动脚本（#368 版，逐字节核过）→ stage（引擎 `abc8d41`、仓库 `b62fb73`、node v24.16.0）→ preflight 全通过 → migrate（恢复点 `gate-migrate-20261123T095714Z`，主账号原中台改名留着、钥匙已作废）→ windows（3352、3353 起来，主账号令牌副本 600）→ rotate-worker → status（三个服务以 dt-gate 在跑，健康检查 `abc8d41`）→ verify 全部符合（`/Library/Application Support/DigitalTwin/verify/20261123-225636.json`，监听者规则 9 项全对，门卫 `guard=yes`）→ dt-gate 里 pin `abc8d41` + reconcile（`why: null`、`frozen: []`，恢复闸开）。
+  - 验收句「中台以 dt-gate 身份运行，3350 / 3352 / 3353 只收 dt-gate 在听的连接」：**通过**（真机）。
+  - 清单里 verify 那条写成 root 副本路径，root 副本旁没有 `dt_pf_verify.py`，要在仓库里跑 `sudo bash ops/dt_worker_pf.sh verify`；命令清单已改。
+- **门卫（0E-3c）停在第 4 步**：lark-cli、21 个脚本、入口已装（都属 root、和仓库逐字节一致）；App ID 已登记；App Secret 已放进 dt-gate（600）。`doctor --online` 报「no access token available for bot」。已排除密钥：以 dt-gate 身份用同一份密钥直连飞书拿到 `code:0`。根因：lark-cli 1.0.96 的环境变量凭据不会拿 APP_SECRET 自己换令牌，只读 `LARKSUITE_CLI_TENANT_ACCESS_TOKEN`（源码 `extension/credential/env/env.go` ResolveToken）。已交门卫线（local_2bfa53b4）改成门卫自己换令牌后交给 lark-cli，单开 PR。
+  - 第一次放密钥用了会回显的 `cat`，截图里露了明文，已请常浩在飞书后台重置、用不回显的 `read -s` 重放（23:14）。
+- **今天下午合并的**（都没安装；#368 的启动脚本随搬家装进了工人共享目录）：#313 门卫监听者规则 `ce5afa5`、#366 门卫接上监听核对 `6c60ec5`、#367 P2-22 出口账本对账换门卫身份 `7d5c9cc`、#370 门卫常驻 LaunchDaemon `87ae808`（没审查，常浩回「合并 370」）、#368 五要素写进工人提示词 `b62fb73`（第 2 轮 P0/P1 清零，P2-05 修了没复审，常浩 17:45 选「修完不再审」）。
+- **#369（0E-3b 派单改点门卫卡）还开着**：第 1 轮 ChatGPT 回信没写完，P1 正文丢了；常浩经驿窗批第 3 轮重审、在协调会话批第 4 轮；第 4 轮返修，剩 P1-01（点批准到发事件之间可另装接派单事件的规则）、P2-01（发卡被强杀后收不了尾）。接手会话 local_fd6cd46a 在修，修完怎么收（送第 5 轮 / 修完不再审 / 接受为已知风险）等常浩选。范围外的转 #371、#372。预览卡已在常浩私聊（猛鬼兽发的三张），他还没回样子。
+- **今天接受的风险**：#268、#255、#340「修完不再审」；#255 其余 P2（P2-08、P2-17～19 在 0E-3c 真机核，P2-20、P2-21 接受）；#368 P2-05 修了没复审；#370 没审查。
+- **偶发**：CI 上 `test_autoloop_publish.OnlyNonMain` 清理临时目录报 `Directory not empty: 'pack'`（#368 第一次 CI），重跑通过，LESSONS 里没有，待查。
+- **还没做 / 明天的顺序**：① 门卫取令牌的修复合并 → 重装 `gatekeeper.py` → 门卫清单第 4 步起（前台 run、配回调、绑定、切飞书通道、点真卡）→ 第 10 步装常驻；② #369 收口合并；③ 在新布局下跑派活剩余 4 单（`docs/批2-五单验收单.md`）。`install_hold.txt` 里 `autoloop_grants.py` 那行写着「搬完删掉」，但主账号 `~/.hermes/scripts/` 里那份旧版还在，删了这行工程自检会天天报不同，先留着，等决定主账号那份怎么处理。
+- **待开的**：#326（工人记模型，要合 main、解冲突，协调会话接）、#341–#343（#333 后三批）、#344、#319（发布凭据草稿；放开真发布前必须先合 #320）。
+
 ## 2026-11-23 · 第二天落地：上午到 14:45 的进展（协调会话 dt-coord-3，交接中）
 
 - **六件决定已登记**（DECIDED 11-23，PR #345 `4250fa0`）：门卫应用已建在公司飞书，名「卫士」，App ID `cli_ab890cf1cd395d03`；网关提议时拦没有派单规则的项目；账本收 dt-sandbox（并进 #328）；shanhao1997 经典令牌（只勾 public_repo、90 天）；搬家不带出口账本和 hub-pin；#339 已合并 `41c5f32`。
