@@ -627,6 +627,15 @@ class LedgerTests(Base):
         self.assertEqual([c["item"] for c in cands], ["别的仓库的 74"])
         self.assertTrue(any("1 件和别的来源是同一个 PR" in n for n in self.notes), self.notes)
 
+    def test_dispatch_row_merged_into_its_pr(self):
+        row = {**loop_row("pr:my-skills#74", "t-1（Claude）：做甲", source="pr"), "ask": "拍板"}   # 冻结的派单并进它开着的 PR
+        self.snapshot([row])
+        cands, _ = self.from_ledger()
+        self.assertEqual(len(cands), 1)
+        self.assertIn("新通道派单", cands[0]["why_owner"])
+        have = [pf.cand("merge", "skills", "o/my-skills#74 做甲", "合并官判「问常浩」", "shadow/agreement.csv")]
+        self.assertEqual(self.from_ledger(have)[0], [])                       # 这一行自己就是 #74：不重复列
+
     def test_mainline_item_carries_its_mainline_name(self):
         self.snapshot([loop_row("mainline:my-skills/风格库/常浩决定", "常浩决定", source="mainline")])
         self.assertEqual([c["item"] for c in self.from_ledger()[0]], ["风格库：常浩决定"])

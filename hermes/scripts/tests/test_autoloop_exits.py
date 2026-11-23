@@ -305,6 +305,19 @@ class Reconcile(Base):
         self.assertEqual(E.settle("merge:o/r:1:h", "failed", "GitHub 上看过没合并", confirm=True)["state"], "failed")
         self.assertEqual(E.show()["frozen"], [])
 
+    def test_too_many_rounds_can_be_settled(self):
+        """#338 乙：真走一遍对账 → 核不清 → 常浩 settle 结算；范围在结算前冻结。"""
+        key = "send_feishu:card-9"
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        self.unknown(key, kind="send_feishu", scope="card:9", target=t)
+        n = iter(range(10 ** 6))
+        with mock.patch.object(E, "lark_read", side_effect=lambda a, w: {"messages": [], "has_more": True, "page_token": f"t{next(n)}"}):
+            notes = E.reconcile(now=E.now_tz() + dt.timedelta(minutes=10))
+        self.assertEqual([x["state"] for x in notes if x["key"] == key], ["unreconciled"])
+        with self.assertRaisesRegex(E.Refused, "核不清"):
+            E.guard("send_feishu", "send_feishu:card-9b", "card:9", {}, self.act())
+        self.assertEqual(E.settle(key, "failed", "私聊里核过没发出", confirm=True)["state"], "failed")
+
     def test_settle_done_writes_the_ref_and_feishu_needs_one(self):
         """第 2 轮预审 P2-B2：发飞书核不清、常浩结算成做成了，必须写核到的消息号，同一动作之后直接回它（桥接要拿它报送达）。"""
         key = "send_feishu:card-7"
@@ -439,6 +452,22 @@ class Readers(Base):
             with self.subTest(partial=partial), mock.patch.object(E, "lark_read", return_value=partial):
                 with self.assertRaisesRegex(E.Unreachable, "对账：.*没法确认读没读全"):
                     E.read_send(t, row, now)
+
+    def test_read_send_too_many_rounds_goes_to_owner(self):
+        """#338 乙：翻到轮数上限 = 连得上、确定读不全。记核不清交常浩结算，不再永远停在结果不明；其他读不全照旧保持不明。"""
+        now = E.now_tz()
+        row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        n = iter(range(10 ** 6))
+        endless = lambda args, what: {"messages": [], "has_more": True, "page_token": f"t{next(n)}"}
+        with mock.patch.object(E, "lark_read", side_effect=endless) as m:
+            verdict, evidence = E.read_send(t, row, now)
+        self.assertIsNone(verdict)
+        self.assertRegex(evidence["note"], "翻了 100 轮还没到底.*交常浩核实")
+        self.assertEqual(m.call_count, 100)
+        with mock.patch.object(E, "lark_read", return_value={"messages": [], "has_more": True}), \
+                self.assertRaises(E.Unreachable):                                  # 没给翻页标记：仍按连不上
+            E.read_send(t, row, now)
 
     def test_only_the_real_message_counts(self):
         """审查 P1-05：机器人发的、类型对、有消息号、令牌在按钮回调值里，才算这条；只在文字里搜到令牌不算。"""
