@@ -261,6 +261,14 @@ class Approval(Base):
         with mock.patch.object(C, "loaded_rules", side_effect=C.Rejected("读不到中台正在用的规则（OperationalError），不放行")):
             with self.assertRaisesRegex(G.Rejected, "查不了中台有没有 dispatch-dt-sandbox-claude"):
                 G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        for bad in ({"rules": "坏的"}, {"rules": [{"name": "dispatch-dt-sandbox-claude", "when": "坏的"}]},
+                    {"rules": [{"name": "dispatch-dt-sandbox-claude", "when": {"source": "hermes", "types": "dispatch.dt-sandbox.claude.write"}}]}):
+            self.hub_rules = bad                       # 配置形状不对：说清原因，不吐 Python 报错
+            with self.subTest(bad=bad), self.assertRaisesRegex(G.Rejected, "dispatch-dt-sandbox-claude"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        with mock.patch.dict(sys.modules, {"autoloop_config": None}):   # 装机目录缺 autoloop_config.py（审查 P1）
+            with self.assertRaisesRegex(G.Rejected, "查不了中台有没有 dispatch-dt-sandbox-claude"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
         self.assertFalse(self.db.exists() and self.sql("SELECT code FROM proposals"))
         self.assertEqual(self.notices, [])
 

@@ -591,14 +591,16 @@ def require_hub_rule(repo, executor):
     """中台正在用的规则里要有接这一单的派单规则（常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝）。
     没有它，批准后凭证照签、事件发出去却没有规则接，悄悄丢掉。只读中台库里它当前载入的配置（和 autoloop_config 核对装机
     同一个读法），读不到不放行；规则暂停着不拦（现在的流程是先暂停、批准前由常浩恢复）。"""
-    import autoloop_config as C
     name, etype = rule_name(repo, executor), event_type(repo, executor)
-    try:
-        live = C.dispatch_rules_of(C.loaded_rules())
-    except C.Rejected as e:
-        raise Rejected(f"{e}；查不了中台有没有 {name} 这条派单规则，不提议")
-    when = (live.get(name) or {}).get("when") or {}
-    if when.get("source") != C.SOURCE or etype not in (when.get("types") or []):
+    try:                                       # 装机目录缺 autoloop_config、配置形状不对，也都要说清原因，不吐 Python 报错
+        import autoloop_config as C
+        when = C.dispatch_rules_of(C.loaded_rules()).get(name, {}).get("when") or {}
+        types = when.get("types")
+        found = when.get("source") == C.SOURCE and isinstance(types, list) and etype in types
+    except Exception as e:                     # noqa: BLE001
+        why = str(e) if type(e).__name__ == "Rejected" else f"{type(e).__name__}：{e}"
+        raise Rejected(f"{why}；查不了中台有没有 {name} 这条派单规则，不提议")
+    if not found:
         raise Rejected(f"{repo} 名册放行了写入，但中台没有接 {executor} 派单的规则 {name}（中台配置现在只给沙盒生成派单规则），"
                        f"这一单批准了也派不出去；要派，先由常浩决定给 {repo} 加派单规则")
 
