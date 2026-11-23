@@ -92,6 +92,10 @@ class Unreachable(Exception):
     """对账时外部系统连不上：保持 unknown，下次再对。"""
 
 
+class TooMany(Exception):
+    """对账读列表翻到轮数上限：外部系统连得上，但确定读不全（#338 乙）。记核不清交常浩，不当连不上。"""
+
+
 def now_tz():
     return G.now_tz()
 
@@ -499,9 +503,14 @@ def read_send(t, row, now):
     start = G.parse_iso(row["started_at"]) - dt.timedelta(minutes=1)
     args = ["im", "+chat-messages-list", "--chat-id", t["chat"], "--start", start.isoformat(),
             "--end", (now + dt.timedelta(minutes=1)).isoformat(), "--order", "asc", "--page-all"]
-    # --page-all 默认只翻 10 页（约 500 条）、到顶不报错：只看前半截会把发了两条的认成一条。接着翻到底；
-    # 翻不完按连不上办（保持不明，下次再对），不拿半截列表下结论（#312）
-    msgs = lark_pages.read_all(lambda extra: lark_read(args + extra, "对账"), "对账", Unreachable)["messages"]
+    # --page-all 默认只翻 10 页（约 500 条）、到顶不报错：只看前半截会把发了两条的认成一条。接着翻到底，
+    # 不拿半截列表下结论（#312）。读不全分两种：返回不对、没翻页标记等按连不上办（保持不明，下次再对）；
+    # 翻到轮数上限是连得上、确定读不全，再对也一样，记核不清交常浩 settle 结算（#338 乙）
+    try:
+        msgs = lark_pages.read_all(lambda extra: lark_read(args + extra, "对账"), "对账", Unreachable,
+                                   exhausted=TooMany)["messages"]
+    except TooMany as e:
+        return None, {"note": f"{e}；交常浩核实"}
     hits = [m for m in msgs if isinstance(m, dict) and is_ours(m, t)]
     if len(hits) == 1:
         return "done", {"message_id": hits[0]["message_id"]}
