@@ -10,6 +10,7 @@ import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一�
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import signal
@@ -27,8 +28,17 @@ sys.path.insert(0, str(HERE))
 import autoloop_grants as G  # noqa: E402
 from test_autoloop_grants import Base  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
+from test_autoloop_grants import SCOPE  # noqa: E402
 
 SCRIPT = HERE.parents[2] / "ops/dt_worktree.py"
+_spec = importlib.util.spec_from_file_location("dt_worktree", SCRIPT)
+W = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(W)
+
+
+def scope_block(scope):
+    """提示词里五要素原文的固定分隔段（#336）。"""
+    return f"{W.SCOPE_BEGIN}\n{scope}\n{W.SCOPE_END}"
 PY = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
@@ -276,6 +286,13 @@ class FirstTurnAndResume(WorkerBase):
         self.assertTrue(c["argv"][-1].startswith("做事\n\n【dt-worktree 启动脚本】"))
         self.assertIn(f"codex/{tid}", c["argv"][-1])
 
+    def test_codex_prompt_also_carries_scope(self):
+        tid = self.new_live_task(executor="codex")
+        args = ("exec", "--json", "做事")
+        r, (c,) = self.run_turn([self.dispatch_event(tid, executor="codex")], executor="codex", args=args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(scope_block(SCOPE), c["argv"][-1])
+
     def test_codex_wrapper_uses_codex_message_format_when_stopping(self):
         tid = self.new_live_task(executor="codex")
         G.revoke(tid, now=self.now)
@@ -284,6 +301,69 @@ class FirstTurnAndResume(WorkerBase):
         lines = [json.loads(x) for x in r.stdout.strip().splitlines()]
         self.assertEqual([x["type"] for x in lines], ["item.completed", "turn.completed"])
         self.assertTrue(lines[0]["item"]["text"].startswith("停下了：凭证已撤销"))
+
+
+class ScopeInPrompt(WorkerBase):
+    """#336：工人读不到共享目录的任务单，启动脚本把核过哈希的五要素原文接进提示词；回答、复查轮也带。"""
+
+    def test_first_turn_prompt_has_scope_verbatim_after_note(self):
+        tid = self.new_live_task()
+        r, (c,) = self.run_turn([self.dispatch_event(tid)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prompt = c["argv"][1]
+        self.assertTrue(prompt.startswith("做事\n\n【dt-worktree 启动脚本】"))
+        self.assertIn(scope_block(SCOPE), prompt)
+        self.assertIn("常浩批准的范围，以此为准", prompt)
+        self.assertIn("第 1 代", prompt)
+        self.assertIn("不用再去读共享目录", prompt)
+        self.assertLess(prompt.index("不要 git push"), prompt.index(W.SCOPE_BEGIN))
+        self.assertEqual(c["argv"][2:], ["--session-id", "s-1"])
+
+    def test_answer_and_timer_turns_also_carry_scope(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)])
+        timer = {"id": "timer:1", "source": "hermes", "type": "timer.due", "subject": tid}
+        for ev, args in ((self.answer_event(tid), ("-p", "接着做", "--resume", "s-1")),
+                         (timer, ("-p", "看看进度", "--resume", "s-1"))):
+            r, (c,) = self.run_turn([ev], args=args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(scope_block(SCOPE), c["argv"][1])
+            self.assertEqual(c["argv"][-2:], ["--resume", "s-1"])
+
+    def test_scope_hash_mismatch_never_reaches_cli(self):
+        tid = self.new_live_task()
+        p = self.tasks / f"{tid}.md"
+        p.write_text(p.read_text().replace("只改 README.md", "顺便升级依赖"))
+        r, calls = self.run_turn([self.dispatch_event(tid)])
+        self.assert_stopped(r, calls, "五要素和凭证记的范围对不上")
+
+
+class ScopeNoteUnit(unittest.TestCase):
+    def test_limit_matches_gateway(self):
+        self.assertEqual(W.MAX_SCOPE, G.MAX_SCOPE)
+
+    def test_scope_kept_verbatim_including_markers_inside(self):
+        scope = "目标：x\n  缩进和空行保留\n\n" + W.SCOPE_END + "\n结尾"
+        (out,) = W.with_note("claude", ["-p", "做事"], "t-20261123-abcdef", "claude/t-20261123-abcdef",
+                             {"scope_text": scope, "generation": 2})[1:]
+        self.assertIn(scope_block(scope), out)
+        self.assertIn(f"共 {len(scope)} 字", out)
+        self.assertIn("第 2 代", out)
+        self.assertNotIn("截断", out)
+
+    def test_too_long_scope_is_cut_and_says_so(self):
+        scope = "甲" * (W.MAX_SCOPE + 5)
+        (out,) = W.with_note("codex", ["exec", "做事"], "t-20261123-abcdef", "codex/t-20261123-abcdef",
+                             {"scope_text": scope, "generation": 1})[1:]
+        self.assertIn(scope_block("甲" * W.MAX_SCOPE), out)
+        self.assertNotIn("甲" * (W.MAX_SCOPE + 1), out)
+        self.assertIn(f"原文共 {W.MAX_SCOPE + 5} 字", out)
+        self.assertIn("已截断", out)
+
+    def test_unknown_prompt_position_left_alone(self):
+        args = ["--version"]
+        self.assertEqual(W.with_note("claude", args, "t-20261123-abcdef", "b", {"scope_text": "x", "generation": 1}),
+                         args)
 
 
 class PfGate(WorkerBase):
