@@ -94,6 +94,9 @@ PROPOSAL_TTL = dt.timedelta(minutes=30)
 STALE = dt.timedelta(seconds=60)          # 在途超过这么久没结果，才当结果不明补发（POST 超时 15 秒）
 MAX_HOURS = 72
 CARD_TOKEN = re.compile(r"^[0-9a-f]{16}$")
+REQUEST_ID = re.compile(r"^[0-9a-f]{16,64}$")               # 提议的请求号（客户端生成，重试带同一个，#369 P2-02）
+MAX_PENDING = 3                             # 同时等常浩点的派单提议最多几张（#369 P2-02）：秘书不可信，不能让卡淹没私聊
+MAX_PER_HOUR = 10                           # 一小时里最多登记几张派单提议
 CHOICES = ("ok", "no")                     # 确认卡上的两个按钮：批准派单、不派
 UNFREEZE_TEXT = re.compile(r"^恢复\s*(t-\d{8}-[0-9a-f]{6})\s+([0-9a-f]{6})$")
 TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")
@@ -119,7 +122,7 @@ CREATE TABLE IF NOT EXISTS proposals (code TEXT PRIMARY KEY, repo TEXT NOT NULL,
   content_hash TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, card_token TEXT NOT NULL UNIQUE,
   card_state TEXT NOT NULL DEFAULT 'pending' CHECK (card_state IN ('pending','sent','unsure')), card_message TEXT, card_note TEXT,
   decision TEXT CHECK (decision IN ('approved','rejected','expired','void')), decided_at TEXT, decided_note TEXT,
-  click_event TEXT, closed_at TEXT, task_id TEXT);
+  click_event TEXT, closed_at TEXT, task_id TEXT, request_id TEXT UNIQUE, request_hash TEXT);
 CREATE TABLE IF NOT EXISTS used_messages (message_id TEXT PRIMARY KEY, purpose TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hub_events (event_key TEXT PRIMARY KEY, task_id TEXT NOT NULL, rule TEXT NOT NULL,
   executor TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, hub_event INTEGER, at TEXT NOT NULL,
@@ -557,26 +560,35 @@ def content_hash(repo, github, executor, actions, valid_until, scope_text):
 
 
 def require_hub_rule(repo, executor):
-    """中台正在用的规则里要有接这一单的派单规则（常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝）。
-    没有它，批准后凭证照签、事件发出去却没有规则接，悄悄丢掉。只读中台库里它当前载入的配置（和 autoloop_config 核对装机
-    同一个读法），读不到不放行；规则暂停着不拦（现在的流程是先暂停、批准前由常浩恢复）。点卡批准时再核一次。"""
-    name, etype = rule_name(repo, executor), event_type(repo, executor)
+    """中台正在用的配置里，这一类派单事件要正好交给受控的工人（常浩 11-23 定：名册放行、但中台没有派单规则的项目，
+    提议时就拒绝；PR #369 L3 第 3 轮 P1-01：不只看有没有规则接这类事件，还要整条规则——交给哪个 Agent、工作目录、提示词、
+    通道等——和生成的一样，那个 Agent 的定义也一样，没有别的规则也接，否则卡片上写的「交给 X」和实际执行的对不上）。
+    逐字段比对在 autoloop_config.dispatch_route_problem。只读中台库里它当前载入的配置（和 autoloop_config 核对装机同一个
+    读法），读不到不放行；规则暂停着不拦（现在的流程是先暂停、批准前由常浩恢复），暂停只豁免暂停本身。点卡批准时再核一次。
+    剩余风险：核过之后、中台接到事件之前配置又被换掉，这里拦不住；hermes 钥匙在时 autoloop_config install 不许改派单规则，
+    工人侧启动脚本还会按凭证核规则名、执行方和仓库。"""
+    name = rule_name(repo, executor)
     try:                                       # 装机目录缺 autoloop_config、配置形状不对，也都要说清原因，不吐 Python 报错
         import autoloop_config as C
-        when = C.dispatch_rules_of(C.loaded_rules()).get(name, {}).get("when") or {}
-        types = when.get("types")
-        found = when.get("source") == C.SOURCE and isinstance(types, list) and etype in types
+        why = C.dispatch_route_problem(C.loaded_rules(), repo, executor)
     except Exception as e:                     # noqa: BLE001
         why = str(e) if type(e).__name__ == "Rejected" else f"{type(e).__name__}：{e}"
         raise Rejected(f"{why}；查不了中台有没有 {name} 这条派单规则，不提议")
-    if not found:
+    if why and why.startswith("中台没有接"):
         raise Rejected(f"{repo} 名册放行了写入，但中台没有接 {executor} 派单的规则 {name}（中台配置现在只给沙盒生成派单规则），"
                        f"这一单批准了也派不出去；要派，先由常浩决定给 {repo} 加派单规则")
+    if why:
+        raise Rejected(f"派单规则 {name} 核对不过：{why}；不提议、不签")
 
 
-def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None):
-    """登记一张派单提议，等门卫发确认卡（本函数不发任何消息）。"""
+def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None, request_id=None):
+    """登记一张派单提议，等门卫发确认卡（本函数不发任何消息）。
+    request_id（#369 L3 第 3 轮 P2-02）：同一个请求号再交一次，内容一样就原样返回原来那张提议（again: true），不另登记、
+    不多发一张卡；内容不一样拒绝。待批的提议（没定、没过期）最多 MAX_PENDING 张、一小时最多登记 MAX_PER_HOUR 张，
+    都在凭证库写事务里数，超了拒绝。"""
     now = now or now_tz()
+    if request_id is not None and not REQUEST_ID.match(request_id):
+        raise Rejected("请求号写法不对（16 到 64 位小写十六进制）")
     if not REPO_NAME.match(repo or ""):
         raise Rejected(f"{repo} 不在名册能派写入单的仓库里")
     github = allowed_repos().get(repo)
@@ -596,22 +608,47 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
     valid_until = iso(now + dt.timedelta(hours=hours))
     h = content_hash(repo, github, executor, actions, valid_until, scope_text)
     require_recovery()                         # 闸关着门卫也发不出确认卡：先说清，不留一张必然过期的提议
+    rhash = sha256("\n".join([repo, executor, ",".join(actions), str(hours), scope_text]))
+    card = "门卫会把确认卡发到常浩私聊，他点「批准派单」才签"
     with tx(path) as con:
+        if request_id is not None:
+            old = con.execute("SELECT * FROM proposals WHERE request_id = ?", (request_id,)).fetchone()
+            if old is not None:
+                if old["request_hash"] != rhash:
+                    raise Rejected("这个请求号已经交过一张内容不同的提议，不登记")
+                return {**proposal_out(old), "card": card, "again": True}
+        pending = con.execute("SELECT COUNT(*) FROM proposals WHERE decision IS NULL AND expires_at > ?",
+                              (iso(now),)).fetchone()[0]
+        if pending >= MAX_PENDING:
+            raise Rejected(f"已经有 {pending} 张派单确认卡等常浩点，先等他处理（每张 {int(PROPOSAL_TTL.total_seconds() // 60)} 分钟"
+                           f"不点自动作废），不再登记新的")
+        recent = con.execute("SELECT COUNT(*) FROM proposals WHERE created_at > ?",
+                             (iso(now - dt.timedelta(hours=1)),)).fetchone()[0]
+        if recent >= MAX_PER_HOUR:
+            raise Rejected(f"一小时里已经登记了 {recent} 张派单提议，到上限了，过一会儿再提")
         for _ in range(5):
             code, token = secrets.token_hex(4), secrets.token_hex(8)
             try:
                 con.execute("INSERT INTO proposals (code, repo, github, executor, scope_text, actions, valid_until, "
-                            "content_hash, created_at, expires_at, card_token) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            "content_hash, created_at, expires_at, card_token, request_id, request_hash) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (code, repo, github, executor, scope_text, json.dumps(list(actions)), valid_until, h,
-                             iso(now), iso(now + PROPOSAL_TTL), token))
+                             iso(now), iso(now + PROPOSAL_TTL), token, request_id, rhash))
                 break
-            except sqlite3.IntegrityError:
+            except sqlite3.IntegrityError:     # 请求号不会撞：同一个请求号上面已经按原提议返回（同一写事务）
                 continue
         else:
             raise Rejected("提议号连撞 5 次，请重试")
-    return {"code": code, "repo": repo, "github": github, "executor": executor, "actions": list(actions),
-            "valid_until": valid_until, "expires_at": iso(now + PROPOSAL_TTL),
-            "card": "门卫会把确认卡发到常浩私聊，他点「批准派单」才签"}
+        return {**proposal_out(con.execute("SELECT * FROM proposals WHERE code = ?", (code,)).fetchone()), "card": card}
+
+
+def proposal_out(row):
+    """propose 返回给秘书的样子：不含卡片令牌和内容哈希。已经定了结果的另带 decision。"""
+    out = {"code": row["code"], "repo": row["repo"], "github": row["github"], "executor": row["executor"],
+           "actions": json.loads(row["actions"]), "valid_until": row["valid_until"], "expires_at": row["expires_at"]}
+    if row["decision"]:
+        out["decision"] = row["decision"]
+    return out
 
 
 def proposal_view(row):
@@ -662,9 +699,19 @@ def cards_to_close(path=None):
                                                       "card_message IS NOT NULL AND closed_at IS NULL ORDER BY decided_at")]
 
 
-def card_closed(code, now=None, path=None):
+def cards_to_settle(path=None):
+    """定了结果（实际上只会是过期作废）、卡片消息号一直没登记上、还没收尾的提议（#369 L3 第 3 轮 P2-01）：发卡结果不明，
+    或者发成了但门卫在登记消息号前退出。门卫对这些只按出口账本对账、不再发卡，对上了补登记消息号、再改成结果卡。"""
     with tx(path) as con:
-        con.execute("UPDATE proposals SET closed_at = ? WHERE code = ?", (iso(now or now_tz()), code))
+        return [proposal_view(r) for r in con.execute("SELECT * FROM proposals WHERE decision IS NOT NULL AND "
+                                                      "card_message IS NULL AND closed_at IS NULL ORDER BY decided_at")]
+
+
+def card_closed(code, now=None, path=None, note=None):
+    """卡片收尾完了（改成了结果卡，或者确认根本没有卡要改）；note 写为什么不用改。"""
+    with tx(path) as con:
+        con.execute("UPDATE proposals SET closed_at = ?, card_note = COALESCE(?, card_note) WHERE code = ?",
+                    (iso(now or now_tz()), note, code))
 
 
 def send_note(task_id, send):
@@ -1055,6 +1102,7 @@ def build_parser():
     p.add_argument("--executor", required=True)
     p.add_argument("--scope-file", required=True)
     p.add_argument("--hours", type=int, default=12)
+    p.add_argument("--request-id")
     sub.add_parser("unfreeze").add_argument("--message-id", required=True)
     p = sub.add_parser("resume-dispatch")
     p.add_argument("--task", required=True)
@@ -1080,7 +1128,8 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     try:
         if a.cmd == "propose":
-            out = propose(a.repo, a.executor, Path(a.scope_file).read_text(encoding="utf-8"), a.hours)
+            out = propose(a.repo, a.executor, Path(a.scope_file).read_text(encoding="utf-8"), a.hours,
+                          request_id=a.request_id)
         elif a.cmd == "unfreeze":
             out = unfreeze(a.message_id)
         elif a.cmd == "resume-dispatch":

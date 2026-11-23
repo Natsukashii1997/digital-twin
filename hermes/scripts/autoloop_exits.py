@@ -613,6 +613,13 @@ def settle(key, result, note, confirm=False, ref=None):
     return {"key": key, "state": result, **({"ref": ref} if ref else {})}
 
 
+def attempt(key):
+    """只读：这个幂等键在账本里的那一行（dict，outcome 已解析），没有返回 None。门卫收尾过期的派单确认卡时用（#369 P2-01）。"""
+    with db(write=False) as con:
+        r = con.execute("SELECT key, state, outcome FROM exits WHERE key = ?", (key,)).fetchone()
+    return r and {"key": r["key"], "state": r["state"], "outcome": json.loads(r["outcome"] or "{}")}
+
+
 def show():
     with db(write=False) as con:
         rows = [dict(r) for r in con.execute("SELECT key, kind, scope, state, attempts, outcome, evidence, updated_at "

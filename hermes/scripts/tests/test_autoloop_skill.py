@@ -42,7 +42,7 @@ import autoloop_exits as EX  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
 import autoloop_recovery as RV  # noqa: E402
 import gate_intake as I  # noqa: E402
-from test_autoloop_grants import CHAT, LATER, T0, Base  # noqa: E402
+from test_autoloop_grants import CHAT, LATER, T0, Base, hub  # noqa: E402
 from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
 
 SKILL = HERE.parents[1] / "skills/autoloop/SKILL.md"
@@ -102,7 +102,9 @@ def p_cli(argv):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         code = I.main(["dispatch-propose", *argv])
-    return code, json.loads(buf.getvalue())
+    out = json.loads(buf.getvalue())
+    assert re.match(r"^[0-9a-f]{16,64}$", out.pop("request_id")), out     # 每次输出都带请求号（#369 P2-02）
+    return code, out
 
 
 class SkillDocMatchesScripts(unittest.TestCase):
@@ -171,7 +173,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [8], tables)
+        self.assertEqual([len(t) for t in tables], [11], tables)
         reach = [inspect.getsource(G.propose) + inspect.getsource(RV.ensure_open) + inspect.getsource(G.require_hub_rule)
                  + inspect.getsource(I.propose_dispatch)]
         for table, src in zip(tables, reach):
@@ -274,7 +276,7 @@ class OneSentenceToDispatch(Base):
 
     def test_project_without_dispatch_rule_is_refused_at_propose(self):
         """常浩 11-23 定（#346）：中台没有这条派单规则，网关提议时就拒绝，不登记提议；技能第 3 节的表认得这句原话。"""
-        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude")]}
+        self.hub_rules = hub(("dt-sandbox", "claude"))
         code, out = self.propose(executor="codex")
         self.assertEqual(code, 1)
         self.assertIn("名册放行了写入，但中台没有接", out["why"])

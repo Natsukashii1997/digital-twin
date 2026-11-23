@@ -146,6 +146,61 @@ def dispatch_rule(repo, executor):
             "parallel": 2, "resume": True, "channels": list(NEW_CHANNELS)}
 
 
+def agent_spec(executor):
+    """派单规则交给的 Agent（dt-claude / dt-codex）应有的定义：跑在 dt-worker、program 挂工人侧启动脚本。"""
+    return {"name": AGENTS[executor][1], "worker": WORKER, "use": executor, "access": "edit",
+            "program": f"{PROGRAM_DIR}/dt-worktree-{executor}"}
+
+
+def type_hits(pattern, etype):
+    """中台 when.types 里的一项会不会接到 etype：原样相等、「*」、「x.*」前缀；别的带 * 的写法认不准，一律当接得到。"""
+    if not isinstance(pattern, str):
+        return True
+    if pattern == etype or pattern == "*":
+        return True
+    if pattern.endswith(".*") and "*" not in pattern[:-2]:
+        return etype.startswith(pattern[:-1])
+    return "*" in pattern
+
+
+def dispatch_route_problem(live, repo, executor):
+    """中台正在用的配置 live 里，repo / executor 这一类派单事件实际交给谁（PR #369 L3 第 3 轮 P1-01）。
+    要正好一条同名规则、整条（交给哪个 Agent、工作目录、标题、提示词、并发、续接、通道）和 dispatch_rule 生成的一样
+    （中台载入时补的 group = 规则名、tell = needed 两个默认值照补；暂停状态不算规则内容，不拦），它交给的 Agent 定义也和
+    agent_spec 一样，并且没有别的规则也接 hermes 来源的这类事件。都对返回 None，否则返回一句原因。"""
+    name, etype = G.rule_name(repo, executor), G.event_type(repo, executor)
+    rules = live.get("rules") if isinstance(live, dict) else None
+    if not isinstance(rules, list) or not all(isinstance(r, dict) for r in rules):
+        return "中台配置里的规则不是列表，核不了"
+    same = [r for r in rules if r.get("name") == name]
+    if not same:
+        return f"中台没有接 {executor} 派单的规则 {name}"
+    if len(same) > 1:
+        return f"中台有 {len(same)} 条同名的派单规则 {name}"
+    have = {k: v for k, v in same[0].items() if k != "paused"}
+    have.setdefault("group", name)
+    have.setdefault("tell", "needed")
+    want = {"group": name, "tell": "needed", **dispatch_rule(repo, executor)}
+    if have != want:
+        diff = sorted(k for k in set(have) | set(want) if have.get(k) != want.get(k))
+        return f"中台的派单规则 {name} 和应有的不一样（{'、'.join(diff)}），实际交给谁、在哪做对不上卡片"
+    aid = AGENTS[executor][0]
+    agents = live.get("agents")
+    if not isinstance(agents, dict) or agents.get(aid) != agent_spec(executor):
+        return f"中台里 Agent {aid} 的定义和应有的不一样（或没有），派单规则交给的不是受控的工人"
+    others = []
+    for r in rules:
+        when = r.get("when")
+        if r is same[0] or not isinstance(when, dict) or when.get("source") != SOURCE:
+            continue
+        types = when.get("types")
+        if not isinstance(types, list) or any(type_hits(t, etype) for t in types):
+            others.append(str(r.get("name")))
+    if others:
+        return f"中台还有别的规则也接 {etype}：{'、'.join(others[:3])}，批准后不只交给 {aid}"
+    return None
+
+
 def render(current, owner_open_id, repos):
     """在现有配置上生成数字分身这一块；同样的输入总得到同样的输出（可重复跑）。"""
     if not re.match(r"^ou_[\w-]+$", owner_open_id or ""):
@@ -156,9 +211,8 @@ def render(current, owner_open_id, repos):
     new = copy.deepcopy(current)
     new.setdefault("sources", {})[SOURCE] = {"name": "猛鬼兽派单网关"}
     agents = new.setdefault("agents", {})
-    for executor, (aid, name) in AGENTS.items():
-        agents[aid] = {"name": name, "worker": WORKER, "use": executor, "access": "edit",
-                       "program": f"{PROGRAM_DIR}/dt-worktree-{executor}"}
+    for executor, (aid, _) in AGENTS.items():
+        agents[aid] = agent_spec(executor)
     channels = new.setdefault("channels", {})
     if "defaultChannels" in new:
         new["defaultChannels"] = [c for c in new["defaultChannels"] if c != "secretary"]

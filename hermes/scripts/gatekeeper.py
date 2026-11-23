@@ -851,8 +851,37 @@ def close_grant_card(p):
     return {"code": p["code"], "ok": True, "closed": p["decision"]}
 
 
+def settle_unsent_card(p):
+    """过期作废、但卡片消息号一直没登记上的提议（#369 P2-01）：只看出口账本、只读对账，不再发卡。
+    账本记着发成了 → 补登记消息号（下一步按 cards_to_close 改成灰卡）；确定没发出去或根本没发过 → 收尾，没有卡要改；
+    结果不明 → 对一次账，对不上留到下一轮；核不清 → 私聊提醒常浩一次，留着等他在 dt-gate 用 autoloop_exits settle 结算。"""
+    import autoloop_exits as E
+    code = p["code"]
+    key = f"send_feishu:grant-card-{code}"
+    row = E.attempt(key)
+    if row and row["state"] == "unknown":
+        E.reconcile(scope=f"chat:grant-{code}")
+        row = E.attempt(key)
+    if row is None:
+        AG.card_closed(code, note="没发过确认卡")
+        return {"code": code, "ok": True, "settled": "never_sent"}
+    if row["state"] == "failed":
+        AG.card_closed(code, note="确认卡确定没发出去")
+        return {"code": code, "ok": True, "settled": "not_sent"}
+    if row["state"] == "done" and MSG_RE.match(row["outcome"].get("message_id") or ""):
+        AG.mark_card(code, row["outcome"]["message_id"])
+        return {"code": code, "ok": True, "settled": "found", "message_id": row["outcome"]["message_id"]}
+    if row["state"] in ("unreconciled", "done"):           # done 却没有消息号：同核不清，不猜
+        F.alert(f"gate-grant-unsure-{code}", f"派单确认卡（提议 {code}）发没发出去核不清，提议已过期作废、不会签凭证；"
+                f"如果私聊里有这张卡，它的按钮点了也不认。请在 dt-gate 核实后用 autoloop_exits settle --key {key} 结算。",
+                every=None)
+        return {"code": code, "ok": False, "unreconciled": True}
+    return {"code": code, "ok": False, "state": row["state"]}     # 还在不明或在做：下一轮再对
+
+
 def grant_cards_once():
-    """派单卡线程的一轮：没绑定、收点击不在线就不做；先把过期的标成作废，再发该发的卡、改该改的卡。返回这一轮做了什么。"""
+    """派单卡线程的一轮：没绑定、收点击不在线就不做；先把过期的标成作废，再发该发的卡，过期但消息号没登记上的只对账收尾，
+    最后改该改的卡。返回这一轮做了什么。"""
     if not_ready():
         return []
     AG.expire_due()
@@ -863,6 +892,12 @@ def grant_cards_once():
             continue
         _GRANT_TRIED[p["code"]] = time.monotonic()
         done.append(send_grant_card(p, chat))
+    for p in AG.cards_to_settle():
+        key = f"settle-{p['code']}"
+        if time.monotonic() - _GRANT_TRIED.get(key, -GRANT_RETRY) < GRANT_RETRY:
+            continue
+        _GRANT_TRIED[key] = time.monotonic()
+        done.append(settle_unsent_card(p))
     for p in AG.cards_to_close():
         key = f"close-{p['code']}"
         if time.monotonic() - _GRANT_TRIED.get(key, -GRANT_RETRY) < GRANT_RETRY:

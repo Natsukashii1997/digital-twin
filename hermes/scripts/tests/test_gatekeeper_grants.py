@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,6 +28,12 @@ from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 SCOPE = "目标：给 dt-sandbox 的 README 加一节\n范围：只改 README.md\n验收：PR 里只有 README.md"
 
 
+def hub(*pairs):
+    """中台在用的配置（只含派单这一块）：pairs 里每个 (仓库, 执行方) 一条生成的派单规则，加两个工人 Agent 的定义。"""
+    return {"rules": [C.dispatch_rule(r, x) for r, x in pairs],
+            "agents": {C.AGENTS[x][0]: C.agent_spec(x) for x in C.AGENTS}}
+
+
 class Base(TG.Base):
     def setUp(self):
         super().setUp()
@@ -34,8 +41,8 @@ class Base(TG.Base):
         roster = root / "projects.json"
         roster.write_text(json.dumps({"projects": [], "inventory": [
             {"path": "github:o/dt-sandbox", "category": "沙盒", "sandbox": True}]}), encoding="utf-8")
-        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", x) for x in AG.EXECUTORS]}
-        self.posted = []
+        self.hub_rules = hub(*[("dt-sandbox", x) for x in AG.EXECUTORS])
+        self.posted, self.signed = [], 0
         env = {"DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"), "DT_GRANTS_STATUS": str(root / "shared/grants/status.json"),
                "DT_GRANTS_TASKS": str(root / "shared/tasks")}
         for p in (mock.patch.dict(os.environ, env), mock.patch.object(AG, "ROSTER", roster),
@@ -146,6 +153,62 @@ class Sending(Base):
         self.assertIsNotNone(self.row(code)["closed_at"])
 
 
+    def later(self, minutes=31):
+        real = AG.now_tz
+        return mock.patch.object(AG, "now_tz", lambda: real() + dt.timedelta(minutes=minutes))
+
+    def test_card_sent_but_not_registered_is_found_and_turned_grey_after_expiry(self):
+        """#369 P2-01：飞书收到了卡，门卫在登记消息号前退出，过了 30 分钟再起来：按出口账本找回原消息号、改成灰卡，
+        不重发、不签。"""
+        code = self.propose()
+        with mock.patch.object(AG, "mark_card"):                 # 发成了，登记消息号之前进程没了
+            G.grant_cards_once()
+        self.assertIsNone(self.row(code)["card_message"])
+        G._GRANT_TRIED.clear()
+        with self.later():
+            recs = G.grant_cards_once()
+        self.assertEqual([r.get("settled") for r in recs if "settled" in r], ["found"])
+        self.assertEqual(len(self.sent_cards()), 1)              # 没有第二次发
+        r = self.row(code)
+        self.assertEqual((r["decision"], r["card_message"]), ("expired", f"om_gate_msg_{self.lark.n:04d}"))
+        self.assertIsNotNone(r["closed_at"])
+        (p,) = self.patches()
+        self.assertEqual((p["header"]["template"], CV.button_values(p)), ("grey", []))
+        self.assertEqual((AG.show(), self.posted), ([], []))
+
+    def test_unsure_card_after_expiry_waits_and_unreconciled_is_told_once(self):
+        code = self.propose()
+        self.lark.fail.add("发卡片")
+        G.grant_cards_once()
+        self.lark.fail.clear()
+        G._GRANT_TRIED.clear()
+        with self.later(), mock.patch.object(E, "reconcile", lambda **kw: []):   # 对账读不到私聊：保持不明，不收尾
+            (rec,) = G.grant_cards_once()
+        self.assertEqual(rec["state"], "unknown")
+        self.assertIsNone(self.row(code)["closed_at"])
+        with E.db() as con:
+            con.execute("UPDATE exits SET state = 'unreconciled' WHERE key = ?", (f"send_feishu:grant-card-{code}",))
+        for _ in range(2):
+            G._GRANT_TRIED.clear()
+            with self.later():
+                (rec,) = G.grant_cards_once()
+            self.assertTrue(rec["unreconciled"])
+        told = [t for t in self.lark.texts() if "核不清" in t and code in t]
+        self.assertEqual(len(told), 1)                           # 只提醒一次
+        self.assertIsNone(self.row(code)["closed_at"])           # 留着等常浩结算，不当成已收尾
+        self.assertEqual((len(self.sent_cards()), AG.show(), self.posted), (1, [], []))   # 只有最初那一次（结果不明）
+
+    def test_never_sent_card_is_just_closed_after_expiry(self):
+        G.LISTENING.clear()
+        code = self.propose()
+        G.LISTENING.set()
+        with self.later():
+            (rec,) = G.grant_cards_once()
+        self.assertEqual(rec["settled"], "never_sent")
+        self.assertIsNotNone(self.row(code)["closed_at"])
+        self.assertEqual((self.sent_cards(), self.patches()), ([], []))
+
+
 class Clicking(Base):
     def test_owner_click_signs_sends_and_turns_card_green(self):
         code, token, mid = self.sent_card()
@@ -213,6 +276,52 @@ class Clicking(Base):
         self.assertIn(first["task_id"], self.lark.texts()[-1])
         self.assertEqual(len(AG.show()), 1)
         self.assertEqual(len(self.posted), 1)
+
+    def test_two_clicks_at_the_same_time_sign_once(self):
+        """#369 P3-02：两次点击真并发（同一张卡、不同回调事件；批准对批准、批准对不派）：只签一张凭证、只记一个 start 事件、
+        只发一次中台，另一次返回 already；批准和不派抢的时候，先提交的那个决定算数。"""
+        for second in ("ok", "no"):
+            with self.subTest(second=second):
+                code, token, mid = self.sent_card()
+                gate, out = threading.Barrier(2), {}
+
+                def go(choice, eid):
+                    gate.wait()
+                    out[eid] = AG.decide(token, choice, mid, eid)
+                ts = [threading.Thread(target=go, args=a) for a in (("ok", f"a-{second}"), (second, f"b-{second}"))]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+                first, other = sorted(out.values(), key=lambda r: bool(r.get("already")))
+                self.assertTrue(other["already"])
+                self.assertEqual(other["decision"], first["decision"])
+                self.assertEqual(self.row(code)["decision"], first["decision"])
+                con = sqlite3.connect(os.environ["DT_GRANTS_DB"])
+                try:
+                    grants = con.execute("SELECT COUNT(*) FROM grants").fetchone()[0]
+                    starts = con.execute("SELECT COUNT(*) FROM hub_events WHERE kind = 'start'").fetchone()[0]
+                finally:
+                    con.close()
+                n = sum(1 for r in out.values() if r["decision"] == "approved" and not r.get("already"))
+                self.assertEqual(n, 1 if first["decision"] == "approved" else 0)
+                self.assertEqual((grants, starts, len(self.posted)), (self.signed + n,) * 3)
+                self.signed += n
+
+    def test_hub_rule_changed_after_propose_voids_without_signing(self):
+        """P1-01：提议后中台的派单规则被改成交给别的 Agent，再点批准：记 void，不签凭证、不写任务单、不发事件。"""
+        code, token, mid = self.sent_card()
+        live = hub(*[("dt-sandbox", x) for x in AG.EXECUTORS])
+        live["rules"][0] = live["rules"][0] | {"to": "dt-codex"}
+        self.hub_rules = live
+        rec = self.click(token, mid)
+        self.assertFalse(rec["ok"])
+        self.assertEqual(rec["decision"], "void")
+        self.assertIn("和应有的不一样（to）", self.row(code)["decided_note"])
+        self.assertEqual((AG.show(), self.posted), ([], []))
+        self.assertEqual(list(Path(os.environ["DT_GRANTS_TASKS"]).glob("*.md")) if Path(os.environ["DT_GRANTS_TASKS"]).exists()
+                         else [], [])
+        self.assertIn("已作废", json.dumps(self.patches()[-1], ensure_ascii=False))
 
     def test_patch_failure_is_said_in_text_and_retried_by_the_loop(self):
         code, token, mid = self.sent_card()

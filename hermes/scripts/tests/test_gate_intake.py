@@ -24,6 +24,7 @@ import hub_listener as HL  # noqa: E402
 import secretary_patrol as SP  # noqa: E402
 
 TOKEN = "t" * 40
+RID = "0123456789abcdef0123456789abcdef"
 
 
 def post(url, body=b"{}", token=TOKEN, headers=None):
@@ -99,19 +100,22 @@ class IntakeTest(Base):
     def test_dispatch_proposal_goes_to_grants_propose(self):
         """0E-3b：派单提议交网关 propose（只登记，确认卡由门卫发）；五要素写成私有临时文件，用完删掉。"""
         self.reply = (0, {"code": "abcd1234", "card": "门卫会把确认卡发到常浩私聊"})
-        body = json.dumps({"repo": "dt-sandbox", "executor": "codex", "scope": "目标：改 README", "hours": 6}).encode()
+        body = json.dumps({"repo": "dt-sandbox", "executor": "codex", "scope": "目标：改 README", "hours": 6,
+                           "request_id": RID}).encode()
         code, res = post(self.url + "/v1/dispatch/proposal", body)
         self.assertEqual((code, res), (200, {"code": 0, "result": self.reply[1]}))
         (c,) = self.calls
         self.assertEqual(c["script"], "autoloop_grants.py")
         f = c["args"][c["args"].index("--scope-file") + 1]
-        self.assertEqual(c["args"], ["propose", "--repo", "dt-sandbox", "--executor", "codex", "--scope-file", f, "--hours", "6"])
+        self.assertEqual(c["args"], ["propose", "--repo", "dt-sandbox", "--executor", "codex", "--scope-file", f, "--hours", "6",
+                                     "--request-id", RID])
         self.assertEqual((c["scope"], c["mode"]), ("目标：改 README", 0o600))
         self.assertEqual(list((self.d / "inbox").iterdir()), [])
 
     def test_bad_dispatch_proposal_refused(self):
-        good = {"repo": "dt-sandbox", "executor": "claude", "scope": "目标"}
-        for bad in ({**good, "repo": "../x"}, {**good, "executor": "gpt"}, {**good, "scope": ""}, {**good, "scope": "长" * 3001},
+        good = {"repo": "dt-sandbox", "executor": "claude", "scope": "目标", "request_id": RID}
+        for bad in ({k: v for k, v in good.items() if k != "request_id"}, {**good, "request_id": "ABC"},
+                    {**good, "request_id": "a" * 15}, {**good, "request_id": 123}, {**good, "repo": "../x"}, {**good, "executor": "gpt"}, {**good, "scope": ""}, {**good, "scope": "长" * 3001},
                     {**good, "hours": "12"}, {**good, "approve": True}, [good]):
             with self.subTest(bad=bad):
                 self.assertEqual(post(self.url + "/v1/dispatch/proposal", json.dumps(bad, ensure_ascii=False).encode())[0], 400)
@@ -129,15 +133,20 @@ class IntakeTest(Base):
         os.chmod(f, 0o600)
         with mock.patch.dict(os.environ, {"DT_INTAKE_TOKEN_FILE": str(f), "DT_INTAKE_URL": self.url}):
             self.reply = (0, {"code": "abcd1234"})
-            self.assertEqual(I.propose_dispatch("dt-sandbox", "claude", "目标"), (0, {"code": "abcd1234"}))
+            code, out = I.propose_dispatch("dt-sandbox", "claude", "目标")
+            self.assertEqual((code, out["code"]), (0, "abcd1234"))
+            self.assertRegex(out["request_id"], r"^[0-9a-f]{32}$")                          # 没给就新生成，输出里带着
+            self.assertEqual(I.propose_dispatch("dt-sandbox", "claude", "目标", request_id=RID),
+                             (0, {"code": "abcd1234", "request_id": RID}))
+            self.assertEqual(self.calls[-1]["args"][-2:], ["--request-id", RID])         # 给了就原样交给网关
             self.reply = (1, {"ok": False, "why": "dt-x 不在名册能派写入单的仓库里"})
-            self.assertEqual(I.propose_dispatch("dt-x", "claude", "目标"), (1, self.reply[1]))
+            self.assertEqual(I.propose_dispatch("dt-x", "claude", "目标", request_id=RID), (1, {**self.reply[1], "request_id": RID}))
             self.assertEqual(I.propose_dispatch("../x", "claude", "目标")[0], 1)           # 窗口拒收形状不对的
             self.reply = (None, None)
             self.assertEqual(I.propose_dispatch("dt-sandbox", "claude", "目标")[0], 2)      # 控制面超时：结果不明
         with mock.patch.dict(os.environ, {"DT_INTAKE_TOKEN_FILE": str(f), "DT_INTAKE_URL": "http://127.0.0.1:9"}):
-            code, out = I.propose_dispatch("dt-sandbox", "claude", "目标")
-            self.assertEqual(code, 2)
+            code, out = I.propose_dispatch("dt-sandbox", "claude", "目标", request_id=RID)
+            self.assertEqual((code, out["request_id"]), (2, RID))                          # 结果不明：带同一个请求号再跑
             self.assertIn("结果不明", out["why"])
 
     def test_only_four_paths_and_valid_task_ids(self):

@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -41,6 +42,12 @@ SCOPE = "目标：给 dt-sandbox 的 README 加一节\n范围：只改 README.md
 def raw_msg(mid, text, when, sender=OWNER, chat=CHAT):
     return {"message_id": mid, "chat_id": chat, "content": text, "create_time": when.astimezone().strftime("%Y-%m-%d %H:%M"),
             "deleted": False, "msg_type": "text", "sender": {"id": sender, "id_type": "open_id", "sender_type": "user"}}
+
+
+def hub(*pairs):
+    """中台在用的配置（只含派单这一块）：pairs 里每个 (仓库, 执行方) 一条生成的派单规则，加两个工人 Agent 的定义。"""
+    return {"rules": [C.dispatch_rule(r, x) for r, x in pairs],
+            "agents": {C.AGENTS[x][0]: C.agent_spec(x) for x in C.AGENTS}}
 
 
 def down(body):
@@ -67,7 +74,7 @@ class Base(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.msgs, self.n, self.posted = {}, 0, []
-        self.hub_rules = {"rules": [C.dispatch_rule(r, x) for r in ("dt-sandbox", "digital-twin") for x in G.EXECUTORS]}
+        self.hub_rules = hub(*[(r, x) for r in ("dt-sandbox", "digital-twin") for x in G.EXECUTORS])
 
     def write_roster(self, sandbox, twin_write=True):
         inv = [{"path": "github:o/old", "category": "待删"}]
@@ -181,6 +188,61 @@ class Approval(Base):
         with mock.patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit):
             G.main(["approve", "--message-id", "om_fixturemsg0001"])
 
+    def test_same_request_id_returns_the_same_proposal(self):
+        """#369 P2-02：同一个请求号重交（客户端结果不明后重试）返回原提议，不另登记、不多一张卡；内容不同拒绝。"""
+        rid = "ab" * 16
+        a = G.propose("dt-sandbox", "claude", SCOPE, now=T0, request_id=rid)
+        b = G.propose("dt-sandbox", "claude", SCOPE, now=T0 + dt.timedelta(minutes=1), request_id=rid)
+        self.assertEqual((b["code"], b.get("again"), "again" in a), (a["code"], True, False))
+        self.assertEqual(b["card"], a["card"])
+        self.assertNotIn("card_token", json.dumps(b))
+        for change in ({"scope_text": SCOPE + "\n多一句"}, {"hours": 6}, {"executor": "codex"}):
+            kw = {"repo": "dt-sandbox", "executor": "claude", "scope_text": SCOPE, "hours": 12, **change}
+            with self.subTest(change=change), self.assertRaisesRegex(G.Rejected, "内容不同"):
+                G.propose(now=T0, request_id=rid, **kw)
+        for bad in ("AB" * 16, "a" * 15, "x" * 32):
+            with self.assertRaisesRegex(G.Rejected, "请求号写法不对"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0, request_id=bad)
+        self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
+
+    def test_same_request_id_at_once_registers_one(self):
+        G.propose("dt-sandbox", "claude", "先建库", now=T0)    # 库先建好，并发只比登记
+        rid, out, gate = "cd" * 16, [], threading.Barrier(4)
+
+        def go():
+            gate.wait()
+            out.append(G.propose("dt-sandbox", "claude", SCOPE, now=T0, request_id=rid)["code"])
+        ts = [threading.Thread(target=go) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(len(set(out)), 1)
+        self.assertEqual(len(self.sql("SELECT code FROM proposals WHERE request_id = ?", (rid,))), 1)
+
+    def test_pending_and_hourly_limits(self):
+        codes = [G.propose("dt-sandbox", "claude", f"{SCOPE}\n{i}", now=T0)["code"] for i in range(G.MAX_PENDING)]
+        with self.assertRaisesRegex(G.Rejected, f"已经有 {G.MAX_PENDING} 张派单确认卡等常浩点"):
+            G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        with G.tx() as con:                                      # 一张被拒、一张已批：名额回来
+            con.execute("UPDATE proposals SET decision = 'rejected' WHERE code = ?", (codes[0],))
+            con.execute("UPDATE proposals SET decision = 'approved' WHERE code = ?", (codes[1],))
+        G.propose("dt-sandbox", "claude", SCOPE + "\n再来一张", now=T0)
+        G.propose("dt-sandbox", "claude", SCOPE + "\n又一张", now=T0)
+        with self.assertRaises(G.Rejected):
+            G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        later = T0 + G.PROPOSAL_TTL + dt.timedelta(seconds=1)     # 过期了（还没被标 expired）也不再占名额
+        G.propose("dt-sandbox", "claude", SCOPE, now=later)
+        self.assertEqual(len(self.sql("SELECT code FROM proposals")), 6)
+        with mock.patch.object(G, "MAX_PENDING", 99):
+            for i in range(G.MAX_PER_HOUR - 6):
+                G.propose("dt-sandbox", "claude", f"{SCOPE}\n第 {i} 张", now=later)
+            with self.assertRaisesRegex(G.Rejected, f"一小时里已经登记了 {G.MAX_PER_HOUR} 张"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=later)
+            G.propose("dt-sandbox", "claude", SCOPE, now=T0 + dt.timedelta(hours=2))   # 一小时后滑出去了
+        self.assertEqual(len(self.sql("SELECT code FROM proposals")), G.MAX_PER_HOUR + 1)
+
+    @mock.patch.object(G, "MAX_PENDING", 99)
     def test_codes_and_tokens_are_random_and_never_overwrite(self):
         a = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         b = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
@@ -307,17 +369,49 @@ class Approval(Base):
 
     def test_hub_without_dispatch_rule_rejects_at_propose(self):
         """常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝并说清原因；不记提议、不发私聊。"""
-        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude")]}
+        self.hub_rules = hub(("dt-sandbox", "claude"))
         with self.assertRaisesRegex(G.Rejected, "名册放行了写入，但中台没有接 codex 派单的规则 dispatch-digital-twin-codex"):
             G.propose("digital-twin", "codex", SCOPE, now=T0)
         with self.assertRaisesRegex(G.Rejected, "dispatch-dt-sandbox-codex"):
             G.propose("dt-sandbox", "codex", SCOPE, now=T0)     # 同一仓库另一个执行方没有规则也拦
         wrong = C.dispatch_rule("dt-sandbox", "claude") | {"when": {"source": "hermes", "types": ["dispatch.other.claude.write"]}}
-        self.hub_rules = {"rules": [wrong]}
-        with self.assertRaisesRegex(G.Rejected, "中台没有"):
+        self.hub_rules = hub() | {"rules": [wrong]}
+        with self.assertRaisesRegex(G.Rejected, "和应有的不一样（when）"):
             G.propose("dt-sandbox", "claude", SCOPE, now=T0)    # 同名规则接的不是这类事件
-        self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude") | {"paused": True}]}
+        self.hub_rules = hub() | {"rules": [C.dispatch_rule("dt-sandbox", "claude") | {"paused": True}]}
         self.assertTrue(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"])   # 暂停着不拦
+        self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
+
+    def test_hub_rule_must_route_to_the_controlled_worker(self):
+        """PR #369 L3 第 3 轮 P1-01：不只看有没有规则接这类事件；交给谁、在哪做、怎么做不对，或别的规则也接，都不提议。"""
+        rule = C.dispatch_rule("dt-sandbox", "claude")
+        cases = {
+            "to": {"to": "dt-codex"}, "cwd": {"cwd": "~/dt-work/other"}, "prompt": {"prompt": "随便做"},
+            "channels": {"channels": ["feishu"]}, "parallel": {"parallel": 9}, "resume": {"resume": False},
+            "title": {"title": "x-{subject}"}, "tell": {"tell": "always"}, "emits": {"emits": {"source": "hermes", "types": ["x"]}},
+        }
+        for field, change in cases.items():
+            self.hub_rules = hub() | {"rules": [rule | change]}
+            with self.subTest(field=field), self.assertRaisesRegex(G.Rejected, f"和应有的不一样（{field}"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        self.hub_rules = hub() | {"rules": [rule, rule]}
+        with self.assertRaisesRegex(G.Rejected, "有 2 条同名"):
+            G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        for agent in (None, C.agent_spec("claude") | {"program": "/tmp/x"}, C.agent_spec("claude") | {"worker": "nat"}):
+            live = hub(("dt-sandbox", "claude"))
+            live["agents"]["dt-claude"] = agent
+            self.hub_rules = live
+            with self.subTest(agent=agent), self.assertRaisesRegex(G.Rejected, "Agent dt-claude 的定义"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        for types in (["*"], ["dispatch.*"], ["dispatch.dt-sandbox.claude.write"], ["dispatch.dt-*.write"], "坏的"):
+            spy = {"name": "watch", "when": {"source": "hermes", "types": types}, "to": "dt-codex", "cwd": "~/x", "prompt": "p"}
+            self.hub_rules = hub(("dt-sandbox", "claude")) | {"rules": [rule, spy]}
+            with self.subTest(types=types), self.assertRaisesRegex(G.Rejected, "别的规则也接 dispatch.dt-sandbox.claude.write：watch"):
+                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        other = {"name": "watch", "when": {"source": "hermes", "types": ["dispatch.dt-sandbox.codex.*"]}, "to": "dt-codex",
+                 "cwd": "~/x", "prompt": "p"}
+        self.hub_rules = hub(("dt-sandbox", "claude")) | {"rules": [rule, other, rule | {"name": "x", "when": {"source": "gh", "types": ["*"]}}]}
+        self.assertTrue(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"])    # 接别的事件、别的来源的不算
         self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
 
     def test_hub_unreadable_rejects_at_propose(self):
