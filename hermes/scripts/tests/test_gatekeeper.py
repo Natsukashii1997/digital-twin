@@ -19,6 +19,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 import autoloop_answer as A  # noqa: E402
+import autoloop_exits as E  # noqa: E402
 import autoloop_feishu as F  # noqa: E402
 import autoloop_recovery as Rv  # noqa: E402
 import gatekeeper as G  # noqa: E402
@@ -303,6 +304,25 @@ class Config(Base):
         subprocess.run(["/bin/chmod", "+a", "everyone allow read", str(f)], check=True)
         self.assertTrue(G.allow_acl(f))
         self.assertTrue(G.allow_acl(Path(self.tmp.name) / "missing"))  # 读不出来也不认
+
+
+class ExitsReader(Base):
+    """#255 L3 P2-22：门卫进程里，出口账本对账读私聊用门卫自己的身份（门卫发的消息只有门卫看得到）。"""
+    def test_reconcile_reads_with_the_gatekeeper_identity(self):
+        self.lark.calls.clear()
+        with mock.patch.dict(os.environ, {"DT_EXITS_LARK_PROFILE": "cli_mengguishou"}), \
+                mock.patch("subprocess.run", side_effect=AssertionError("不该走猛鬼兽的登录配置")):
+            self.assertEqual(E.lark_read(["im", "+chat-messages-list", "--chat-id", CHAT], "对账"), {})
+        self.assertEqual(self.lark.calls, [["im", "+chat-messages-list", "--chat-id", CHAT]])
+        self.lark.fail.add("对账")
+        with self.assertRaisesRegex(E.Unreachable, "对账"):       # 门卫读失败：当读不到，保持结果不明
+            E.lark_read(["im", "+chat-messages-list"], "对账")
+
+    def test_switching_back_to_the_default_bot_restores_the_profile_reader(self):
+        F.use(F.Bot())                                          # 换回猛鬼兽：对账照旧走 DT_EXITS_LARK_PROFILE
+        self.assertIsNone(E._READER[0])
+        F.use(G.GATE)
+        self.assertIsNotNone(E._READER[0])
 
 
 class RealCommand(unittest.TestCase):
