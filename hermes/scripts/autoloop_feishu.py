@@ -148,9 +148,11 @@ BOT = Bot()
 
 
 def use(bot):
-    """换机器人（门卫启动时调用一次）。一个进程只用一个机器人。"""
+    """换机器人（门卫启动时调用一次）。一个进程只用一个机器人：出口账本对账读私聊也跟着换成它（#255 L3 P2-22）。"""
     global BOT
     BOT = bot
+    import autoloop_exits as E
+    E.use_reader(None if type(bot) is Bot else bot.lark)   # 猛鬼兽照旧走 DT_EXITS_LARK_PROFILE，不变
 
 
 def owner_holds(con, card_id):
