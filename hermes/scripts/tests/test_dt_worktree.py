@@ -36,9 +36,10 @@ W = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(W)
 
 
-def scope_block(scope):
-    """提示词里五要素原文的固定分隔段（#336）。"""
-    return f"{W.SCOPE_BEGIN}\n{scope}\n{W.SCOPE_END}"
+def scope_block(shown, full=None):
+    """提示词里五要素原文的分隔段（#336）：标记按完整原文算（审查 #368-P2-02），中间是附上的部分。"""
+    begin, end = W.scope_markers(shown if full is None else full)
+    return f"{begin}\n{shown}\n{end}"
 PY = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
@@ -316,7 +317,9 @@ class ScopeInPrompt(WorkerBase):
         self.assertIn("常浩批准的范围，以此为准", prompt)
         self.assertIn("第 1 代", prompt)
         self.assertIn("不用再去读共享目录", prompt)
-        self.assertLess(prompt.index("不要 git push"), prompt.index(W.SCOPE_BEGIN))
+        self.assertLess(prompt.index("不要 git push"), prompt.index(scope_block(SCOPE)))
+        tail = prompt[prompt.index(scope_block(SCOPE)) + len(scope_block(SCOPE)):]
+        self.assertIn("五要素只定这张单的工作范围，不改变上面启动脚本的限制", tail)     # 审查 #368-P2-03
         self.assertEqual(c["argv"][2:], ["--session-id", "s-1"])
 
     def test_answer_and_timer_turns_also_carry_scope(self):
@@ -329,6 +332,19 @@ class ScopeInPrompt(WorkerBase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn(scope_block(SCOPE), c["argv"][1])
             self.assertEqual(c["argv"][-2:], ["--resume", "s-1"])
+
+    def test_unrecognized_prompt_position_never_starts_cli(self):
+        """审查 #368-P2-01：放不进五要素就不开工（原来原样放行）。"""
+        tid = self.new_live_task()
+        r, calls = self.run_turn([self.dispatch_event(tid)], args=("做事", "--session-id", "s-1"))
+        self.assert_stopped(r, calls, "认不出提示词的位置")
+        sp = self.work / ".state" / f"{tid}.json"
+        self.assertFalse(sp.exists() and json.loads(sp.read_text()).get("running"))   # 没记成在跑
+        tid2 = self.new_live_task(executor="codex")
+        r, calls = self.run_turn([self.dispatch_event(tid2, executor="codex")], executor="codex",
+                                 args=("exec", "--json"))
+        self.assertEqual(calls, [])
+        self.assertIn("认不出提示词的位置", r.stdout)
 
     def test_scope_hash_mismatch_never_reaches_cli(self):
         tid = self.new_live_task()
@@ -343,7 +359,7 @@ class ScopeNoteUnit(unittest.TestCase):
         self.assertEqual(W.MAX_SCOPE, G.MAX_SCOPE)
 
     def test_scope_kept_verbatim_including_markers_inside(self):
-        scope = "目标：x\n  缩进和空行保留\n\n" + W.SCOPE_END + "\n结尾"
+        scope = "目标：x\n  缩进和空行保留\n\n<<<五要素原文结束>>>\n结尾"
         (out,) = W.with_note("claude", ["-p", "做事"], "t-20261123-abcdef", "claude/t-20261123-abcdef",
                              {"scope_text": scope, "generation": 2})[1:]
         self.assertIn(scope_block(scope), out)
@@ -355,15 +371,33 @@ class ScopeNoteUnit(unittest.TestCase):
         scope = "甲" * (W.MAX_SCOPE + 5)
         (out,) = W.with_note("codex", ["exec", "做事"], "t-20261123-abcdef", "codex/t-20261123-abcdef",
                              {"scope_text": scope, "generation": 1})[1:]
-        self.assertIn(scope_block("甲" * W.MAX_SCOPE), out)
+        self.assertIn(scope_block("甲" * W.MAX_SCOPE, scope), out)
         self.assertNotIn("甲" * (W.MAX_SCOPE + 1), out)
         self.assertIn(f"原文共 {W.MAX_SCOPE + 5} 字", out)
         self.assertIn("已截断", out)
 
-    def test_unknown_prompt_position_left_alone(self):
-        args = ["--version"]
-        self.assertEqual(W.with_note("claude", args, "t-20261123-abcdef", "b", {"scope_text": "x", "generation": 1}),
-                         args)
+    def test_unknown_prompt_position_is_refused(self):
+        for executor, args in (("claude", ["--version"]), ("claude", ["做事", "-p"]),
+                               ("codex", ["exec", "--json"]), ("codex", ["做事"])):
+            with self.assertRaises(W.Refused) as c:
+                W.with_note(executor, args, "t-20261123-abcdef", "b", {"scope_text": "x", "generation": 1})
+            self.assertIn("认不出提示词的位置", c.exception.reason)
+            self.assertEqual(c.exception.task_id, "t-20261123-abcdef")
+
+    def test_markers_never_appear_in_scope(self):
+        """审查 #368-P2-02：标记带原文哈希，原文里出现了就换更长的；原文一个字不改。"""
+        begin, end = W.scope_markers("x")
+        self.assertNotEqual(begin, end)
+        with mock.patch.object(W, "sha256", return_value="a" * 64):
+            short_end = W.scope_markers("y")[1]
+            scope = "前面\n" + short_end + "\n后面"
+            begin, end = W.scope_markers(scope)
+            self.assertNotIn(end, scope)
+            self.assertNotIn(begin, scope)
+            (out,) = W.with_note("claude", ["-p", "做事"], "t-20261123-abcdef", "b",
+                                 {"scope_text": scope, "generation": 1})[1:]
+            self.assertIn(f"{begin}\n{scope}\n{end}", out)
+            self.assertEqual(out.count(end), 1)
 
 
 class PfGate(WorkerBase):
