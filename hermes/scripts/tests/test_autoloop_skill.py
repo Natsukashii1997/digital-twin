@@ -390,7 +390,7 @@ class OneSentenceToDispatch(Base):
         text = SKILL.read_text(encoding="utf-8")
         sec = text[text.index("## 4. 他点了卡之后"):text.index("## 5. 「t-… 怎么样了」")]
         rows = [re.findall(r"`([^`]+)`", line.split("|")[1]) for line in sec.splitlines() if line.startswith("| `")]
-        self.assertEqual(len(rows), 6, rows)
+        self.assertEqual(len(rows), 7, rows)
 
         def down(body):
             raise G.Rejected("连不上中台或回应不对：URLError")
@@ -399,6 +399,9 @@ class OneSentenceToDispatch(Base):
         shut = self.propose()[1]["code"]
         with mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：x")):
             click(shut, post=self.post)                                   # 闸关着
+        held = self.propose()[1]["code"]
+        with mock.patch.object(G, "route_problem", lambda repo, ex: "中台的派单规则 x 和应有的不一样（to）"):
+            click(held, post=self.post)                                   # 签了、发前核不过：暂缓（#369 P2-03）
         click(self.propose()[1]["code"], "no", post=self.post)            # 不派
         late = self.propose()[1]["code"]
         G.mark_card(late, f"om_card_{late}")
@@ -407,7 +410,8 @@ class OneSentenceToDispatch(Base):
         self.write_roster("o2/dt-sandbox")
         click(void, post=self.post)                                       # 名册变了
         shown = " ".join(json.dumps(CV.render_grant(p, lambda a: {}), ensure_ascii=False) for p in G.cards_to_close())
-        self.assertEqual(len(G.cards_to_close()), 6)
+        self.assertEqual(len(G.cards_to_close()), 7)
+        self.assertNotIn("作废没发", shown)                                 # 暂缓不说成作废
         for words in sum(rows, []):
             with self.subTest(words=words):
                 self.assertIn(words, shown)

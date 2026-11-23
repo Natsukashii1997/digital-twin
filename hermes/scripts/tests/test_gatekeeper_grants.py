@@ -425,6 +425,24 @@ class Clicking(Base):
         self.assertTrue(r["sent"])
         self.assertEqual(len(self.posted), 1)
 
+    def test_held_start_event_is_told_as_held_and_sent_once_later(self):
+        """#369 第 5 轮 P2-03：批准签了凭证，发 start 事件前在锁里核规则没过（暂缓）：卡上写「暂缓发送、不要重提」，
+        不写「作废」；规则恢复后 send-pending 用原事件号发一次，再补发不会多出第二个事件。"""
+        code, token, mid = self.sent_card()
+        with mock.patch.object(AG, "route_problem", lambda repo, ex: "中台的派单规则 x 和应有的不一样（to）"):
+            rec = self.click(token, mid)
+        self.assertEqual(rec["decision"], "approved")
+        self.assertIn("暂缓发送", rec["note"])
+        self.assertIn("不要重提一张", rec["note"])
+        card = json.dumps(self.patches()[-1], ensure_ascii=False)
+        self.assertIn("暂缓发送", card)
+        self.assertNotIn("作废没发", card)                             # 只说「没作废」，不说「作废没发」
+        self.assertEqual(self.posted, [])
+        (r,) = AG.send_pending()
+        self.assertTrue(r["sent"])
+        self.assertEqual(AG.send_pending(), [])
+        self.assertEqual([b["id"] for b in self.posted], [f"{rec['task_id']}:g1:start"])
+
     def test_hub_rule_changed_after_propose_voids_without_signing(self):
         """P1-01：提议后中台的派单规则被改成交给别的 Agent，再点批准：记 void，不签凭证、不写任务单、不发事件。"""
         code, token, mid = self.sent_card()

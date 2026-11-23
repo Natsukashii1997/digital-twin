@@ -1132,6 +1132,9 @@ def deliver_ask(st, d, ctx, now):
 def _resume(st, d, kind, reason, now, generation, lock, partial=False):
     """经网关续接（② 重派、③ 返修）。按 resume_dispatch 的结果分类：凭证当场不放行（还没记事件）→ failed；
     事件已记、发出且中台给了事件号 → done；其余（发送结果不明、镜像写不成、事件还排着）→ unknown（网关以后补发，对账看它）。
+    网关明确暂缓没发的（held：派单规则核不过或配置锁等不到，#369 第 5 轮 P2-03）账本同样记 unknown——秘书账本只有
+    done / failed / unknown 三种结果，「只差网关补发」本来就是 unknown 的一种（恢复闸认它）——但 outcome 记 held、
+    返回带 held 和白话原因，不说成「发送结果不明」。
     partial：前面已经做了撤不回的一步（③ 的留言已发出），这时网关不放行也只能记结果不明，交对账、不重发。
     续接带上决定号和前闸核过的代次（L3 第 3 轮 P1-09）：事件和这次决定绑在同一条续接日志里，凭证换了代就不续接。
     lock：submit 持着的这张任务的任务锁凭证（task_locked 交出的），网关核实后才不再拿锁（续审第 4 轮）。"""
@@ -1151,6 +1154,11 @@ def _resume(st, d, kind, reason, now, generation, lock, partial=False):
     if hit and hit.get("sent") is True:
         finish(st, d["id"], "done", {"ref": key, "event_key": key, "hub_event": hit.get("hub_event")}, now=now)
         return {"ok": True, "result": "done", "decision": d["id"], "msg": f"已经由网关续接（{kind}）"}
+    if hit and hit.get("held"):           # 网关明确没发（规则核不过或配置锁等不到），事件原样留着（#369 第 5 轮 P2-03）
+        finish(st, d["id"], "unknown", {"event_key": key, "send": hit, "held": True}, now=now)
+        return {"ok": False, "result": "unknown", "held": True, "decision": d["id"],
+                "msg": f"续接事件已记账、网关暂缓发送没发出去（{str(hit.get('why') or '')[:120]}）；事件留着，派单规则恢复后"
+                       "在电脑上跑 send-pending 补发，补发后对账结成做成"}
     finish(st, d["id"], "unknown", {"event_key": key, "send": sent if isinstance(sent, dict) else hit}, now=now)
     return {"ok": False, "result": "unknown", "decision": d["id"], "msg": "续接事件已记账、还没确认发到中台，等对账"}
 

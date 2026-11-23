@@ -740,6 +740,9 @@ def send_note(task_id, send):
     mine = [s for s in send or [] if str(s.get("event_key", "")).startswith(f"{task_id}:")]
     if mine and mine[0].get("sent") is True:
         return "已送到中台，等工人接单"
+    if mine and mine[0].get("held"):          # 暂缓不是作废（#369 第 5 轮 P2-03）：事件留着，不要重提一张
+        return (f"凭证已签，派单消息暂缓发送：{str(mine[0].get('why') or '')[:80]}。事件留着没作废，"
+                "派单规则恢复后在电脑上跑 send-pending 补发，不要重提一张")
     if mine and mine[0].get("sent") is False:
         return "凭证已签，但派单消息作废没发"
     return "凭证已签，还没确认送到中台（会自动补送）"
