@@ -464,6 +464,9 @@ class WorkerIsolation(unittest.TestCase):
         self.assertEqual(self.status("at=x enabled=yes rules=6\n"), [])
         both = ("dt-worker", "dt-secretary")
         self.assertEqual(self.status("at=x enabled=yes rules=15 users=dt-worker,dt-secretary\n", accounts=both), [])
+        # 监听者规则开着时状态多一个 guard=yes（0E-1 监听者规则）：巡检照常判、不报异常
+        self.assertEqual(self.status("at=x boot=1 state=ok enabled=yes rules=15 users=dt-worker,dt-secretary guard=yes "
+                                     "reloaded=no reenabled=no\n", accounts=both), [])
 
     def test_pf_secretary_not_managed(self):
         """秘书账号建了，门卫规则还是 0A 旧版（没有 users）或没管上秘书：要报。"""

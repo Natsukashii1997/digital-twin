@@ -5,6 +5,15 @@
 #   dt-worker     中台 3350、过滤代理 8090
 #   dt-secretary  只读窗口 3352、秘书窄接口 3353（0E-2 由 dt-gate 开）、过滤代理 8090；连不到中台 3350
 # dt-gate 是控制面，不在这里限制。
+# 监听者规则（0E-2 中台搬进 dt-gate 之后才生效）：中台 3350、只读窗口 3352、秘书窄接口 3353 只收「监听者是 dt-gate」的连接，
+# 谁连都一样（本机端口谁都能抢绑：中台重启的空档里别的账号先占住 3350，就能骗走工人的新钥匙）。没人在听时 pf 认作 unknown，
+# 同样回绝。搬家前中台还在主账号下跑，这条一加主账号自己也连不上中台，所以只在 root 写的标记 $DIR/hub-in-gate 在时才生成：
+# 0E-2 的 migrate 搬完写标记、再跑 apply；rollback 先删标记、再跑 apply。标记必须是 root 的普通文件，不对就判 failed。
+# 另管一个空着的 3359：不跑任何服务，专给 verify 在 IPv4、IPv6 上测「别人冒充」被拒（正常时 3350 等都被 dt-gate 占着，测不了）。
+# 部署约束（给 0E-2）：pf 认的是套接字创建时的身份，不是现在拿着它的进程。这几个端口必须由 dt-gate 的进程自己建套接字、
+# 自己绑：不用 launchd 的 Sockets 套接字激活，不由 root 先绑再降权，不从 root 进程传 fd——不然监听者算 root，一律被回绝。
+# apply 写完状态前，再核一次：实际加载上的规则里有没有这条、标记现在在不在，和这次生成的对不上（和 migrate / rollback
+# 同时跑撞上了）就判 failed，下一轮再核。
 # 两个账号也不能对外提供服务（入站一律拒绝，审查第 4 轮 P2-8）：不然一个账号先占住另一个准连的端口
 # （中台、过滤代理没在跑，或秘书窄接口还没开），就能冒充它、在两个账号之间搭出一条通道。
 # 承诺的范围（常浩 11-20 定，L3 第 3 轮 P1-02）：这两个账号的 TCP、UDP 只能经 8090 出去。pf 按账号认不出的
@@ -43,6 +52,8 @@ set -Eeuo pipefail   # -E：函数里出错也触发 ERR，apply 中途任何一
 
 WORKER=dt-worker
 SECRETARY=dt-secretary
+GATE_ACCOUNT=dt-gate
+GUARDED_PORTS="3350, 3352, 3353, 3359"     # 监听者规则管的端口：中台、只读窗口、秘书窄接口；3359 空着，给 verify 测冒充
 ANCHOR=com.apple/dt-worker
 DIR="/Library/Application Support/DigitalTwin"
 RULES="$DIR/pf-dt-worker.rules"
@@ -51,6 +62,8 @@ STATUS="$DIR/pf-dt-worker.status"
 GUARD="$DIR/dt_root_guard.sh"
 DS_TRIES=12                                 # 目录服务查不清时最多试几次（每次隔 5 秒）
 LABEL=cn.digital-twin.pf-dt-worker
+HUB_MARK="$DIR/hub-in-gate"                 # 0E-2 搬家完成的标记（root 写）
+LISTENER_GUARD=no                           # yes：生成监听者规则（见头注释）
 PLIST="/Library/LaunchDaemons/$LABEL.plist"
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -76,6 +89,10 @@ print_rules() {
   echo "block drop out quick proto tcp from any to any user unknown flags S/SA"
   echo "block drop out quick proto udp from any to any user unknown"
   local u p
+  if [ "$LISTENER_GUARD" = yes ]; then
+    # 收包那个套接字（监听者）不是 dt-gate 的，一律回绝；不写地址族：IPv4、IPv6 一起管
+    echo "block return in quick proto tcp from any to any port { $GUARDED_PORTS } user != $GATE_ACCOUNT"
+  fi
   for u in "$@"; do
     p=$(ports_for "$u") || { echo "不认识的账号：$u" >&2; return 1; }
     echo "pass out quick inet proto tcp from any to 127.0.0.1 port { $p } user $u"
@@ -99,8 +116,16 @@ present_users() {
   esac
 }
 
+# 搬家标记在不在：no 不在；yes 在、是 root 的普通文件；bad 在但不对（链接、不是普通文件、不归 root）
+file_owner() { stat -f %u "$1"; }
+hub_in_gate() {
+  [ -e "$HUB_MARK" ] || [ -L "$HUB_MARK" ] || { echo no; return 0; }
+  if [ -f "$HUB_MARK" ] && [ ! -L "$HUB_MARK" ] && [ "$(file_owner "$HUB_MARK" 2>/dev/null)" = 0 ]; then echo yes; else echo bad; fi
+}
+
 if [ "${1:-}" = rules ]; then
   shift
+  if [ "${1:-}" = --guard ]; then LISTENER_GUARD=yes; shift; fi
   print_rules "$@"
   exit
 fi
@@ -290,6 +315,13 @@ apply() {
     UNCLEAR) fail "目录服务查不清本机账号，规则不动" ;;
   esac
   for u in ${users//,/ }; do uid_ok "$u" || fail "$u 的 uid 是 0、不唯一，或目录服务查不清"; done
+  LISTENER_GUARD=$(trap - ERR; hub_in_gate)
+  case $LISTENER_GUARD in
+    no) ;;
+    bad) fail "搬家标记 $HUB_MARK 不是 root 的普通文件" ;;
+    yes) uid_ok "$GATE_ACCOUNT" || fail "有搬家标记，但 $GATE_ACCOUNT 的 uid 是 0、不唯一，或目录服务查不清" ;;
+    *) fail "搬家标记判不清（${LISTENER_GUARD}）" ;;
+  esac
   write_rules "$users"
   # 系统默认 pf.conf 里有 com.apple/* 锚点；被人换掉了就按系统默认的重新加载一次
   anchor_hooked || /sbin/pfctl -q -f /etc/pf.conf 2>/dev/null || true
@@ -328,8 +360,14 @@ apply() {
     left=$(trap - ERR; kill_accounts) || fail "规则生效后没清掉受管账号的进程：$left"
   fi
   [ "$(pf_enabled)" = yes ] || fail "pf 没开"
+  # 状态里的 guard 要和实际加载的、标记现在的样子都对得上（和 migrate / rollback 同时跑撞上时，加载上的可能是另一次生成的）
+  actual=no
+  printf '%s\n' "$loaded" | grep -q 'user != ' && actual=yes
+  mark_now=$(trap - ERR; hub_in_gate)
+  [ "$actual" = "$LISTENER_GUARD" ] && [ "$mark_now" = "$LISTENER_GUARD" ] \
+    || fail "监听者规则和搬家标记对不上（这次生成 ${LISTENER_GUARD}、实际加载 ${actual}、标记现在 ${mark_now}），下一轮再核"
   trap - ERR
-  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded reenabled=$reenabled"
+  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users guard=$LISTENER_GUARD reloaded=$reloaded reenabled=$reenabled"
 }
 
 case "${1:-install}" in
