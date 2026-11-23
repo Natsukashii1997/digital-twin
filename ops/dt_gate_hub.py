@@ -799,11 +799,15 @@ def prepare_log(host, which):
     os.chmod(f, 0o600)
 
 
+LAUNCHCTL_NOT_FOUND = 113                  # launchctl print：找不到这个服务
+
+
 def unload(host, domain_label):
+    """卸掉服务，等 launchctl print 明确说「找不到」（113）才算卸了；还在、或别的错误（查不清）都算没卸掉。"""
     host.launchctl("bootout", domain_label)
     for _ in range(40):                    # bootout 是异步的，等真卸完（全局坑 G-18）
         code, _ = host.launchctl("print", domain_label)
-        if code != 0:
+        if code == LAUNCHCTL_NOT_FOUND:
             return True
         host.sleep(0.5)
     return False
@@ -909,6 +913,26 @@ def wait_port_free(host, hostport, seconds=30, what="主账号中台"):
     raise Stop(f"{what}停了以后 {hostport} 还有人在听（或核不清）")
 
 
+def wait_no_listener(host, port_no, seconds=30):
+    """回滚关门卫前用：以 root 用 lsof 看这个端口上有没有任何账号在听（门卫开着时，别的账号在听和没人在听连过去都是
+    「被拒」，连接分不清，L3 第 2 轮返修审查）。lsof 查不了算没空。"""
+    last = ""
+    for _ in range(int(seconds * 2)):
+        try:
+            uids = host.listeners(port_no)
+            if not uids:
+                return
+            last = f"uid {sorted(set(uids))} 在听"
+        except (OSError, subprocess.SubprocessError) as e:
+            last = f"查不清（{type(e).__name__}）"
+        host.sleep(0.5)
+    raise Stop(f"dt-gate 的服务停了以后 {port_no} 端口还有人在听：{last}")
+
+
+def hub_port_of(url):
+    return urllib.parse.urlsplit(url).port or 3350
+
+
 # ---------- migrate ----------
 FACTS = ("runs", "cards", "pauses", "max_event", "rules_sha256")
 
@@ -918,7 +942,7 @@ class Progress:
 
     def __init__(self, stamp, owner_account):
         self.f = gate_root() / "migrating.json"
-        self.data = {"stamp": stamp, "owner_account": owner_account,
+        self.data = {"stamp": stamp, "owner_account": owner_account, "hub_url": None,     # 退回时核中台端口用
                      "done": {"held": False, "stopped": False, "gate_hub": False, "daemon": False, "guard_on": False,
                               "moved": False}}
         write_json(self.f, self.data)
@@ -1026,6 +1050,7 @@ def cmd_migrate(host, a):
             host.chown(d, g["uid"], g["gid"])
             os.chmod(d, 0o755)
         url = before["url"]
+        prog.data["hub_url"] = url                       # 和下一行一起写盘
         prog.mark("daemon")                              # 先记：plist 写了但没装上，也要收拾（独立审查 P2-1）
         install_daemon(host, current, "hub", url)
         wait_health(host, url, current["engine"]["commit"], guid)
@@ -1065,7 +1090,7 @@ def cmd_migrate(host, a):
         write_json(root / "state.json", state)
     except BaseException as e:
         say(f"出错了，退回主账号中台：{e}")
-        if undo(host, current, a.owner_account, stamp, prog.done):
+        if undo(host, current, a.owner_account, stamp, prog.done, prog.data.get("hub_url")):
             prog.close("undone")
         else:
             say(f"退回没做完整（见上），进度记录留在 {prog.f}：看清原因后跑 rollback --confirm")
@@ -1092,20 +1117,25 @@ def unmark_owner(host, current, owner_account):
     run_helper(host, current, owner_account, ["unmark", str(owner_hub(host, owner_account)), "--prefix", MARK])
 
 
-def undo(host, current, owner_account, stamp, done):
-    """migrate 中途出错或被打断：dt-gate 这边停掉、挪开留证，主账号中台原样放回、重新启用。尽力做完每一步。"""
+def undo(host, current, owner_account, stamp, done, hub_url=None):
+    """migrate 中途出错或被打断：dt-gate 这边停掉、挪开留证，主账号中台原样放回、重新启用。尽力做完每一步。
+    dt-gate 的中台卸不掉、或卸了端口上还有人在听（L3 第 2 轮 P1-01）：现场保持「还在 dt-gate」——目录不挪、主账号目录不放回、
+    门卫不关、主账号中台不启用、停写和进度记录都留着，返回 False，看清原因后 rollback 再收拾。"""
     gp = gate_paths(host)
     daemon_ok = True
     if done.get("daemon"):
         try:
             remove_daemon(host, "hub")
-        except Stop as e:                                # 卸不掉：dt-gate 的中台可能还在跑（P1-01）。目录不挪、门卫不关、
-            say(f"  {e}")                                # 主账号中台不启用、保持停写和进度记录，rollback 再收拾
+            if not hub_url:
+                raise Stop("进度记录里没有中台地址，核不了端口上还有没有人在听")
+            wait_no_listener(host, hub_port_of(hub_url))
+        except Stop as e:
+            say(f"  {e}")
             daemon_ok = False
     if done.get("gate_hub") and daemon_ok:
         host.as_user(gate_account(), ["/bin/mv", "-n", str(gp["hub"]), str(gp["hub"]) + f".failed-{stamp}"])
     ohub = owner_hub(host, owner_account)
-    if done.get("moved"):
+    if done.get("moved") and daemon_ok:
         try:
             unmark_owner(host, current, owner_account)
         except Stop as e:
@@ -1176,6 +1206,8 @@ def cmd_windows(host, a):
             raise Stop(f"读不到 {gate_account()} 的 {tok}：{err[:100]}")
         run_helper(host, current, s["owner_account"], ["put", str(osup / tok), "--mkdir"], stdin=data)
         del data
+        s.setdefault("ports", {})[which] = p             # 先记端口再装：回滚按装的时候的端口核（独立审查建议 3）
+        write_json(gate_root() / "state.json", s)
         install_daemon(host, current, which, s["hub_url"])
         wait_answering(host, p, guid)
         say(f"{LABEL[which]} 在 127.0.0.1:{p} 起来了；主账号的令牌副本：{osup / tok}（600）")
@@ -1390,24 +1422,8 @@ def cmd_status(host, a):
 
 
 # ---------- rollback ----------
-def cmd_rollback(host, a):
-    if not a.confirm:
-        raise Stop("回滚会停掉 dt-gate 的中台、把主账号的中台放回去：确认后加 --confirm")
-    current = load_current()
-    settle_progress()
-    half = gate_root() / "migrating.json"
-    if load_state() is None and half.exists():
-        m = read_json(half)
-        say(f"收拾搬到一半的那次（{m['stamp']}，做过：{[k for k, v in m['done'].items() if v]}）")
-        if not undo(host, current, m["owner_account"], m["stamp"], m["done"]):
-            raise Stop("没收拾完整（见上），进度记录留着；看清原因后再跑一次 rollback --confirm")
-        os.replace(half, gate_root() / f"migrating.undone-{m['stamp']}.json")
-        say("收拾好了：主账号中台已放回并重新启用")
-        return 0
-    s = need_state()
-    gp = gate_paths(host)
-    gate = gate_account()
-    stamp = now_stamp()
+def _rollback_move(host, current, s, gp, gate, stamp):
+    """回滚的前三步：留备份、停服务、关门卫、主账号中台目录放回。"""
     # 先只读核对，再停服务、关门卫，最后才删说明文件、放回目录：关门卫停下时说明文件还在，主账号命令行不会新建空中台，
     # 再跑一次 rollback 能接着来（独立审查第 2 轮 P2-2）
     if not owner_note_ok(host, s["owner_account"], s["owner_hub"]):
@@ -1423,11 +1439,10 @@ def cmd_rollback(host, a):
     say("2. 停掉 dt-gate 的三个服务，关掉门卫监听者规则")
     for which in ("intake", "readonly", "hub"):          # 卸不掉就停在这里：plist、门卫、目录、停写都不动（P1-01）
         remove_daemon(host, which)
-    u = urllib.parse.urlsplit(s["hub_url"])
-    hub_addr = f"{u.hostname or '127.0.0.1'}:{u.port or 3350}"
-    for addr in (hub_addr, f"127.0.0.1:{port('DT_GATE_READONLY_PORT', 3352)}",
-                 f"127.0.0.1:{port('DT_GATE_INTAKE_PORT', 3353)}"):
-        wait_port_free(host, addr, what="dt-gate 的服务")   # 三个端口都没人听了才关门卫
+    ports = s.get("ports") or {}                         # windows 装的时候记下的端口；没记的按现在的设置
+    for p in (hub_port_of(s["hub_url"]), ports.get("readonly") or port("DT_GATE_READONLY_PORT", 3352),
+              ports.get("intake") or port("DT_GATE_INTAKE_PORT", 3353)):
+        wait_no_listener(host, int(p))                   # 三个端口都没有任何账号在听了才关门卫
     if not guard_off(host):                              # 关掉之前不动目录、不启用主账号中台；再跑一次 rollback 接着来
         raise Stop("门卫监听者规则没关掉（见上），没有放回主账号中台；看清原因后再跑一次 rollback --confirm")
     try:
@@ -1441,6 +1456,35 @@ def cmd_rollback(host, a):
     code, _, err = host.as_user(s["owner_account"], ["/bin/mv", "-n", s["owner_moved"], s["owner_hub"]])
     if code != 0:
         raise Stop(f"放不回去：{err[:200]}")
+
+
+def cmd_rollback(host, a):
+    if not a.confirm:
+        raise Stop("回滚会停掉 dt-gate 的中台、把主账号的中台放回去：确认后加 --confirm")
+    current = load_current()
+    settle_progress()
+    half = gate_root() / "migrating.json"
+    if load_state() is None and half.exists():
+        m = read_json(half)
+        say(f"收拾搬到一半的那次（{m['stamp']}，做过：{[k for k, v in m['done'].items() if v]}）")
+        if not undo(host, current, m["owner_account"], m["stamp"], m["done"], m.get("hub_url")):
+            raise Stop("没收拾完整（见上），进度记录留着；看清原因后再跑一次 rollback --confirm")
+        os.replace(half, gate_root() / f"migrating.undone-{m['stamp']}.json")
+        say("收拾好了：主账号中台已放回并重新启用")
+        return 0
+    s = need_state()
+    gp = gate_paths(host)
+    gate = gate_account()
+    stamp = now_stamp()
+    # 上次回滚已经把主账号中台目录放回、还没来得及归档 state 就被打断（独立审查）：放回之前一定关过门卫，接着做剩下的
+    restored = (not exists_as(host, s["owner_account"], s["owner_moved"])
+                and exists_as(host, s["owner_account"], Path(s["owner_hub"]) / "config.json"))
+    if restored:
+        say("上次回滚已把主账号中台目录放回，接着做剩下的（确认门卫关着、重新启用、结束停写）")
+        if not guard_off(host):
+            raise Stop("门卫监听者规则没关掉（见上），先不启用主账号中台；看清原因后再跑一次 rollback --confirm")
+    else:
+        _rollback_move(host, current, s, gp, gate, stamp)
     host.as_user(s["owner_account"], ["/bin/mv", "-n", s["plist_moved"], s["plist_home"]])
     start_owner_agent(host, s["owner_account"])
     if s.get("owner_hold") and not gate_cards_clean(host, current, s.get("owner_hold_max_card")):

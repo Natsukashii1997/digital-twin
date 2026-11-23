@@ -660,34 +660,44 @@ def _ledger_leftovers(kind):
     except Exception as e:                                   # 脚本缺了也不能当成「没有」
         return [f"{'秘书' if kind == 'secretary' else '托管'}账本核不了（{type(e).__name__}）"]
     who = use.who
+    raw, bad = [], []
     try:
         rd = L.raw_dir(use)
-        raw = sorted(p.name for p in rd.iterdir()
-                     if p.is_dir() and any(L.DECISION_ID.match(f.stem) for f in p.glob("d-*.json"))) if rd.is_dir() else []
+        subs = sorted(p for p in rd.iterdir() if p.is_dir()) if rd.is_dir() else []
+        for p in subs:                                       # glob 碰到读不了的目录会静默返回空：逐个显式读
+            try:
+                if any(n.endswith(".json") and L.DECISION_ID.match(n[:-5]) for n in os.listdir(p)):
+                    raw.append(p.name)
+            except OSError:
+                bad.append(f"{who}原文目录 {p.name} 读不了")
     except OSError:
         return [f"{who}原文目录读不了"]
     db = L.db_path()
     try:
         if not db.exists():
-            return [f"{who}会话 {s} 有原文、账本库不在" for s in raw]
+            return bad + [f"{who}会话 {s} 有原文、账本库不在" for s in raw]
         con = _ro(db)
         try:
             con.row_factory = sqlite3.Row
+            con.execute("BEGIN")                             # 一个读事务：各会话读的是同一个快照
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             if use.decisions not in tables:
-                return [f"{who}会话 {s} 有原文、账本表不在" for s in raw]
+                return bad + [f"{who}会话 {s} 有原文、账本表不在" for s in raw]
             sids = {r[0] for r in con.execute(f"SELECT DISTINCT session_id FROM {use.decisions}")}
             if use.sessions in tables:
                 sids |= {r[0] for r in con.execute(f"SELECT session_id FROM {use.sessions}")}
             store = types.SimpleNamespace(conn=con)
-            out = []
+            out = list(bad)
             for sid in sorted(sids | set(raw)):
-                out += [f"{who}会话 {sid}：{x}" for x in L.drain_blockers(store, sid, use)]
+                try:
+                    out += [f"{who}会话 {sid}：{x}" for x in L.drain_blockers(store, sid, use)]
+                except L.LedgerError as e:                   # 这个会话的原文目录读不了：记下、接着查别的会话
+                    out.append(f"{who}会话 {sid}：核不清（{e}）")
             return out
         finally:
             con.close()
     except Exception as e:                                   # 账本坏行、表结构不对、库锁着：查不清一律拦
-        return [f"{who}账本读不了（{type(e).__name__}）"]
+        return bad + [f"{who}账本读不了（{type(e).__name__}）"]
 
 
 def _held_task_locks(d):

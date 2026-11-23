@@ -688,13 +688,39 @@ class Leftovers(unittest.TestCase):
         self.assertEqual(self.ledger_items(), ["托管账本读不了（OperationalError）"])
 
     def test_ledger_check_is_read_only(self):
+        """只读打开（mode=ro 的 URI），不走会迁移、写库的 open_store；库、文件都不变。"""
+        import sqlite3
+        import custody_ledger as L
         con = self.ledger()
         self.sec(con, "d-000001-aaaaa1", "issued")
-        con.commit()
         db = self.root / "twin-state.db"
         before = (self.files(), db.read_bytes(), con.execute("PRAGMA user_version").fetchone()[0])
-        self.ledger_items()
+        uris, real = [], sqlite3.connect
+
+        def connect(target, *a, **kw):
+            uris.append((str(target), kw.get("uri")))
+            return real(target, *a, **kw)
+        with mock.patch.object(R.sqlite3, "connect", connect), \
+                mock.patch.object(L, "open_store", side_effect=AssertionError("不该走 open_store")):
+            self.assertEqual(len(self.ledger_items()), 1)
+        ledger = [u for u in uris if "twin-state.db" in u[0]]
+        self.assertEqual(len(ledger), 2, uris)                                     # 秘书、托管各一次
+        self.assertTrue(all(u.endswith("?mode=ro") and uri for u, uri in ledger), ledger)
         self.assertEqual((self.files(), db.read_bytes(), con.execute("PRAGMA user_version").fetchone()[0]), before)
+
+    def test_unreadable_raw_session_dir_counts(self):
+        """原文的会话目录读不了：glob 会静默返回空，这里要报出来（独立审查）。"""
+        con = self.ledger()
+        self.sec(con, "d-000001-aaaaa1", "done")                                   # 账本里这个会话干净
+        self.raw("secretary", self.SS, "d-000001-aaaaa1")
+        self.raw("custody", "c-20261121-090909-cccccccccccc", "d-000002-bbbbb2")   # 账本里没有这次会话
+        for d in (self.root / "secretary" / self.SS, self.root / "custody" / "c-20261121-090909-cccccccccccc"):
+            os.chmod(d, 0)
+            self.addCleanup(os.chmod, d, 0o700)
+        got = self.ledger_items()
+        self.assertIn(f"秘书原文目录 {self.SS} 读不了", got)
+        self.assertTrue([x for x in got if x.startswith(f"秘书会话 {self.SS}：核不清")], got)   # 账本里有的会话：drain_blockers 也拦
+        self.assertIn("托管原文目录 c-20261121-090909-cccccccccccc 读不了", got)
 
     def test_nothing_installed_is_clean_and_creates_nothing(self):
         self.assertEqual(R.leftovers(), {"hold": None, "items": []})

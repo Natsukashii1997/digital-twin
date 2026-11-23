@@ -75,6 +75,7 @@ class FakeHost(H.Host):
         self.guard_fail = set()                # 要判不过的 (函数, 参数)
         self.chowns = []
         self.stuck = set()                     # launchctl print 一直说还在的标签（卸不掉，L3 第 2 轮 P1-01）
+        self.listening = None                  # None：用真的 lsof；字典：端口 → 在听的 uid（值是异常就抛）
 
     def is_root(self):
         return True
@@ -140,6 +141,14 @@ class FakeHost(H.Host):
 
     def boot_sec(self):
         return "1795000000"
+
+    def listeners(self, port_no):
+        if self.listening is None:
+            return H.Host.listeners(self, port_no)
+        v = self.listening.get(int(port_no), [])
+        if isinstance(v, Exception):
+            raise v
+        return v
 
     def pf_apply(self, script):
         """假门卫（#313 新版）：按标记在不在写状态 guard=yes / no；pf_fail 里还有次数就写 failed（模拟和定时 apply 撞车）。"""
@@ -333,6 +342,7 @@ class ChecksTest(unittest.TestCase):
         (users["nat"] / "Library/LaunchAgents").mkdir(parents=True)
         (users["nat"] / "Library/LaunchAgents/agent-autoloop.plist").write_text("x")
         self.users = users
+        self.host.listening = {}                                         # 端口上默认没人在听（不跑真的 lsof）
         q = mock.patch.object(H, "recovery_as", self.fake_recovery())    # 主账号恢复闸默认干净；要测的用例自己再换
         q.start()
         self.addCleanup(q.stop)
@@ -968,14 +978,82 @@ class ChecksTest(unittest.TestCase):
         self.rollback_blocked(self.d / "rbs", setup, "卸不下来", plist_kept=True)
 
     def test_rollback_stops_while_a_service_port_is_still_listened(self):
-        def setup():
-            srv = socket.socket()
-            srv.bind(("127.0.0.1", 0))
-            srv.listen(128)
-            self.addCleanup(srv.close)
-            os.environ["DT_GATE_INTAKE_PORT"] = str(srv.getsockname()[1])            # setUp 的 patch.dict 会还原
-            return srv.close
+        def setup():                                     # 门卫开着时连过去分不清，按 root 的 lsof 看：别的账号还在听
+            self.host.listening[int(os.environ["DT_GATE_INTAKE_PORT"])] = [os.getuid() + 1]
+            return self.host.listening.clear
         self.rollback_blocked(self.d / "rbp", setup, "还有人在听", plist_kept=False)
+
+    def test_rollback_stops_when_lsof_cannot_tell_who_listens(self):
+        def setup():
+            self.host.listening[1] = OSError("lsof 出错")                               # 中台端口（hub_url :1）查不清
+            return self.host.listening.clear
+        self.rollback_blocked(self.d / "rbl", setup, "查不清", plist_kept=False)
+
+    def test_rollback_checks_the_window_ports_recorded_at_install(self):
+        """windows 装的时候记下的端口：回滚按它核，不按回滚时的环境变量（独立审查建议 3）。"""
+        def setup():
+            st = Path(os.environ["DT_GATE_ROOT"]) / "state.json"
+            s = json.loads(st.read_text())
+            s["ports"] = {"readonly": 40001, "intake": 40002}
+            st.write_text(json.dumps(s))
+            self.host.listening[40002] = [os.getuid() + 1]
+            return self.host.listening.clear
+        self.rollback_blocked(self.d / "rbw", setup, "40002", plist_kept=False)
+
+    def test_unload_only_trusts_launchctl_saying_not_found(self):
+        """print 返回 113（找不到）才算卸了；别的错误码是查不清，不删 plist（独立审查）。"""
+        d = self.plists()
+        self.host.sleep = lambda s: None
+        real = self.host.launchctl
+        self.host.launchctl = lambda *a: (5, "Input/output error") if a[0] == "print" else real(*a)
+        with self.assertRaisesRegex(H.Stop, "卸不下来"):
+            H.remove_daemon(self.host, "hub")
+        self.assertTrue((d / f"{H.LABEL['hub']}.plist").exists())
+
+    def test_undo_keeps_everything_while_the_hub_port_is_still_listened(self):
+        """卸了服务但中台端口上还有人在听、或进度记录里没有地址：和卸不掉一样，现场保持在 dt-gate。"""
+        (self.users["nat"] / ".agent-autoloop").mkdir(exist_ok=True)
+        (self.users["nat"] / ".agent-autoloop/config.json").write_text("{}")
+        self.host.sleep = lambda s: None
+        done = {"held": True, "stopped": True, "gate_hub": True, "daemon": True, "guard_on": True}
+        for name, url, listening in (("有人在听", "http://127.0.0.1:41000", {41000: [os.getuid() + 1]}),
+                                     ("没记地址", None, {})):
+            with self.subTest(name=name):
+                self.plists()
+                self.guarded()
+                gate_hub = self.users["dt-gate"] / ".agent-autoloop"
+                gate_hub.mkdir(exist_ok=True)
+                self.host.listening = dict(listening)
+                self.host.calls.clear()
+                run = self.fake_recovery(hold="gate-migrate-S")
+                start = mock.Mock()
+                with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
+                        mock.patch("sys.stdout", io.StringIO()):
+                    self.assertFalse(H.undo(self.host, {"repo": {"dir": str(self.d)}}, "nat", "S", done, url))
+                start.assert_not_called()
+                self.assertTrue(gate_hub.is_dir())
+                self.assertTrue(os.path.lexists(H.hub_mark()))
+                self.assertFalse([c for c in self.host.calls if c[0] == "pf_apply"])
+                self.assertEqual(run.state["hold"], "gate-migrate-S")
+
+    def test_rollback_resumes_after_owner_hub_was_put_back(self):
+        """回滚放回主账号中台目录之后、归档 state 之前被打断：再跑一次接着启用、结束停写（独立审查）。"""
+        w = self.d / "rbr"
+        s = self.rollback_state(w)
+        (w / "hub").unlink()
+        (w / "moved").rename(w / "hub")                                              # 上次已放回
+        run = self.fake_recovery(hold="gate-migrate-S")
+        start = mock.Mock()
+        with mock.patch.object(H, "recovery_as", run), mock.patch.object(H, "start_owner_agent", start), \
+                mock.patch.object(H, "now_stamp", return_value="Q"), mock.patch("sys.stdout", io.StringIO()) as out:
+            self.assertEqual(H.cmd_rollback(self.host, self.a()), 0, out.getvalue())
+        self.assertIn("接着做剩下的", out.getvalue())
+        start.assert_called_once()
+        self.assertIsNone(run.state["hold"])
+        self.assertIsNone(H.load_state())
+        self.assertTrue((Path(os.environ["DT_GATE_ROOT"]) / "state.rolled-back-Q.json").exists())
+        self.assertEqual((w / "hub/config.json").read_text(), "{}")
+        self.assertEqual(s["owner_hub"], str(w / "hub"))
 
     def test_wait_port_free_only_trusts_a_refused_connection(self):
         """连上了、超时（监听队列满）都不算空；连接被拒才算。"""
@@ -1402,6 +1480,7 @@ class MigrateEndToEndTest(unittest.TestCase):
         self.assertIn("在跑", self.out.getvalue())
 
         # 回滚
+        self.assertEqual(H.load_state()["ports"], {"readonly": int(self.ports["ro"]), "intake": int(self.ports["in"])})
         self.assertEqual(self.main("rollback", "--confirm"), 0, self.out.getvalue())
         self.assertFalse(os.path.lexists(self.d / "pf/hub-in-gate"))                 # 先关门卫监听者规则再放回
         self.assertIn("guard=no", (self.d / "pf/pf-dt-worker.status").read_text())

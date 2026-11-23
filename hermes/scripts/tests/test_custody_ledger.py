@@ -439,6 +439,11 @@ class ReviewRound1Tests(Base):
         self.rejects("LedgerMismatch", self.reply, issue="DTS-8")
         self.assertEqual(L.raw_orphans(self.st, SID), [d["id"]])
         self.assertTrue(any("有原文、账本里却没有" in b for b in L.drain_blockers(self.st, SID)))
+        d = L.raw_dir() / SID                                  # 原文目录读不了：报出来，不当成「没有孤儿」（0E-2 返修审查）
+        os.chmod(d, 0)
+        self.addCleanup(os.chmod, d, 0o700)
+        self.rejects("RawUnreadable", L.raw_orphans, self.st, SID)
+        self.rejects("RawUnreadable", L.drain_blockers, self.st, SID)
 
     def test_round2_p1_02_suspend_only_into_current_session(self):
         """第 2 轮 P1-02：已结束的托管不能再记（哪怕账本里有它的登记）；现在这次也要账本身份对得上。"""

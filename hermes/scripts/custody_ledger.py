@@ -219,7 +219,11 @@ def raw_orphans(store, session_id, use=CUSTODY):
     d = raw_dir(use) / session_id
     if not d.is_dir():
         return []
-    ids = {p.stem for p in d.glob("d-*.json") if DECISION_ID.match(p.stem)}
+    try:                                # glob 碰到读不了的目录会静默返回空，读不了必须报出来（0E-2 返修审查）
+        names = os.listdir(d)
+    except OSError as e:
+        raise LedgerError(f"{use.who}原文目录 {d} 读不了（{type(e).__name__}），核不了有没有账本里没有的决定", "RawUnreadable")
+    ids = {n[:-5] for n in names if n.endswith(".json") and DECISION_ID.match(n[:-5])}
     have = {r[0] for r in store.conn.execute(f"SELECT id FROM {use.decisions} WHERE session_id=?", (session_id,))}
     return sorted(ids - have)
 
