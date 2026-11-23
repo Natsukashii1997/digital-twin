@@ -55,11 +55,14 @@ class PfRules(unittest.TestCase):
         self.assertEqual(lines[2], f"block return in quick proto {{ tcp, udp }} from any to any user {user}")
 
     def test_listener_guard_only_with_flag(self):
-        """监听者规则只在 --guard（apply 里是有搬家标记）时生成，排在最前。"""
+        """监听者规则只在 --guard（apply 里是有搬家标记）时生成，紧跟在两条「查不到主人」的兜底之后、按账号的规则之前
+        （兜底管出站、它管入站，互不影响；#210 合并时兜底定在最前）。"""
         self.assertNotIn("user != dt-gate", rules("dt-worker").stdout)
         r = subprocess.run(["bash", str(PF), "rules", "--guard", "dt-worker"], capture_output=True, text=True)
         body = [l for l in r.stdout.splitlines() if not l.startswith("#")]
-        self.assertEqual(body[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353, 3359 } user != dt-gate")
+        self.assertEqual(body[:2], ["block drop out quick proto tcp from any to any user unknown flags S/SA",
+                          "block drop out quick proto udp from any to any user unknown"])
+        self.assertEqual(body[2], "block return in quick proto tcp from any to any port { 3350, 3352, 3353, 3359 } user != dt-gate")
         self.assertEqual(allowed_ports(r.stdout, "dt-worker"), {3350, 8090})
 
     def test_worker_only(self):
@@ -767,7 +770,7 @@ exit 1
         return d
 
     def test_listener_guard(self):
-        """0E-2 搬家标记在（root 的普通文件）：规则多一条「3350 / 3352 / 3353 只收 dt-gate 在听的」排在最前，状态 guard=yes；
+        """0E-2 搬家标记在（root 的普通文件）：规则多一条「3350 / 3352 / 3353 只收 dt-gate 在听的」，紧跟两条兜底、在按账号的规则之前，状态 guard=yes；
         标记不在：没有这条、guard=no；标记是链接、不归 root、或查不到 dt-gate：判 failed，不生成规则。"""
         r, f, _ = self.apply("ok")
         self.assertEqual(f["guard"], "no")
@@ -776,7 +779,7 @@ exit 1
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((f["state"], f["guard"]), ("ok", "yes"))
         lines = [l for l in (Path(self.last_dir) / "pf-dt-worker.rules").read_text().splitlines() if not l.startswith("#")]
-        self.assertEqual(lines[0], "block return in quick proto tcp from any to any port { 3350, 3352, 3353, 3359 } user != dt-gate")
+        self.assertEqual(lines[2], "block return in quick proto tcp from any to any port { 3350, 3352, 3353, 3359 } user != dt-gate")
         # 0E-2 换工人钥匙前的核对（#268 ops/dt_gate_hub.py pf_listener_rule）认的就是这种写法
         self.assertRegex("\n".join(lines), r"(?m)^\s*(pass|block)\b.*\bin\b.*\b3350\b.*\buser\b.*dt-gate")
         for d, why in ((self.guard_dir(owner="501"), "不是_root_的普通文件"), (self.guard_dir(link=True), "不是_root_的普通文件")):
