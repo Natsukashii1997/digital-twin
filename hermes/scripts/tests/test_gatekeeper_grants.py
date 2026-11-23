@@ -191,6 +191,18 @@ class Clicking(Base):
         self.assertEqual((AG.show(), self.posted), ([], []))
         self.assertIsNone(self.row(code)["decision"])
 
+    def test_click_before_message_id_is_registered_asks_to_retry(self):
+        """卡已送到、门卫还没登记消息号时被点：不签、不当成别的卡，只请他几秒后再点；登记后再点照常签。"""
+        code = self.propose()
+        token = self.row(code)["card_token"]
+        rec = self.click(token, "om_gate_msg_9999", eid="early")
+        self.assertFalse(rec["ok"])
+        self.assertIn("还在登记", self.lark.texts()[-1])
+        self.assertIsNone(self.row(code)["decision"])
+        G.grant_cards_once()
+        rec = self.click(token, self.row(code)["card_message"], eid="later")
+        self.assertTrue(rec["ok"], rec)
+
     def test_replay_is_handled_once_and_a_second_click_does_not_sign_again(self):
         code, token, mid = self.sent_card()
         first = self.click(token, mid, eid="same")

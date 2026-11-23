@@ -221,12 +221,12 @@ class Approval(Base):
     def test_click_must_hit_the_registered_card(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         token = self.proposal(code)["card_token"]
-        with self.assertRaisesRegex(G.Rejected, "不是登记的"):            # 卡还没发出（没有消息号）
+        with self.assertRaisesRegex(G.CardNotReady, "还在登记"):          # 卡还没登记消息号：请他稍后再点
             G.decide(token, "ok", "om_fixturecard9999", "ev-1", now=T0, post=self.post)
         G.mark_card(code, unsure="发卡结果不明")
         (todo,) = G.cards_to_send(now=T0)                                  # 结果不明的照样交门卫，由出口账本拦重发
         self.assertEqual(todo["card_state"], "unsure")
-        with self.assertRaisesRegex(G.Rejected, "不是登记的"):
+        with self.assertRaisesRegex(G.CardNotReady, "还在登记"):
             G.decide(token, "ok", "om_fixturecard9999", "ev-1", now=T0, post=self.post)
         G.mark_card(code, "om_fixturecard0001")
         G.mark_card(code, "om_fixturecard0002")                            # 只认第一次登记的消息号

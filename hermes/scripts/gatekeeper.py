@@ -897,6 +897,9 @@ def handle_grant(ev, token, choice):
         raise Quiet("回调没带消息号")
     try:
         res = AG.decide(token, choice, mid, ev["event_id"])
+    except AG.CardNotReady:                      # 卡到了、消息号还没登记（同中台卡片 P2-7）：只回点卡的本人，请他再点
+        GATE.send_text(b["chat_id"], "派单确认卡还在登记，请几秒后在卡片上再点一次。", f"gate-grant-retry-{secrets.token_hex(8)}")
+        return {"ok": False, "why": "派单确认卡还在登记，请他稍后再点"}
     except AG.Rejected as e:
         raise Quiet(str(e))
     if res.get("already"):

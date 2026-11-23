@@ -131,6 +131,10 @@ class Rejected(Exception):
     """拒绝：说人话的原因，不带身份值、不带密钥。"""
 
 
+class CardNotReady(Rejected):
+    """派单确认卡已经发出、门卫还没登记上消息号时被点了：核不了点的是不是这张卡，不定结果，请他几秒后再点。"""
+
+
 class Busy(Rejected):
     """这张单的任务锁被别人持着（秘书 ② / ③、受信发布或另一次续接正在处理）。"""
 
@@ -694,7 +698,9 @@ def decide(token, choice, message_id, event_id, now=None, path=None, post=None):
         p = con.execute("SELECT * FROM proposals WHERE card_token = ?", (token,)).fetchone()
     if p is None:
         raise Rejected("没有这张派单确认卡")
-    if not p["card_message"] or p["card_message"] != message_id:
+    if not p["card_message"] and not p["decision"]:
+        raise CardNotReady("派单确认卡还在登记")
+    if p["card_message"] != message_id:
         raise Rejected("点的不是登记的那张派单确认卡")
     why = None
     if choice == "ok" and not p["decision"] and now < parse_iso(p["expires_at"]):
