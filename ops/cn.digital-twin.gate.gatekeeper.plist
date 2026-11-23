@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 门卫常驻（ADR-015 0E-3c）：以 dt-gate 身份跑门卫入口的 run，开机自起、退出了 launchd 重起。
+     装在 /Library/LaunchDaemons/（root:wheel 644）；不写环境变量（入口 env -i 自己定），日志文件由 root 先建好交给 dt-gate（600），
+     同 dt_gate_hub.py 给中台服务的做法。装法见门卫真机清单「门卫装成系统服务」一节；同一时间只能有一个门卫在跑。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>cn.digital-twin.gate.gatekeeper</string>
+  <key>UserName</key><string>dt-gate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/DigitalTwin/bin/gatekeeper</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/dt-gate</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>Umask</key><integer>63</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Library/Logs/DigitalTwin/gate/gatekeeper.log</string>
+  <key>StandardErrorPath</key><string>/Library/Logs/DigitalTwin/gate/gatekeeper.log</string>
+</dict>
+</plist>
