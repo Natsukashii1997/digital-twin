@@ -353,7 +353,10 @@ def check_ledger(st, session_id, lid):
         L.check_session(st, session_id, lid)
     except L.LedgerError as e:
         raise ReportError(f"托管账本对不上，不处理：{e}", e.code)
-    orphans = L.raw_orphans(st, session_id)
+    try:
+        orphans = L.raw_orphans(st, session_id)
+    except L.LedgerError as e:
+        raise ReportError(f"托管账本对不上，不处理：{e}", e.code)
     if orphans:
         raise ReportError(f"托管账本对不上，不处理：{len(orphans)} 个决定有原文、账本里却没有（账本可能被旧备份覆盖）", "LedgerMismatch")
 
