@@ -90,7 +90,7 @@ class Base(unittest.TestCase):
         self.vault.mkdir()
         (self.vault / "关于我.md").write_text("---\nsensitivity: 受限\n---\n常浩，一个人推进十几个个人项目。", encoding="utf-8")
         (self.tmp / "CLAUDE.md").write_text("# 规则\n## 0. 回复语言\n## 2. Simplicity First\n", encoding="utf-8")
-        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": raw_msgs()}},
+        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": raw_msgs(), "has_more": False}},
                     "docs +create": {"ok": True, "data": {"document": {"url": "https://x.feishu.cn/docx/abc"}}},
                     "+messages-send": {"ok": True, "data": {"message_id": "om_sent"}},
                     "+messages-mget": {"ok": True, "data": {"messages": [{"msg_type": "interactive",
@@ -125,6 +125,33 @@ class Base(unittest.TestCase):
     def collected(self):
         gd.collect(gd.dt.date.fromisoformat(DAY))
         return json.loads((self.dir / f"{DAY}.material.json").read_text(encoding="utf-8"))
+
+
+class ReadToTheEnd(Base):
+    """#312：读群消息 --page-all 默认只翻 10 页，到顶不报错、只留 has_more=true。原来只取第一轮的 messages。"""
+    @staticmethod
+    def rounds(pages):
+        calls = []
+
+        def lark(args, what, identity, cwd=None, wait=0):
+            calls.append((args, what, identity))
+            return pages[args[args.index("--page-token") + 1] if "--page-token" in args else None]
+        return lark, calls
+
+    def test_messages_beyond_first_round_are_read(self):
+        lark, calls = self.rounds({None: {"messages": raw_msgs()[:1], "has_more": True, "page_token": "t2"},
+                                   "t2": {"messages": raw_msgs()[1:3], "has_more": True, "page_token": "t3"},
+                                   "t3": {"messages": raw_msgs()[3:], "has_more": False}})
+        with mock.patch.object(gd, "lark", lark):
+            msgs = gd.fetch_messages(gd.dt.date.fromisoformat(DAY))
+        self.assertEqual([m["id"] for m in msgs], ["M1", "M2", "M3"])          # 三轮都读到；撤回的那条照旧去掉
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(c[0][:2] == ["im", "+chat-messages-list"] and c[2] == "user" for c in calls))   # 续翻也用常浩的用户身份
+
+    def test_not_read_to_the_end_fails_instead_of_truncating(self):
+        lark, _ = self.rounds({None: {"messages": raw_msgs()[:1], "has_more": True}})
+        with mock.patch.object(gd, "lark", lark), self.assertRaisesRegex(gd.Fail, "读群消息：还有下一页，但飞书没给翻页标记，没读全"):
+            gd.fetch_messages(gd.dt.date.fromisoformat(DAY))
 
 
 class Collect(Base):
@@ -292,7 +319,7 @@ class Build(Base):
         self.assertEqual(meta["degraded"], "模型没写成")
 
     def test_没有消息的日子不调模型(self):
-        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": []}}})
+        self.reply({"+chat-messages-list": {"ok": True, "data": {"messages": [], "has_more": False}}})
         self.collected()
         with mock.patch.object(gd, "generate") as g:
             meta = gd.build(gd.dt.date.fromisoformat(DAY))
