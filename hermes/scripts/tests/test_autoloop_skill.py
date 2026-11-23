@@ -120,7 +120,8 @@ class SkillDocMatchesScripts(unittest.TestCase):
         for words, fn in (("已发到常浩私聊", G.propose), ("不能续接：", G.resume_dispatch), ("已经是终态", G._tighten),
                           ("凭证已过期", G.check_row), ("【派单确认】", G.notice_text),
                           ("还有没确认送到中台的派单事件", G.resume_dispatch), ("另有入口正在处理", G.task_lock),
-                          ("开闸后 send-pending 补发", G.send_pending), ("恢复闸关着", RV.ensure_open)):
+                          ("开闸后 send-pending 补发", G.send_pending), ("恢复闸关着", RV.ensure_open),
+                          ("派单事件发出后没确认送到中台", G._stop_after), ("中台库读不了", G.stop_runs)):
             with self.subTest(words=words):
                 self.assertIn(words, self.text)
                 self.assertIn(words, inspect.getsource(fn))
@@ -129,7 +130,8 @@ class SkillDocMatchesScripts(unittest.TestCase):
         for field, script in (("usable", "autoloop_grants"), ("why_not", "autoloop_grants"), ("events", "autoloop_grants"),
                               ("valid_until", "autoloop_grants"), ("freeze_code", "autoloop_grants"),
                               ("mirror_error", "autoloop_grants"), ("event_key", "autoloop_grants"),
-                              ("in_flight", "autoloop_grants"),
+                              ("in_flight", "autoloop_grants"), ("runs_stopped", "autoloop_grants"),
+                              ("runs_finished", "autoloop_grants"), ("runs_stop_error", "autoloop_grants"),
                               ("task_id", "autoloop_grants"), ("dispatch_rules", "autoloop_config"),
                               ("source_hermes", "autoloop_config"), ("key_file", "autoloop_config"),
                               ("loaded", "autoloop_config"), ("paused", "autoloop_config"),
@@ -475,6 +477,8 @@ class SkillOnRealHub(HubFixture):
 
         code, out = cli(["revoke", "--task", tid, "--reason", "常浩说停"])       # 停掉之后续接发不出去
         self.assertEqual((code, out["status"]), (0, "revoked"))
+        self.assertEqual((len(out["runs_stopped"]), out.get("runs_stop_error")), (1, None))   # 技能第 7 节：排着队的那一轮也叫停了
+        self.assertEqual(self.runs_of(tid)[0]["state"], "cancelled")
         self.assertEqual(cli(["resume-dispatch", "--task", tid, "--kind", "redispatch", "--reason", "x"])[0], 1)
         self.assertEqual(len(self.runs_of(tid)), 1)
 

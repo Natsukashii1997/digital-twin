@@ -585,6 +585,149 @@ class Generations(Base):
             G.unfreeze(self.say(f"恢复 {a} abcdef"), now=T0)
 
 
+class StopRuns(Base):
+    """停单之后取消中台里这张单排队、在跑的轮次（方案 5.1 第 4 条）。中台库用临时 sqlite 文件，取消接口打桩。"""
+
+    def setUp(self):
+        super().setUp()
+        import autoloop_config as C
+        self.C = C
+        self.hub_home = self.root / "hub"
+        self.hub_home.mkdir()
+        self.cancelled, self.fail = [], set()
+        self.real_hub = C.hub
+        for p in (mock.patch.dict(os.environ, {"AGENT_AUTOLOOP_HOME": str(self.hub_home)}),
+                  mock.patch.object(C, "hub", side_effect=self._hub)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _hub(self, method, path, body=None):
+        rid = int(path.split("/")[3])
+        self.assertEqual((method, path, body), ("POST", f"/v1/runs/{rid}/cancel", {}))
+        if rid in self.fail:
+            raise self.C.Rejected("中台回 HTTP 409")
+        self.cancelled.append(rid)
+        return {"changed": True}
+
+    def hub_runs(self, rows):
+        con = sqlite3.connect(self.hub_home / "hub.db")
+        con.execute("CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, lane TEXT, rule TEXT, state TEXT)")
+        con.executemany("INSERT INTO runs VALUES (?,?,?,?)", rows)
+        con.commit()
+        con.close()
+
+    def test_only_this_tasks_live_runs_are_cancelled(self):
+        a, b = self.new_task(), self.new_task()
+        rule = "dispatch-dt-sandbox-claude"
+        self.hub_runs([(1, a, rule, "done"), (2, a, rule, "claimed"), (3, a, rule, "queued"), (4, b, rule, "claimed"),
+                       (5, a, "别的规则", "queued"), (6, a, rule, "cancelled"), (7, a, rule, "unknown")])
+        with self.assertRaisesRegex(G.Rejected, "还有效"):
+            G.stop_runs(a, now=T0)                             # 凭证有效的单不经这里停
+        self.assertEqual(self.cancelled, [])
+        G.revoke(a, now=T0)                                    # 库函数只收紧凭证，不自动停轮次
+        self.assertEqual(self.cancelled, [])
+        got = G.stop_runs(a, now=T0)
+        self.assertEqual((got["stopped"], got["finished"], list(got["failed"]), got["in_transit"]), ([2, 3], [], ["7"], 0))
+        self.assertIn("中台不让取消", got["failed"]["7"])       # unknown：可能还在跑，中台的取消接口不收，报出来
+        self.assertEqual(self.cancelled, [2, 3])               # 别的单、别的规则、已结束的都不碰
+        what, detail = self.sql("SELECT what, detail FROM grant_log WHERE task_id = ? ORDER BY id", (a,))[-1]
+        self.assertEqual((what, json.loads(detail)),
+                         ("停轮次", {"stopped": [2, 3], "finished": [], "failed": {"7": got["failed"]["7"]}, "in_transit": 0}))
+        self.assertEqual(G.show(b)[0]["status"], "active")
+
+    def test_cli_revoke_and_freeze_stop_runs_and_report(self):
+        a, b, c = self.new_task(), self.new_task(executor="codex"), self.new_task()
+        self.hub_runs([(11, a, "dispatch-dt-sandbox-claude", "claimed"), (12, b, "dispatch-dt-sandbox-codex", "queued"),
+                       (13, b, "dispatch-dt-sandbox-codex", "claimed")])
+        self.fail = {13}
+        with mock.patch.object(G, "now_tz", return_value=T0):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(G.main(["revoke", "--task", a, "--reason", "常浩说停"]), 0)
+            got = json.loads(out.getvalue())
+            self.assertEqual((got["status"], got["runs_stopped"]), ("revoked", [11]))
+            self.assertNotIn("runs_stop_error", got)
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(G.main(["freeze", "--task", b, "--reason", "先别动"]), 0)
+            got = json.loads(out.getvalue())
+            self.assertEqual((got["status"], got["runs_stopped"]), ("frozen", [12]))    # 取消不了的那一轮单独报，不改退出码
+            self.assertIn("轮次 13", got["runs_stop_error"])
+            self.assertIn("agent-autoloop stop", got["runs_stop_error"])                # 告诉人怎么补停
+            self.assertRegex(got["freeze_code"], r"^[0-9a-f]{6}$")
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:           # 没有要停的：空列表
+                self.assertEqual(G.main(["revoke", "--task", c]), 0)
+            self.assertEqual(json.loads(out.getvalue())["runs_stopped"], [])
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as out:           # 完成不停轮次
+                d = self.new_task()
+                self.assertEqual(G.main(["complete", "--task", d]), 0)
+            self.assertNotIn("runs_stopped", json.loads(out.getvalue()))
+        self.assertEqual(self.cancelled, [11, 12])
+
+    def test_hub_db_missing_is_reported_and_revoke_still_stands(self):
+        a = self.new_task()
+        with mock.patch.object(G, "now_tz", return_value=T0), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(G.main(["revoke", "--task", a]), 0)       # 中台库不在：停单照样生效
+        got = json.loads(out.getvalue())
+        self.assertEqual(got["status"], "revoked")
+        self.assertIn("中台库读不了", got["runs_stop_error"])
+        self.assertNotIn("runs_stopped", got)
+        self.assertEqual(G.show(a)[0]["status"], "revoked")
+        self.assertEqual(self.cancelled, [])
+        what, detail = self.sql("SELECT what, detail FROM grant_log WHERE task_id = ? ORDER BY id", (a,))[-1]
+        self.assertEqual(what, "停轮次")                        # 读不了也记一笔
+        self.assertIn("中台库读不了", json.loads(detail)["error"])
+
+    def revoke_cli(self, tid):
+        with mock.patch.object(G, "now_tz", return_value=T0), mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(G.main(["revoke", "--task", tid, "--reason", "常浩说停"]), 0)
+        got = json.loads(out.getvalue())
+        self.assertEqual(got["status"], "revoked")             # 停单本身的结果一定打出来
+        return got
+
+    def test_run_that_finished_before_the_cancel_is_not_an_error(self):
+        a = self.new_task()
+        self.hub_runs([(21, a, "dispatch-dt-sandbox-claude", "claimed")])
+        self.fail = {21}                                       # 查的时候在跑，取消时中台说已经结束了
+        import autoloop_publish as P
+        with mock.patch.object(P, "hub_run", return_value={"id": 21, "state": "done"}):
+            got = self.revoke_cli(a)
+        self.assertEqual((got["runs_stopped"], got["runs_finished"]), ([], [21]))
+        self.assertNotIn("runs_stop_error", got)
+
+    def test_hub_config_missing_never_hides_the_stop(self):
+        a = self.new_task()
+        self.hub_runs([(31, a, "dispatch-dt-sandbox-claude", "queued")])
+        with mock.patch.object(self.C, "hub", self.real_hub):  # 真的调用函数：中台库在，config.json 不在
+            got = self.revoke_cli(a)
+        self.assertEqual(got["runs_stopped"], [])
+        self.assertIn("轮次 31：中台配置读不了（FileNotFoundError", got["runs_stop_error"])
+
+    def test_log_failure_and_unexpected_errors_never_hide_the_stop(self):
+        a, b = self.new_task(), self.new_task()
+        self.hub_runs([(41, a, "dispatch-dt-sandbox-claude", "queued")])
+        real_log = G.log
+
+        def log(con, tid, what, now, **detail):
+            if what == "停轮次":
+                raise sqlite3.OperationalError("database is locked")
+            return real_log(con, tid, what, now, **detail)
+        with mock.patch.object(G, "log", side_effect=log):
+            got = self.revoke_cli(a)
+        self.assertEqual(got["runs_stopped"], [41])            # 取消已经发出去了，结果照样交回
+        self.assertIn("凭证库日志没记上（OperationalError）", got["runs_stop_error"])
+        with mock.patch.object(G, "stop_runs", side_effect=RuntimeError("意外")):
+            got = self.revoke_cli(b)
+        self.assertEqual(got["runs_stop_error"], "停轮次出错（RuntimeError）")
+
+    def test_events_still_on_the_way_to_the_hub_are_reported(self):
+        a = self.new_task()
+        self.hub_runs([])
+        with G.tx() as con:                                    # 别的进程已领走、正在发的派单事件
+            con.execute("UPDATE hub_events SET sent = 2 WHERE task_id = ?", (a,))
+        got = self.revoke_cli(a)
+        self.assertEqual(got["runs_stopped"], [])
+        self.assertIn("还有 1 个派单事件发出后没确认送到中台", got["runs_stop_error"])
+
+
 class Resume(Base):
     def test_resume_only_while_valid(self):
         tid = self.new_task()
@@ -685,6 +828,7 @@ class Resume(Base):
         finally:
             child.stdin.close()
             child.wait(10)
+            child.stdout.close()                               # 不关会留一个 ResourceWarning: unclosed file
         with G.task_lock(tid) as mine:
             out = G.resume_dispatch(tid, "redispatch", "x", now=T0, post=self.post, lock=mine)
         self.assertEqual(out["event_key"], f"{tid}:g1:redispatch:1")
