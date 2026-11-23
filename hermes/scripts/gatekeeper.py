@@ -190,8 +190,9 @@ CONNECT_WAIT = 120                        # 秒：总线 ready 后，飞书长�
 READY_WAIT = 120                          # 秒：consume 起来后一直不打就绪标记，超过这么久也重起（#255 复核 P2-2）
 NOTICE_RETRY_WINDOW = 50 * 60             # 秒：通知只在这么久内自动重发（飞书幂等键只保证一小时内去重），过了交人工核查
 ENTRY_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-ENTRY_ENV = {"PATH", "LANG", "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING"}   # 入口 env -i 之后，
-#   /usr/bin/python3（xcrun 转发壳）自己会补后五个（本机 11-20 实测），别的变量出现就说明没经入口
+ENTRY_ENV = {"PATH", "LANG", "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING",
+             "DT_HUB_LISTENER_UID"}   # 入口 env -i 之后，/usr/bin/python3（xcrun 转发壳）自己会补 CPATH 到
+#   __CF_USER_TEXT_ENCODING 这五个（本机 11-20 实测）；DT_HUB_LISTENER_UID 由入口写死；别的变量出现就说明没经入口
 EVENT_KEEP = 30 * 86400                  # 秒：回调去重记录留这么久（飞书重投远短于这个）
 DEFAULT_LARK = "/Library/Application Support/DigitalTwin/bin/lark-cli"
 SCHEMA = """
@@ -355,12 +356,17 @@ def launch_flags():
 
 
 def launch_env():
-    """防误用：PATH 正好是入口写的，除入口给的 PATH、LANG 和 xcrun 转发壳自己补的几个外没有别的变量。只核变量名，
+    """防误用：PATH 正好是入口写的，除入口给的 PATH、LANG、DT_HUB_LISTENER_UID 和 xcrun 转发壳自己补的几个外没有别的变量，
+    DT_HUB_LISTENER_UID 等于运行账号的 uid（中台监听核对，见 hub_listener）。只核变量名和这一个值，
     直接跑 Python 的人照样能凑出这套环境，所以它不是「走过入口」的证明（L3 第 3 轮 P1-04-B）；真正的边界是 root 装的
     入口、固定解释器、root 代码目录和 LaunchDaemon（0E-3c 实装验收）。"""
     extra = sorted(set(os.environ) - ENTRY_ENV)
     if os.environ.get("PATH") != ENTRY_PATH or extra:
         raise F.Fail(f"门卫只经入口脚本跑（环境没被清空：{', '.join(extra[:5]) or 'PATH 不对'}）")
+    if os.environ.get("DT_HUB_LISTENER_UID") != str(os.geteuid()):
+        # 中台由 dt-gate 自己跑（0E-2）：门卫带钥匙连中台前要核端口上在听的是本账号（hub_listener）。没设就不核，
+        # 别的账号抢先占了 3350 门卫会把通道钥匙交给它，所以必须有、且等于运行账号（#255 合并后补，常浩 11-23「启用前单独修」）
+        raise F.Fail("门卫只经入口脚本跑（入口没写中台监听核对 DT_HUB_LISTENER_UID，或不是运行账号的 uid）")
 
 
 def launch_ok():

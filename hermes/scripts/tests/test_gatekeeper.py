@@ -227,10 +227,16 @@ class Config(Base):
             with mock.patch.object(G.sys, "flags", types.SimpleNamespace(isolated=1, no_site=0, dont_write_bytecode=1)):
                 with self.assertRaisesRegex(F.Fail, "-I -S -B"):
                     G.launch_ok()
-            entry_env = {"PATH": G.ENTRY_PATH, "LANG": "en_US.UTF-8", "SDKROOT": "/x", "__CF_USER_TEXT_ENCODING": "0x0"}
+            entry_env = {"PATH": G.ENTRY_PATH, "LANG": "en_US.UTF-8", "SDKROOT": "/x", "__CF_USER_TEXT_ENCODING": "0x0",
+                         "DT_HUB_LISTENER_UID": str(os.geteuid())}
             with mock.patch.object(G.sys, "flags", flags):
                 with self.assertRaisesRegex(F.Fail, "环境没被清空"):   # L3 第 2 轮 P1-04：没经入口的 env -i
                     G.launch_ok()
+                no_listener = {k: v for k, v in entry_env.items() if k != "DT_HUB_LISTENER_UID"}
+                for env in (no_listener, {**entry_env, "DT_HUB_LISTENER_UID": str(os.geteuid() + 1)}):
+                    with mock.patch.dict(os.environ, env, clear=True):   # 中台监听核对没写、或不是运行账号：不起
+                        with self.assertRaisesRegex(F.Fail, "DT_HUB_LISTENER_UID"):
+                            G.launch_ok()
                 with mock.patch.dict(os.environ, entry_env, clear=True):
                     with self.assertRaisesRegex(F.Fail, "不属 root"):        # 临时目录属本账号，不属 root
                         G.launch_ok()
@@ -251,6 +257,18 @@ class Config(Base):
                 with self.assertRaisesRegex(F.Fail, "-I -S -B"):
                     G.run()
                 card_loop.assert_not_called()
+
+    def test_entry_listener_check_keeps_channel_key_away_from_other_listeners(self):
+        """入口写的 DT_HUB_LISTENER_UID 生效后：3350 上在听的不是门卫自己的账号，门卫不带通道钥匙去，算没发出去。"""
+        opened = []
+        with mock.patch.dict(os.environ, {"DT_HUB_LISTENER_UID": str(os.geteuid())}), \
+                mock.patch.object(F, "hub_target", lambda channel="feishu": ("http://127.0.0.1:3350", "k")), \
+                mock.patch.object(F.hub_listener, "listener_uids", lambda *a, **k: [os.geteuid() + 1]), \
+                mock.patch.object(F.urllib.request.OpenerDirector, "open", lambda *a, **k: opened.append(a)):
+            with self.assertRaises(F.HubError) as e:
+                F.hub("GET", "/v1/cards/next?wait=1")
+        self.assertFalse(e.exception.sent)
+        self.assertEqual(opened, [])
 
     def test_main_checks_code_before_importing_siblings(self):
         """P1-04：作为主程序启动时，导入同目录脚本之前先核；目录别人能改就退出，同目录被换掉的脚本一行都不跑。"""
@@ -291,6 +309,8 @@ class Config(Base):
         self.assertFalse((Path(os.environ["DT_GATE_HOME"]) / "app.json").exists())
         sh = (HERE.parent.parent.parent / "ops/dt_gatekeeper.sh").read_text(encoding="utf-8")
         self.assertIn("exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin", sh)
+        self.assertIn("GATE_UID=$(/usr/bin/id -u dt-gate)", sh)          # 中台监听核对写死成 dt-gate 的 uid
+        self.assertIn('DT_HUB_LISTENER_UID="$GATE_UID"', sh)
         self.assertIn('/usr/bin/python3 -I -S -B "$GATE_DIR/gatekeeper.py" "$@"', sh)
         self.assertEqual(subprocess.run(["/bin/sh", "-n", str(HERE.parent.parent.parent / "ops/dt_gatekeeper.sh")]).returncode, 0)
 
