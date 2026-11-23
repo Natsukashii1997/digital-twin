@@ -62,6 +62,17 @@ check_account() {
     echo "  [停下] 查不清 $u 是不是管理员（dseditgroup -o checkmember -m $u admin）"
     bad=1
   fi
+  # 主组不能是 wheel（0），也不能在 wheel 组里（审查第 4 轮 P3-2）
+  m=$(dscl . -read "/Users/$u" PrimaryGroupID 2>/dev/null | awk '{print $2}')
+  case $m in
+    ''|*[!0-9]*) echo "  [停下] 读不出 $u 的主组（dscl . -read /Users/$u PrimaryGroupID）"; bad=1 ;;
+    0) echo "  [停下] $u 的主组是 wheel（0）：请改成 staff（20）"; bad=1 ;;
+  esac
+  is_member "$u" wheel && m=0 || m=$?
+  if [ "$m" != 1 ]; then
+    echo "  [停下] $u 在 wheel 组里或查不清（dseditgroup -o checkmember -m $u wheel）"
+    bad=1
+  fi
   if [ "$(dscl . -read "/Users/$u" IsHidden 2>/dev/null | awk '{print $2}')" = 1 ]; then
     echo "  登录界面：已隐藏"
   else
@@ -96,11 +107,18 @@ ard_access() {
   pgrep -qx ARDAgent && rc=0 || rc=$?
   if [ "$rc" = 1 ]; then echo "  远程管理：没开"; return 0; fi
   [ "$rc" = 0 ] || { echo "  [停下] 查不清远程管理开没开（pgrep 出错）"; return 1; }
-  all=$(defaults read /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers 2>/dev/null || echo 0)
-  if [ "$all" != 0 ]; then
-    echo "  [停下] 远程管理开着，允许所有本地用户：请在「系统设置 → 通用 → 共享 → 远程管理」改成「仅这些用户」且不含 $u"
-    return 1
-  fi
+  # 只认读出来明确是 0（「仅这些用户」）；读不出、没有这一项、读出别的值都是查不清，停下（L3 第 4 轮 P2-02：
+  # 原来读失败一律当成 0）。远程管理开着时这一项系统总会写上，没有它不当成安全的默认值。
+  all=$(defaults read /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers 2>&1) || all="读不出：$all"
+  case $all in
+    0) ;;
+    1)
+      echo "  [停下] 远程管理开着，允许所有本地用户：请在「系统设置 → 通用 → 共享 → 远程管理」改成「仅这些用户」且不含 $u"
+      return 1 ;;
+    *)
+      echo "  [停下] 远程管理开着，查不清是不是允许所有本地用户（${all%%$'\n'*}）"
+      return 1 ;;
+  esac
   privs=$(dscl . -read "/Users/$u" naprivs 2>&1) || true
   case $privs in
     "No such key: naprivs"*|"naprivs: 0") ;;
@@ -119,11 +137,14 @@ ard_access() {
 # 允许名单不存在 = 「所有用户」都能登录。
 # 名单里有没有它要分清「不是成员」和「查不清」，查不清当成能登录（L3 第 3 轮 P2-02）。
 remote_access() {
-  local u=$1 job=$2 group=$3 name=$4 m=2
-  if ! launchctl print "system/$job" >/dev/null 2>&1; then
-    echo "  ${name}：没开"
-    return 0
-  fi
+  local u=$1 job=$2 group=$3 name=$4 m=2 rc
+  # 只有「找不到这个服务」（返回 113）才算没开；别的出错是查不清（审查第 4 轮 P3-1）
+  launchctl print "system/$job" >/dev/null 2>&1 && rc=0 || rc=$?
+  case $rc in
+    0) ;;
+    113) echo "  ${name}：没开"; return 0 ;;
+    *) echo "  [停下] 查不清${name}开没开（launchctl print system/$job 返回 ${rc}）"; return 1 ;;
+  esac
   if dscl . -read "/Groups/$group" >/dev/null 2>&1; then
     is_member "$u" "$group" && m=0 || m=$?
   fi
@@ -144,8 +165,9 @@ no_processes() {
   local out err rc others
   err=$(mktemp)
   out=$(ps -U "$1" -o comm= 2>"$err") && rc=0 || rc=$?
-  if [ "$rc" != 0 ] && [ -s "$err" ]; then
-    echo "  [停下] 查不清 ${1} 下有没有进程在跑：$(head -1 "$err")"
+  # 只有退出码 1、没有输出也没有报错才是「没有进程」；别的非 0 一律查不清（L3 第 4 轮 P2-02）
+  if [ "$rc" != 0 ] && { [ "$rc" != 1 ] || [ -s "$err" ] || [ -n "$out" ]; }; then
+    echo "  [停下] 查不清 ${1} 下有没有进程在跑（ps 返回 ${rc}）：$(head -1 "$err")"
     rm -f "$err"
     return 1
   fi

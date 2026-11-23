@@ -316,7 +316,13 @@ class PolicyMergeTests(Base):
                   {"event": "revert_opened", "id": "m1", "at": "2026-11-08T12:00:00+08:00", "revert_pr": "9",
                    "revert_url": "https://github.com/o/digital-twin/pull/9", "reason": "合错了"},
                   {"event": "bypass", "at": "2026-11-08T13:00:00+08:00", "repo": "o/digital-twin", "pr": "3", "title": "直接合的",
-                   "head": SHA, "tier": "L2", "suggestion": "建议合并", "merged_at": "2026-11-08T04:50:00Z"})
+                   "head": SHA, "tier": "L2", "suggestion": "建议合并", "merged_at": "2026-11-08T04:50:00Z",
+                   "policy_signed_at": "2026-11-08T09:00:00+08:00"},
+                  {"event": "bypass", "at": "2026-11-08T13:00:00+08:00", "repo": "o/digital-twin", "pr": "4", "title": "签之前合的",
+                   "head": SHA, "tier": "L1", "suggestion": "建议合并", "merged_at": "2026-11-08T00:59:00Z",
+                   "policy_signed_at": "2026-11-08T09:00:00+08:00"},
+                  {"event": "bypass", "at": "2026-11-08T13:00:00+08:00", "repo": "o/digital-twin", "pr": "6", "title": "旧版记的",
+                   "head": SHA, "tier": "L1", "suggestion": "建议合并", "merged_at": "2026-11-08T04:50:00Z"})   # #322 前没有签署时间
         book = actions.policy_book(actions.pdaily_data.window(D))
         (m,) = book["merged"]
         self.assertEqual((m["pr"], m["tier"], m["revert_cmd"], m["revert"]["revert_pr"]), ("7", "L1", "撤回 digital-twin#7", "9"))

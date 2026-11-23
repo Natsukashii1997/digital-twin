@@ -5,10 +5,15 @@
 #   dt-worker     中台 3350、过滤代理 8090
 #   dt-secretary  只读窗口 3352、秘书窄接口 3353（0E-2 由 dt-gate 开）、过滤代理 8090；连不到中台 3350
 # dt-gate 是控制面，不在这里限制。
-# 承诺的范围（常浩 11-20 定，L3 第 3 轮 P1-02）：这两个账号的 TCP、UDP 只能经 8090 出去。pf 按账号认不出的两样
-# 接受为已知风险、不在承诺里：系统解析器（mDNSResponder）代发的 DNS 查询，和 ICMP（ping）——两条都只能带很少的数据，
-# 真要堵得全机禁用。经 IPv6 套接字连 ::ffff:127.0.0.1 这类 IPv4 映射地址，发出去的是 IPv4 包，照样按上面的规则判。
-# 规则没在生效（状态不是 state=ok、或超过 10 分钟没刷新）时，工人的启动脚本拒绝开工（常浩 11-20 定，L3 第 3 轮 P1-03）。
+# 两个账号也不能对外提供服务（入站一律拒绝，审查第 4 轮 P2-8）：不然一个账号先占住另一个准连的端口
+# （中台、过滤代理没在跑，或秘书窄接口还没开），就能冒充它、在两个账号之间搭出一条通道。
+# 承诺的范围（常浩 11-20 定，L3 第 3 轮 P1-02）：这两个账号的 TCP、UDP 只能经 8090 出去。pf 按账号认不出的
+# 接受为已知风险、不在承诺里：系统服务替账号代发的流量（系统解析器 mDNSResponder 代发的 DNS 查询、trustd 联网查证书、
+# nsurlsessiond 后台下载这一类），和 ICMP（ping）——真要堵得全机禁用。
+# 重新加载规则时的偶发漏过（常浩 11-21 接受为已知风险，L3 第 4 轮 P1-02）：每秒强制重新加载一次的压力测试里约每重载
+# 一千次漏过一个包，不重载时 600 秒零漏过；所以平时不重新加载，真要加载时先写「进行中」、加载前后各清一遍两个账号的进程。经 IPv6 套接字连 ::ffff:127.0.0.1 这类 IPv4 映射地址，发出去的是 IPv4 包，照样按上面的规则判。
+# 规则没在生效（状态不是 state=ok、超过 10 分钟没刷新、或不是本次开机写的）时，工人的启动脚本拒绝开工
+# （常浩 11-20 定，L3 第 3 轮 P1-03）；规则重新加载过、或判定不在生效时，结束两个账号的全部进程（审查第 4 轮 P2-4、P2-5）。
 #
 # 用法（主账号终端，要输管理员密码）：
 #   sudo bash ops/dt_worker_pf.sh install     装上：规则 + 开机和每 5 分钟自动重新加载
@@ -17,14 +22,21 @@
 #   sudo bash ops/dt_worker_pf.sh verify      真机越权测试：以各账号身份去连，证明真挡住了（ops/dt_pf_verify.py）
 #   sudo bash ops/dt_worker_pf.sh verify stress 600  诊断：两个账号连续 600 秒不停去连，同时反复强制重新加载规则，
 #                                                   看重新加载那一刻会不会漏过（漏过时当场抓 pf 的现场）
+#   sudo bash ops/dt_worker_pf.sh verify stress 600 0  同样连 600 秒，但不强制重新加载：看平时会不会漏
 #   bash ops/dt_worker_pf.sh rules dt-worker [dt-secretary]   只打印规则，不用 sudo（测试用）
 # apply 由开机任务调用，不用手动运行；每次按本机现有账号重新生成规则，dt-secretary 建好后 5 分钟内自动管上。
 # 实际加载的规则和应有的一模一样时不重新加载（L3 第 3 轮 P1-02：11-19 两次偶发漏过都在重新加载附近，平时不再重载）。
 #
 # 不改 /etc/pf.conf：规则挂在系统自带的 com.apple/* 锚点下面（com.apple/dt-worker，名字沿用 0A）。
-# 每次先把状态文件写成 state=applying，再逐项核对：每个账号的 uid 大于 0、只对应这一个账号；主规则集里真的挂着
-# com.apple/* 锚点、锚点前面只有 scrub 类规则，com.apple 下别的锚点里没有 quick 放行（否则数据包轮不到门卫规则）；
-# 实际加载的规则和规则文件解析出来的一模一样。全部对上才写 state=ok，中途任何一步出错都写 state=failed 和原因（所有人可读）。
+# 每次逐项核对：目录服务查得清账号（查不清就重试约一分钟，仍不清就不动规则、写 failed——不当成账号不存在）；
+# 每个账号的 uid 大于 0、只对应这一个账号；主规则集里真的挂着 com.apple/* 锚点、锚点前面只有 scrub 类规则，
+# com.apple 下别的锚点里没有 quick 放行（出站、入站都算），门卫自己的锚点里没有地址转换规则和子锚点，没有网卡被 pf 跳过
+# （set skip），没有带 pass 的地址转换规则（否则数据包轮不到门卫规则）；实际加载的规则和规则文件解析出来的一模一样。
+# 要重新加载、或 pf 被关过要重新打开时，先把状态写成 state=applying，确认规则对了，清空 pf 的连接状态表，再打开 pf、
+# 结束两个账号的全部进程并确认清干净了（清空状态表影响整台机器已有的连接，只在这两种少见情况下做）。
+# 保证的是「最近一次核对（每 5 分钟一次，工人只认 10 分钟内的）时规则在生效」，不是开工那一刻实时查的：
+# 工人账号读不了 pf，关掉 pf 要 root 权限，root 被攻破不在这道门防的范围里（L3 第 4 轮 P1-03）。
+# 全部对上才写 state=ok，中途任何一步出错都写 state=failed 和原因（所有人可读）。状态里记本次开机时间 boot=。
 # 工人的启动脚本、每日巡检都据此判断门卫规则是不是在生效。
 # 写任何文件之前先核对路径：从 / 起每一级都只有 root 能改（ops/dt_root_guard.sh，和账号初始化共用）。
 set -Eeuo pipefail   # -E：函数里出错也触发 ERR，apply 中途任何一步失败都落到 state=failed
@@ -37,6 +49,7 @@ RULES="$DIR/pf-dt-worker.rules"
 SELF="$DIR/dt_worker_pf.sh"
 STATUS="$DIR/pf-dt-worker.status"
 GUARD="$DIR/dt_root_guard.sh"
+DS_TRIES=12                                 # 目录服务查不清时最多试几次（每次隔 5 秒）
 LABEL=cn.digital-twin.pf-dt-worker
 PLIST="/Library/LaunchDaemons/$LABEL.plist"
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -53,19 +66,37 @@ ports_for() {
 # 打印规则；参数是要管的账号（pf 不认不存在的用户名，所以只传本机已有的）
 print_rules() {
   echo "# 由 dt_worker_pf.sh 生成，不要手改（digital-twin#190、ADR-015 0E-1）"
+  # 兜底：pf 偶尔查不到包属于哪个套接字（user = unknown），下面按账号的规则就都不匹配、落到默认放行。
+  # 11-22 真机：不重载 600 秒里约 0.75% 的受管 SYN 这样漏出去，加了这几条后零漏过（L3 第 5 轮 P1-02 返修）。
+  # 对所有账号生效：TCP 只丢新连接的首包（drop 不回 RST，偶发查不到时程序约 1 秒后重发，重发时一般查得到）；
+  # UDP 查不到主人一律丢，不给本地链路 fe80::/10 开口子（路由器常把 DNS 公告成 fe80 地址，开了就是一条外传通道）。
+  # 每次都查不到主人的流量会一直被挡：本机转发 / 地址转换（互联网共享、虚拟机共享网络）、部分系统服务发往
+  # 局域网设备的 UDP（11-22 诊断见过一次，发往 fe80 地址）——本机现在没装这类软件，装了要另议。
+  # 入站不加兜底：没人在听的端口收到的包本来就查不到主人，拦了会让本机「连一个没人听的端口」从立刻被拒变成超时。
+  echo "block drop out quick proto tcp from any to any user unknown flags S/SA"
+  echo "block drop out quick proto udp from any to any user unknown"
   local u p
   for u in "$@"; do
     p=$(ports_for "$u") || { echo "不认识的账号：$u" >&2; return 1; }
     echo "pass out quick inet proto tcp from any to 127.0.0.1 port { $p } user $u"
     # 不写地址族：IPv4、IPv6 一起挡
     echo "block return out quick proto { tcp, udp } from any to any user $u"
+    # 入站按「收包的套接字属于谁」判：这个账号监听的端口谁都连不上；它自己连出去的回包走连接状态，不经这条
+    echo "block return in quick proto { tcp, udp } from any to any user $u"
   done
 }
 
-# 本机现有的、要管的账号（逗号分隔）：工人必须有，秘书有就管
+# 本机现有的、要管的账号（逗号分隔）：工人必须有，秘书有就管。打印 NONE 是目录服务里确实没有工人，
+# UNCLEAR 是目录服务查不清——不能当成「没有秘书」把它从规则里删掉（审查第 4 轮 P1-1）。
+# 结果只靠打印、不靠返回码；apply 调它时在命令替换里先关掉 ERR 陷阱（set -E 下子 shell 里出错会先跑一遍 fail）
 present_users() {
-  id "$WORKER" >/dev/null 2>&1 || return 1
-  if id "$SECRETARY" >/dev/null 2>&1; then echo "$WORKER,$SECRETARY"; else echo "$WORKER"; fi
+  local names
+  names=$(user_list | awk '{print $1}') || { echo UNCLEAR; return 0; }
+  case $'\n'"$names"$'\n' in *$'\n'"$WORKER"$'\n'*) ;; *) echo NONE; return 0 ;; esac
+  case $'\n'"$names"$'\n' in
+    *$'\n'"$SECRETARY"$'\n'*) echo "$WORKER,$SECRETARY" ;;
+    *) echo "$WORKER" ;;
+  esac
 }
 
 if [ "${1:-}" = rules ]; then
@@ -91,16 +122,86 @@ write_rules() {
 
 # 状态文件：一行 key=value，值里不带空格
 write_status() {
-  printf 'at=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" > "$STATUS.tmp"
-  chmod 644 "$STATUS.tmp"
-  mv -f "$STATUS.tmp" "$STATUS"
+  # 每一步都查：fail 里是 set +e，重定向失败时不能把上次留下的 .tmp 挪进来（子 agent 审查 P3-3）
+  rm -f "$STATUS.tmp" || return 1
+  printf 'at=%s boot=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$(boot_sec)" "$*" > "$STATUS.tmp" || return 1
+  chmod 644 "$STATUS.tmp" || return 1
+  mv -f "$STATUS.tmp" "$STATUS" || return 1
 }
 
+# 判定不在生效：先写 failed（工人看到就不再开工），再结束两个受管账号的全部进程。清进程不依赖状态写没写成
+# （L3 第 4 轮 P1-03：原来 set -e 下状态写失败，后面的清进程就跳过了）；没清干净的，原因补进状态。
+# pf 关着就顺手打开（只会更严，L3 第 5 轮 P1-03）。状态写不进去时删掉旧的状态文件，再不行就清空它：不能让工人拿着
+# 旧的 state=ok 在 10 分钟有效期里照样开工（L3 第 5 轮 P1-03 C）。
 fail() {
+  local why=$1 left
   trap - ERR
-  write_status "state=failed enabled=$(pf_enabled) reason=${1// /_}"
-  cat "$STATUS"
+  set +e
+  [ "$(pf_enabled)" = yes ] || /sbin/pfctl -q -E 2>/dev/null
+  mark_failed "$why"
+  left=$(kill_accounts)
+  if [ -n "$left" ]; then
+    why="${why}；${left}"
+    mark_failed "$why"
+  fi
+  cat "$STATUS" 2>/dev/null
   exit 1
+}
+
+mark_failed() {
+  write_status "state=failed enabled=$(pf_enabled) reason=${1// /_}" 2>/dev/null && return 0
+  rm -f "$STATUS" 2>/dev/null && return 0
+  : > "$STATUS" 2>/dev/null
+}
+
+# 本次开机的时间（秒），写进状态：重启后旧的 state=ok 不算数（审查第 4 轮 P2-2）。读不出就是空，工人那边当不过。
+boot_sec() { /usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p'; }
+
+# 结束两个受管账号的全部进程（审查第 4 轮 P2-4、P2-5）：规则换过后，旧规则下建好的连接还挂在 pf 的连接状态表里、
+# 不再过新规则；门卫判定不在生效时，正在跑的 CLI 也不能接着联网。
+# 发了信号还要回查清干净没有（L3 第 4 轮 P1-03）：pgrep 返回 1（没有进程）才算清了，最多等约 5 秒；还有剩的、
+# pgrep 出错（查不清）都打印原因、返回 1。账号确实不在（目录服务说清了）就不用清；目录服务查不清不当成不在。
+# 结果靠打印和返回码；在命令替换里调时先关 ERR 陷阱。
+kill_accounts() {
+  local u names rc i old p left unclear out prc bad=""
+  for u in "$WORKER" "$SECRETARY"; do
+    if ! id "$u" >/dev/null 2>&1; then
+      names=$(user_list) || { bad="${bad}；查不清 $u 在不在，没法确认它的进程清了"; continue; }
+      printf '%s\n' "$names" | awk -v u="$u" '$1 == u {f = 1} END {exit !f}' || continue
+    fi
+    # 先记下现在有哪些进程：只要它们都没了就算清干净。动手之后新起的（系统按账号身份重新拉起的 mdworker 之类）
+    # 生在新规则下，不算残留，不然会被误判成「结束不掉」（子 agent 审查第 4 轮）
+    old=$(/usr/bin/pgrep -u "$u" 2>/dev/null) && rc=0 || rc=$?
+    case $rc in
+      0) ;;
+      1) continue ;;
+      *) bad="${bad}；查不清 $u 还有没有进程（pgrep 返回 ${rc}）"; continue ;;
+    esac
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      /usr/bin/pkill -KILL -u "$u" 2>/dev/null || true
+      left="" unclear=""
+      for p in $old; do
+        # ps 只有这几种结果算数：返回 0 且属于这个账号（还活着）、返回 0 且是别的账号（号被复用，这个进程没了）、
+        # 返回 1 且没有输出（没了）；返回 0 却没有输出等别的一律查不清，不能当成已经结束（L3 第 5 轮 P1-03 B、子 agent 审查 P3-1）
+        out=$(/bin/ps -o user= -p "$p" 2>/dev/null) && prc=0 || prc=$?
+        out=$(printf '%s' "$out" | tr -d ' \n')
+        case $prc in
+          0) if [ "$out" = "$u" ]; then left="$left $p"; elif [ -z "$out" ]; then unclear="ps 返回 0 却没有输出"; fi ;;
+          1) [ -z "$out" ] || unclear="ps 返回 1 却有输出" ;;
+          *) unclear="ps 返回 ${prc}" ;;
+        esac
+      done
+      [ -z "$unclear" ] || break
+      [ -n "$left" ] || break
+      sleep 0.5
+    done
+    if [ -n "$unclear" ]; then
+      bad="${bad}；查不清 $u 的进程清没清（${unclear}）"
+    elif [ -n "$left" ]; then
+      bad="${bad}；$u 的进程结束不掉（${left# }）"
+    fi
+  done
+  [ -z "$bad" ] || { echo "${bad#；}"; return 1; }
 }
 
 pf_enabled() { /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && echo yes || echo no; }
@@ -109,61 +210,126 @@ pf_enabled() { /sbin/pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' && ec
 anchor_hooked() { /sbin/pfctl -s rules 2>/dev/null | grep -qx 'anchor "com.apple/\*" all'; }
 
 # 数据包轮得到门卫规则（L3 第 3 轮 P1-03）：主规则集里 com.apple/* 锚点前面只能是 scrub 类；com.apple 下别的锚点
-# （名字排在 dt-worker 前面的先判）和它们的子锚点里不能有 quick 放行——有的话，命中它的包在进门卫规则之前就放行了。
+# （名字排在 dt-worker 前面的先判）和它们的子锚点里不能有 quick 放行，出站、入站都算——有的话，命中它的包在进门卫规则之前
+# 就放行了（L3 第 4 轮 P1-05：入站放行会让两个账号照样对外提供服务，绕过门卫的入站拒绝）。门卫自己的锚点里，过滤规则由
+# apply 逐条比对，地址转换规则和子锚点一条都不该有（L3 第 4 轮 P1-06：nat / rdr pass 命中的包不过过滤规则）。
 # 查不出来一律不过。不过时把挡路的那条规则打印出来（进状态文件的原因）。
 order_ok() {
-  local main before
+  local main before ifs nat hit
   main=$(/sbin/pfctl -s rules 2>/dev/null) || { echo "读不出主规则集"; return 1; }
   before=$(printf '%s\n' "$main" | sed '/^anchor "com.apple\/\*" all$/,$d')
   before=$(printf '%s\n' "$before" | grep -v '^scrub' | grep . | head -1 || true)
   [ -z "$before" ] || { echo "主规则集里锚点前面有：$before"; return 1; }
+  # set skip 的网卡上 pf 一条规则都不执行（审查第 4 轮 P2-3）
+  ifs=$(/sbin/pfctl -s Interfaces -v 2>/dev/null) || { echo "读不出 pf 的网卡列表"; return 1; }
+  hit=$(printf '%s\n' "$ifs" | grep -F '(skip)' | head -1 || true)
+  [ -z "$hit" ] || { echo "有网卡被 pf 跳过：$hit"; return 1; }
+  # 带 pass 的地址转换规则命中的包不过过滤规则；主规则集里只认系统自带的 com.apple/* 转换锚点，别的锚点查不到里面
+  nat=$(/sbin/pfctl -s nat 2>/dev/null) || { echo "读不出主规则集的地址转换规则"; return 1; }
+  hit=$(printf '%s\n' "$nat" | grep -E '(^|[[:space:]])pass([[:space:]]|$)|-anchor ' \
+        | grep -vE '^(nat|rdr|binat)-anchor "com\.apple/\*" all$' | head -1 || true)
+  [ -z "$hit" ] || { echo "主规则集的地址转换里有：$hit"; return 1; }
   no_quick_pass com.apple 0
+}
+
+# 一段过滤规则里会在门卫之前定局的：带 quick 的放行，和带 quick 的锚点调用（锚点里任何一条命中就定局，里面不带 quick 的
+# pass 也算数；子 agent 审查第 4 轮）
+quick_hit() { printf '%s\n' "$1" | grep -E '^(pass|anchor)[[:space:]]' | grep -E '[[:space:]]quick([[:space:]]|$)' | head -1 || true; }
+# 一段地址转换规则里的：带 pass 的转换（命中的包不过过滤规则）、带 quick 的转换锚点
+# 保守写法：哪一行出现单独的 pass 都算（含 no nat / no rdr / no binat pass，L3 第 5 轮 P1-09）
+nat_hit() {
+  printf '%s\n' "$1" | grep -E '(^|[[:space:]])pass([[:space:]]|$)|^(nat|rdr|binat)-anchor[[:space:]].*[[:space:]]quick([[:space:]]|$)' \
+    | head -1 || true
 }
 
 no_quick_pass() {
   local subs sub rules hit
   [ "$2" -lt 5 ] || { echo "$1 下的锚点层数太多，查不完"; return 1; }
+  if [ "$2" = 0 ]; then                     # com.apple 自己的规则（各个子锚点的调用在这里）也要查
+    rules=$(/sbin/pfctl -a "$1" -s rules 2>/dev/null) || { echo "读不出 $1 的规则"; return 1; }
+    hit=$(quick_hit "$rules")
+    [ -z "$hit" ] || { echo "$1 里有：$hit"; return 1; }
+    rules=$(/sbin/pfctl -a "$1" -s nat 2>/dev/null) || { echo "读不出 $1 的地址转换规则"; return 1; }
+    hit=$(nat_hit "$rules")
+    [ -z "$hit" ] || { echo "$1 的地址转换里有：$hit"; return 1; }
+  fi
   subs=$(/sbin/pfctl -a "$1" -s Anchors 2>/dev/null) || { echo "读不出 $1 下的锚点"; return 1; }
   for sub in $subs; do
     case $sub in "$1"/?*) ;; *) echo "认不出 $1 下的锚点名：$sub"; return 1 ;; esac   # pfctl 打印的是完整路径
-    [ "$sub" = "$ANCHOR" ] && continue
+    if [ "$sub" = "$ANCHOR" ]; then
+      rules=$(/sbin/pfctl -a "$sub" -s nat 2>/dev/null) || { echo "读不出 $sub 的地址转换规则"; return 1; }
+      hit=$(printf '%s\n' "$rules" | grep . | head -1 || true)
+      [ -z "$hit" ] || { echo "$sub 的地址转换里有：$hit"; return 1; }
+      rules=$(/sbin/pfctl -a "$sub" -s Anchors 2>/dev/null) || { echo "读不出 $sub 下的锚点"; return 1; }
+      hit=$(printf '%s\n' "$rules" | grep . | head -1 | sed 's/^[[:space:]]*//' || true)
+      [ -z "$hit" ] || { echo "$sub 下有子锚点：$hit"; return 1; }
+      continue
+    fi
     rules=$(/sbin/pfctl -a "$sub" -s rules 2>/dev/null) || { echo "读不出 $sub 的规则"; return 1; }
-    hit=$(printf '%s\n' "$rules" | grep -E '^pass .*[[:space:]]quick([[:space:]]|$)' | head -1 || true)
+    hit=$(quick_hit "$rules")
     [ -z "$hit" ] || { echo "$sub 里有：$hit"; return 1; }
+    rules=$(/sbin/pfctl -a "$sub" -s nat 2>/dev/null) || { echo "读不出 $sub 的地址转换规则"; return 1; }
+    hit=$(nat_hit "$rules")
+    [ -z "$hit" ] || { echo "$sub 的地址转换里有：$hit"; return 1; }
     no_quick_pass "$sub" $(( $2 + 1 )) || return 1
   done
 }
 
 apply() {
   # 状态文件、规则文件都写在 $DIR 里：先确认从 / 起每一级只有 root 能改，不然连状态都不写（写了也不可信）
-  root_path "$DIR" || { echo "$DIR 不是只有 root 能改的目录，不动手"; exit 1; }
-  write_status "state=applying"
+  root_path "$DIR" || { echo "$DIR 不是只有 root 能改的目录，不动手"; kill_accounts >/dev/null || true; exit 1; }
   trap 'fail "第 $LINENO 行出错"' ERR
-  users=$(present_users) || fail "没有 $WORKER 这个账号"
+  tries=0
+  while :; do
+    users=$(trap - ERR; present_users)
+    [ "$users" = UNCLEAR ] && [ $(( tries += 1 )) -lt "$DS_TRIES" ] || break
+    sleep 5                                 # 开机头一分钟目录服务常没就绪
+  done
+  case $users in
+    NONE) fail "没有 $WORKER 这个账号" ;;
+    UNCLEAR) fail "目录服务查不清本机账号，规则不动" ;;
+  esac
   for u in ${users//,/ }; do uid_ok "$u" || fail "$u 的 uid 是 0、不唯一，或目录服务查不清"; done
   write_rules "$users"
   # 系统默认 pf.conf 里有 com.apple/* 锚点；被人换掉了就按系统默认的重新加载一次
   anchor_hooked || /sbin/pfctl -q -f /etc/pf.conf 2>/dev/null || true
   anchor_hooked || fail "主规则集没挂 com.apple/* 锚点"
-  why=$(order_ok) || fail "有规则排在门卫规则前面放行：$why"
+  # 命令替换里先关掉 ERR 陷阱：不然 order_ok 不过时陷阱在子 shell 里先跑一遍 fail，原因里混进别的内容、进程也杀两遍
+  why=$(trap - ERR; order_ok) || fail "有规则排在门卫规则前面放行：$why"
   # 实际加载的规则必须和规则文件解析出来的一模一样（同一个 pfctl 打印，按 uid 展开）；一样就不重新加载
   expected=$(/sbin/pfctl -nvf "$RULES" 2>/dev/null)
   [ -n "$expected" ] || fail "规则文件解析不出来"
-  loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
+  # 两种情况要动手（L3 第 4、5 轮 P1-03）：pf 被关过，或实际加载的规则和应有的不一样。先写「进行中」（工人不再开工）；
+  # 规则不对就先清进程再加载；打开 pf 之前先确认门卫规则已经是对的（关着时规则可能被删改）；再清空 pf 的连接状态表
+  # （旧规则下、或关掉之前留下的状态，后来的包会凭它直接放行，不过新规则）；然后打开 pf、结束两个账号的全部进程。
+  # 中途任何一步不过都走 fail，fail 里 pf 关着就先打开（只会更严）。
+  reenabled=no
   reloaded=no
+  [ "$(pf_enabled)" = yes ] || reenabled=yes
+  loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
+  if [ "$reenabled" = yes ] || [ "$loaded" != "$expected" ]; then
+    write_status "state=applying"           # 只在真要动手时写：平时每 5 分钟一次的核对不让工人撞上「进行中」（审查第 4 轮 P2-1）
+  fi
   if [ "$loaded" != "$expected" ]; then
+    # 加载前先清一遍：11-21 压力测试在强制重新加载期间抓到偶发漏过，加载时两个账号最好没有进程在联网
+    left=$(trap - ERR; kill_accounts) || fail "重新加载前没清掉受管账号的进程：$left"
     /sbin/pfctl -q -a "$ANCHOR" -f "$RULES" || fail "规则没加载上（pf 保留了旧规则）"
     reloaded=yes
     loaded=$(/sbin/pfctl -a "$ANCHOR" -s rules 2>/dev/null || true)
   fi
-  [ "$(pf_enabled)" = yes ] || /sbin/pfctl -q -E 2>/dev/null || true
-  [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   [ "$loaded" = "$expected" ] || {
     diff <(echo "$expected") <(echo "$loaded") | head -20 >&2 || true
     fail "加载上的规则和应有的不一致"
   }
+  if [ "$reenabled" = yes ] || [ "$reloaded" = yes ]; then
+    /sbin/pfctl -q -F states 2>/dev/null || fail "清不掉 pf 的连接状态表"
+    [ "$reenabled" = no ] || /sbin/pfctl -q -E 2>/dev/null || true
+    [ "$(pf_enabled)" = yes ] || fail "pf 没开"
+    left=$(trap - ERR; kill_accounts) || fail "规则生效后没清掉受管账号的进程：$left"
+  fi
+  [ "$(pf_enabled)" = yes ] || fail "pf 没开"
   trap - ERR
-  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded"
+  write_status "state=ok enabled=yes rules=$(echo "$loaded" | grep -c 'user = ') users=$users reloaded=$reloaded reenabled=$reenabled"
 }
 
 case "${1:-install}" in
