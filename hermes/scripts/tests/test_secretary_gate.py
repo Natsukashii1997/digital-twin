@@ -284,6 +284,11 @@ class Base(unittest.TestCase):
         p = mock.patch.object(G, "post_event", self.fake_post)
         p.start()
         self.addCleanup(p.stop)
+        live = {"rules": [AC.dispatch_rule("dt-sandbox", x) for x in AC.AGENTS],        # 中台在用的派单规则合规（#369 P1-01：
+                "agents": {AC.AGENTS[x][0]: AC.agent_spec(x) for x in AC.AGENTS}}       # 发事件前在配置锁里再核一次）
+        p = mock.patch.object(AC, "loaded_rules", lambda: live)
+        p.start()
+        self.addCleanup(p.stop)
         self.make_grant()
         self.ask_card()
         self.feishu(7, T - dt.timedelta(minutes=40))

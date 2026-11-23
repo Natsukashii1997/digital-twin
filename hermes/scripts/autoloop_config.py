@@ -75,6 +75,10 @@ class Rejected(Exception):
     """拒绝：说人话的原因，不带钥匙。"""
 
 
+class Busy(Rejected):
+    """配置锁在别人手里，等不到：不是拒绝这件事本身，过一会儿再来。"""
+
+
 # ---------- 路径 ----------
 def home():
     return Path(os.environ.get("AGENT_AUTOLOOP_HOME") or "~/.agent-autoloop").expanduser()
@@ -107,7 +111,9 @@ def lock_file():
 
 @contextlib.contextmanager
 def config_lock():
-    """install 和 issue-source-key 共用的跨进程排他锁（flock）：检查到签发之间不会插进另一个配置操作。"""
+    """install、issue-source-key 共用的跨进程排他锁（flock）：检查到签发之间不会插进另一个配置操作。派单网关点卡批准
+    （核规则 → 签凭证 → 发事件）和 send_pending 发每个派单事件也拿它（#369 第 4 轮 P1-01）：核过的规则在事件送到中台之前
+    不会被 install 换掉。不可重入（重入由 autoloop_grants.route_lock 自己管）。"""
     f = lock_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(f.parent, 0o700)
@@ -120,7 +126,7 @@ def config_lock():
                 break
             except BlockingIOError:
                 if time.monotonic() >= end:
-                    raise Rejected("另一个中台配置操作还在进行，稍后再试")
+                    raise Busy("另一个中台配置操作还在进行，稍后再试")
                 time.sleep(0.1)
         yield
     finally:
@@ -208,6 +214,9 @@ def render(current, owner_open_id, repos):
     others = secretary_routes(current)
     if others:      # 秘书通道只收派单规则的卡片（规格 §6）；别的规则点名它，秘书就能领到、答到不该它答的卡片
         raise Rejected(f"这些规则把卡片发给秘书通道，不装：{'、'.join(others)}")
+    listeners = hermes_listeners(current)
+    if listeners:   # hermes 来源只给派单规则用（#369 第 4 轮 P1-01）：别的规则接 hermes 事件，批准过的派单会被它一起接走
+        raise Rejected(f"这些不是派单规则却接 hermes 来源的事件，不装：{'、'.join(listeners)}")
     new = copy.deepcopy(current)
     new.setdefault("sources", {})[SOURCE] = {"name": "猛鬼兽派单网关"}
     agents = new.setdefault("agents", {})
@@ -224,6 +233,13 @@ def render(current, owner_open_id, repos):
     rules += [dispatch_rule(repo, ex) for repo in sorted(repos) for ex in sorted(AGENTS)]
     new["rules"] = rules
     return new
+
+
+def hermes_listeners(rules):
+    """不是派单规则（名字不以 dispatch- 开头）、却接 hermes 来源事件的规则名。"""
+    return [str(r.get("name")) for r in rules.get("rules", []) if isinstance(r, dict)
+            and not str(r.get("name", "")).startswith("dispatch-")
+            and isinstance(r.get("when"), dict) and r["when"].get("source") == SOURCE]
 
 
 def secretary_routes(rules):
@@ -346,6 +362,7 @@ def mismatches(rules):
         a = rules.get("agents", {}).get(aid)
         pairs.append((f"agents.{aid}", a and {"access": "edit", **a}, live.get("agents", {}).get(aid)))
     bad += [name for name, a, b in pairs if a != b]
+    bad += [f"{name}←hermes" for name in hermes_listeners(live)]     # 别的规则接 hermes 事件（#369 第 4 轮 P1-01）
     return bad + [f"{name}→secretary" for name in secretary_routes(live)]
 
 

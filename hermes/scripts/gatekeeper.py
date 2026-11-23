@@ -854,12 +854,12 @@ def close_grant_card(p):
 def settle_unsent_card(p):
     """过期作废、但卡片消息号一直没登记上的提议（#369 P2-01）：只看出口账本、只读对账，不再发卡。
     账本记着发成了 → 补登记消息号（下一步按 cards_to_close 改成灰卡）；确定没发出去或根本没发过 → 收尾，没有卡要改；
-    结果不明 → 对一次账，对不上留到下一轮；核不清 → 私聊提醒常浩一次，留着等他在 dt-gate 用 autoloop_exits settle 结算。"""
+    在做或结果不明 → 对一次账（对账先把进程确认已结束的「在做」扫成不明；进程还在或查不清的保持在做），对不上留到下一轮；核不清 → 私聊提醒常浩一次，留着等他在 dt-gate 用 autoloop_exits settle 结算。"""
     import autoloop_exits as E
     code = p["code"]
     key = f"send_feishu:grant-card-{code}"
     row = E.attempt(key)
-    if row and row["state"] == "unknown":
+    if row and row["state"] in ("executing", "unknown"):   # 「在做」可能是强杀留下的：reconcile 先按进程在不在扫成不明（#369 第 4 轮 P2-01）
         E.reconcile(scope=f"chat:grant-{code}")
         row = E.attempt(key)
     if row is None:
@@ -935,6 +935,10 @@ def handle_grant(ev, token, choice):
     except AG.CardNotReady:                      # 卡到了、消息号还没登记（同中台卡片 P2-7）：只回点卡的本人，请他再点
         GATE.send_text(b["chat_id"], "派单确认卡还在登记，请几秒后在卡片上再点一次。", f"gate-grant-retry-{secrets.token_hex(8)}")
         return {"ok": False, "why": "派单确认卡还在登记，请他稍后再点"}
+    except AG.HubBusy:                           # 中台配置正在变更（#369 第 4 轮 P1-01）：这次不定结果，请他过一会儿再点
+        GATE.send_text(b["chat_id"], "中台配置正在变更，这次点击没有生效，请过一会儿在卡片上再点一次。",
+                       f"gate-grant-busy-{secrets.token_hex(8)}")
+        return {"ok": False, "why": "中台配置正在变更，请他稍后再点"}
     except AG.Rejected as e:
         raise Quiet(str(e))
     if res.get("already"):

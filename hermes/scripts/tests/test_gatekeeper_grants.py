@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -86,6 +87,10 @@ class Base(TG.Base):
         r = self.row(code)
         return code, r["card_token"], r["card_message"]
 
+    def later(self, minutes=31):
+        real = AG.now_tz
+        return mock.patch.object(AG, "now_tz", lambda: real() + dt.timedelta(minutes=minutes))
+
     def click(self, token, mid, choice="ok", eid="ev_g1", **kw):
         return G.handle_event(TG.event({"gate_grant": token, "a": choice}, eid=eid, mid=mid, **kw))
 
@@ -153,10 +158,6 @@ class Sending(Base):
         self.assertIsNotNone(self.row(code)["closed_at"])
 
 
-    def later(self, minutes=31):
-        real = AG.now_tz
-        return mock.patch.object(AG, "now_tz", lambda: real() + dt.timedelta(minutes=minutes))
-
     def test_card_sent_but_not_registered_is_found_and_turned_grey_after_expiry(self):
         """#369 P2-01：飞书收到了卡，门卫在登记消息号前退出，过了 30 分钟再起来：按出口账本找回原消息号、改成灰卡，
         不重发、不签。"""
@@ -197,6 +198,62 @@ class Sending(Base):
         self.assertEqual(len(told), 1)                           # 只提醒一次
         self.assertIsNone(self.row(code)["closed_at"])           # 留着等常浩结算，不当成已收尾
         self.assertEqual((len(self.sent_cards()), AG.show(), self.posted), (1, [], []))   # 只有最初那一次（结果不明）
+
+    def killed_mid_send(self):
+        """门卫发卡时被强杀：出口账本留下 executing，做它的进程已经不在（换成一个刚退出的进程号）。"""
+        code = self.propose()
+        with mock.patch.object(E, "_finish"), mock.patch.object(AG, "mark_card"):   # 发出去了，记结果之前进程没了
+            G.grant_cards_once()
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        key = f"send_feishu:grant-card-{code}"
+        with E.db() as con:
+            con.execute("UPDATE exits SET pid = ?, proc = 'Mon Nov 23 00:00:00 2026' WHERE key = ?", (dead.pid, key))
+        self.assertEqual(E.attempt(key)["state"], "executing")
+        return code, key
+
+    def chat_has(self, *cards):
+        """对账读私聊：私聊里有这几张门卫发的卡（按发出顺序给消息号）。"""
+        msgs = [{"message_id": f"om_gate_msg_{i:04d}", "msg_type": "interactive", "sender": {"sender_type": "app"},
+                 "content": json.dumps(c, ensure_ascii=False)} for i, c in cards]
+        return mock.patch.object(E, "lark_read", lambda args, what: {"messages": msgs, "has_more": False})
+
+    def test_card_killed_mid_send_is_swept_found_and_turned_grey(self):
+        """#369 第 4 轮 P2-01：强杀留下 executing，过期后门卫对账：扫成不明 → 在私聊里按令牌找到原卡 → 补登记、改灰卡，不重发。"""
+        code, key = self.killed_mid_send()
+        (card,) = self.sent_cards()
+        G._GRANT_TRIED.clear()
+        with self.later(), self.chat_has((self.lark.n, card)):
+            recs = G.grant_cards_once()
+        self.assertEqual([r.get("settled") for r in recs if "settled" in r], ["found"])
+        self.assertEqual(E.attempt(key)["state"], "done")
+        r = self.row(code)
+        self.assertEqual((r["card_message"], r["decision"]), (f"om_gate_msg_{self.lark.n:04d}", "expired"))
+        self.assertIsNotNone(r["closed_at"])
+        self.assertEqual((len(self.sent_cards()), CV.button_values(self.patches()[-1])), (1, []))
+        self.assertEqual((AG.show(), self.posted), ([], []))
+
+    def test_card_killed_mid_send_not_found_is_never_resent(self):
+        code, key = self.killed_mid_send()
+        G._GRANT_TRIED.clear()
+        with self.later(), self.chat_has():                     # 私聊里找不到：查不到不等于没发
+            (rec,) = G.grant_cards_once()
+        self.assertFalse(rec["ok"])
+        self.assertIn(E.attempt(key)["state"], ("unknown", "unreconciled"))
+        self.assertIsNone(self.row(code)["closed_at"])
+        self.assertEqual(len(self.sent_cards()), 1)
+
+    def test_live_sender_is_not_swept(self):
+        """做它的进程还在（这里就是本进程）：保持在做，不收尾、不对账成别的结果。"""
+        code = self.propose()
+        with mock.patch.object(E, "_finish"), mock.patch.object(AG, "mark_card"):
+            G.grant_cards_once()
+        key = f"send_feishu:grant-card-{code}"
+        G._GRANT_TRIED.clear()
+        with self.later(), self.chat_has():
+            (rec,) = G.grant_cards_once()
+        self.assertEqual((rec["state"], E.attempt(key)["state"]), ("executing", "executing"))
+        self.assertIsNone(self.row(code)["closed_at"])
 
     def test_never_sent_card_is_just_closed_after_expiry(self):
         G.LISTENING.clear()
@@ -307,6 +364,66 @@ class Clicking(Base):
                 self.assertEqual(n, 1 if first["decision"] == "approved" else 0)
                 self.assertEqual((grants, starts, len(self.posted)), (self.signed + n,) * 3)
                 self.signed += n
+
+    def test_install_running_while_owner_clicks(self):
+        """#369 第 4 轮 P1-01：常浩点批准时 install 正拿着配置锁（加了一条也接派单事件的规则）。批准等 install 做完，
+        在锁里重核看到新规则：作废、不签、不发；install 一直不放锁：这次点击不定结果，请他过一会儿再点。"""
+        code, token, mid = self.sent_card()
+        spy = {"name": "custom-watch", "when": {"source": "hermes", "types": ["dispatch.dt-sandbox.claude.write"]},
+               "to": "dt-codex", "cwd": "~/dt-work/other", "prompt": "另一套"}
+        held, release = threading.Event(), threading.Event()
+
+        def install():
+            with C.config_lock():
+                held.set()
+                release.wait(5)
+                self.hub_rules = {**self.hub_rules, "rules": [*self.hub_rules["rules"], spy]}   # 放锁前中台载入新规则
+        t = threading.Thread(target=install)
+        t.start()
+        held.wait(5)
+        threading.Timer(0.3, release.set).start()               # install 0.3 秒后做完放锁
+        rec = self.click(token, mid)
+        t.join()
+        self.assertEqual(rec["decision"], "void")
+        self.assertIn("别的规则也接 dispatch.dt-sandbox.claude.write：custom-watch", self.row(code)["decided_note"])
+        self.assertEqual((AG.show(), self.posted), ([], []))
+
+        self.hub_rules = hub(*[("dt-sandbox", x) for x in AG.EXECUTORS])
+        code, token, mid = self.sent_card()
+        held.clear(), release.clear()
+        t = threading.Thread(target=install)
+        t.start()
+        held.wait(5)
+        with mock.patch.object(C, "LOCK_WAIT", 0.2):
+            rec = self.click(token, mid, eid="busy")
+        release.set()
+        t.join()
+        self.assertFalse(rec["ok"])
+        self.assertIn("中台配置正在变更", self.lark.texts()[-1])
+        self.assertIsNone(self.row(code)["decision"])           # 没定结果，卡还开着，可以再点
+        self.assertEqual((AG.show(), self.posted), ([], []))
+
+    def test_rule_swapped_before_send_holds_the_event(self):
+        """签发后事件没送到（中台连不上），之后规则被换成交给别的 Agent：send-pending 在锁里重核，不发、事件留着；
+        规则恢复后补发。"""
+        code, token, mid = self.sent_card()
+        with mock.patch.object(AG, "post_event", side_effect=AG.Rejected("连不上中台")):
+            rec = self.click(token, mid)
+        self.assertEqual(rec["decision"], "approved")
+        good = self.hub_rules
+        bad = hub(*[("dt-sandbox", x) for x in AG.EXECUTORS])
+        bad["rules"][0] = bad["rules"][0] | {"to": "dt-codex"}
+        self.hub_rules = bad
+        with self.later(2):                                     # 过了在途窗口
+            (r,) = AG.send_pending()
+        self.assertEqual((r["sent"], r["held"]), (False, True))
+        self.assertIn("和应有的不一样（to）", r["why"])
+        self.assertEqual(self.posted, [])
+        self.hub_rules = good
+        with self.later(2):
+            (r,) = AG.send_pending()
+        self.assertTrue(r["sent"])
+        self.assertEqual(len(self.posted), 1)
 
     def test_hub_rule_changed_after_propose_voids_without_signing(self):
         """P1-01：提议后中台的派单规则被改成交给别的 Agent，再点批准：记 void，不签凭证、不写任务单、不发事件。"""

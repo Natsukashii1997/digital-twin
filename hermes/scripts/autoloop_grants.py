@@ -74,6 +74,7 @@ import secrets
 import sqlite3
 import stat
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -504,10 +505,28 @@ def send_pending(path=None, post=None, now=None):
         if ev is None:
             return results
         seen.add(ev["event_key"])
+        unsure = None
         try:
-            hub_event = post(event_body(ev, row))
-        except Rejected as e:
-            results.append({"event_key": ev["event_key"], "sent": None, "why": f"结果不明（{e}），凭证仍有效时下次补发"})
+            with route_lock():                    # 发之前在配置锁里再核一次派单规则（#369 第 4 轮 P1-01）：核过到送达之间换不掉
+                why = route_problem(row["repo"], row["executor"])
+                if why is None:
+                    try:
+                        hub_event = post(event_body(ev, row))
+                    except Rejected as e:
+                        unsure = e
+        except HubBusy as e:
+            why = f"{e}（中台配置正在变更）"
+        except Rejected as e:                     # 拿锁之前就出错（装机目录缺 autoloop_config）：没发
+            why = str(e)
+        if unsure is not None:
+            results.append({"event_key": ev["event_key"], "sent": None, "why": f"结果不明（{unsure}），凭证仍有效时下次补发"})
+            continue
+        if why is not None:                       # 没发：放回领取前的样子，规则恢复后 send-pending 补发
+            with tx(path) as con:                 # 领取时改了 sent、claimed_at、tries，原样改回（没发就不算一次尝试）
+                con.execute("UPDATE hub_events SET sent = ?, claimed_at = ?, tries = ? WHERE event_key = ? AND sent = 2",
+                            (ev["sent"], ev["claimed_at"], ev["tries"], ev["event_key"]))
+            results.append({"event_key": ev["event_key"], "sent": False, "held": True,
+                            "why": f"{why}；事件没发，留着，派单规则恢复后 send-pending 补发"})
             continue
         with tx(path) as con:
             con.execute("UPDATE hub_events SET sent = 1, hub_event = ? WHERE event_key = ? AND sent IN (2, -2)",
@@ -732,7 +751,60 @@ def _void(con, code, decision, note, now, event_id=None):
     return {"code": code, "decision": decision, "note": note}
 
 
+class HubBusy(Exception):
+    """中台配置正在变更（配置锁等不到）：这次点击不定结果，请常浩过一会儿再点。"""
+
+
+_ROUTE = threading.local()
+
+
+@contextlib.contextmanager
+def route_lock():
+    """和 autoloop_config.install 同一把配置锁（#369 第 4 轮 P1-01）。等不到报 HubBusy；装机目录缺 autoloop_config 报 Rejected。
+    同一线程里可重入（批准持着锁调 send_pending，不自己等自己）。"""
+    if getattr(_ROUTE, "n", 0):
+        _ROUTE.n += 1
+        try:
+            yield
+        finally:
+            _ROUTE.n -= 1
+        return
+    try:
+        import autoloop_config as C
+    except Exception as e:                     # noqa: BLE001
+        raise Rejected(f"查不了中台派单规则（{type(e).__name__}），不发")
+    try:
+        cm = C.config_lock()
+        cm.__enter__()
+    except C.Busy as e:
+        raise HubBusy(str(e))
+    _ROUTE.n = 1
+    try:
+        yield
+    finally:
+        _ROUTE.n = 0
+        cm.__exit__(None, None, None)
+
+
+def route_problem(repo, executor):
+    """在配置锁里用：这一类派单事件现在是不是正好交给受控的工人。返回 None 或一句原因（读不到中台也算有问题）。"""
+    try:
+        require_hub_rule(repo, executor)
+    except Rejected as e:
+        return str(e)
+    return None
+
+
 def decide(token, choice, message_id, event_id, now=None, path=None, post=None):
+    """见 _decide。批准这一路从核中台派单规则、签凭证到把 start 事件发给中台，全程持配置锁（route_lock，和 install 同一把），
+    核过的规则在事件送到中台之前换不掉（#369 第 4 轮 P1-01）；锁等不到报 HubBusy，不定结果。不派不拿锁。"""
+    if choice != "ok":
+        return _decide(token, choice, message_id, event_id, now, path, post)
+    with route_lock():
+        return _decide(token, choice, message_id, event_id, now, path, post)
+
+
+def _decide(token, choice, message_id, event_id, now=None, path=None, post=None):
     """常浩在门卫确认卡上点了按钮（门卫已核过点击人、私聊是绑定的常浩，回调 event_id 没处理过）。
     令牌、消息号对不上抛 Rejected（不是这张卡，门卫不回话）；其余都定一个结果写回提议并返回：
       {"code", "decision": approved|rejected|expired|void, "note", "task_id"?, "send"?, "already"?}

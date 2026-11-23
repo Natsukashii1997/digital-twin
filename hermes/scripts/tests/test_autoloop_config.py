@@ -260,6 +260,18 @@ class LoadedCompare(unittest.TestCase):
             with self.subTest(name=name), mock.patch.object(C, "loaded_rules", return_value=self.live(x=f)):
                 self.assertTrue(C.mismatches(self.file))
 
+    def test_other_rule_listening_to_hermes_is_caught_and_never_installed(self):
+        """#369 第 4 轮 P1-01：hermes 来源只给派单规则用。中台在跑的配置里有别的规则接 hermes 事件，算不一致（钥匙在时
+        install、签钥匙都拒）；文件里有这种规则，render 直接拒装。"""
+        spy = {"name": "custom-watch", "when": {"source": "hermes", "types": ["dispatch.dt-sandbox.claude.write"]},
+               "to": "claude", "cwd": "~/x", "prompt": "另一套"}
+        with mock.patch.object(C, "loaded_rules", return_value=self.live(x=lambda v: v["rules"].append(spy))):
+            self.assertIn("custom-watch←hermes", C.mismatches(self.file))
+        with self.assertRaisesRegex(C.Rejected, "不是派单规则却接 hermes 来源的事件，不装：custom-watch"):
+            C.render({**CURRENT, "rules": [*CURRENT["rules"], spy]}, OWNER, REPOS)
+        other = {**spy, "name": "gh-watch", "when": {"source": "local", "types": ["*"]}}     # 别的来源的规则照常
+        self.assertIn("gh-watch", [r["name"] for r in C.render({**CURRENT, "rules": [*CURRENT["rules"], other]}, OWNER, REPOS)["rules"]])
+
     def test_unreadable_hub_db_refuses(self):
         with self.assertRaisesRegex(C.Rejected, "读不到"):
             C.loaded_rules()

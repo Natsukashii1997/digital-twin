@@ -15,6 +15,7 @@ from unittest import mock
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
+import autoloop_config as AC  # noqa: E402
 import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
@@ -492,7 +493,10 @@ class AdmissionRace(Base):
             for tid in (TASK, "t-20261118-bbbbbb"):
                 row = con.execute("SELECT * FROM grants WHERE task_id = ?", (tid,)).fetchone()
                 G.record_event(con, row, "start", f"{tid}:g1:start", G.now_tz())
-        with mock.patch.object(R, "ensure_open", lambda readers=None: epoch):   # 「看一眼」一直说开着：只靠 admit 拦
+        live = {"rules": [AC.dispatch_rule("dt-sandbox", "claude")],                # 中台派单规则合规（发前再核，#369 P1-01）
+                "agents": {AC.AGENTS[x][0]: AC.agent_spec(x) for x in AC.AGENTS}}
+        with mock.patch.object(R, "ensure_open", lambda readers=None: epoch), \
+                mock.patch.object(AC, "loaded_rules", lambda: live):              # 「看一眼」一直说开着：只靠 admit 拦
             out = G.send_pending(post=post)
         self.assertEqual(len(sent), 1)
         self.assertEqual(out[0]["sent"], True)
