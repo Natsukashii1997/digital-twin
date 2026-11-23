@@ -129,6 +129,14 @@ class Deliver(Base):
             F.deliver({**CARD, "ref": "om_fixture_1", "version": 2, "state": "closed", "result": "不用了"})
         self.assertEqual(len(self.lark.sent()), sent)
 
+    def test_settled_card_without_local_record_is_not_sent_again(self):
+        """#255 L3 P2-14：本机没登记过的结束卡，改不了原消息时不另发（证明不了原消息发给的是现在绑定的人）。"""
+        self.lark.fail_patch = True
+        sent = len(self.lark.sent())
+        with self.assertRaisesRegex(F.Fail, "没有发送登记"):
+            F.deliver({**CARD, "ref": "om_somewhere_else", "version": 2, "state": "closed", "result": "不用了"})
+        self.assertEqual(len(self.lark.sent()), sent)
+
     def test_delivered_at_follows_the_version_that_reached_the_owner(self):
         """#218 审查 P1-02：送达时间按版本记——开着的卡改版成功才换成新版本的送达时刻，改不了就留在旧版本；同一版重送不变。"""
         def row():

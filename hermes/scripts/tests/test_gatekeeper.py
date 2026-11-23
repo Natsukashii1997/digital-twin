@@ -1218,11 +1218,42 @@ READY = "[event] ready event_key=card.action.trigger"
             out = F.once(ready=mock.Mock(side_effect=OSError("ls 跑不起来")))   # 复核 P2-6：核对本身出错也报 failed
         self.assertIn("OSError", posts[-1][1]["error"])
         self.assertEqual(len(self.lark.calls), sends)
-        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "hub_readable", lambda: True):
-            out = F.once(ready=mock.Mock(side_effect=[None, "断了"]))  # #255 复核 P2-5：等锁期间断了，拿到锁再问一次
+        order = []
+        real_still_open = F._still_open
+
+        def still_open(epoch):
+            order.append("闸")
+            return real_still_open(epoch)
+
+        def ready():
+            order.append("长连接")
+            return "断了"
+        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "hub_readable", lambda: True), \
+                mock.patch.object(F, "_still_open", still_open):
+            out = F.once(ready=ready)                               # #255 L3 P1-05：只在锁里、核过闸之后问一次
         self.assertEqual(out["paused"], "断了")
+        self.assertEqual(order, ["闸", "长连接"])
         self.assertEqual(posts[-1][1]["error"], "断了")
         self.assertEqual(len(self.lark.calls), sends)
+
+    def test_maintenance_while_disconnected_writes_nothing_to_the_hub(self):
+        """#255 L3 P1-05：领到卡时维护已开始、长连接也断了——不向中台报 failed（维护停写），也不发卡，等中台再递。"""
+        self.bind()
+        posts, sends = [], len(self.lark.calls)
+
+        def hub(method, path, body=None, timeout=20, channel="feishu"):
+            if path.startswith("/v1/cards/next"):
+                return {"card": dict(CARD)}
+            posts.append((path, body))
+            return {}
+        ready = mock.Mock(return_value="长连接断了")
+        with mock.patch.object(F, "hub", hub), mock.patch.object(F, "hub_readable", lambda: True), \
+                mock.patch.object(F, "_still_open", mock.Mock(side_effect=F.Deferred("恢复闸关着：维护中"))):
+            out = F.once(ready=ready)
+        self.assertTrue(out["deferred"])
+        self.assertEqual(posts, [])                                     # 没写中台
+        self.assertEqual(len(self.lark.calls), sends)                   # 没发卡
+        ready.assert_not_called()
 
 
 if __name__ == "__main__":

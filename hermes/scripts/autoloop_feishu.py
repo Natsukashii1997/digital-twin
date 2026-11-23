@@ -387,8 +387,10 @@ def _deliver(card):
         except SendError:
             if card["state"] == "open":                # 开着的卡：原消息的按钮还能用，不另发
                 raise
+            if not r:                                  # 本机没登记过这张卡：证明不了原消息发给的是现在绑定的人，不另发（#255 L3 P2-14）
+                raise Fail(f"卡片 {card['id']} 本机没有发送登记，改不了原消息，也不另发")
             chat = owner_chat()
-            if r and r["chat_id"] != chat:             # 发卡后换绑过：结果不另发到新私聊（门卫 #255 独立复核 P2-6）
+            if r["chat_id"] != chat:                   # 发卡后换绑过：结果不另发到新私聊（门卫 #255 独立复核 P2-6）
                 raise Fail(f"卡片 {card['id']} 发在换绑前的私聊，改不了原消息，也不另发到新私聊")
             send_card(chat, content, f"autoloop-card-{card['id']}-v{card['version']}")
         with db(write=True) as con:                    # 开着的卡改版送到了：送达时间从这一版起算（结束的卡不再计时）
@@ -563,7 +565,8 @@ def once(wait=50, ready=None):
     """领一张、处理一张；没有卡片返回 None。恢复闸关着（批 0D）就不领卡（返回 paused）；领卡前先确认中台库能读（读不到这轮不领，
     返回 paused）；处理在桥接锁里做，锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。
     ready（门卫用，同 run）：长轮询要等一阵，领到卡后发卡前再问一次；这时不能干活（收点击的长连接断了）就不发，
-    向中台报 failed 写明原因（中台退避重递）。猛鬼兽不传，行为不变。"""
+    向中台报 failed 写明原因（中台退避重递）。这一问只在桥接锁里、核过恢复闸之后做：报 failed 也是写中台，维护停写时
+    不许写（#255 L3 P1-05）。猛鬼兽不传，行为不变。"""
     import autoloop_exits as E
     import autoloop_recovery as R
     try:
@@ -582,16 +585,12 @@ def once(wait=50, ready=None):
             return ready() if ready else None
         except Exception as e:                   # 核对本身出错也报 failed，不让卡空等中台租约过期（复核 P2-6）
             return f"领到卡后核对能不能发时出错（{type(e).__name__}）"
-    why = not_ready()
-    if why:
-        hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
-        return {"card": card["id"], "ok": False, "paused": why}
     with bridge_lock():
         try:
             _still_open(epoch)
         except Deferred as e:                    # 领卡之后闸关了：什么都不写，中台过一会儿再给这张卡
             return {"card": card["id"], "ok": False, "deferred": True, "why": str(e)}
-        why = not_ready()                        # 等锁期间（如 bind confirm 占着）长连接可能断了：拿到锁再问一次（#255 复核 P2-5）
+        why = not_ready()                        # 长轮询和等锁期间长连接都可能断了：锁里、核过闸才问（#255 复核 P2-5、L3 P1-05）
         if why:
             hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
             return {"card": card["id"], "ok": False, "paused": why}
