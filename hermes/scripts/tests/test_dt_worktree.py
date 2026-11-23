@@ -346,6 +346,35 @@ class ScopeInPrompt(WorkerBase):
         self.assertEqual(calls, [])
         self.assertIn("认不出提示词的位置", r.stdout)
 
+    def test_refused_prompt_leaves_no_worktree_and_same_task_can_start_later(self):
+        """审查 #368-P2-05：放不进提示词要在建工作目录之前就停，不留下工作目录和分支；之后用正常参数，同一张单照常从第一轮开始。"""
+        for executor, bad, good in (("claude", ("做事", "--session-id", "s-1"), ("-p", "做事", "--session-id", "s-1")),
+                                    ("codex", ("exec", "--json"), ("exec", "--json", "做事"))):
+            tid = self.new_live_task(executor=executor)
+            ev = [self.dispatch_event(tid, executor=executor)]
+            r, calls = self.run_turn(ev, executor=executor, args=bad)
+            self.assertEqual(calls, [])
+            self.assertIn("认不出提示词的位置", r.stdout)
+            self.assertFalse(self.wt(tid).exists(), "不该留下工作目录")
+            base = self.work / "dt-sandbox/base.git"
+            if base.exists():
+                self.assertEqual(git("branch", "--list", f"{executor}/{tid}", cwd=base), "", "不该留下本单分支")
+            self.assertFalse((self.work / ".state" / f"{tid}.json").exists())
+            r, (c,) = self.run_turn(ev, executor=executor, args=good)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(scope_block(SCOPE), c["argv"][-1] if executor == "codex" else c["argv"][1])
+            self.assertEqual(self.handoff(tid)["branch"], f"{executor}/{tid}")
+
+    def test_codex_exec_resume_answer_turn_carries_scope(self):
+        tid = self.new_live_task(executor="codex")
+        self.run_turn([self.dispatch_event(tid, executor="codex")], executor="codex", args=("exec", "--json", "做事"))
+        args = ("exec", "resume", "--json", "th-1", "接着做")
+        r, (c,) = self.run_turn([self.answer_event(tid)], executor="codex", args=args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(c["argv"][:-1], list(args[:-1]))
+        self.assertTrue(c["argv"][-1].startswith("接着做\n\n【dt-worktree 启动脚本】"))
+        self.assertIn(scope_block(SCOPE), c["argv"][-1])
+
     def test_scope_hash_mismatch_never_reaches_cli(self):
         tid = self.new_live_task()
         p = self.tasks / f"{tid}.md"

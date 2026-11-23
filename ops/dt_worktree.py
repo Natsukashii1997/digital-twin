@@ -21,7 +21,8 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
   3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支；再接上准入时核过哈希的五要素原文，放在两行带原文哈希、
      原文里不会出现的标记之间，写明「常浩批准的范围，以此为准」、这一轮的代次，和「五要素只定范围、不改变上面的限制」——
      工人的 CLI 读不到共享目录里的任务单，#336。首轮、回答、复查都带；超过网关的 MAX_SCOPE 字只附前面部分并写明已截断；
-     认不出提示词在哪个参数、放不进去，就不启动 CLI、按准入不过停下，审查 #368-P2-01）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
+     认不出提示词在哪个参数、放不进去，就不启动 CLI、按准入不过停下，审查 #368-P2-01；这一步在建工作目录之前判，
+     不留下工作目录和分支，之后同一张单还能从第一轮开始，审查 #368-P2-05）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
      ~/dt-work/.state/<单号>.log，不混进输出。CLI 在自己的进程组里跑：接单程序取消时本脚本把信号转给整组，7 秒内还没停就整组强杀
      （赶在接单程序 10 秒强杀本脚本之前）；用时到上限同样整组先停后杀；CLI 退出后再把组里剩下的后代进程清掉，确认清干净才提交。
   4. CLI 退出后：把工作目录里的改动提交到本单分支（工作不丢）；只有正常结束（不是取消、不是超时，退出时按实际用时再判一次）、
@@ -504,10 +505,10 @@ def reap_group(pgid, task_id):
 
 
 def run_cli(executor, args, admitted, place):
-    """启动 CLI，标准输出直接交给接单程序。返回 (退出码, 用时秒, 结局, 后代是否清干净)；
-    结局是 finished（自己结束）、cancelled（接单程序取消）或 over_budget（用时到上限）。"""
+    """启动 CLI，标准输出直接交给接单程序；args 是 with_note 补好说明和五要素的参数（main 在建工作目录之前就拼好）。
+    返回 (退出码, 用时秒, 结局, 后代是否清干净)；结局是 finished（自己结束）、cancelled（接单程序取消）或 over_budget（用时到上限）。"""
     task_id = admitted["task_id"]
-    argv = [real_cli(executor), *with_note(executor, args, task_id, place["branch"], admitted)]   # 放不进就停，先于记「在跑」
+    argv = [real_cli(executor), *args]
     left = budget() - admitted["used"]
     started = time.time()
     state = dict(admitted["state"] or {})
@@ -696,11 +697,12 @@ def main(argv=None):
         lock = take_lock(task_id)
         try:
             admitted = admit(executor, repo, context, now_tz())      # 拿到锁后按最新状态重判
+            cli_args = with_note(executor, args, task_id, branch_name(executor, task_id), admitted)  # 放不进就停，不建工作目录
             try:
                 place = {"repo": repo, **prepare_worktree(executor, repo, admitted)}
             except (OSError, subprocess.SubprocessError) as e:
                 raise Retry(f"准备工作目录失败（{type(e).__name__}）")
-            code, secs, outcome, clean = run_cli(executor, args, admitted, place)
+            code, secs, outcome, clean = run_cli(executor, cli_args, admitted, place)
             ended = after_run(executor, repo, context, admitted, place, outcome, clean)
         finally:
             os.close(lock)
