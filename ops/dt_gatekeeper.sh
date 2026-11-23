@@ -9,6 +9,9 @@
 # 0E-2 如要给门卫传中台路径，在这里写死，不从调用方环境取。
 # DT_HUB_LISTENER_UID 写死成 dt-gate 的 uid（0E-2 #268 的监听核对）：门卫带通道钥匙、本人密钥连 127.0.0.1:3350 之前，
 # 先核端口上在听的是 dt-gate 自己；查不到这个账号就不起（set -e）。门卫自己再核它等于运行账号（launch_env）。
+# 0E-3b：门卫的派单卡线程和点击要读写凭证库、名册、工人镜像和任务单（autoloop_grants 的 DT_GRANTS_DB、DT_ROSTER、
+# DT_GRANTS_STATUS、DT_GRANTS_TASKS、DT_HUB），0E-3c 装门卫时同样写死在这里（和 dt_gate_hub.py gate_env 给窗口的一致），
+# 并加进 gatekeeper.py 的 ENTRY_ENV（入口以外多出来的变量门卫会拒绝启动）。
 set -eu
 GATE_DIR="/Library/Application Support/DigitalTwin/gatekeeper"
 GATE_UID=$(/usr/bin/id -u dt-gate)

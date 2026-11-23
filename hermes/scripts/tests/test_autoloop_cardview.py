@@ -290,5 +290,51 @@ class ExistingButtonsUnchanged(TP.MergeButtonsPlugin):
             self.assertFalse({"merge_officer", "custody", "pdaily", "probe", "ref", "card"} & set(v))
 
 
+class GrantCard(unittest.TestCase):
+    """派单确认卡（批 0E-3b，常浩 11-23 定沿用丙版、要「不派」收在折叠里）。"""
+    P = {"code": "abcd1234", "repo": "dt-sandbox", "github": "o/dt-sandbox", "executor": "codex",
+         "scope_text": "目标：改 README\n[点我](https://x) **粗体**", "valid_until": "2026-11-24T10:00:00+08:00",
+         "expires_at": "2026-11-23T22:30:00+08:00", "card_token": "b" * 16, "decision": None, "decided_note": None,
+         "task_id": None, "action_words": ["改文件", "推分支（不推 main）", "开 PR"]}
+
+    def grant(self, **kw):
+        return V.render_grant({**self.P, **kw}, lambda a: {"gate_grant": "b" * 16, "a": a}, mark="令牌尾号 bbbb")
+
+    def test_open_card_is_recommend_first(self):
+        c = self.grant()
+        els = c["body"]["elements"]
+        self.assertEqual((c["header"]["title"]["content"], c["header"]["template"]), ("派单确认 · dt-sandbox", "indigo"))
+        self.assertEqual(els[0], V.md("**要派一张改文件的任务给 Codex**", text_size="heading"))
+        for want in ("仓库：o/dt-sandbox", "交给：Codex", "能做的事：改文件、推分支（不推 main）、开 PR", "任务有效到：11-24 10:00"):
+            self.assertIn(want, els[1]["content"])
+        self.assertEqual(els[2]["content"], "**猛鬼兽整理的五要素（原文，核对后再批）**")
+        self.assertEqual(els[3], V.plain(self.P["scope_text"]))           # 秘书写的原文：纯文本，不当 markdown
+        self.assertEqual((els[4]["text"]["content"], els[4]["type"], els[4]["width"]), ("✅ 批准派单", "primary_filled", "fill"))
+        self.assertEqual(els[5]["tag"], "collapsible_panel")
+        self.assertEqual(els[5]["header"]["title"]["content"], "不同意？· 展开")
+        self.assertEqual(els[5]["elements"][0]["text"]["content"], "不派")
+        self.assertEqual(V.button_values(c), [{"gate_grant": "b" * 16, "a": "ok"}, {"gate_grant": "b" * 16, "a": "no"}])
+        self.assertIn("到 11-23 22:30 自动作废", els[-1]["content"])
+        self.assertIn("令牌尾号 bbbb", els[-1]["content"])
+        self.assertEqual(c, self.grant())                                  # 同一张提议每次渲染完全一样
+
+    def test_decided_cards_have_no_buttons(self):
+        for decision, color, words in (("approved", "green", "✅ 已批准，单号 t-20261123-abc123"), ("rejected", "grey", "⏹ 不派了"),
+                                       ("expired", "grey", "⏹ 已作废：过了 30 分钟没批"), ("void", "grey", "⏹ 已作废")):
+            note = {"approved": "已送到中台，等工人接单", "expired": "过了 30 分钟没批", "void": "名册里 dt-sandbox 的仓库变了"}.get(decision)
+            c = self.grant(decision=decision, decided_note=note, task_id="t-20261123-abc123" if decision == "approved" else None)
+            with self.subTest(decision=decision):
+                self.assertEqual(c["header"]["template"], color)
+                self.assertEqual(V.button_values(c), [])
+                self.assertEqual(c["body"]["elements"][0]["content"], f"**{words}**")
+                self.assertEqual(c["body"]["elements"][-2]["header"]["title"]["content"], "当时批的是什么 · 展开")
+        self.assertIn(V.plain("原因：名册里 dt-sandbox 的仓库变了"),
+                      self.grant(decision="void", decided_note="名册里 dt-sandbox 的仓库变了")["body"]["elements"])
+
+    def test_trusted_lines_escape_markdown(self):
+        c = self.grant(github="o/[x](https://evil)")
+        self.assertNotIn("[x](", c["body"]["elements"][1]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()

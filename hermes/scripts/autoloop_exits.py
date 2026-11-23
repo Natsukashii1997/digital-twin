@@ -479,9 +479,12 @@ def _walk(x):
             yield from _walk(v)
 
 
+MARKER_KEYS = ("autoloop", "gate_grant")
+
+
 def is_ours(m, t):
     """这条消息是不是本次发出的那条（审查 P1-05）：机器人发的、消息类型对、有消息号，并且
-    卡片：某个按钮回调值里正好是 {"autoloop": 令牌}；文字：正文里有这次的随机标记。只在整份 JSON 里搜到令牌不算。"""
+    卡片：某个按钮回调值里正好是 {"autoloop": 令牌}（门卫派单确认卡是 {"gate_grant": 令牌}，target 里 marker_key 写明）；文字：正文里有这次的随机标记。只在整份 JSON 里搜到令牌不算。"""
     if (m.get("sender") or {}).get("sender_type") != "app" or not m.get("message_id"):
         return False
     if m.get("msg_type") != t.get("msg_type", "interactive"):
@@ -492,7 +495,10 @@ def is_ours(m, t):
     except ValueError:
         return False
     if t.get("msg_type", "interactive") == "interactive":
-        return any(d.get("autoloop") == t["marker"] for d in _walk(content))
+        key = t.get("marker_key", "autoloop")      # 中台卡片按钮带 autoloop 令牌；门卫派单确认卡带 gate_grant 令牌（0E-3b）
+        if key not in MARKER_KEYS:
+            return False
+        return any(d.get(key) == t["marker"] for d in _walk(content))
     return isinstance(content, dict) and t["marker"] in str(content.get("text") or "")
 
 

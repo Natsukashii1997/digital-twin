@@ -64,6 +64,13 @@ def prod_snapshot():
 
 
 @unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
+
+def click_card(G, code):
+    """模拟门卫：发确认卡（登记消息号）、常浩点「批准派单」（0E-3b 起批准只认门卫卡上的点击）。"""
+    (p,) = [x for x in G.cards_to_send() if x["code"] == code]
+    G.mark_card(code, f"om_card_{code}")
+    return G.decide(p["card_token"], "ok", f"om_card_{code}", f"ev-{code}")
+
 class ExecGateEndToEnd(HubFixture):
     def setUp(self):
         self.prod_before = prod_snapshot()
@@ -114,7 +121,6 @@ class ExecGateEndToEnd(HubFixture):
                   mock.patch.object(C, "dispatch_rule", side_effect=rule_here),
                   mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": GRANT_OWNER}),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", return_value="om_notice0001"),
                   mock.patch.object(Rv, "ensure_open"), mock.patch.object(Rv, "admit"),   # 恢复闸放行（闸本身见 0D 测试）
                   mock.patch.object(P, "GATE_USER", __import__("pwd").getpwuid(os.geteuid()).pw_name),
                   mock.patch.object(P, "TEST_BACKEND", backend)):
@@ -147,7 +153,7 @@ class ExecGateEndToEnd(HubFixture):
         C.issue_source_key(confirm=True, target=self.home)
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})      # 只在临时中台里恢复
         code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n范围：只改 README.md", hours=2)["code"]
-        return G.approve(self.say(f"派单 {code}"))["task_id"]
+        return click_card(G, code)["task_id"]
 
     def test_unreachable_repo_is_queued_for_retry_not_done(self):
         """P1-04：第一轮取不到仓库，启动脚本写「没跑成」→ 中台判 failed、放回排队、5 分钟后重派，不是 done。"""
@@ -232,7 +238,7 @@ class ExecGateEndToEnd(HubFixture):
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})      # 只在临时中台里恢复
 
         code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n范围：只改 README.md", hours=2)["code"]
-        tid = G.approve(self.say(f"派单 {code}"))["task_id"]
+        tid = click_card(G, code)["task_id"]
         (run,) = self.wait_runs(tid, 1)
         self.assertEqual(run["state"], "done", run)
         (c,) = [x for x in self.calls() if x["argv"][:1] == ["-p"]]

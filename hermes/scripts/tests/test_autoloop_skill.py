@@ -1,15 +1,17 @@
 """隔离自测：python3 -B -m unittest discover -s hermes/scripts/tests -v。
 
 autoloop 技能（#195 批 2 派活入口，hermes/skills/autoloop/SKILL.md）的三类核对：
-  1. 文档对得上脚本：技能里写的每条 G 命令都能被网关的命令行解析；技能表格里引用的脚本原话、字段名，脚本里确实有；
-  2. 五要素文件 → propose → 常浩照确认消息回 → approve → 派单事件发出，全程走命令行（和猛鬼兽调用的方式一样），
-     以及技能里写了回话的各条岔路（名单外、只回「可以」、别人回的、中台连不上后补送、续接、停、冻）。
+  1. 文档对得上脚本：技能里写的每条 G、P 命令都能被命令行解析；技能表格里引用的脚本原话、字段名、卡上的结果字样，
+     脚本里（或真实渲染出的确认卡上）确实有；
+  2. 五要素文件 → P（客户端 → 真的 3353 窗口 → 网关 propose，0E-3b）→ 门卫发确认卡、常浩点「批准派单」（模拟门卫：
+     mark_card + decide，门卫本身见 test_gatekeeper_grants）→ 派单事件发出，以及技能里写了回话的各条岔路
+     （名单外、点「不派」、过期、中台连不上后补送、续接、停、冻）。
      「把一句话整理成五要素」是模型做的，这里测不到，从整理好的五要素文件开始；
   3. 端到端：临时目录里起真的 agent-autoloop 中台（同 test_autoloop_hub_e2e 的 HubFixture，本机没有命令行时跳过），
      按技能第 1 节看通道（暂停不派、没规则不派、没钥匙不派），恢复后派一单，中台里出现这张单的轮次；
      提单后通道被暂停，中台收到但没有轮次（技能第 4 节第二步要查出来的情况）；
      续接后按技能第 6 节数这张单的事件条数：通道开着多一条，通道暂停时 sent 是 true 但条数不变。
-凭证库、镜像、任务单、名册、中台都在临时目录；飞书回读和发私聊打桩。不碰 DigitalTwin/autoloop/ 和正式中台。
+凭证库、镜像、任务单、名册、中台都在临时目录；窗口在本进程里起（随机端口）。不碰 DigitalTwin/autoloop/ 和正式中台。
 
 没覆盖的：第 2、3 类把批 0D 的恢复闸打桩放行（RV.ensure_open / RV.admit，同 test_autoloop_grants.Base），
 「真中台 + 真恢复闸」这条路这里不走；恢复闸关着时的回话只用打桩的拒绝验（OneSentenceToDispatch 里那条）。
@@ -33,12 +35,14 @@ from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE.parent))
+import autoloop_cardview as CV  # noqa: E402
 import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_exits as EX  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
 import autoloop_recovery as RV  # noqa: E402
-from test_autoloop_grants import CHAT, LATER, OWNER, T0, Base, raw_msg  # noqa: E402
+import gate_intake as I  # noqa: E402
+from test_autoloop_grants import CHAT, LATER, T0, Base  # noqa: E402
 from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
 
 SKILL = HERE.parents[1] / "skills/autoloop/SKILL.md"
@@ -55,9 +59,50 @@ def cli(argv, now=T0):
     return code, json.loads(buf.getvalue())
 
 
-def reply_line(notice):
-    """常浩照【派单确认】最后一行回的那句话：从网关发的确认消息里取，不经过模型。"""
-    return next(line for line in notice.splitlines() if line.startswith("同意就回：")).split("：", 1)[1]
+def click(code, choice="ok", now=T0, post=None):
+    """模拟门卫：发确认卡（登记消息号）、常浩在卡上点按钮。返回 decide 的结果。"""
+    with G.tx() as con:
+        token, mid = con.execute("SELECT card_token, card_message FROM proposals WHERE code = ?", (code,)).fetchone()
+    if not mid:
+        G.mark_card(code, f"om_card_{code}")
+    return G.decide(token, choice, f"om_card_{code}", f"ev-{code}-{choice}-{now:%H%M%S}", now=now, post=post)
+
+
+class Window:
+    """真的 3353 窗口（本进程里起，随机端口），控制面工具换成在本进程里跑网关的命令行：和 dt-gate 里一样拿它打印的
+    原文交给 gate_intake.last_json 解析，只是不起子进程。"""
+
+    def __init__(self, test, token_dir, now=T0):
+        import http.server
+        import threading
+        self.now = now
+        token = "w" * 40
+        f = Path(token_dir) / "intake.token"
+        f.write_text(token, encoding="utf-8")
+        os.chmod(f, 0o600)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), I.make_handler(token, self.tool))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        test.addCleanup(srv.server_close)
+        test.addCleanup(srv.shutdown)
+        p = mock.patch.dict(os.environ, {"DT_INTAKE_TOKEN_FILE": str(f), "DT_INTAKE_URL": f"http://127.0.0.1:{srv.server_address[1]}",
+                                         "DT_INTAKE_INBOX": str(Path(token_dir) / "inbox")})
+        p.start()
+        test.addCleanup(p.stop)
+
+    def tool(self, script, args):
+        assert script == "autoloop_grants.py", script
+        buf = io.StringIO()
+        with mock.patch.object(G, "now_tz", return_value=self.now), contextlib.redirect_stdout(buf):
+            code = G.main(args)
+        return code, I.last_json(buf.getvalue())
+
+
+def p_cli(argv):
+    """像猛鬼兽那样跑一条 P 命令（客户端）：返回 (退出码, 输出的 JSON)。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = I.main(["dispatch-propose", *argv])
+    return code, json.loads(buf.getvalue())
 
 
 class SkillDocMatchesScripts(unittest.TestCase):
@@ -79,7 +124,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
         subs = next(a for a in G.build_parser()._actions if a.dest == "cmd").choices
         seen = set()
         for cmd in sorted(cmds):
-            if "--" not in cmd and cmd not in ("G show", "G send-pending"):      # 只是提到名字（如「跑 `G approve`」）
+            if "--" not in cmd and cmd not in ("G show", "G send-pending"):      # 只是提到名字（如「跑 `G freeze`」）
                 self.assertIn(cmd.split()[1], subs, cmd)
                 continue
             filled = re.sub(r"<[^<>|]*\|[^<>]*>", lambda m: m.group(0)[1:-1].split("|")[0], cmd)   # <a|b> 取第一个
@@ -88,8 +133,25 @@ class SkillDocMatchesScripts(unittest.TestCase):
             with self.subTest(cmd=cmd), mock.patch("sys.stderr"):
                 a = G.build_parser().parse_args(argv)          # 解析不了会 SystemExit
                 seen.add(a.cmd)
-        self.assertEqual(seen, {"propose", "approve", "show", "send-pending", "resume-dispatch", "revoke", "freeze",
-                                "complete"})                   # 放权方向的 unfreeze、出口用的 check 不归技能调
+        self.assertEqual(seen, {"show", "send-pending", "resume-dispatch", "revoke", "freeze", "complete"})
+        # 提单走 P（下一条测试）；批准没有命令（只认门卫卡上的点击，0E-3b）；放权方向的 unfreeze、出口用的 check 不归技能调
+        self.assertNotIn("approve", subs)
+
+    def test_every_propose_command_in_the_skill_parses(self):
+        cmds = set(re.findall(r"`(P [^`]*)`", self.text))
+        cmds |= {line.strip() for line in self.text.splitlines() if re.match(r"^P --", line.strip())}
+        self.assertTrue(cmds)
+        prefix = "`/usr/bin/python3 ~/.hermes/scripts/gate_intake.py dispatch-propose`"
+        self.assertIn(f"`P` = {prefix}", self.text)
+        for cmd in sorted(cmds):
+            if "--" not in cmd:
+                continue
+            filled = re.sub(r"<[^<>|]*\|[^<>]*>", lambda m: m.group(0)[1:-1].split("|")[0], cmd)
+            filled = re.sub(r"<[^<>]*>", "x", filled)
+            with self.subTest(cmd=cmd), mock.patch.object(I, "propose_dispatch", return_value=(0, {})) as m, \
+                    mock.patch("pathlib.Path.read_text", return_value="五要素"), mock.patch("sys.stdout"):
+                self.assertEqual(I.main(["dispatch-propose", *shlex.split(filled)[1:]]), 0)
+                self.assertEqual(m.call_args[0][:2], ("x", "claude"))
 
     def test_other_script_commands_exist(self):
         for script, sub in (("autoloop_config", "status"), ("autoloop_readonly", "show")):
@@ -109,16 +171,17 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [8, 8], tables)
-        reach = [inspect.getsource(G.propose) + inspect.getsource(G.notify_owner) + inspect.getsource(RV.ensure_open)
-                 + inspect.getsource(G.require_hub_rule),
-                 inspect.getsource(G.approve) + inspect.getsource(G.verify_owner)]
+        self.assertEqual([len(t) for t in tables], [8], tables)
+        reach = [inspect.getsource(G.propose) + inspect.getsource(RV.ensure_open) + inspect.getsource(G.require_hub_rule)
+                 + inspect.getsource(I.propose_dispatch)]
         for table, src in zip(tables, reach):
             for words in table:
                 with self.subTest(words=words):
                     self.assertIn(words, src)
-        for words, fn in (("已发到常浩私聊", G.propose), ("不能续接：", G.resume_dispatch), ("已经是终态", G._tighten),
-                          ("凭证已过期", G.check_row), ("【派单确认】", G.notice_text),
+        for words, fn in (("门卫会把确认卡发到常浩私聊，他点「批准派单」才签", G.propose), ("不能续接：", G.resume_dispatch),
+                          ("已经是终态", G._tighten), ("凭证已过期", G.check_row), ("派单确认 · ", CV.render_grant),
+                          ("连不上 dt-gate 的窗口", I.propose_dispatch), ("✅ 批准派单", CV.render_grant),
+                          ("不同意？· 展开", CV.render_grant),
                           ("还有没确认送到中台的派单事件", G.resume_dispatch), ("另有入口正在处理", G.task_lock),
                           ("开闸后 send-pending 补发", G.send_pending), ("恢复闸关着", RV.ensure_open),
                           ("派单事件发出后没确认送到中台", G._stop_after), ("中台库读不了", G.stop_runs)):
@@ -132,7 +195,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                               ("mirror_error", "autoloop_grants"), ("event_key", "autoloop_grants"),
                               ("in_flight", "autoloop_grants"), ("runs_stopped", "autoloop_grants"),
                               ("runs_finished", "autoloop_grants"), ("runs_stop_error", "autoloop_grants"),
-                              ("task_id", "autoloop_grants"), ("dispatch_rules", "autoloop_config"),
+                              ("dispatch_rules", "autoloop_config"),
                               ("source_hermes", "autoloop_config"), ("key_file", "autoloop_config"),
                               ("loaded", "autoloop_config"), ("paused", "autoloop_config"),
                               ("key", "autoloop_config"), ("executor", "autoloop_grants"), ("repo", "autoloop_grants"),
@@ -153,10 +216,11 @@ class SkillDocMatchesScripts(unittest.TestCase):
     def test_limits_in_the_skill_match_the_gateway(self):
         self.assertEqual((G.MAX_SCOPE, G.MAX_HOURS, int(G.PROPOSAL_TTL.total_seconds() // 60), int(G.STALE.total_seconds())),
                          (3000, 72, 30, 60))
-        for words in ("最多 3000 字", "1 到 72", "30 分钟内有效", "过 60 秒"):
+        for words in ("最多 3000 字", "1 到 72", "30 分钟后自动作废", "过 60 秒"):
             self.assertIn(words, self.text)
         self.assertEqual(G.build_parser().parse_args(["propose", "--repo", "r", "--executor", "claude",
                                                       "--scope-file", "f"]).hours, 12)       # 技能写的默认 12 小时
+        self.assertEqual((I.MAX_SCOPE, I.EXECUTORS), (G.MAX_SCOPE, G.EXECUTORS))            # 窗口先核的形状和网关一致
 
 
 class InstalledLayoutNeedsRosterPrefix(unittest.TestCase):
@@ -199,45 +263,44 @@ class OneSentenceToDispatch(Base):
         p = mock.patch.object(G, "post_event", side_effect=self.post)
         p.start()
         self.addCleanup(p.stop)
+        self.window = Window(self, self.root)
 
     def propose(self, repo="dt-sandbox", executor="claude", now=T0):
-        return cli(["propose", "--repo", repo, "--executor", executor, "--scope-file", str(self.scope), "--hours", "12"], now)
+        self.window.now = now
+        return p_cli(["--repo", repo, "--executor", executor, "--scope-file", str(self.scope), "--hours", "12"])
 
     def dispatch(self, now=T0):
-        self.propose(now=now)
-        mid = self.say(reply_line(self.notices[-1][0]), now)
-        return cli(["approve", "--message-id", mid], now)[1]["task_id"]
+        return click(self.propose(now=now)[1]["code"], now=now, post=self.post)["task_id"]
 
     def test_project_without_dispatch_rule_is_refused_at_propose(self):
-        """常浩 11-23 定（#346）：中台没有这条派单规则，网关提议时就拒绝，不发【派单确认】；技能第 3 节的表认得这句原话。"""
+        """常浩 11-23 定（#346）：中台没有这条派单规则，网关提议时就拒绝，不登记提议；技能第 3 节的表认得这句原话。"""
         self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude")]}
         code, out = self.propose(executor="codex")
         self.assertEqual(code, 1)
         self.assertIn("名册放行了写入，但中台没有接", out["why"])
-        self.assertEqual(self.notices, [])
+        self.assertEqual(G.cards_to_send(), [])
 
     def test_five_elements_to_event(self):
-        code, out = self.propose()
-        self.assertEqual((code, out["notice"], out["repo"], out["executor"]), (0, "已发到常浩私聊", "dt-sandbox", "claude"))
-        (notice, _key), = self.notices                         # 确认消息由网关自己发：五要素原文 + 怎么回
-        self.assertTrue(notice.startswith("【派单确认】"))
-        for line in FIVE.splitlines():
-            self.assertIn(line, notice)
-        said = reply_line(notice)
-        self.assertEqual(said, f"派单 {out['code']}")
-        self.assertEqual(G.show(), [])                         # 他没回之前什么都没签
+        code, out = self.propose()                             # 客户端 → 窗口 → 网关（网关按缩进打印多行 JSON）
+        self.assertEqual((code, out["card"], out["repo"], out["executor"]),
+                         (0, "门卫会把确认卡发到常浩私聊，他点「批准派单」才签", "dt-sandbox", "claude"))
+        (p,) = G.cards_to_send(now=T0)                         # 门卫要发的卡：五要素原文 + 两个按钮
+        card = json.dumps(CV.render_grant(p, lambda a: {"gate_grant": p["card_token"], "a": a}), ensure_ascii=False)
+        self.assertIn(json.dumps(FIVE, ensure_ascii=False)[1:-1], card)
+        self.assertIn("派单确认 · dt-sandbox", card)
+        self.assertEqual(G.show(), [])                         # 他没点之前什么都没签
 
-        code, out = cli(["approve", "--message-id", self.say(said)])
-        self.assertEqual(code, 0)
-        tid = out["task_id"]
+        res = click(out["code"], post=self.post)
+        tid = res["task_id"]
         self.assertRegex(tid, G.TASK_ID)
-        self.assertEqual([(s["sent"], s["hub_event"]) for s in out["send"]], [(True, 101)])
+        self.assertEqual((res["decision"], res["note"]), ("approved", "已送到中台，等工人接单"))
+        self.assertEqual([(s["sent"], s["hub_event"]) for s in res["send"]], [(True, 101)])
         (ev,) = self.posted                                    # 中台收到的事件：对象是单号，类型对着这条派单规则
         self.assertEqual((ev["subject"], ev["type"]), (tid, "dispatch.dt-sandbox.claude.write"))
         self.assertNotIn("README", json.dumps(ev, ensure_ascii=False))
         self.assertIn(FIVE, (self.tasks / f"{tid}.md").read_text(encoding="utf-8"))      # 工人读的任务单 = 他确认的原文
 
-        code, (g,) = cli(["show", "--task", tid])              # 技能第 5 节第 1 层、回执里的「有效到」
+        code, (g,) = cli(["show", "--task", tid])              # 技能第 4 节回执、第 5 节第 1 层
         self.assertEqual((code, g["usable"], g["why_not"], g["executor"], g["github"]), (0, True, None, "claude", "o/dt-sandbox"))
         self.assertEqual(g["valid_until"], G.iso(T0 + dt.timedelta(hours=12)))
         self.assertEqual([(e["kind"], e["state"]) for e in g["events"]], [("start", "已送到中台")])
@@ -246,45 +309,35 @@ class OneSentenceToDispatch(Base):
         for repo in ("agent-autoloop", "little-steps", "nope"):          # 明说不许写、没写许不许、名册里没有
             with self.subTest(repo=repo):
                 self.assertEqual(self.propose(repo), (1, {"ok": False, "why": f"{repo} 不在名册能派写入单的仓库里"}))
-        self.assertEqual(self.propose(executor="gpt")[1]["why"], "执行方只能是 claude 或 codex")
-        self.assertEqual((self.notices, self.posted, G.show()), ([], [], []))
+        self.assertEqual(self.propose(executor="gpt")[0], 1)            # 窗口先拒（形状不对），到不了网关
+        self.assertEqual((G.cards_to_send(), self.posted, G.show()), ([], [], []))
 
-    def test_only_the_exact_phrase_from_the_owner_approves(self):
-        self.propose()
-        said = reply_line(self.notices[-1][0])
-        for text, kw, why in (("可以", {}, "不是批准派单的口令"), ("派吧", {}, "不是批准派单的口令"),
-                              (said + "，顺便把 CI 也加上", {}, "不是批准派单的口令"),
-                              ("派单 0000000a", {}, "没有这个确认码的派单提议"),
-                              (said, {"sender": "ou_someone_else_0001"}, "身份核实不通过"),
-                              (said, {"chat": "oc_some_group_0001"}, "身份核实不通过")):
-            with self.subTest(text=text, kw=kw):
-                code, out = cli(["approve", "--message-id", self.say(text, **kw)])
-                self.assertEqual((code, out["ok"]), (1, False))
-                self.assertIn(why, out["why"])
+    def test_only_a_click_on_the_card_approves(self):
+        """打字批准没有了（技能第 0 节第 3 条）；「不派」、过期都不签；同一张卡点两次只签一次；改了重提是新卡。"""
+        with mock.patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit):
+            G.main(["approve", "--message-id", "om_fixturemsg0001"])
+        no = click(self.propose()[1]["code"], "no", post=self.post)
+        self.assertEqual(no["decision"], "rejected")
+        late = T0 + dt.timedelta(minutes=31)
+        old = self.propose()[1]["code"]
+        self.assertEqual(click(old, now=late, post=self.post)["decision"], "expired")
         self.assertEqual((self.posted, G.show()), ([], []))
-        late = T0 + dt.timedelta(minutes=31)                   # 过了 30 分钟
-        self.assertIn("已过期（30 分钟）", cli(["approve", "--message-id", self.say(said, late)], late)[1]["why"])
-        self.propose(now=late)                                 # 重新整理一次：新码，旧码作废
-        new = reply_line(self.notices[-1][0])
-        self.assertNotEqual(new, said)
-        mid = self.say(new, late)
-        tid = cli(["approve", "--message-id", mid], late)[1]["task_id"]
-        again = cli(["approve", "--message-id", mid], late)    # 同一条确认再用一次
-        self.assertEqual(again[0], 1)
-        self.assertIn("已经签过凭证", again[1]["why"])
-        self.assertIn(tid, again[1]["why"])
+        new = self.propose(now=late)[1]["code"]                # 重新整理一次：新提议、新卡
+        self.assertNotEqual(new, old)
+        tid = click(new, now=late, post=self.post)["task_id"]
+        again = click(new, now=late + dt.timedelta(seconds=1), post=self.post)
+        self.assertEqual((again["already"], again["task_id"]), (True, tid))
         self.assertEqual(len(self.posted), 1)
 
     def test_hub_down_then_resend_never_creates_a_second_task(self):
-        self.propose()
-        mid = self.say(reply_line(self.notices[-1][0]))
-        with mock.patch.object(G, "post_event", side_effect=G.Rejected("连不上中台或回应不对：URLError")):
-            code, out = cli(["approve", "--message-id", mid])
-        self.assertEqual(code, 0)                              # 退出码还是 0：技能要看 send，不能只看退出码
-        (s,) = out["send"]
+        def down(body):
+            raise G.Rejected("连不上中台或回应不对：URLError")
+        res = click(self.propose()[1]["code"], post=down)
+        (s,) = res["send"]
         self.assertIsNone(s["sent"])
         self.assertIn("结果不明", s["why"])
-        self.assertEqual(cli(["show", "--task", out["task_id"]])[1][0]["events"][0]["state"], "在途或结果不明")
+        self.assertTrue(res["note"].startswith("凭证已签，还没确认送到中台"))          # 卡上那一行（技能第 4 节表）
+        self.assertEqual(cli(["show", "--task", res["task_id"]])[1][0]["events"][0]["state"], "在途或结果不明")
         self.assertEqual(cli(["send-pending"])[1], [])         # 没到 60 秒：不抢
         code, sent = cli(["send-pending"], LATER)
         self.assertEqual((code, [x["sent"] for x in sent]), (0, [True]))
@@ -292,16 +345,13 @@ class OneSentenceToDispatch(Base):
         self.assertEqual(len(self.posted), 1)
 
     def test_missing_source_key_is_reported_as_not_sent(self):
-        self.propose()
-        mid = self.say(reply_line(self.notices[-1][0]))
-        with mock.patch.object(G, "post_event", self.real_post):       # 真的发送函数：隔离环境里没有钥匙文件
-            out = cli(["approve", "--message-id", mid])[1]
-        self.assertIsNone(out["send"][0]["sent"])
-        self.assertIn("还没有 hermes 来源密钥", out["send"][0]["why"])
+        res = click(self.propose()[1]["code"], post=self.real_post)     # 真的发送函数：隔离环境里没有钥匙文件
+        self.assertIsNone(res["send"][0]["sent"])
+        self.assertIn("还没有 hermes 来源密钥", res["send"][0]["why"])
         self.assertEqual(len(G.show()), 1)                     # 凭证已签，只是没派出去
 
     def test_closed_recovery_gate_is_reported_not_retried(self):
-        """批 0D 的恢复闸关着时：提单被拒、原因里有「恢复闸关着」；批准照样签凭证，但 send 是一句 error、事件留在账里；
+        """批 0D 的恢复闸关着时：提单被拒、原因里有「恢复闸关着」；点卡照样签凭证，但卡上写「还没送到中台」、事件留在账里；
         开闸后 send-pending 补发。技能第 3、4 节各有一行讲这种情况。"""
         closed = mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：电脑睡醒过，要先对账"))
         with closed:
@@ -311,18 +361,16 @@ class OneSentenceToDispatch(Base):
         # 网关拒绝语后半句「事件已记账，开闸后 send-pending 补发」对提单不成立（技能第 3 节那行叫猛鬼兽别转）：
         # 钉住它，网关改了措辞这里会失败，技能那一行要跟着改
         self.assertIn("事件已记账，开闸后 send-pending 补发", out["why"])
-        self.assertEqual(self.notices, [])
         with G.tx() as con:                                    # 真的什么都没登记：没有提议、没有事件
             self.assertEqual([con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("proposals", "hub_events")],
                              [0, 0])
         self.assertEqual(cli(["send-pending"]), (0, []))       # 开闸后补发也补不出东西
-        self.propose()
-        mid = self.say(reply_line(self.notices[-1][0]))
+        code = self.propose()[1]["code"]
         with closed:
-            code, out = cli(["approve", "--message-id", mid])
-        self.assertEqual(code, 0)                              # 退出码还是 0
-        self.assertIn("恢复闸关着", out["send"]["error"])
-        tid = out["task_id"]
+            res = click(code, post=self.post)
+        self.assertIn("恢复闸关着", res["send"]["error"])
+        self.assertTrue(res["note"].startswith("凭证已签，还没送到中台："))
+        tid = res["task_id"]
         self.assertEqual((self.posted, cli(["show", "--task", tid])[1][0]["events"][0]["state"]), ([], "待发"))
         code, sent = cli(["send-pending"])                     # 开闸之后补送
         self.assertEqual([(s["event_key"], s["sent"]) for s in sent], [(f"{tid}:g1:start", True)])
@@ -334,6 +382,33 @@ class OneSentenceToDispatch(Base):
         code, out = cli(["resume-dispatch", "--task", other, "--kind", "redispatch", "--reason", "再跑一次"])
         self.assertEqual(code, 1)
         self.assertIn("不能续接：这张单还有没确认送到中台的派单事件", out["why"])
+
+    def test_card_results_quoted_in_section_4_are_what_the_card_shows(self):
+        """技能第 4 节「卡上写的」那张表：每一格引的字样，都出现在真实流程定出结果后门卫改出的卡片上。"""
+        text = SKILL.read_text(encoding="utf-8")
+        sec = text[text.index("## 4. 他点了卡之后"):text.index("## 5. 「t-… 怎么样了」")]
+        rows = [re.findall(r"`([^`]+)`", line.split("|")[1]) for line in sec.splitlines() if line.startswith("| `")]
+        self.assertEqual(len(rows), 6, rows)
+
+        def down(body):
+            raise G.Rejected("连不上中台或回应不对：URLError")
+        click(self.propose()[1]["code"], post=self.post)                  # 已送到
+        click(self.propose()[1]["code"], post=down)                       # 没确认送到
+        shut = self.propose()[1]["code"]
+        with mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：x")):
+            click(shut, post=self.post)                                   # 闸关着
+        click(self.propose()[1]["code"], "no", post=self.post)            # 不派
+        late = self.propose()[1]["code"]
+        G.mark_card(late, f"om_card_{late}")
+        G.expire_due(now=T0 + dt.timedelta(minutes=31))                  # 过期
+        void = self.propose()[1]["code"]
+        self.write_roster("o2/dt-sandbox")
+        click(void, post=self.post)                                       # 名册变了
+        shown = " ".join(json.dumps(CV.render_grant(p, lambda a: {}), ensure_ascii=False) for p in G.cards_to_close())
+        self.assertEqual(len(G.cards_to_close()), 6)
+        for words in sum(rows, []):
+            with self.subTest(words=words):
+                self.assertIn(words, shown)
 
     def test_resume_stop_freeze_complete(self):
         tid = self.dispatch()
@@ -398,30 +473,13 @@ class SkillOnRealHub(HubFixture):
         super().setUp()
         root = self.roster.parent
         self.status_file, self.tasks = root / "shared/grants/status.json", root / "shared/tasks"
-        self.msgs, self.notices, self.n = {}, [], 0
         for p in (mock.patch.dict(os.environ, {"DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"), "DT_OWNER_CHAT_ID": CHAT,
                                                "DT_GRANTS_STATUS": str(self.status_file), "DT_GRANTS_TASKS": str(self.tasks)}),
-                  mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", side_effect=self._notify),
                   mock.patch.object(RV, "ensure_open"), mock.patch.object(RV, "admit")):   # 恢复闸放行，同 test_autoloop_grants.Base
             p.start()
             self.addCleanup(p.stop)
         self.scope = root / "五要素.md"
         self.scope.write_text(FIVE, encoding="utf-8")
-
-    def _fetch(self, mid):
-        m = self.msgs.get(mid)
-        return None if m is None else G.I.normalize(m) | {"text": m["content"]}
-
-    def _notify(self, text, key):
-        self.notices.append(text)
-        return f"om_notice{len(self.notices):04d}"
-
-    def say(self, text, **kw):
-        self.n += 1
-        mid = f"om_fixturemsg{self.n:04d}"
-        self.msgs[mid] = raw_msg(mid, text, T0, **kw)
-        return mid
 
     def gate(self, repo="dt-sandbox", executor="claude"):
         """技能第 1 节第 3 步：这条通道现在能不能派。"""
@@ -439,10 +497,10 @@ class SkillOnRealHub(HubFixture):
 
     def dispatch(self, executor="claude", before_approve=lambda: None):
         code, out = cli(["propose", "--repo", "dt-sandbox", "--executor", executor, "--scope-file", str(self.scope)])
-        self.assertEqual((code, out["notice"]), (0, "已发到常浩私聊"))
+        self.assertEqual(code, 0)                              # 窗口里跑的就是这条（窗口本身见 OneSentenceToDispatch）
         before_approve()
-        code, out = cli(["approve", "--message-id", self.say(reply_line(self.notices[-1]))])
-        self.assertEqual(code, 0)
+        out = click(out["code"])                               # 常浩在卫士的卡上点「批准派单」（同 cli 用 T0）
+        self.assertEqual(out["decision"], "approved")
         (sent,) = [s for s in out["send"] if s["event_key"].startswith(out["task_id"])]
         return out["task_id"], sent
 

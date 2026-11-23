@@ -217,20 +217,16 @@ class StopRunsEndToEnd(HubFixture):
         import autoloop_recovery as RV
         import test_autoloop_grants as TG
         root = self.roster.parent
-        msgs, notices = {}, []
+        msgs = {}
 
         def fetch(mid):
             m = msgs.get(mid)
             return None if m is None else G.I.normalize(m) | {"text": m["content"]}
 
-        def notify(text, key):
-            notices.append(text)
-            return f"om_notice{len(notices):04d}"
-
         for p in (mock.patch.dict(os.environ, {"DT_GRANTS_DB": str(root / "dt/autoloop/grants.db"),
                                                "DT_GRANTS_STATUS": str(root / "shared/grants/status.json"),
                                                "DT_GRANTS_TASKS": str(root / "shared/tasks"), "DT_OWNER_CHAT_ID": TG.CHAT}),
-                  mock.patch.object(G, "fetch_message", side_effect=fetch), mock.patch.object(G, "notify_owner", side_effect=notify),
+                  mock.patch.object(G, "fetch_message", side_effect=fetch),
                   mock.patch.object(RV, "ensure_open"), mock.patch.object(RV, "admit"),       # 恢复闸放行，同 TG.Base
                   mock.patch.object(G, "now_tz", return_value=TG.T0)):
             p.start()
@@ -241,9 +237,9 @@ class StopRunsEndToEnd(HubFixture):
 
         def dispatch():
             code = G.propose("dt-sandbox", "claude", TG.SCOPE)["code"]
-            mid = f"om_fixturemsg{len(msgs) + 1:04d}"
-            msgs[mid] = TG.raw_msg(mid, f"派单 {code}", TG.T0)
-            out = G.approve(mid)
+            (p,) = [x for x in G.cards_to_send() if x["code"] == code]      # 模拟门卫发卡、常浩点「批准派单」（0E-3b）
+            G.mark_card(code, f"om_card_{code}")
+            out = G.decide(p["card_token"], "ok", f"om_card_{code}", f"ev-{code}")
             self.assertTrue(out["send"][-1]["sent"], out)
             return out["task_id"]
 

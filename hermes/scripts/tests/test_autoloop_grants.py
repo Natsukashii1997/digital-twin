@@ -1,9 +1,10 @@
 """隔离自测：python3 -B -m unittest discover -s hermes/scripts/tests -v。
 
-autoloop_grants.py（任务凭证与派单网关，#195 批 0B-1）：两步批准（随机确认码、脚本自己发确认消息、内容和名册映射绑定）、
+autoloop_grants.py（任务凭证与派单网关，#195 批 0B-1；0E-3b 起批准改成点门卫确认卡）：两步批准（随机提议号和卡片令牌、
+只登记不发消息、门卫发卡后点击才签、内容和名册映射绑定、防重放）、
 凭证判定、代次作废、冻结 / 恢复（冻结码 + 先记更正）/ 撤销、状态镜像（收紧先写镜像、放宽后写）、任务单、
 只在凭证有效时续接、逐个现读领取后发事件。凭证库、镜像、任务单、名册都放临时目录；飞书回读打桩 fetch_message
-（走真实的 twin_identity.verify_message），发私聊打桩 notify_owner；中台用假的 post。不联网、不碰 ~/Library/Application Support/DigitalTwin。
+（走真实的 twin_identity.verify_message，只剩恢复冻结在用）；门卫发卡用 mark_card 模拟；中台用假的 post。不联网、不碰 ~/Library/Application Support/DigitalTwin。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import datetime as dt
@@ -61,12 +62,11 @@ class Base(unittest.TestCase):
                    DT_OWNER_OPEN_ID=OWNER, DT_OWNER_CHAT_ID=CHAT)
         for p in (mock.patch.dict(os.environ, env, clear=True), mock.patch.object(G, "ROSTER", self.roster),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", side_effect=self._notify),
                   mock.patch.object(R, "ensure_open"), mock.patch.object(R, "admit"),   # 恢复闸放行（关着见 RecoveryGate）
                   mock.patch.object(C, "loaded_rules", side_effect=lambda: self.hub_rules)):   # 中台在用的规则（HubRule）
             p.start()
             self.addCleanup(p.stop)
-        self.msgs, self.n, self.posted, self.notices = {}, 0, [], []
+        self.msgs, self.n, self.posted = {}, 0, []
         self.hub_rules = {"rules": [C.dispatch_rule(r, x) for r in ("dt-sandbox", "digital-twin") for x in G.EXECUTORS]}
 
     def write_roster(self, sandbox, twin_write=True):
@@ -85,10 +85,6 @@ class Base(unittest.TestCase):
         m = self.msgs.get(mid)
         return None if m is None else G.I.normalize(m) | {"text": m["content"]}
 
-    def _notify(self, text, key):
-        self.notices.append((text, key))
-        return f"om_notice{len(self.notices):04d}"
-
     def say(self, text, when=T0, **kw):
         self.n += 1
         mid = f"om_fixturemsg{self.n:04d}"
@@ -103,9 +99,32 @@ class Base(unittest.TestCase):
         self.posted.append(body)
         return 100 + len(self.posted)
 
+    def card_of(self, code):
+        """门卫发卡：记消息号，返回 (令牌, 消息号)；发过的沿用。"""
+        token, mid = self.sql("SELECT card_token, card_message FROM proposals WHERE code = ?", (code,))[0]
+        if not mid:
+            self.n += 1
+            mid = f"om_fixturecard{self.n:04d}"
+            G.mark_card(code, mid)
+        return token, mid
+
+    def click(self, code, choice="ok", now=T0, post=None, event=None):
+        """常浩在门卫确认卡上点了按钮（门卫已核过点击人、私聊）。"""
+        token, mid = self.card_of(code)
+        self.n += 1
+        return G.decide(token, choice, mid, event or f"ev-fixture-{self.n}", now=now, post=post or self.post)
+
     def new_task(self, when=T0, repo="dt-sandbox", executor="claude", post=None):
         code = G.propose(repo, executor, SCOPE, hours=12, now=when)["code"]
-        return G.approve(self.say(f"派单 {code}", when), now=when, post=post or self.post)["task_id"]
+        return self.click(code, now=when, post=post)["task_id"]
+
+    def proposal(self, code):
+        con = sqlite3.connect(self.db)
+        con.row_factory = sqlite3.Row
+        try:
+            return dict(con.execute("SELECT * FROM proposals WHERE code = ?", (code,)).fetchone())
+        finally:
+            con.close()
 
     def mirror(self):
         return json.loads(self.status.read_text(encoding="utf-8"))["tasks"]
@@ -128,104 +147,149 @@ class Base(unittest.TestCase):
 
 
 class Approval(Base):
-    def test_two_step_issues_grant_and_sends_start(self):
-        tid = self.new_task()
+    def test_card_click_issues_grant_and_sends_start(self):
+        out = G.propose("dt-sandbox", "claude", SCOPE, now=T0)
+        code = out["code"]
+        self.assertRegex(code, r"^[0-9a-f]{8}$")
+        self.assertIn("门卫", out["card"])
+        (todo,) = G.cards_to_send(now=T0)                  # 提议只登记，等门卫发卡
+        self.assertEqual((todo["code"], todo["github"], todo["executor"], todo["scope_text"], todo["actions"]),
+                         (code, "o/dt-sandbox", "claude", SCOPE, list(G.ACTIONS)))
+        self.assertRegex(todo["card_token"], G.CARD_TOKEN)
+        res = self.click(code)
+        tid = res["task_id"]
         self.assertRegex(tid, G.TASK_ID)
+        self.assertEqual((res["decision"], res["note"]), ("approved", "已送到中台，等工人接单"))
         (g,) = G.show(tid)
         self.assertEqual((g["status"], g["generation"], g["actions"]), ("active", 1, list(G.ACTIONS)))
-        self.assertEqual(g["github"], "o/dt-sandbox")
-        self.assertEqual(g["rule"], "dispatch-dt-sandbox-claude")
-        (text, key), = self.notices                        # 确认消息由脚本自己发，内容就是要签的内容
-        for want in ("o/dt-sandbox", "claude", "只改 README.md", "改文件", "派单 "):
-            self.assertIn(want, text)
-        self.assertTrue(key.startswith("dt-grant-"))
+        self.assertEqual((g["github"], g["rule"]), ("o/dt-sandbox", "dispatch-dt-sandbox-claude"))
+        self.assertEqual(G.cards_to_send(now=T0), [])
         self.assertEqual(len(self.posted), 1)
         ev = self.posted[0]
         self.assertEqual((ev["subject"], ev["type"], ev["id"]), (tid, "dispatch.dt-sandbox.claude.write", f"{tid}:g1:start"))
         self.assertEqual(json.loads(ev["detail"]), {"task_id": tid, "generation": 1, "kind": "start"})
         self.assertNotIn("README", json.dumps(ev, ensure_ascii=False))   # 凭证内容不进事件
+        (closing,) = G.cards_to_close()                    # 门卫把卡改成结果
+        self.assertEqual((closing["decision"], closing["task_id"]), ("approved", tid))
+        G.card_closed(code, now=T0)
+        self.assertEqual(G.cards_to_close(), [])
 
-    def test_phrase_must_match_a_live_proposal(self):
-        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
-        self.assertRegex(code, r"^[0-9a-f]{8}$")
-        for text in ("派单 00000000", "派单", "好的派吧", f"派单 {code} 顺便合并", f"派单 {code[:6]}"):
-            with self.subTest(text=text), self.assertRaises(G.Rejected):
-                G.approve(self.say(text), now=T0, post=self.post)
-        self.assertEqual(G.show(), [])
+    def test_typed_approval_is_gone(self):
+        """常浩 11-23 定（0E-3b ①）：打字「派单 <码>」批准关掉、代码里删；网关也不再自己发私聊。"""
+        for name in ("approve", "notify_owner", "APPROVE_TEXT"):
+            self.assertFalse(hasattr(G, name), name)
+        with mock.patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit):
+            G.main(["approve", "--message-id", "om_fixturemsg0001"])
 
-    def test_codes_are_random_and_never_overwrite(self):
+    def test_codes_and_tokens_are_random_and_never_overwrite(self):
         a = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         b = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
-        self.assertNotEqual(a, b)                          # 同样内容也是新码
-        with mock.patch.object(G.secrets, "token_hex", side_effect=["aaaaaaaa", "aaaaaaaa", "bbbbbbbb"]):
+        self.assertNotEqual(a, b)                          # 同样内容也是新号
+        self.assertNotEqual(self.card_of(a)[0], self.card_of(b)[0])
+        with mock.patch.object(G.secrets, "token_hex", side_effect=["aaaaaaaa", "1" * 16, "aaaaaaaa", "2" * 16,
+                                                                    "bbbbbbbb", "1" * 16, "cccccccc", "3" * 16]):
             G.propose("dt-sandbox", "claude", SCOPE, now=T0)
             c = G.propose("dt-sandbox", "codex", SCOPE + "\n顺便升级依赖", now=T0)["code"]
-        self.assertEqual(c, "bbbbbbbb")                    # 撞号重抽，不覆盖
-        tid = G.approve(self.say("派单 aaaaaaaa"), now=T0, post=self.post)["task_id"]
+        self.assertEqual(c, "cccccccc")                    # 提议号、令牌撞了都重抽，不覆盖
+        self.assertEqual(self.proposal("aaaaaaaa")["executor"], "claude")
+        tid = self.click("aaaaaaaa")["task_id"]
         self.assertEqual(G.show(tid)[0]["executor"], "claude")
         self.assertEqual(G.show(tid)[0]["scope_hash"], G.sha256(SCOPE))
 
     def test_proposal_expires(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        self.card_of(code)
         later = T0 + dt.timedelta(minutes=31)
-        with self.assertRaisesRegex(G.Rejected, "过期"):
-            G.approve(self.say(f"派单 {code}", later), now=later, post=self.post)
+        self.assertEqual(G.cards_to_send(now=later), [])   # 过期的不再发卡
+        res = self.click(code, now=later)
+        self.assertEqual((res["decision"], res["note"]), ("expired", "过了 30 分钟没批"))
+        self.assertEqual(G.show(), [])
+        self.assertEqual(self.posted, [])
 
-    def test_undelivered_notice_cannot_be_approved(self):
-        with mock.patch.object(G, "notify_owner", side_effect=G.Rejected("确认消息没发出去")):
-            with self.assertRaisesRegex(G.Rejected, "没发出去"):
-                G.propose("dt-sandbox", "claude", SCOPE, now=T0)
-        (code,), = self.sql("SELECT code FROM proposals")
-        with self.assertRaisesRegex(G.Rejected, "确认消息没发到"):
-            G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+    def test_expire_due_marks_unanswered_cards(self):
+        a = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        b = G.propose("dt-sandbox", "codex", SCOPE, now=T0 + dt.timedelta(minutes=20))["code"]
+        self.card_of(a)
+        self.assertEqual(G.expire_due(now=T0 + dt.timedelta(minutes=31)), [a])
+        self.assertEqual([c["code"] for c in G.cards_to_close()], [a])      # 发过卡的要改成「已作废」
+        self.assertEqual(self.proposal(a)["decision"], "expired")
+        self.assertIsNone(self.proposal(b)["decision"])
+        self.assertEqual(self.click(a)["decision"], "expired")              # 过期后再点：照原结果，不签
+        self.assertTrue(self.click(a)["already"])
         self.assertEqual(G.show(), [])
 
-    def test_roster_mapping_change_rejects(self):
+    def test_click_must_hit_the_registered_card(self):
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        token = self.proposal(code)["card_token"]
+        with self.assertRaisesRegex(G.Rejected, "不是登记的"):            # 卡还没发出（没有消息号）
+            G.decide(token, "ok", "om_fixturecard9999", "ev-1", now=T0, post=self.post)
+        G.mark_card(code, unsure="发卡结果不明")
+        (todo,) = G.cards_to_send(now=T0)                                  # 结果不明的照样交门卫，由出口账本拦重发
+        self.assertEqual(todo["card_state"], "unsure")
+        with self.assertRaisesRegex(G.Rejected, "不是登记的"):
+            G.decide(token, "ok", "om_fixturecard9999", "ev-1", now=T0, post=self.post)
+        G.mark_card(code, "om_fixturecard0001")
+        G.mark_card(code, "om_fixturecard0002")                            # 只认第一次登记的消息号
+        for args, why in (((token, "ok", "om_fixturecard0002"), "不是登记的"), (("0" * 16, "ok", "om_fixturecard0001"), "没有这张"),
+                          ((token, "yes", "om_fixturecard0001"), "按钮值"), ((token[:-1], "ok", "om_fixturecard0001"), "按钮值")):
+            with self.subTest(args=args), self.assertRaisesRegex(G.Rejected, why):
+                G.decide(*args, "ev-1", now=T0, post=self.post)
+        self.assertEqual(G.show(), [])
+        self.assertEqual(self.click(code)["decision"], "approved")
+
+    def test_no_button_voids_without_signing(self):
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        res = self.click(code, "no")
+        self.assertEqual((res["decision"], res["note"]), ("rejected", "你点了不派"))
+        again = self.click(code, "ok")                     # 点过不派再点批准：照原结果，不签
+        self.assertEqual((again["decision"], again["already"]), ("rejected", True))
+        self.assertEqual(G.show(), [])
+        self.assertEqual(self.posted, [])
+
+    def test_replayed_click_signs_once(self):
+        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
+        tid = self.click(code)["task_id"]
+        again = self.click(code)
+        self.assertEqual((again["decision"], again["task_id"], again["already"]), ("approved", tid, True))
+        self.assertEqual(len(G.show()), 1)
+        self.assertEqual(len(self.posted), 1)
+        new = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]   # 同样内容重提要重新点
+        self.assertNotEqual(new, code)
+        self.assertEqual(len(G.show()), 1)
+
+    def test_roster_mapping_change_voids(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         self.write_roster("o2/dt-sandbox")                 # 短名一样，完整仓库变了
-        with self.assertRaisesRegex(G.Rejected, "仓库变了"):
-            G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
-        self.write_roster(None)
-        with self.assertRaisesRegex(G.Rejected, "仓库变了"):
-            G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+        res = self.click(code)
+        self.assertEqual(res["decision"], "void")
+        self.assertIn("仓库变了", res["note"])
+        self.write_roster("o/dt-sandbox")
+        self.assertTrue(self.click(code)["already"])       # 作废的提议不会因为名册改回来就能批
         self.assertEqual(G.show(), [])
 
     def test_missing_write_allowed_is_not_allowed(self):
         code = G.propose("digital-twin", "codex", SCOPE, now=T0)["code"]
         self.write_roster("o/dt-sandbox", twin_write=None)  # 字段被删掉：不再算允许写入
-        with self.assertRaisesRegex(G.Rejected, "仓库变了"):
-            G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+        self.assertIn("仓库变了", self.click(code)["note"])
         with self.assertRaisesRegex(G.Rejected, "名册"):
             G.propose("digital-twin", "codex", SCOPE, now=T0)
         self.assertEqual(G.show(), [])
 
-    def test_tampered_proposal_rejected(self):
+    def test_tampered_proposal_voids(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         self.sql("UPDATE proposals SET scope_text = ? WHERE code = ?", (SCOPE + "\n顺便合并", code))
-        with self.assertRaisesRegex(G.Rejected, "对不上"):
-            G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+        res = self.click(code)
+        self.assertEqual(res["decision"], "void")
+        self.assertIn("对不上", res["note"])
+        self.assertEqual(G.show(), [])
 
-    def test_not_owner_or_not_private_or_old_or_replayed(self):
+    def test_hub_rule_gone_before_click_voids(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
-        for kw in ({"sender": "ou_someone_else_0001"}, {"chat": "oc_some_group_0001"}):
-            with self.subTest(kw=kw), self.assertRaisesRegex(G.Rejected, "身份核实不通过"):
-                G.approve(self.say(f"派单 {code}", **kw), now=T0, post=self.post)
-        old = self.say(f"派单 {code}", T0 - dt.timedelta(minutes=20))
-        with self.assertRaisesRegex(G.Rejected, "身份核实不通过"):
-            G.approve(old, now=T0, post=self.post)
-        mid = self.say(f"派单 {code}")
-        G.approve(mid, now=T0, post=self.post)
-        with self.assertRaisesRegex(G.Rejected, "已经签过|已经用过"):
-            G.approve(mid, now=T0, post=self.post)
-
-    def test_reproposing_same_task_needs_a_new_approval(self):
-        code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
-        mid = self.say(f"派单 {code}")
-        G.approve(mid, now=T0, post=self.post)
-        self.assertNotEqual(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"], code)
-        with self.assertRaisesRegex(G.Rejected, "已经签过|已经用过"):
-            G.approve(mid, now=T0, post=self.post)
-        self.assertEqual(len(G.show()), 1)
+        self.hub_rules = {"rules": []}
+        res = self.click(code)
+        self.assertEqual(res["decision"], "void")
+        self.assertIn("dispatch-dt-sandbox-claude", res["note"])
+        self.assertEqual((G.show(), self.posted), ([], []))
 
     def test_repo_and_executor_and_hours_checked(self):
         for repo in ("agent-autoloop", "little-steps", "old", "nope", "../x"):
@@ -255,7 +319,6 @@ class Approval(Base):
         self.hub_rules = {"rules": [C.dispatch_rule("dt-sandbox", "claude") | {"paused": True}]}
         self.assertTrue(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"])   # 暂停着不拦
         self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
-        self.assertEqual(len(self.notices), 1)
 
     def test_hub_unreadable_rejects_at_propose(self):
         with mock.patch.object(C, "loaded_rules", side_effect=C.Rejected("读不到中台正在用的规则（OperationalError），不放行")):
@@ -270,7 +333,6 @@ class Approval(Base):
             with self.assertRaisesRegex(G.Rejected, "查不了中台有没有 dispatch-dt-sandbox-claude"):
                 G.propose("dt-sandbox", "claude", SCOPE, now=T0)
         self.assertFalse(self.db.exists() and self.sql("SELECT code FROM proposals"))
-        self.assertEqual(self.notices, [])
 
     def test_files_are_private_and_shared_files_are_readable(self):
         old = os.umask(0o077)                                    # 严格 umask 下共享目录也要显式给 755
@@ -303,7 +365,7 @@ class Approval(Base):
 class Sending(Base):
     def test_hub_unreachable_keeps_event_for_resend(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
-        out = G.approve(self.say(f"派单 {code}"), now=T0, post=down)
+        out = self.click(code, now=T0, post=down)
         self.assertEqual([s["sent"] for s in out["send"]], [None])         # 结果不明
         self.assertEqual(G.show(out["task_id"])[0]["status"], "active")
         self.assertEqual(G.send_pending(post=self.post, now=T0), [])       # 刚领走的不抢
@@ -370,10 +432,10 @@ class RecoveryGate(Base):
         with self.closed():
             with self.assertRaisesRegex(G.Rejected, "睡醒"):
                 G.propose("dt-sandbox", "claude", SCOPE, now=T0)
-        self.assertEqual(self.notices, [])
+        self.assertFalse(self.db.exists() and self.sql("SELECT code FROM proposals"))
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         with self.closed():
-            out = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+            out = self.click(code, now=T0, post=self.post)
             self.assertIn("恢复闸关着", out["send"]["error"])
             with self.assertRaisesRegex(G.Rejected, "send-pending 补发"):
                 G.send_pending(post=self.post, now=T0)
@@ -384,7 +446,7 @@ class RecoveryGate(Base):
     def test_events_wait_for_the_gate_then_go_once(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         with self.closed():
-            tid = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)["task_id"]
+            tid = self.click(code, now=T0, post=self.post)["task_id"]
         self.assertEqual(self.sent_states(tid), {"start": 0})
         self.assertEqual([s["sent"] for s in G.send_pending(post=self.post, now=T0)], [True])
         self.assertEqual(G.send_pending(post=self.post, now=LATER), [])
@@ -452,7 +514,7 @@ class Mirror(Base):
     def test_approve_without_mirror_sends_nothing_and_stays_strict(self):
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
         with mock.patch.object(G, "write_status", side_effect=OSError("磁盘满")):
-            out = G.approve(self.say(f"派单 {code}"), now=T0, post=self.post)
+            out = self.click(code, now=T0, post=self.post)
         self.assertIn("镜像", out["send"]["error"])
         self.assertFalse(self.status.exists())                     # 工人看不到这张单：比库更严
         self.assertEqual(self.posted, [])
@@ -470,7 +532,7 @@ class Mirror(Base):
             n = self.post(body)
             if not box:
                 with mock.patch.object(G, "write_status", side_effect=OSError("磁盘满")):
-                    box["x"] = G.approve(self.say(f"派单 {x_code}", LATER), now=LATER, post=self.post)
+                    box["x"] = self.click(x_code, now=LATER, post=self.post)
                 self.assertIn("error", box["x"]["send"])
                 self.assertNotIn(box["x"]["task_id"], self.mirror())
             return n
@@ -917,7 +979,7 @@ class Cli(Base):
     def test_show_tells_usable_now_and_event_delivery(self):
         """查进度用的两样只读输出（autoloop 技能读）：现在能不能用、每个派单事件送没送到中台。"""
         code = G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"]
-        tid = G.approve(self.say(f"派单 {code}"), now=T0, post=down)["task_id"]
+        tid = self.click(code, now=T0, post=down)["task_id"]
         (g,) = G.show(tid, now=T0)
         self.assertEqual((g["usable"], g["why_not"]), (True, None))
         self.assertEqual([(e["event_key"], e["kind"], e["state"], e["hub_event"]) for e in g["events"]],
