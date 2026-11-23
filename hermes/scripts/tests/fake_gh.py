@@ -9,6 +9,7 @@ state 目录里的文件：
   pr_list.json / issue_list.json   pr list / issue list 返回的 JSON
   api.json      gh api <路径> 的回话：{路径: 回话}，回话是字符串就原样输出，否则输出 JSON；路径不在里面按 404 失败
   fail_match    参数里含这个文件内容的调用失败（模拟只有某个仓库连不上）
+  pr_body.md    pr create 写下的最近一次 PR 正文（假 gh 自己写，测试读）
 """
 import json
 import os
@@ -61,6 +62,8 @@ def main(args):
         print("https://github.com/o/fx/issues/7")
     elif (kind, verb) == ("pr", "create"):
         (state / "pr_head").write_text(opt(args, "-H"))
+        if opt(args, "-F"):                                         # 记下 PR 正文（测试核 P-13 留痕那几行）
+            (state / "pr_body.md").write_text(Path(opt(args, "-F")).read_text(encoding="utf-8"), encoding="utf-8")
         print("https://github.com/o/fx/pull/8")
     elif (kind, verb) == ("pr", "view"):
         f = state / "pr_state"

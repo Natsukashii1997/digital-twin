@@ -179,6 +179,70 @@ class Publish(PublishBase):
             self.assertEqual(w.branch_name(ex, "t-20261118-abcdef"), P.branch_name(ex, "t-20261118-abcdef"))
 
 
+class ModelInPr(PublishBase):
+    """P-13 留痕（#195 缺口 2）：交接清单 schema 2 带这一轮用的模型，PR 正文写出来；旧格式照收、按未记录。"""
+
+    def body(self):
+        return (self.gh_state / "pr_body.md").read_text(encoding="utf-8")
+
+    def test_model_from_the_worker_reaches_the_pr_body_and_the_log(self):
+        tid = self.new_live_task()
+        r, _ = self.run_turn([self.dispatch_event(tid)], **self.with_model_log("claude", "claude-opus-5-5"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = P.publish(tid)
+        self.assertEqual((out["model"], out["model_from"]), ("claude-opus-5-5", "transcript"))
+        body = self.body()
+        self.assertIn("执行方：claude\n接入：本机 CLI（经中台，工人账号 dt-worker）\n"
+                      "模型：`claude-opus-5-5`（工人侧从 CLI 自己的会话记录读出，控制面没核实）\n", body)
+        log = [json.loads(x) for x in (self.root / "publish.jsonl").read_text().splitlines()]
+        self.assertEqual(log[-1]["model"], "claude-opus-5-5")
+
+    def test_not_recorded_and_old_manifest_say_so(self):
+        tid = self.worked()
+        P.publish(tid)
+        self.assertIn("模型：未记录（工人侧没读到这一轮用的模型）", self.body())
+        old = self.worked()                                # 还没记模型的启动脚本写的旧清单：照收
+        p = self.outbox / old / "handoff.json"
+        m = json.loads(p.read_text())
+        for k in ("model", "model_from"):
+            del m[k]
+        m["schema"] = 1
+        p.write_text(json.dumps(m))
+        self.assertIsNone(P.publish(old)["model"])
+        self.assertIn("模型：未记录", self.body())
+
+    def test_bad_model_fields_are_refused(self):
+        tid = self.worked()
+        for fields, words in (({"model": "bad name!", "model_from": "transcript"}, "内容不合格式"),
+                              ({"model": "a,b,c,d", "model_from": "transcript"}, "内容不合格式"),
+                              ({"model": "a,a", "model_from": "transcript"}, "内容不合格式"),
+                              ({"model": "gpt-6", "model_from": "guess"}, "内容不合格式"),
+                              ({"model": None, "model_from": "args"}, "内容不合格式"),
+                              ({"model": "gpt-6", "model_from": None}, "内容不合格式"),
+                              ({"model": 5, "model_from": "args"}, "内容不合格式"),
+                              ({"model": "gpt-6", "model_from": ["args"]}, "内容不合格式"),
+                              ({"model": "gpt-6", "model_from": {"a": 1}}, "内容不合格式"),
+                              ({"schema": True}, "字段不对"), ({"schema": 3}, "字段不对")):
+            with self.subTest(fields=fields):
+                self.rewrite_manifest(tid, **{"model": None, "model_from": None, "schema": 2, **fields})
+                self.rejects(tid, words)
+        p = self.outbox / tid / "handoff.json"            # schema 2 少了模型字段、schema 1 多了模型字段
+        for schema, drop in ((2, True), (1, False)):
+            m = json.loads(p.read_text())
+            m.update(schema=schema, model=None, model_from=None)
+            if drop:
+                del m["model"], m["model_from"]
+            p.write_text(json.dumps(m))
+            self.rejects(tid, "字段不对")
+
+    def test_model_names_agree_with_worker(self):
+        spec = importlib.util.spec_from_file_location("dt_worktree", SCRIPT)
+        w = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(w)
+        self.assertEqual(w.MODEL_NAME.pattern, P.MODEL_NAME.pattern)
+        self.assertEqual(w.MAX_MODELS, P.MAX_MODELS)
+
+
 class OnlyNonMain(PublishBase):
     """验收 3：只能推非 main，只推本单分支。"""
 

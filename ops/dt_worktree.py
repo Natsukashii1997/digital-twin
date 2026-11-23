@@ -25,6 +25,12 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
      后代进程清干净、整轮没收到过取消（提交后、换交接包和清单前各看一次）、再核一次凭证仍有效，才打交接包（git bundle + 清单）放进
      ~/dt-outbox/<单号>/，由主账号的受信发布脚本（hermes/scripts/autoloop_publish.py）取走核对后推分支、开 PR。
      本脚本不推、不碰 GitHub 写凭据（方案第 12 节第 6 条）。
+  5. 记下这一轮实际用的模型（P-13 留痕，#195 缺口 2）：CLI 的标准输出不经本脚本，所以 CLI 退出后读它自己的会话记录——
+     Claude 读 ~/.claude/projects/*/<会话号>.jsonl 里本轮开始后、工作目录是本单（含子目录）的回复的 message.model；Codex 读
+     ~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl 里本轮开始后、工作目录是本单的 turn_context.model（续接按线程号在所有日期里找，
+     新会话只看本轮开始那天和今天）。读不到退到启动参数里的 --model / -m；都没有记「未记录」，不猜。只在要交接的轮次读
+     （取消、超时不读），只读普通文件、每份最后 8 MB、最多 2 秒。结果写进交接清单（schema 2 的 model、model_from），
+     受信发布写进 PR 正文。这是工人侧自报，不当证据；读模型出任何错都不影响这一轮。
 
 准入不过、用时到上限、进程没清干净、交接前凭证失效、提交或交接出错：输出一条 CLI 格式的最终消息（第一行「停下了：原因」，
 回执里一张「任务停下了」通知卡），退出码 0，中台按「本轮结束」处理、不自动重派；被取消的一轮也写「停下了」（不带通知卡）。
@@ -38,7 +44,8 @@ PR 审查、常浩合并兜底，0D 的结果账本记「轮次 × 交接头提�
 路径之类；真正的边界在主账号的受信发布（再按凭证库核一遍）和 GitHub 保护（方案 5.1 第 3 条）。
 
 只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_AUTOLOOP_SHARED、DT_GRANTS_STATUS、
-DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET、DT_PF_STATUS。
+DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET、DT_PF_STATUS；
+会话记录的位置跟 CLI 一样认 CLAUDE_CONFIG_DIR、CODEX_HOME，没设就在家目录下。
 """
 import datetime as dt
 import fcntl
@@ -47,6 +54,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -63,6 +71,13 @@ CHECK_ARGS = {"claude": (["auth", "status"], ["--version"]), "codex": (["login",
 PF_STALE_SECONDS = 10 * 60                         # 门卫规则每 5 分钟核对一次；超过两个周期没刷新就当停了
 PF_ACCOUNT = "dt-worker"
 BUDGET_SECONDS = 2 * 3600                          # 每张单跨轮累计（常浩 2026-11-18 定：一律 2 小时）
+MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,63}$")     # 和 autoloop_publish.MODEL_NAME 同一写法
+MODEL_ARG = {"claude": "--model", "codex": "-m"}  # 中台插件拼命令行时给模型用的参数（agent-autoloop plugins/*/agent.ts）
+MAX_MODELS = 3                                     # 一轮里换过模型（如回退）时最多记几个
+SESSION_ID = re.compile(r"^[\w-]{1,100}$")
+LOG_TAIL = 8 * 1024 * 1024                         # 每份会话记录只读最后这么多字节
+LOG_LINE = 1024 * 1024                             # 每行最多这么多字节，超长的整行跳过
+LOG_SECONDS = 2                                    # 读模型最多花这么久（中台取消后 10 秒强杀，不能拖收尾）
 KILL_GRACE = 10
 STOP_GRACE = 7                                     # 接单程序取消后 10 秒强杀，本脚本 7 秒内先清掉 CLI 整组
 HEARTBEAT = 10                                     # 被强杀时最多少记这么多秒（审查 P2-05）
@@ -522,6 +537,119 @@ def run_cli(executor, args, admitted, place):
     return code, secs, outcome, clean
 
 
+# ---------- 这一轮用的模型（P-13 留痕） ----------
+def _seconds(text):
+    """会话记录里的 ISO 时间（结尾可能是 Z）→ 秒；不认得返回 None。"""
+    try:
+        return dt.datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _records(p, deadline):
+    """逐条读一份会话记录。会话记录在工人侧、只当资料：不跟随链接、只读普通文件（管道之类直接跳过，不会卡住）、
+    只读最后 LOG_TAIL 字节（续接的会话一直往同一个文件追加；要的只是本轮的记录），每行最多 LOG_LINE 字节，
+    过了 deadline 就不读了。"""
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return
+        if st.st_size > LOG_TAIL:
+            f.seek(st.st_size - LOG_TAIL)
+            f.readline(LOG_LINE)                  # 丢掉被切开的半行
+        while time.time() < deadline:
+            line = f.readline(LOG_LINE)
+            if not line:
+                return
+            if not line.endswith(b"\n") and len(line) >= LOG_LINE:
+                while line and not line.endswith(b"\n") and time.time() < deadline:   # 超长的行整行跳过
+                    line = f.readline(LOG_LINE)
+                continue
+            try:
+                d = json.loads(line.decode("utf-8", errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(d, dict):
+                yield d
+
+
+def _arg_after(args, flag):
+    return args[args.index(flag) + 1] if flag in args[:-1] else None
+
+
+def _here_and_now(d, place, since):
+    """工作目录是本单的（或它下面的子目录：会话中途 cd 进去也算），时间在本轮开始之后。"""
+    cwd = os.path.realpath(str(d.get("cwd") or "/nonexistent"))
+    return (cwd == place or cwd.startswith(place + os.sep)) and (_seconds(d.get("timestamp")) or 0) >= since
+
+
+def claude_models(args, place, since, deadline):
+    """Claude：会话号来自中台拼的 --session-id / --resume；只认本轮开始后、工作目录是本单的回复。"""
+    sid = _arg_after(args, "--session-id") or _arg_after(args, "--resume")
+    if not sid or not SESSION_ID.match(sid):
+        return []
+    root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    out = []
+    for p in sorted(root.glob(f"*/{sid}.jsonl")):
+        for d in _records(p, deadline):
+            if d.get("type") == "assistant" and isinstance(d.get("message"), dict) and _here_and_now(d, place, since):
+                out.append(d["message"].get("model"))
+    return out
+
+
+def codex_models(args, place, since, deadline):
+    """Codex：续接（codex exec resume … <线程号> <提示词>）写回会话开始那天的文件，按线程号在所有日期里找；
+    新会话按本地日期分目录，只看本轮开始那天和今天、本轮开始后改过的文件。都只认工作目录是本单的 turn_context。"""
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    thread = args[-2] if len(args) >= 3 and "resume" in args[:2] else None
+    if thread is not None:
+        if not SESSION_ID.match(thread):
+            return []
+        files = sorted(root.glob(f"*/*/*/rollout-*-{thread}.jsonl"))
+    else:
+        days = sorted({time.strftime("%Y/%m/%d", time.localtime(t)) for t in (since, time.time())})
+        files = [p for day in days for p in sorted((root / day).glob("rollout-*.jsonl"))]
+    out = []
+    for p in files:
+        if p.stat().st_mtime < since:
+            continue
+        for d in _records(p, deadline):
+            c = d.get("payload")
+            if d.get("type") == "turn_context" and isinstance(c, dict) and _here_and_now(
+                    {"cwd": c.get("cwd"), "timestamp": d.get("timestamp")}, place, since):
+                out.append(c.get("model"))
+    return out
+
+
+def model_used(executor, args, worktree, since):
+    """这一轮实际用的模型：(名字, 来源)。来源 transcript = CLI 自己的会话记录，args = 启动参数，(None, None) = 未记录。
+    名字不合格式的不记（会话记录是工人侧的文件，只当资料）；读的过程中出任何错都当没读到，不影响这一轮。
+    一轮里换过模型时按出现先后记，最多 MAX_MODELS 个，多的不记：这时来源写成 transcript+，由 main 记一句日志后改回 transcript。"""
+    since -= 2                                   # 会话记录和本机同一个时钟，留 2 秒余量
+    place = os.path.realpath(worktree)
+    args = list(args)
+    deadline = time.time() + LOG_SECONDS
+    try:
+        found = (claude_models(args, place, since, deadline) if executor == "claude"
+                 else codex_models(args, place, since, deadline))
+    except Exception:                            # noqa: BLE001  读模型出什么错都不能影响这一轮的结局
+        found = []
+    names = []
+    for m in found:
+        if isinstance(m, str) and MODEL_NAME.match(m) and m not in names:
+            names.append(m)
+    if names:
+        return ",".join(names[:MAX_MODELS]), "transcript" + ("+" if len(names) > MAX_MODELS else "")
+    given = _arg_after(args, MODEL_ARG[executor])
+    if given and MODEL_NAME.match(given):
+        return given, "args"
+    return None, None
+
+
 def commit_changes(task_id, place, generation):
     wt = place["worktree"]
     git("add", "-A", cwd=wt)
@@ -532,8 +660,9 @@ def commit_changes(task_id, place, generation):
     return True
 
 
-def write_handoff(executor, repo, task_id, generation, place):
-    """交接包：本单分支相对基线的提交（git bundle）+ 清单。先放包，最后原子换清单；受信发布只把它当资料。"""
+def write_handoff(executor, repo, task_id, generation, place, model=(None, None)):
+    """交接包：本单分支相对基线的提交（git bundle）+ 清单。先放包，最后原子换清单；受信发布只把它当资料。
+    清单 schema 2 比 1 多 model、model_from（这一轮用的模型和来源，未记录时两个都是 null）。"""
     wt, branch, base = place["worktree"], place["branch"], place["base"]
     head = git("rev-parse", f"refs/heads/{branch}", cwd=wt).stdout.strip()
     if head == base:
@@ -551,9 +680,10 @@ def write_handoff(executor, repo, task_id, generation, place):
         tmp.unlink()
         return "cancelled"
     os.replace(tmp, bundle)
-    manifest = {"schema": 1, "task_id": task_id, "generation": generation, "executor": executor, "repo": repo,
+    manifest = {"schema": 2, "task_id": task_id, "generation": generation, "executor": executor, "repo": repo,
                 "branch": branch, "base": base, "head": head, "bundle": bundle.name, "bundle_sha256": digest,
-                "run": os.environ.get("AGENT_AUTOLOOP_RUN", ""), "at": iso(now_tz())}
+                "run": os.environ.get("AGENT_AUTOLOOP_RUN", ""), "at": iso(now_tz()),
+                "model": model[0], "model_from": model[1]}
     mtmp = d / f".handoff.{os.getpid()}.json"
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
     os.chmod(mtmp, 0o644)
@@ -574,7 +704,7 @@ def write_handoff(executor, repo, task_id, generation, place):
     return manifest
 
 
-def after_run(executor, repo, context, admitted, place, outcome="finished", clean=True):
+def after_run(executor, repo, context, admitted, place, outcome="finished", clean=True, model=(None, None)):
     """CLI 退出后：先提交（工作不丢）；取消、超时、后代没清干净、提交后收到取消、凭证失效都不交接（审查 P1-03）。
     返回 None 表示交接了（或没有要交接的改动）；否则返回 (结局, 原因)，由 main 交一条「停下了」。"""
     task_id, gen = admitted["task_id"], admitted["generation"]
@@ -591,7 +721,7 @@ def after_run(executor, repo, context, admitted, place, outcome="finished", clea
             admit(executor, repo, context, now_tz(), check_budget=False)
         except Refused as e:
             return "stopped", f"{e.reason}，{kept}没有交接"
-        m = write_handoff(executor, repo, task_id, gen, place)
+        m = write_handoff(executor, repo, task_id, gen, place, model)
         if m == "cancelled":
             return "cancelled", f"本轮被中台取消，{kept}没有交接"
         if m and stopped():                      # 取消落在提交点之后：清单已换，结论照样是停下了，中台记这一轮已取消
@@ -659,8 +789,16 @@ def main(argv=None):
                 place = {"repo": repo, **prepare_worktree(executor, repo, admitted)}
             except (OSError, subprocess.SubprocessError) as e:
                 raise Retry(f"准备工作目录失败（{type(e).__name__}）")
+            since = time.time()
             code, secs, outcome, clean = run_cli(executor, args, admitted, place)
-            ended = after_run(executor, repo, context, admitted, place, outcome, clean)
+            model = (None, None)
+            if outcome == "finished" and clean and not stopped():   # 只有要交接的轮次才用得上；取消、超时不占收尾的时间
+                model = model_used(executor, args, place["worktree"], since)
+                if model[1] == "transcript+":
+                    model = (model[0], "transcript")
+                    log(task_id, f"这一轮换过不止 {MAX_MODELS} 个模型，只记了前 {MAX_MODELS} 个")
+                log(task_id, f"这一轮用的模型：{model[0] or '未记录'}（来源 {model[1] or '无'}）")
+            ended = after_run(executor, repo, context, admitted, place, outcome, clean, model)
         finally:
             os.close(lock)
     except Refused as e:
