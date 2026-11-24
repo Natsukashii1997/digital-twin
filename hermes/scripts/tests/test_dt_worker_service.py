@@ -57,6 +57,10 @@ class FakeHost(S.Host):
         self.print_disabled_code = 0
         self.ps_fail_from = None          # 第几次看进程表起 ps 出错
         self.bootstrap_fails = 0          # 前几次 bootstrap 失败
+        self.bootstrap_fail_loads = False # bootstrap 报失败、服务却装上了
+        self.bootouts = 0                 # 卸服务（bootout system/…）第几次
+        self.sticky_from_bootout = None   # 从第几次起 bootout 卸不掉
+        self.unclear_from_bootout = None  # 从第几次起 bootout 之后 print 查不清（返回 5）
 
     def is_root(self):
         return True
@@ -95,12 +99,18 @@ class FakeHost(S.Host):
         if verb == "bootstrap":
             if self.bootstrap_fails > 0:
                 self.bootstrap_fails -= 1
+                if self.bootstrap_fail_loads:
+                    self.loaded = True
                 return 5, "Bootstrap failed: 5: Input/output error"
             self.loaded = True
             return 0, ""
         if verb == "bootout":
             if args[1] == f"system/{S.LABEL}":
-                self.loaded = False
+                self.bootouts += 1
+                if self.unclear_from_bootout is not None and self.bootouts >= self.unclear_from_bootout:
+                    self.print_code = 5
+                if self.sticky_from_bootout is None or self.bootouts < self.sticky_from_bootout:
+                    self.loaded = False
             return 0, ""
         if verb == "print":
             if self.print_code is not None:
@@ -187,11 +197,11 @@ class PlistShape(unittest.TestCase):
         self.assertNotIn("StandardErrorPath", p)
 
 
-@unittest.skipUnless(sys.platform == "darwin", "要 macOS 的 sysctl kern.boottime（CI 是 Linux）")
+@unittest.skipUnless(sys.platform == "darwin", "要 macOS 的 stat -f、sysctl kern.boottime（CI 是 Linux）")
 class Wrapper(unittest.TestCase):
-    """服务 plist 里那段 sh 真跑：门卫状态是本次开机的 state=ok、0 ≤ 现在 − 修改时间 ≤ 600、而且修改时间（按秒）
-    晚于这段 sh 起来的时间，才启动接单程序，日志追加到 ~/.agent-autoloop/logs/up.log。等待间隔换成 0.2 秒；
-    要「起来之后写的」就先起来、过一秒多再写，修改时间是真实的写入时间。"""
+    """服务 plist 里那段 sh 真跑：它起来之后门卫新发布过状态文件（身份变了：门卫写临时文件再 mv 换掉），而且新的那份是
+    本次开机的 state=ok、enabled=yes、users 里有本账号、0 ≤ 现在 − 修改时间 ≤ 600，才启动接单程序，日志追加到
+    ~/.agent-autoloop/logs/up.log。等待间隔换成 0.2 秒。"""
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -208,27 +218,25 @@ class Wrapper(unittest.TestCase):
         out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
         self.boot = re.search(r"sec = (\d+)", out).group(1)
 
-    def ok(self):
-        return f"at=x boot={self.boot} state=ok enabled=yes rules=9 users=dt-worker\n"
+    def ok(self, **change):
+        f = {"at": "x", "boot": self.boot, "state": "ok", "enabled": "yes", "rules": "9", "users": "dt-worker,dt-secretary"}
+        f.update(change)
+        return " ".join(f"{k}={v}" for k, v in f.items() if v is not None) + "\n"
 
-    def write(self, text, age=None):
-        """写状态文件；age 给了就把修改时间摆到 age 秒以前（负数 = 以后）。"""
-        self.status.write_text(text)
+    def publish(self, text, age=None):
+        """像门卫那样发布：写临时文件、（可选）把修改时间摆到 age 秒以前，再 mv 换掉——身份跟着变。"""
+        tmp = self.d / "pf.status.tmp"
+        tmp.write_text(text)
         if age is not None:
-            t = time.time() - age
-            os.utime(self.status, (t, t))
+            ts = time.time() - age
+            os.utime(tmp, (ts, ts))
+        os.replace(tmp, self.status)
 
-    def start(self, script=None):
-        cmd = ["/bin/sh", "-c", script or self.script, "dt-worker-up", "/bin/sh", "-c", f'echo started; touch "{self.marker}"']
-        p = subprocess.Popen(cmd, env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"})
+    def start(self):
+        cmd = ["/bin/sh", "-c", self.script, "dt-worker-up", "/bin/sh", "-c", f'echo started; touch "{self.marker}"']
+        p = subprocess.Popen(cmd, env={"HOME": str(self.home), "PATH": "/usr/bin:/bin", "USER": "dt-worker"})
         self.addCleanup(self.stop, p)
-        return p
-
-    def started_then_write(self, text):
-        """先起来，过 1.2 秒（换了一秒）再写：修改时间按秒算也晚于起来时间。"""
-        p = self.start()
-        time.sleep(1.2)
-        self.write(text)
+        time.sleep(0.3)                              # 等它记下状态文件当时的身份
         return p
 
     def wait_for(self, path, seconds):
@@ -244,65 +252,64 @@ class Wrapper(unittest.TestCase):
             p.kill()
         p.wait()
 
-    def test_runs_when_ok_written_after_it_started(self):
-        p = self.started_then_write(self.ok())
+    def assert_waits(self, p, seconds=1.2):
+        self.assertFalse(self.wait_for(self.marker, seconds))
+        self.assertIsNone(p.poll())
+
+    def test_runs_after_new_ok_published(self):
+        self.publish(self.ok())                      # 起来之前就有的 ok
+        p = self.start()
+        self.publish(self.ok())                      # 起来之后门卫又发布了一次（同一秒也算：认身份不认时间）
         self.assertTrue(self.wait_for(self.marker, 5))
         self.assertEqual(p.wait(5), 0)
         self.assertIn("started", (self.home / ".agent-autoloop/logs/up.log").read_text())
 
-    def test_waits_when_not_ok(self):
-        for text in (f"at=x boot={self.boot} state=failed reason=x\n",
-                     f"at=x boot={self.boot} state=applying\n",
-                     "at=x boot=1 state=ok enabled=yes\n",                       # 上次开机的 ok 不算
-                     f"at=x boot={self.boot}0 state=ok\n"):                      # 前缀相同也不算
-            with self.subTest(text=text):
-                self.marker.unlink(missing_ok=True)
-                p = self.started_then_write(text)
-                self.assertFalse(self.wait_for(self.marker, 1))
-                self.assertIsNone(p.poll())
-                self.stop(p)
-
-    def test_waits_without_status_file(self):
-        p = self.start()
-        self.assertFalse(self.wait_for(self.marker, 1.5))
-        self.assertIsNone(p.poll())
-
-    def test_waits_for_ok_written_after_it_started(self):
-        """第 1 轮 P1-02：门卫判定失败、旧的 ok 作废不掉（只清了进程）时，launchd 重起的外壳不能拿旧的 ok 放行；
-        门卫下一次核对成功写了新的 ok 才起来。"""
-        self.write(self.ok(), 5)                     # 这段 sh 起来之前写的 ok（哪怕只早 5 秒）
-        p = self.start()
-        self.assertFalse(self.wait_for(self.marker, 1.5))
-        self.assertIsNone(p.poll())
-        self.write(self.ok())                        # 门卫又写了一次 ok（已经过了一秒多）
-        self.assertTrue(self.wait_for(self.marker, 5))
-
-    def test_waits_for_ok_written_in_the_same_second(self):
-        """第 2 轮 P2-06：按秒比，和起来同一秒写的不认（宁可多等门卫一轮，不放行可能是起来之前写的）。"""
-        self.write(self.ok(), -0.0)
-        p = self.start()                             # 和写入大概率同一秒；不同秒时修改时间也早于起来时间
-        self.assertFalse(self.wait_for(self.marker, 1.5))
-        self.assertIsNone(p.poll())
-
-    def test_waits_when_clock_went_back(self):
-        """第 2 轮 P1-02：时钟往回调过，旧 ok 的修改时间在「现在」之后：不认（0 ≤ 现在 − 修改时间）。
-        起始时间换成 0，单看这一条。"""
-        script = self.script.replace("w=$(/bin/date +%s)", "w=0")
-        self.assertNotEqual(script, self.script)
-        self.write(self.ok(), -100)
-        p = self.start(script)
-        self.assertFalse(self.wait_for(self.marker, 1.5))
-        self.assertIsNone(p.poll())
-
-    def test_waits_when_ok_is_stale(self):
-        """ok 写了超过 10 分钟没刷新（门卫停了）：不算。起始时间换成 0，只看新不新鲜。"""
-        script = self.script.replace("w=$(/bin/date +%s)", "w=0")
-        self.write(self.ok(), 700)
-        p = self.start(script)
-        self.assertFalse(self.wait_for(self.marker, 1.5))
-        self.write(self.ok(), 30)
+    def test_runs_when_status_appears_after_start(self):
+        p = self.start()                             # 起来时还没有状态文件
+        self.publish(self.ok())
         self.assertTrue(self.wait_for(self.marker, 5))
         p.wait(5)
+
+    def test_waits_for_new_publish_not_old_ok(self):
+        """第 1、3 轮 P1-02：门卫判定失败、旧的 ok 作废不掉时，launchd 重起的外壳不能拿旧的 ok 放行：碰一下修改时间
+        （时钟追上来）、原地改写内容都不算新发布；门卫真的换上新文件才起来。"""
+        self.publish(self.ok())
+        p = self.start()
+        self.assert_waits(p)
+        os.utime(self.status, None)                  # 修改时间变成「现在」，身份没变
+        self.assert_waits(p)
+        self.status.write_text(self.ok(at="y"))      # 原地改写，身份没变
+        self.assert_waits(p)
+        self.publish(self.ok())
+        self.assertTrue(self.wait_for(self.marker, 5))
+
+    def test_waits_when_clock_went_back_then_forward(self):
+        """第 3 轮 P1-02：旧 ok 的修改时间在将来（时钟往回调过）；时钟再追上来（修改时间不再在将来）也不放行。"""
+        self.publish(self.ok(), age=-100)
+        p = self.start()
+        self.assert_waits(p)
+        os.utime(self.status, None)
+        self.assert_waits(p)
+
+    def test_waits_when_new_publish_is_bad(self):
+        cases = [self.ok(state="failed"), self.ok(state="applying"), self.ok(boot="1"), self.ok(boot=self.boot + "0"),
+                 self.ok(enabled="no"), self.ok(enabled=None), self.ok(users="dt-secretary"), self.ok(users=None),
+                 self.ok(users="dt-worker2")]
+        p = self.start()
+        for text in cases:
+            with self.subTest(text=text):
+                self.publish(text)
+                self.assert_waits(p, 0.6)
+
+    def test_waits_when_new_publish_has_future_or_stale_mtime(self):
+        """新发布的那份也要 0 ≤ 现在 − 修改时间 ≤ 600（和 dt_worktree 一样）。"""
+        p = self.start()
+        self.publish(self.ok(), age=-100)            # 修改时间在将来
+        self.assert_waits(p)
+        self.publish(self.ok(), age=700)             # 超过 10 分钟
+        self.assert_waits(p)
+        self.publish(self.ok(), age=30)
+        self.assertTrue(self.wait_for(self.marker, 5))
 
 
 class Install(unittest.TestCase):
@@ -450,7 +457,7 @@ class Install(unittest.TestCase):
 
     def test_first_install_fails_to_load_rolls_back(self):
         self.host.bootstrap_fails = 5
-        with self.assertRaisesRegex(GH.Stop, "原来没装服务，新写的 plist 已删掉"):
+        with self.assertRaisesRegex(GH.Stop, "已退回原样（新写的 plist 已删掉，原来就没装着服务"):
             self.run_install()
         self.assertFalse(self.plist.exists())
         self.assertFalse(self.host.loaded)
@@ -464,6 +471,65 @@ class Install(unittest.TestCase):
         self.assertEqual(calls[0], ("sleep", S.GATE_DELAY))
         self.assertEqual(calls[1][:2], ("launchctl", "kickstart"))
         self.assertGreaterEqual(S.GATE_DELAY, 2)
+
+    def test_reinstall_unload_unclear(self):
+        """第 3 轮 P1-01：bootout 之后 print 一直查不清（不是 113）：不能说「什么都没改」，说清可能已经停了、给核实和装回的步骤；
+        plist 不动。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.unclear_from_bootout = 1
+        with self.assertRaisesRegex(GH.Stop, "bootout 之后查不清.*可能已经停了.*bootstrap system"):
+            self.run_install()
+        self.assertEqual(self.plist.read_bytes(), b"old")
+        self.assertNotIn("disable", [c[1] for c in self.host.calls if c[0] == "launchctl"])
+
+    def test_reinstall_unload_sticks(self):
+        """bootout 之后 print 一直说还装着：服务照旧在跑，什么都没改。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.sticky_from_bootout = 1
+        with self.assertRaisesRegex(GH.Stop, "卸不下来.*服务照旧在跑"):
+            self.run_install()
+        self.assertTrue(self.host.loaded)
+        self.assertEqual(self.plist.read_bytes(), b"old")
+
+    def test_rollback_unload_unclear_first_install(self):
+        """第 3 轮 P2-08：新服务装不上、回滚时卸没卸掉查不清：plist 删掉，但不报「已退回原样」，给核实步骤。"""
+        self.host.bootstrap_fails = 5
+        self.host.unclear_from_bootout = 2           # 第 1 次是装之前卸旧的（没装着），第 2 次是回滚
+        with self.assertRaisesRegex(GH.Stop, "只退回了一半：新写的 plist 已删掉，但查不清新服务还装没装.*113"):
+            self.run_install()
+        self.assertFalse(self.plist.exists())
+
+    def test_rollback_unload_sticks_with_old_plist(self):
+        """原来有 plist、没装着；新服务装不上却装上了一半、回滚卸不掉：旧 plist 写回，但报「新服务还装着」，不报退回原样。"""
+        self.plist.write_bytes(b"old")
+        self.host.bootstrap_fails = 5
+        self.host.bootstrap_fail_loads = True
+        self.host.sticky_from_bootout = 2
+        with self.assertRaisesRegex(GH.Stop, "只退回了一半：旧 plist 已写回，但新服务还装着.*卸掉就行"):
+            self.run_install()
+        self.assertEqual(self.plist.read_bytes(), b"old")
+
+    def test_rollback_unload_sticks_was_loaded(self):
+        """原来装着旧服务：回滚卸不掉新的时，提示里要先卸干净（到 113）再 bootstrap 旧的。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.bootstrap_fails = 5
+        self.host.bootstrap_fail_loads = True
+        self.host.sticky_from_bootout = 2
+        with self.assertRaisesRegex(GH.Stop, "新服务还装着.*113.*再 sudo launchctl bootstrap system"):
+            self.run_install()
+        self.assertEqual(self.plist.read_bytes(), b"old")
+
+    def test_ps_fails_after_installed(self):
+        """第 3 轮 P2-09：服务装好之后查进程表出错：不报装失败（不是 1），返回 3、plist 留着、说清查不清。"""
+        self.host.ps_fail_from = 3                   # 第 1 次装之前、第 2 次卸旧服务后，之后都出错
+        code, out = self.run_install()
+        self.assertEqual(code, 3)
+        self.assertTrue(self.plist.exists())
+        self.assertIn("进程表查不清", out)
+        self.assertIn("不是没装上", out)
 
     def test_first_install_task_appears_after_unload(self):
         """原来没装服务时卸之后才看到派单：不装回什么，停下，不写 plist。"""
@@ -540,6 +606,30 @@ class Remove(unittest.TestCase):
         self.assertTrue(self.host.loaded)
         self.assertTrue(self.host.disabled)
 
+    def test_stops_before_bootout_when_plist_not_regular(self):
+        """第 3 轮 P2-10：plist 不是普通文件（链接）：在卸服务之前就停下。"""
+        self.f.unlink()
+        self.f.symlink_to("/etc/hosts")
+        with self.assertRaisesRegex(GH.Stop, "不是普通文件"):
+            S.cmd_remove(self.host, say=quiet)
+        self.assertNotIn("bootout", [c[1] for c in self.host.calls if c[0] == "launchctl"])
+        self.assertTrue(self.host.loaded)
+
+    def test_unlink_fails_reloads(self):
+        """卸了服务却删不掉 plist：装回去，不留下没人接单的样子。"""
+        from unittest import mock
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("nope")):
+            with self.assertRaisesRegex(GH.Stop, "删不掉.*已把服务装回去"):
+                S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.host.loaded)
+        self.assertTrue(self.host.disabled)
+
+    def test_unload_unclear(self):
+        self.host.unclear_from_bootout = 1
+        with self.assertRaisesRegex(GH.Stop, "bootout 之后查不清"):
+            S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.f.exists())
+
     def test_reports_half_done_when_disabled_unreadable(self):
         """第 2 轮 P2-01：enable 返回 0，但 print-disabled 自己出错、查不清：不报成功。"""
         self.host.print_disabled_code = 1
@@ -567,6 +657,21 @@ class Remove(unittest.TestCase):
 
 
 class Status(unittest.TestCase):
+    def test_plist_and_launchd_reported_apart(self):
+        """第 3 轮 P2-11：plist 没了服务却还装着、launchd 查不清，都要看得出来。"""
+        GH.daemons().mkdir(parents=True, exist_ok=True)
+        (GH.daemons() / f"{S.LABEL}.plist").unlink(missing_ok=True)
+        for loaded, code, want in ((True, None, "plist 不存在.*launchd 里已装"),
+                                   (False, None, "plist 不存在.*launchd 里没装（找不到）"),
+                                   (False, 5, "launchd 里查不清（launchctl print 返回 5）")):
+            with self.subTest(want=want):
+                host = FakeHost()
+                host.loaded = loaded
+                host.print_code = code
+                lines = []
+                S.cmd_status(host, say=lines.append)
+                self.assertRegex("\n".join(lines), want)
+
     def test_status_reports(self):
         host = FakeHost()
         host.loaded = True
