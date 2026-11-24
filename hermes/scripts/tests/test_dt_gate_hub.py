@@ -1354,6 +1354,229 @@ def repo_fixture(root):
     return r
 
 
+class PublishCredTest(unittest.TestCase):
+    """0E-4 第 2 段（#319）：stage --gh、put-publish-token、publish on / off、status 显示开关、run gate_github。
+    账号、root 都是替身（FakeHost）：dt-gate 身份跑的自检（as_gate_tool）在用例里换成给定结果；令牌是假的格式串。"""
+    TOKEN = "ghp_" + "A1b2C3d4" * 4 + "Zz9Y"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="dt-gate-pub-")
+        self.addCleanup(tmp.cleanup)
+        self.d = Path(tmp.name)
+        users = {n: self.d / "users" / n for n in ("nat", "dt-gate")}
+        for h in users.values():
+            h.mkdir(parents=True)
+        self.users = users
+        self.host = FakeHost(users)
+        self.root = self.d / "gate"
+        (self.root / "bin").mkdir(parents=True)
+        rdir = self.d / "repo"                                  # 副本：ops 指到仓库（账号侧小工具真跑），脚本是桩
+        (rdir / "hermes/scripts").mkdir(parents=True)
+        (rdir / "ops").symlink_to(REPO / "ops")
+        (rdir / "hermes/scripts/gate_github.py").write_text("# 桩\n")
+        self.pub = rdir / "hermes/scripts/autoloop_publish.py"
+        self.pub.write_text("GENERATION_BOUNDARY = 1  # #320\n")
+        self.current = {"node": "n", "cli": "c", "engine": {"commit": "e" * 40},
+                        "repo": {"commit": "r" * 40, "dir": str(rdir)}, "staged_at": "S", "gh": {"version": "2.63.0", "sha256": "a" * 64}}
+        (self.root / "current.json").write_text(json.dumps(self.current))
+        for k, v in {"DT_GATE_ROOT": self.root, "DT_GATE_ANY_COPY": "1", "DT_GATE_SHARED": self.d / "shared/dt-gate"}.items():
+            q = mock.patch.dict(os.environ, {k: str(v)})
+            q.start()
+            self.addCleanup(q.stop)
+        self.tool_calls = []
+        self.results = {}                                       # 子命令 → (退出码, 输出, 错误)
+
+    def fake_tool(self, host, current, tool, args, timeout=3600):
+        self.tool_calls.append((tool, *args))
+        return self.results.get(args[0] + ("+online" if "--online" in args else ""), (0, "", ""))
+
+    def main(self, *argv, secret=None):
+        out = io.StringIO()
+        self.host.read_secret = lambda prompt: secret
+        with mock.patch.object(H, "as_gate_tool", self.fake_tool), mock.patch("sys.stdout", out):
+            code = H.main(list(argv), host=self.host)
+        return code, out.getvalue()
+
+    # ---------- stage --gh ----------
+    def fake_gh(self, version="2.63.0"):
+        src = self.users["nat"] / "gh"
+        src.write_text(f"#!/bin/sh\necho 'gh version {version} (2026-01-01)'\n#" + "x" * H.GH_MIN_BYTES + "\n")
+        os.chmod(src, 0o755)
+        return src
+
+    def test_stage_gh_copies_and_records_hash(self):
+        src = self.fake_gh()
+        gh = H.stage_gh(self.host, "nat", "dt-gate", src, self.root)
+        dest = self.root / "bin/gh"
+        self.assertEqual(dest.read_bytes(), src.read_bytes())
+        self.assertEqual(stat_mode(dest), 0o755)
+        self.assertEqual(gh, {"path": str(dest), "sha256": hashlib.sha256(src.read_bytes()).hexdigest(), "version": "2.63.0"})
+
+    def test_stage_gh_refuses_small_or_non_gh(self):
+        small = self.users["nat"] / "small"
+        small.write_text("#!/bin/sh\necho 'gh version 2.63.0'\n")
+        with self.assertRaisesRegex(H.Stop, "太小"):
+            H.stage_gh(self.host, "nat", "dt-gate", small, self.root)
+        src = self.fake_gh()
+        src.write_text("#!/bin/sh\necho hello\n#" + "x" * H.GH_MIN_BYTES + "\n")
+        with self.assertRaisesRegex(H.Stop, "版本号"):
+            H.stage_gh(self.host, "nat", "dt-gate", src, self.root)
+        self.assertFalse((self.root / "bin/gh").exists())     # 跑不出版本的不留下
+
+    def test_stage_without_gh_keeps_unchanged_copy_only(self):
+        src = self.fake_gh()
+        gh = H.stage_gh(self.host, "nat", "dt-gate", src, self.root)
+        self.assertEqual(H.kept_gh(self.root, {"gh": gh}), gh)
+        (self.root / "bin/gh").write_bytes(b"changed")
+        self.assertIsNone(H.kept_gh(self.root, {"gh": gh}))     # 内容变了不沿用记录
+        self.assertIsNone(H.kept_gh(self.root, None))
+
+    # ---------- put-publish-token ----------
+    def token_file(self):
+        return self.users["dt-gate"] / ".dt/github-publish.token"
+
+    def test_put_token_needs_confirm_and_a_token_shape(self):
+        code, out = self.main("put-publish-token", secret=self.TOKEN)
+        self.assertEqual(code, 1)
+        self.assertIn("--confirm", out)
+        for bad in ("", "hunter2", "ghp_short", self.TOKEN + " extra"):
+            with self.subTest(bad=bad):
+                code, out = self.main("put-publish-token", "--confirm", secret=bad)
+                self.assertEqual(code, 1)
+                self.assertIn("不像一个 GitHub 令牌", out)
+        self.assertFalse(self.token_file().exists())
+        self.assertEqual(self.tool_calls, [])
+
+    def test_put_token_writes_private_file_as_gate_and_checks(self):
+        self.results["check"] = (0, json.dumps({"ok": True, "login": "shanhao1997", "admin": False, "push": True}), "")
+        code, out = self.main("put-publish-token", "--confirm", secret=self.TOKEN + "\n")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.token_file().read_text(), self.TOKEN + "\n")
+        self.assertEqual(stat_mode(self.token_file()), 0o600)
+        self.assertEqual(stat_mode(self.token_file().parent), 0o700)
+        self.assertEqual(self.tool_calls, [("gate_github", "check", "--repo", "dt-sandbox")])
+        self.assertNotIn(self.TOKEN, out)
+
+    def test_put_token_check_failure_says_do_not_open(self):
+        self.results["check"] = (1, json.dumps({"ok": False, "reason": "权限不对 " + self.TOKEN}), "")
+        code, out = self.main("put-publish-token", "--confirm", secret=self.TOKEN)
+        self.assertEqual(code, 1)
+        self.assertIn("不要打开真发布", out)
+        self.assertNotIn(self.TOKEN, out)                       # 输出先打码
+
+    # ---------- publish on / off ----------
+    def switch(self):
+        return self.root / "publish.json"
+
+    def ok_doctor(self):
+        self.results["doctor+online"] = (0, "[通过] 联网（直连）：令牌身份和权限：shanhao1997\n自检全过\n", "")
+        self.results["doctor"] = (0, "[通过] 真发布开关：开着，放开 dt-sandbox，代理 无（直连）\n自检全过\n", "")
+
+    def test_publish_on_writes_switch_after_doctor_and_readback(self):
+        self.ok_doctor()
+        code, out = self.main("--owner-account", "nat", "publish", "on", "--confirm")
+        self.assertEqual(code, 0, out)
+        sw = json.loads(self.switch().read_text())
+        self.assertEqual({k: sw[k] for k in ("enabled", "repos", "proxy", "by")},
+                         {"enabled": True, "repos": ["dt-sandbox"], "proxy": None, "by": "nat"})
+        self.assertEqual(stat_mode(self.switch()), 0o644)
+        self.assertEqual(self.tool_calls, [("gate_github", "doctor", "--repo", "dt-sandbox", "--online"),
+                                           ("gate_github", "doctor", "--repo", "dt-sandbox")])
+        import gate_github as GG                                 # 受信发布按 gate_github 读到的也是开着
+        with mock.patch.object(GG, "SWITCH", str(self.switch())), \
+                mock.patch.object(GG, "TRUSTED_UIDS", (0, os.geteuid())), mock.patch.object(GG, "has_acl", return_value=False), \
+                mock.patch.object(GG, "root_only"):
+            self.assertEqual(GG.read_switch()["repos"], ["dt-sandbox"])
+
+    def test_publish_on_with_proxy_passes_it_to_doctor_and_switch(self):
+        self.ok_doctor()
+        code, out = self.main("publish", "on", "--confirm", "--proxy", "http://127.0.0.1:8086")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(self.switch().read_text())["proxy"], "http://127.0.0.1:8086")
+        self.assertIn(("gate_github", "doctor", "--repo", "dt-sandbox", "--online", "--proxy", "http://127.0.0.1:8086"),
+                      self.tool_calls)
+
+    def test_publish_on_refusals_leave_no_switch(self):
+        self.ok_doctor()
+        cases = [(("publish", "on"), "--confirm"),
+                 (("publish", "on", "--confirm", "--repo", "digital-twin"), "只能放开"),
+                 (("publish", "on", "--confirm", "--proxy", "http://10.0.0.1:8086"), "127.0.0.1")]
+        for argv, why in cases:
+            with self.subTest(argv=argv):
+                code, out = self.main(*argv)
+                self.assertEqual(code, 1)
+                self.assertIn(why, out)
+        self.assertEqual(self.tool_calls, [])
+        self.assertFalse(self.switch().exists())
+
+    def test_publish_on_needs_generation_boundary_320(self):
+        """副本里的受信发布没有 #320 的代次边界，就不许打开（DECIDED 11-22）。"""
+        self.ok_doctor()
+        for text in ("REAL_PUBLISH = False\n", "# GENERATION_BOUNDARY = 1\n", "GENERATION_BOUNDARY = 0\n"):
+            with self.subTest(text=text):
+                self.pub.write_text(text)
+                code, out = self.main("publish", "on", "--confirm")
+                self.assertEqual(code, 1)
+                self.assertIn("#320", out)
+        self.assertEqual(self.tool_calls, [])
+        self.assertFalse(self.switch().exists())
+
+    def test_publish_on_needs_gh_copy(self):
+        self.ok_doctor()
+        (self.root / "current.json").write_text(json.dumps({k: v for k, v in self.current.items() if k != "gh"}))
+        code, out = self.main("publish", "on", "--confirm")
+        self.assertEqual(code, 1)
+        self.assertIn("--gh", out)
+        self.assertFalse(self.switch().exists())
+
+    def test_publish_on_doctor_failure_does_not_open(self):
+        self.results["doctor+online"] = (1, "[不过] 发布令牌文件：还没放发布令牌\n", "")
+        code, out = self.main("publish", "on", "--confirm")
+        self.assertEqual(code, 1)
+        self.assertIn("没打开", out)
+        self.assertFalse(self.switch().exists())
+
+    def test_publish_on_readback_failure_removes_switch(self):
+        self.ok_doctor()
+        self.results["doctor"] = (0, "[通过] 真发布开关：关着（没有开关文件）\n", "")
+        code, out = self.main("publish", "on", "--confirm")
+        self.assertEqual(code, 1)
+        self.assertIn("已删掉开关文件", out)
+        self.assertFalse(self.switch().exists())
+
+    def test_publish_off_always_allowed(self):
+        code, out = self.main("publish", "off")
+        self.assertEqual(code, 0)
+        self.assertIn("本来就关着", out)
+        self.switch().write_text("{}")
+        code, out = self.main("publish", "off")
+        self.assertEqual(code, 0)
+        self.assertFalse(self.switch().exists())
+
+    # ---------- status、run ----------
+    def test_status_shows_gh_and_switch(self):
+        code, out = self.main("status")
+        self.assertIn("gh 副本：2.63.0", out)
+        self.assertIn("真发布开关：关着（没有开关文件）", out)
+        self.switch().write_text(json.dumps({"enabled": True, "repos": ["dt-sandbox"], "proxy": None, "at": "T", "by": "nat"}))
+        code, out = self.main("status")
+        self.assertIn("真发布开关：开着，放开 dt-sandbox，直连，nat 于 T", out)
+        self.switch().write_text("not json")
+        code, out = self.main("status")
+        self.assertIn("读不懂", out)
+
+    def test_run_allows_gate_github(self):
+        (self.root / "state.json").write_text(json.dumps({"hub_url": "http://127.0.0.1:1"}))
+        self.results["doctor"] = (0, "自检全过\n", "")
+        code, out = self.main("run", "gate_github", "doctor", "--repo", "dt-sandbox")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.tool_calls, [("gate_github", "doctor", "--repo", "dt-sandbox")])
+
+
+def stat_mode(p):
+    return os.stat(p).st_mode & 0o777
+
+
 @unittest.skipIf(SKIP_E2E, "本机没有 agent-autoloop 引擎检出或 node（或 DT_HUB_E2E=0）")
 class MigrateEndToEndTest(unittest.TestCase):
     def setUp(self):

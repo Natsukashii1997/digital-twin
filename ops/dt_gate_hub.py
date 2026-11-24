@@ -15,7 +15,16 @@
   sudo "$GATE/bin/dt-gate-hub" stage …            换新副本（旧的记成 previous.json）
   sudo "$GATE/bin/dt-gate-hub" update --confirm   把已装的服务换到新副本并重启；新的起不来自动退回旧副本
   sudo "$GATE/bin/dt-gate-hub" run <工具> [参数…]  以 dt-gate 身份跑控制面工具（白名单见 TOOLS、CLI_ALLOWED）
-  sudo "$GATE/bin/dt-gate-hub" status             只看：副本版本、搬家记录、三个服务在不在跑、中台健康检查
+  sudo "$GATE/bin/dt-gate-hub" status             只看：副本版本、gh 副本、真发布开关、搬家记录、三个服务在不在跑、中台健康检查
+受信发布的凭据和开关（0E-4，#319；照抄清单 docs/DT-ORC/migration/0E-4-放开受信发布-照抄清单.md）：
+  sudo "$GATE/bin/dt-gate-hub" stage … --gh <gh 程序>   连同 gh 一起 stage：复制成 root 的 GATE/bin/gh（记 SHA-256 和版本）；
+                         不带 --gh 时保留已有的 gh 副本
+  sudo "$GATE/bin/dt-gate-hub" put-publish-token --confirm   终端里粘贴机器账号的令牌（不显示、不进命令行），以 dt-gate 身份
+                         写进它的 ~/.dt/github-publish.token（600），再以 dt-gate 身份核令牌的账号和权限（只打印账号名和权限）
+  sudo "$GATE/bin/dt-gate-hub" publish on --confirm [--repo dt-sandbox] [--proxy http://127.0.0.1:<端口>]
+                         打开真发布：副本里的受信发布要有代次边界（#320），以 dt-gate 身份 doctor --online 全过，才写 root 的
+                         开关文件 GATE/publish.json，写完以 dt-gate 身份回读，读不出「开着」就删掉、算没打开
+  sudo "$GATE/bin/dt-gate-hub" publish off        关真发布：删掉开关文件（关永远允许，不用 --confirm）
   sudo "$GATE/bin/dt-gate-hub" rollback --confirm 退回搬家前；搬家中途被打断（进程被杀、关了终端）也用它收拾
 
 migrate 做的事（顺序固定；每一步做完记进 gate/migrating.json，被打断也能 rollback）：
@@ -87,7 +96,7 @@ REPO_FILES = ("projects.json", "ops/dt_gate_user.py", "ops/dt_gate_hub.py", "ops
 # run 子命令能以 dt-gate 身份跑的控制面工具（都在副本的 hermes/scripts 下）
 TOOLS = ("autoloop_grants", "autoloop_config", "autoloop_readonly", "autoloop_feishu", "autoloop_answer",
          "autoloop_publish", "autoloop_recovery", "autoloop_exits", "secretary", "secretary_ledger", "secretary_gate",
-         "custody", "custody_ledger", "twin_state")
+         "custody", "custody_ledger", "twin_state", "gate_github")
 # 中台命令行只放行看和停的子命令：key new / backup / restore / init / service 会把钥匙打到终端或换掉数据，不经这里
 CLI_ALLOWED = ("status", "runs", "why", "rules", "pause", "resume", "stop", "doctor")
 # git 取代码不受主账号的配置、替换对象、属性文件影响（独立审查 P2-8）
@@ -97,6 +106,9 @@ GIT = ("/usr/bin/git", "-c", "core.attributesFile=/dev/null")
 MARK = "agent-autoloop 中台已搬进 dt-gate"   # 主账号原位置的说明文件开头
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DRAIN_SECONDS = 120                    # 停写以后等在途的写做完最多几秒（0D 恢复门「停写 → 排空」）
+GH_MIN_BYTES = 1_000_000               # gh 程序再小就不像真的（防把空文件、脚本当成 gh 装进去）
+# 副本里的受信发布有代次边界（#320）才许打开真发布：DECIDED 11-22「机器级边界转 #320，放开 REAL_PUBLISH 之前必须合并」
+BOUNDARY_MARK = re.compile(r"^GENERATION_BOUNDARY = 1\b", re.M)
 
 
 class Stop(Exception):
@@ -223,6 +235,11 @@ class Host:
             return None
         m = re.search(r"\bsec\s*=\s*(\d+)", out)
         return m.group(1) if m else None
+
+    def read_secret(self, prompt):
+        """从终端读一行（不回显、不进命令行和 shell 历史）；没有终端时 getpass 退回读标准输入。"""
+        import getpass
+        return getpass.getpass(prompt)
 
     def pf_apply(self, script):
         """跑 root 副本的门卫脚本 apply（0E-1 dt_worker_pf.sh）；返回退出码，结果以状态文件为准。"""
@@ -495,6 +512,32 @@ def stage_node(host, owner, gate, src, root):
     return node, out.decode().strip()
 
 
+def stage_gh(host, owner, gate, src, root):
+    """gh 副本（0E-4）：以主账号身份读出 gh 程序，root 原子写成 GATE/bin/gh（755），以 dt-gate 身份跑 --version 核对。
+    Homebrew 的 gh 没有官方签名可核：信任「stage 那一刻主账号可信」（gate_github 头注释的剩余风险）。"""
+    code, data, err = host.as_user(owner, ["/bin/cat", str(src)], timeout=300)
+    if code != 0 or len(data) < GH_MIN_BYTES:
+        raise Stop(f"读不到 gh 程序 {src}（或太小，不像 gh）：{err.strip()[:200]}")
+    dest = root / "bin/gh"
+    write_root_file(dest, data, 0o755)
+    code, out, err = host.as_user(gate, [str(dest), "--version"])
+    m = re.match(r"^gh version (\d+\.\d+\.\d+)", out.decode("utf-8", "replace").strip())
+    if code != 0 or not m:
+        os.unlink(dest)
+        raise Stop(f"{src} 跑不出 gh 的版本号，没装：{(err or out.decode('utf-8', 'replace')).strip()[:200]}")
+    return {"path": str(dest), "sha256": hashlib.sha256(data).hexdigest(), "version": m.group(1)}
+
+
+def kept_gh(root, prev):
+    """stage 没带 --gh：已有的 gh 副本还在、内容和上次记的一样就沿用记录，否则不记（status 会说没有）。"""
+    gh = (prev or {}).get("gh")
+    dest = root / "bin/gh"
+    if not gh or not dest.is_file() or dest.is_symlink():
+        return None
+    with open(dest, "rb") as fh:
+        return gh if hashlib.sha256(fh.read()).hexdigest() == gh.get("sha256") else None
+
+
 def _quoted(p):
     if "'" in str(p):
         raise Stop(f"路径里有单引号：{p}")
@@ -536,13 +579,16 @@ def cmd_stage(host, a):
     current = {"node": str(node), "node_version": version, "engine": {"commit": esha, "dir": str(edir)},
                "repo": {"commit": rsha, "dir": str(rdir)}, "cli": str(cli), "staged_at": now_stamp()}
     old = root / "current.json"
-    if old.exists():
-        prev = read_json(old)
-        if (prev["engine"]["commit"], prev["repo"]["commit"], prev["node"]) != (esha, rsha, str(node)):
-            write_json(root / "previous.json", prev)
+    prev = read_json(old) if old.exists() else None
+    gh = stage_gh(host, owner, gate_account(), a.gh, root) if getattr(a, "gh", None) else kept_gh(root, prev)
+    if gh:
+        current["gh"] = gh
+    if prev and (prev["engine"]["commit"], prev["repo"]["commit"], prev["node"]) != (esha, rsha, str(node)):
+        write_json(root / "previous.json", prev)
     write_json(old, current)
     write_entry(rdir)
-    say(f"副本好了：引擎 {esha[:12]}、本仓库 {rsha[:12]}、node {version}")
+    say(f"副本好了：引擎 {esha[:12]}、本仓库 {rsha[:12]}、node {version}"
+        + (f"、gh {gh['version']}（SHA-256 {gh['sha256'][:12]}）" if gh else "（没有 gh 副本）"))
     say(f"  在 {root}（属 root，dt-gate 只能读和运行）；以后的命令用：sudo '{entry()}' <命令>")
     return 0
 
@@ -1449,6 +1495,103 @@ def cmd_update(host, a):
     return 0
 
 
+def as_gate_tool(host, current, tool, args, timeout=3600):
+    """以 dt-gate 身份跑副本里的一个控制面工具；环境同 dt-gate 的服务（gate_env），中台地址取 state，还没搬家时用默认。"""
+    s = load_state()
+    hub_url = (s or {}).get("hub_url") or "http://127.0.0.1:3350"
+    argv = [PY, *PY_FLAGS, str(Path(current["repo"]["dir"]) / "hermes/scripts" / f"{tool}.py"), *args]
+    env = {k: v for k, v in gate_env(host, current, hub_url).items() if k not in ("HOME", "PATH", "USER", "LOGNAME")}
+    code, out, err = host.as_user(gate_account(), argv, env=env, timeout=timeout)
+    return code, out.decode("utf-8", "replace"), err
+
+
+def gate_github():
+    """副本里的 gate_github（令牌格式、仓库名单、代理写法只在那里定义一份）；放函数里：只有发布凭据的命令用。"""
+    import gate_github as GG
+    return GG
+
+
+def cmd_put_publish_token(host, a):
+    if not a.confirm:
+        raise Stop("会把机器账号的发布令牌写进 dt-gate 的 ~/.dt/github-publish.token：确认后加 --confirm")
+    GG = gate_github()
+    current = load_current()
+    if not (Path(current["repo"]["dir"]) / "hermes/scripts/gate_github.py").is_file():
+        raise Stop("副本里没有 gate_github.py：先用合并了 0E-4 的提交重新 stage")
+    tok = host.read_secret(f"粘贴 {GG.LOGIN} 的经典令牌（只勾 public_repo；输入不显示），回车：").strip()
+    if not GG.TOKEN_RE.fullmatch(tok):
+        raise Stop("这不像一个 GitHub 令牌（ghp_… 或 github_pat_…），没写")
+    path = gate_home(host) / ".dt/github-publish.token"
+    run_helper(host, current, gate_account(), ["put", str(path), "--mode", "600", "--mkdir"], stdin=(tok + "\n").encode())
+    tok = None
+    say(f"1. 令牌已以 dt-gate 身份写进 {path}（600，内容不显示）")
+    say(f"2. 以 dt-gate 身份核令牌的账号和权限（gate_github check --repo {a.repo}）：")
+    code, out, err = as_gate_tool(host, current, "gate_github", ["check", "--repo", a.repo], timeout=300)
+    say("   " + GG.mask(out.strip() or err.strip())[:600])
+    if code != 0:
+        raise Stop("令牌放进去了，但核对没过（见上）：按原因处理（重建令牌就再跑一次本命令），不要打开真发布")
+    say("令牌核对通过。下一步：sudo …/dt-gate-hub run gate_github doctor --repo dt-sandbox --online，全过再 publish on --confirm")
+    return 0
+
+
+def read_switch_file():
+    """root 写的开关文件原样读出（只给 status 显示）；没有返回 None，读不懂返回 {"bad": 原因}。"""
+    f = gate_root() / "publish.json"
+    if not os.path.lexists(f):
+        return None
+    try:
+        if os.path.islink(f):
+            return {"bad": "是链接（受信发布当关着）"}
+        sw = read_json(f)
+        return sw if isinstance(sw, dict) else {"bad": "不是对象（受信发布当关着）"}
+    except (OSError, ValueError) as e:
+        return {"bad": f"读不懂（{type(e).__name__}，受信发布当关着）"}
+
+
+def cmd_publish(host, a):
+    f = gate_root() / "publish.json"
+    if a.state == "off":
+        if os.path.lexists(f):
+            os.unlink(f)
+            say(f"真发布已关：删掉了 {f}。受信发布从下一次起不推、不开 PR；出口账本对账照常（直连）")
+        else:
+            say("真发布本来就关着（没有开关文件）")
+        return 0
+    if not a.confirm:
+        raise Stop("打开后，dt-gate 会用机器账号的令牌真推这个仓库的 <执行方>/<单号> 分支、开 PR：确认后加 --confirm")
+    GG = gate_github()
+    if a.repo not in GG.REPOS:
+        raise Stop(f"只能放开 {'、'.join(GG.REPOS)}（gate_github.REPOS）")
+    if a.proxy:
+        try:
+            GG.valid_proxy(a.proxy)
+        except GG.NotReady as e:
+            raise Stop(str(e))
+    root_dir(host, gate_root(), make=False)
+    current = load_current()
+    pub = Path(current["repo"]["dir"]) / "hermes/scripts/autoloop_publish.py"
+    if not pub.is_file() or not BOUNDARY_MARK.search(pub.read_text(encoding="utf-8")):
+        raise Stop("副本里的受信发布还没有代次边界（#320，DECIDED 11-22：放开之前必须合并）：#320 合并、重新 stage 后再打开")
+    if not current.get("gh"):
+        raise Stop("副本里没有 gh：先 stage … --gh <gh 程序>")
+    args = ["doctor", "--repo", a.repo, "--online", *(["--proxy", a.proxy] if a.proxy else [])]
+    say(f"1. 以 dt-gate 身份自检（gate_github {' '.join(args)}）：")
+    code, out, err = as_gate_tool(host, current, "gate_github", args, timeout=600)
+    for line in GG.mask(out).strip().splitlines():
+        say("   " + line)
+    if code != 0:
+        raise Stop(f"自检有不过的项，没打开：{GG.mask(err).strip()[:200]}")
+    sw = {"enabled": True, "repos": [a.repo], "proxy": a.proxy or None, "at": now_stamp(), "by": a.owner_account}
+    write_json(f, sw, 0o644)
+    say(f"2. 写好开关文件 {f}：放开 {a.repo}，{'代理 ' + a.proxy if a.proxy else '直连'}")
+    code, out, err = as_gate_tool(host, current, "gate_github", ["doctor", "--repo", a.repo], timeout=300)
+    if code != 0 or not re.search(r"^\[通过\] 真发布开关：开着", out, re.M):
+        os.unlink(f)
+        raise Stop(f"打开后以 dt-gate 身份回读不对，已删掉开关文件、算没打开：{GG.mask(out + err).strip()[-400:]}")
+    say("3. 以 dt-gate 身份回读：开关开着。真发布已打开；随时 sudo …/dt-gate-hub publish off 关掉")
+    return 0
+
+
 def cmd_run(host, a):
     if a.tool not in TOOLS and a.tool != "agent-autoloop":
         raise Stop(f"只能跑这些：agent-autoloop、{'、'.join(TOOLS)}")
@@ -1460,12 +1603,12 @@ def cmd_run(host, a):
             hub_port = urllib.parse.urlsplit(s["hub_url"]).port
             if not listened_by(host, hub_port, host.account(gate_account())["uid"]):
                 raise Stop(f"{hub_port} 端口上在听的不是 dt-gate（中台没起来或被别人占了），不带本人密钥去；先看 status")
-        argv = [current["cli"], *a.args]
+        env = {k: v for k, v in gate_env(host, current, s["hub_url"]).items() if k not in ("HOME", "PATH", "USER", "LOGNAME")}
+        code, out, err = host.as_user(gate_account(), [current["cli"], *a.args], env=env, timeout=3600)
+        out = out.decode("utf-8", "replace")
     else:
-        argv = [PY, *PY_FLAGS, str(Path(current["repo"]["dir"]) / "hermes/scripts" / f"{a.tool}.py"), *a.args]
-    env = {k: v for k, v in gate_env(host, current, s["hub_url"]).items() if k not in ("HOME", "PATH", "USER", "LOGNAME")}
-    code, out, err = host.as_user(gate_account(), argv, env=env, timeout=3600)
-    sys.stdout.write(out.decode("utf-8", "replace"))
+        code, out, err = as_gate_tool(host, current, a.tool, a.args)
+    sys.stdout.write(out)
     sys.stderr.write(err)
     return code
 
@@ -1475,8 +1618,19 @@ def cmd_status(host, a):
         current = load_current()
         say(f"副本：引擎 {current['engine']['commit'][:12]}、本仓库 {current['repo']['commit'][:12]}、"
             f"node {current.get('node_version')}（stage 于 {current['staged_at']}）")
+        gh = current.get("gh")
+        say(f"  gh 副本：{gh['version'] + '（SHA-256 ' + gh['sha256'][:12] + '）' if gh else '没有（stage … --gh 装）'}")
     except Stop as e:
         say(f"副本：{e}")
+    sw = read_switch_file()
+    if sw is None:
+        say("真发布开关：关着（没有开关文件）")
+    elif "bad" in sw:
+        say(f"真发布开关：开关文件{sw['bad']}")
+    else:
+        say(f"真发布开关：{'开着' if sw.get('enabled') is True else '关着'}，放开 {'、'.join(map(str, sw.get('repos') or [])) or '（无）'}，"
+            f"{'代理 ' + str(sw['proxy']) if sw.get('proxy') else '直连'}，{sw.get('by') or '?'} 于 {sw.get('at') or '?'}"
+            "（令牌和联网：sudo …/dt-gate-hub run gate_github doctor --repo dt-sandbox --online）")
     s = load_state()
     if host.is_root():
         settle_progress()
@@ -1600,10 +1754,19 @@ def main(argv=None, host=None):
     p = sub.add_parser("stage")
     for k in ("engine-repo", "engine-commit", "repo", "repo-commit", "node"):
         p.add_argument(f"--{k}", required=True)
+    p.add_argument("--gh", help="连同 gh 程序一起 stage（受信发布用，0E-4）")
     sub.add_parser("preflight")
     for name in ("migrate", "windows", "rotate-worker", "update", "rollback"):
         sub.add_parser(name).add_argument("--confirm", action="store_true")
     sub.add_parser("status")
+    p = sub.add_parser("put-publish-token")
+    p.add_argument("--confirm", action="store_true")
+    p.add_argument("--repo", default="dt-sandbox")
+    p = sub.add_parser("publish")
+    p.add_argument("state", choices=("on", "off"))
+    p.add_argument("--confirm", action="store_true")
+    p.add_argument("--repo", default="dt-sandbox")
+    p.add_argument("--proxy")
     p = sub.add_parser("run")
     p.add_argument("tool")
     p.add_argument("args", nargs=argparse.REMAINDER)
@@ -1616,7 +1779,7 @@ def main(argv=None, host=None):
         return 1
     fn = {"stage": cmd_stage, "preflight": cmd_preflight, "migrate": cmd_migrate, "windows": cmd_windows,
           "rotate-worker": cmd_rotate_worker, "update": cmd_update, "run": cmd_run, "status": cmd_status,
-          "rollback": cmd_rollback}[a.cmd]
+          "rollback": cmd_rollback, "put-publish-token": cmd_put_publish_token, "publish": cmd_publish}[a.cmd]
     try:
         return fn(host, a)
     except Stop as e:
