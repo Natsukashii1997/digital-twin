@@ -11,8 +11,12 @@ loginwindow：图形会话结束，gui/<uid> 域整个没了，KeepAlive 管不�
 
 服务是什么样：/Library/LaunchDaemons/cn.digital-twin.worker-up.plist（root 所有），以 dt-worker 身份跑（UserName），
 开机自起、退出了 launchd 10 秒后重起。命令照抄原 LaunchAgent 里引擎自己写的那一条（node + agent-autoloop.ts up），
-前面套一小段 sh（写在 plist 里，root 所有）：门卫状态文件是本次开机写的 state=ok 才启动接单程序，不然每 10 秒再看一次
-——门卫规则不在生效时工人照旧不在线（原来是图形会话被清掉、碰巧不在线）。日志由这段 sh 以 dt-worker 身份追加到
+前面套一小段 sh（写在 plist 里，root 所有）：门卫状态文件是本次开机写的 state=ok、10 分钟内写的、而且是这段 sh 这次
+起来之后才写的，才启动接单程序，不然每 10 秒再看一次——门卫规则不在生效时工人照旧不在线。「这次起来之后才写的」
+（#382 L3 第 1 轮 P1-02）：门卫判定失败、旧的 ok 作废不掉（状态目录不安全那条分支只清进程就退出）时，服务被清掉后
+launchd 重起，不能拿旧的 ok 又把工人放出来；要等门卫下一次核对成功写新的 ok（每 5 分钟一次）。只比 root 写的状态
+文件的修改时间和这段 sh 自己记在内存里的起始时间，不在 dt-worker 能改的地方留记录。代价：门卫重载或接单程序自己
+崩溃后，最多 5 分钟才回来（装好时 install 叫门卫马上核对一次，不用等）。日志由这段 sh 以 dt-worker 身份追加到
 ~/.agent-autoloop/logs/up.log（不用 StandardOutPath：那是 launchd 以 root 打开的，路径在 dt-worker 能改的目录里）。
 门卫规则的承诺不变：pf 按进程的账号认，服务里的进程仍是 dt-worker；门卫清进程照旧清全部，服务在新规则下重起。
 
@@ -47,17 +51,25 @@ AGENT_LABEL = "agent-autoloop"            # 引擎 join 装的 LaunchAgent（默
 FLAG = "--disable-warning=ExperimentalWarning"
 ABS = re.compile(r"^/[A-Za-z0-9._+/-]+$")
 SEARCH_PATH = re.compile(r"^/[A-Za-z0-9._+/:-]+$")
-START_WAIT = 60                           # 装好后等接单程序起来最多几秒
+START_WAIT = 120                          # 装好后等接单程序起来最多几秒（含门卫核对一次）
+GATE_LABEL = "cn.digital-twin.pf-dt-worker"   # 门卫规则的定时服务（ops/dt_worker_pf.sh），每 5 分钟核对并写状态
 CHECK_TIMEOUT = 60
 
-# 门卫状态是本次开机写的 state=ok 才启动；日志以 dt-worker 身份追加。"$@" 是原 LaunchAgent 的命令。
+# 门卫状态是本次开机写的 state=ok、10 分钟内、而且是这段 sh 起来之后写的，才启动；日志以 dt-worker 身份追加。
+# 先读修改时间再读内容：状态文件是整个换掉的（mv），后读的内容只会比修改时间那一版更新，不会拿旧的 ok 配新的时间。
+# "$@" 是原 LaunchAgent 的命令。
 WRAPPER = r'''s="/Library/Application Support/DigitalTwin/pf-dt-worker.status"
+w=$(/bin/date +%s)
 while :; do
   b=$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null | /usr/bin/sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+  m=$(/usr/bin/stat -f %m "$s" 2>/dev/null)
   l=$(/bin/cat "$s" 2>/dev/null)
-  if [ -n "$b" ]; then
-    case " $l " in *" state=ok "*) case " $l " in *" boot=$b "*) break ;; esac ;; esac
-  fi
+  n=$(/bin/date +%s)
+  case "$b:$m:$w:$n" in *[!0-9:]*|:*|*::*|*:) ;; *)
+    if [ "$m" -gt "$w" ] && [ $((n - m)) -le 600 ]; then
+      case " $l " in *" state=ok "*) case " $l " in *" boot=$b "*) break ;; esac ;; esac
+    fi ;;
+  esac
   /bin/sleep 10
 done
 /bin/mkdir -p "$HOME/.agent-autoloop/logs"
@@ -87,8 +99,10 @@ def parse_agent(data, home):
         p = plistlib.loads(data)
     except Exception as e:                           # plistlib 对坏文件抛的异常种类很多
         raise GH.Stop(f"读不懂原 LaunchAgent（{type(e).__name__}）")
-    args = p.get("ProgramArguments") if isinstance(p, dict) else None
-    env = p.get("EnvironmentVariables") if isinstance(p, dict) else None
+    if not isinstance(p, dict) or p.get("Label") != AGENT_LABEL:
+        raise GH.Stop(f"原 LaunchAgent 的 Label 不是 {AGENT_LABEL}（后面停用、放开都按这个名字）")
+    args = p.get("ProgramArguments")
+    env = p.get("EnvironmentVariables")
     ah = autoloop_home(home)
     program = f"{ah}/app/bin/agent-autoloop.ts"
     if not (isinstance(args, list) and len(args) == 4 and all(isinstance(a, str) for a in args)):
@@ -137,6 +151,26 @@ def busy(rows, uid):
 def up_running(rows, uid, cmd):
     """接单程序本身（node 起的那个；外面那层 sh 的命令行里也有这几个字，不算）。"""
     return any(u == uid and a.split()[0] == cmd["node"] and f"{cmd['program']} up" in a for u, a in rows)
+
+
+def check_token(host, name, uid, home):
+    """Claude 长期令牌文件：~/.dt 是 700 的目录、令牌是 600 的普通文件（不是链接）、都归 dt-worker、不是空的。
+    以 dt-worker 身份 stat（不跟随链接）。返回 (通过, 说明)。没有它时 claude-proxy.sh 会退回钥匙串，没登录就读不到。"""
+    d, f = f"{home}/.dt", f"{home}/.dt/claude-oauth-token"
+    try:
+        code, so, err = host.as_user(name, ["/usr/bin/stat", "-f", "%Sp %u %z", d, f], timeout=CHECK_TIMEOUT)
+    except Exception as e:
+        return False, f"查不了（{type(e).__name__}）"
+    rows = so.decode("utf-8", "replace").splitlines() if code == 0 else []
+    if len(rows) != 2:
+        return False, f"没有令牌文件 {f}（{(err or '').strip()[:80]}）"
+    for line, mode, path in zip(rows, ("drwx------", "-rw-------"), (d, f)):
+        parts = line.split()
+        if len(parts) != 3 or parts[0] != mode or parts[1] != str(uid) or not parts[2].isdigit():
+            return False, f"{path} 不对（应为 {mode}、归 {name}；实际 {line.strip()[:60]}）"
+    if int(rows[1].split()[2]) == 0:
+        return False, f"{f} 是空的"
+    return True, "令牌文件在（600，只有本账号能读）"
 
 
 def check_logins(host, name, home):
@@ -194,7 +228,7 @@ def cmd_install(host, say=print):
         raise GH.Stop(f"读不到原 LaunchAgent {agent_plist(home)}（{err.strip()[:80]}）：dt-worker 是不是还没接过中台")
     cmd = parse_agent(data, home)
     say(f"接单程序：{cmd['node']} {cmd['program']} up")
-    logins = check_logins(host, name, home)
+    logins = {"claude 令牌": check_token(host, name, uid, home), **check_logins(host, name, home)}
     for who, (ok, why) in logins.items():
         say(f"  {who}（没登录、后台环境）：{why}")
     if not all(ok for ok, _ in logins.values()):
@@ -202,11 +236,15 @@ def cmd_install(host, say=print):
                       "`bash /Users/Shared/dt-autoloop/setup-dt-worker.sh` 补长期令牌；Codex：确认 ~/.codex/auth.json 在。"
                       "补完注销 dt-worker 再来")
     # 先装服务再停 LaunchAgent：没有图形会话时 LaunchAgent 本来就没在跑，disable 只管下次登录
-    if not GH.unload(host, f"system/{LABEL}"):
-        raise GH.Stop(f"{LABEL} 卸不下来（launchctl 一直显示还在）")
+    unload_idle(host, uid, "装")
     GH.write_root_file(plist_path(), plistlib.dumps(plist_for(name, home, cmd)), 0o644)
     host.chown(plist_path(), 0, 0)
     GH.load(host, plist_path())
+    # 叫门卫马上核对一次、写新的状态（外壳只认它起来之后写的 ok）；规则没变时门卫不重新加载、不清进程。
+    # 没叫成也不要紧：门卫每 5 分钟自己核对一次，只是要多等
+    code, out = host.launchctl("kickstart", f"system/{GATE_LABEL}")
+    if code != 0:
+        say(f"[注意] 没叫成门卫马上核对（{out[:80]}）：接单程序要等门卫下一次核对（5 分钟内）才起来")
     host.launchctl("bootout", f"gui/{uid}/{AGENT_LABEL}")
     host.launchctl("disable", f"gui/{uid}/{AGENT_LABEL}")
     if agent_disabled(host, uid):
@@ -219,7 +257,8 @@ def cmd_install(host, say=print):
             say(f"已装好：{LABEL} 在跑，接单程序起来了（几十秒内中台显示 {name} 在线）")
             return 0
         host.sleep(1)
-    say(f"[注意] 服务装上了，但 {START_WAIT} 秒没看到接单程序起来：门卫状态不是本次开机的 state=ok 时它会一直等；"
+    say(f"[注意] 服务装上了，但 {START_WAIT} 秒没看到接单程序起来：门卫状态不是它起来之后写的本次开机 state=ok 时它会一直等"
+        "（门卫每 5 分钟核对一次）；"
         f"看 sudo /usr/bin/python3 -B -E -s {Path(__file__).name} status 和 ~{name}/.agent-autoloop/logs/up.log")
     return 1
 
@@ -245,21 +284,46 @@ def cmd_status(host, say=print):
     say(f"原 LaunchAgent：{'已停用' if agent_disabled(host, uid) else '没停用'}")
     logged_in = gui_session(rows, uid)
     say(f"{name} 图形会话：{'登录着' if logged_in else '没登录'}")
+    say(f"  claude 令牌：{check_token(host, name, uid, home)[1]}")
     for who, (ok, why) in check_logins(host, name, home).items():
         say(f"  {who}：{why}" + ("（登录着时钥匙串开着，这一项不代表没登录时）" if logged_in else ""))
     return 0
 
 
+def unload_idle(host, uid, verb):
+    """卸掉服务，保证卸的时候没有派单在跑（#382 L3 第 1 轮 P1-01）。卸之前查过一次，但从那时到卸下，旧服务还在接单
+    （install 中间还跑了最长 2 分钟的登录检查）；卸下之后不会再接新单，所以再查一次就没有空档了。这时有派单在跑，
+    就把旧服务原样装回去（引擎把派单放在单独的进程组里跑、状态记在文件里，接单程序回来会接着管它），然后停下。"""
+    was_loaded = host.launchctl("print", f"system/{LABEL}")[0] == 0
+    if not GH.unload(host, f"system/{LABEL}"):
+        raise GH.Stop(f"{LABEL} 卸不下来（launchctl 一直显示还在），什么都没改；看清原因后再来")
+    if not busy(processes(host), uid):
+        return
+    if not was_loaded:
+        raise GH.Stop(f"有派单正在跑（dt-worktree 进程在），现在{verb}会把那一轮掐断，什么都没改；等它做完再来")
+    try:
+        GH.load(host, plist_path())
+    except GH.Stop as e:
+        raise GH.Stop(f"卸旧服务前刚接到一张派单（dt-worktree 在跑），想把旧服务装回去接着管它，没装上：{e}。"
+                      f"派单进程还在跑；请马上跑 status 看，必要时 sudo launchctl bootstrap system {plist_path()}")
+    raise GH.Stop(f"卸旧服务前刚接到一张派单（dt-worktree 在跑），已把旧服务装回去接着管它，什么都没改；等它做完再来{verb}")
+
+
 def cmd_remove(host, say=print):
     a = account(host)
-    if not GH.unload(host, f"system/{LABEL}"):
-        raise GH.Stop(f"{LABEL} 卸不下来（launchctl 一直显示还在），plist 留着；看清原因后再来")
+    if busy(processes(host), a["uid"]):
+        raise GH.Stop("有派单正在跑（dt-worktree 进程在），现在拆会把那一轮掐断，什么都没改；等它做完再来")
+    unload_idle(host, a["uid"], "拆")
     f = plist_path()
     if os.path.lexists(f):
         if f.is_symlink() or not f.is_file():
             raise GH.Stop(f"{f} 不是普通文件，没删；请人工查看")
         f.unlink()
-    host.launchctl("enable", f"gui/{a['uid']}/{AGENT_LABEL}")
+    code, out = host.launchctl("enable", f"gui/{a['uid']}/{AGENT_LABEL}")
+    if code != 0 or agent_disabled(host, a["uid"]):
+        say(f"[注意] 只拆了一半：{LABEL} 已拆掉，但原 LaunchAgent 没放开（{out[:80]}）。现在登录 {a['name']} 也不会接单；"
+            f"手动放开：sudo launchctl enable gui/{a['uid']}/{AGENT_LABEL}，再跑 status 核对")
+        return 1
     say(f"已拆掉 {LABEL}，原 LaunchAgent 已放开：登录 {a['name']} 后接单程序照旧起来（不登录就不在线）")
     return 0
 

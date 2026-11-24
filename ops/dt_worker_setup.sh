@@ -92,6 +92,11 @@ else
   mv -f "$TOKEN_FILE.tmp" "$TOKEN_FILE"
   echo "已存到 $TOKEN_FILE（只有本账号能读）"
 fi
+# 每次都重核权限（已有的文件也核，#382 L3 第 1 轮 P2-04）：令牌要是普通文件、不是链接，目录 700、文件 600
+[ -L ~/.dt ] || [ -L "$TOKEN_FILE" ] && stop "~/.dt 或 $TOKEN_FILE 是链接，不对；删掉后重跑这个脚本。"
+[ -f "$TOKEN_FILE" ] || stop "$TOKEN_FILE 不是普通文件；删掉后重跑这个脚本。"
+chmod 700 ~/.dt
+chmod 600 "$TOKEN_FILE"
 
 # 5. 给中台用的启动脚本：先补代理再启动（后台读不到终端设置）
 mkdir -p -m 700 ~/.agent-autoloop/bin

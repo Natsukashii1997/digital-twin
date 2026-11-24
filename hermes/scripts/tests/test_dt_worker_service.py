@@ -43,12 +43,16 @@ class FakeHost(S.Host):
         self.calls = []
         self.gui = False
         self.busy = False
+        self.busy_from_ps = None          # 第几次看进程表起有派单在跑（模拟查完之后、卸服务之前刚接到一张）
+        self.ps_calls = 0
         self.loaded = False
         self.up_starts = True
         self.disabled = False
         self.agent = engine_plist()
         self.claude = (0, json.dumps({"loggedIn": True}).encode(), "")
         self.codex = (0, b"Logged in using ChatGPT\n", "")
+        self.token = (0, f"drwx------ {UID} 96\n-rw------- {UID} 108\n".encode(), "")
+        self.enable_result = None         # 不是 None 时 launchctl enable 返回它、也不真放开
 
     def is_root(self):
         return True
@@ -76,6 +80,9 @@ class FakeHost(S.Host):
             return self.claude
         if argv[0].endswith("/codex-proxy.sh"):
             return self.codex
+        if argv[0] == "/usr/bin/stat":
+            assert argv[1:3] == ["-f", "%Sp %u %z"] and argv[3:] == [f"{HOME}/.dt", f"{HOME}/.dt/claude-oauth-token"], argv
+            return self.token
         raise AssertionError(argv)
 
     def launchctl(self, *args):
@@ -94,17 +101,22 @@ class FakeHost(S.Host):
             self.disabled = True
             return 0, ""
         if verb == "enable":
+            if self.enable_result is not None:
+                return self.enable_result
             self.disabled = False
+            return 0, ""
+        if verb == "kickstart":
             return 0, ""
         if verb == "print-disabled":
             return 0, '\t"agent-autoloop" => disabled' if self.disabled else ""
         raise AssertionError(args)
 
     def run_ps(self):
+        self.ps_calls += 1
         rows = ["  1 /sbin/launchd", "501 /usr/bin/whatever"]
         if self.gui:
             rows.append(f"{UID} /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console")
-        if self.busy:
+        if self.busy or (self.busy_from_ps is not None and self.ps_calls >= self.busy_from_ps):
             rows.append(f"{UID} /Users/Shared/dt-autoloop/bin/dt-worktree-claude -p hi")
         if self.loaded:
             rows.append(f"{UID} /bin/sh -c s=x dt-worker-up {NODE} {S.FLAG} {PROGRAM} up")
@@ -136,6 +148,8 @@ class ParseAgent(unittest.TestCase):
             engine_plist(EnvironmentVariables={**env, "AGENT_AUTOLOOP_HOME": "/tmp/other"}),
             engine_plist(EnvironmentVariables={**env, "PATH": "/usr/bin:$(evil)"}),
             engine_plist(EnvironmentVariables="x"),
+            engine_plist(Label="agent-autoloop.other"),                                 # Label 不对：停用、放开都按名字
+            plistlib.dumps({k: v for k, v in plistlib.loads(engine_plist()).items() if k != "Label"}),
         ]
         for data in bad:
             with self.subTest(data=data[:60]):
@@ -162,7 +176,8 @@ class PlistShape(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "要 macOS 的 sysctl kern.boottime（CI 是 Linux）")
 class Wrapper(unittest.TestCase):
-    """服务 plist 里那段 sh 真跑：门卫状态是本次开机的 state=ok 才启动接单程序，日志追加到 ~/.agent-autoloop/logs/up.log。"""
+    """服务 plist 里那段 sh 真跑：门卫状态是本次开机的 state=ok、10 分钟内、而且是这段 sh 起来之后写的，才启动接单程序，
+    日志追加到 ~/.agent-autoloop/logs/up.log。等待间隔换成 0.2 秒；状态文件的修改时间用 utime 摆到起来之前或之后。"""
 
     def setUp(self):
         d = tempfile.TemporaryDirectory()
@@ -174,11 +189,19 @@ class Wrapper(unittest.TestCase):
         self.marker = self.d / "ran"
         self.script = S.WRAPPER.replace("/Library/Application Support/DigitalTwin/pf-dt-worker.status", str(self.status))
         self.assertNotEqual(self.script, S.WRAPPER)
+        self.assertIn("/bin/sleep 10", self.script)
+        self.script = self.script.replace("/bin/sleep 10", "/bin/sleep 0.2")
         out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
         self.boot = re.search(r"sec = (\d+)", out).group(1)
 
-    def start(self):
-        cmd = ["/bin/sh", "-c", self.script, "dt-worker-up", "/bin/sh", "-c", f'echo started; touch "{self.marker}"']
+    def write(self, text, age):
+        """写状态文件，修改时间摆到 age 秒以前（负数 = 以后，即这段 sh 起来之后才写的）。"""
+        self.status.write_text(text)
+        t = time.time() - age
+        os.utime(self.status, (t, t))
+
+    def start(self, script=None):
+        cmd = ["/bin/sh", "-c", script or self.script, "dt-worker-up", "/bin/sh", "-c", f'echo started; touch "{self.marker}"']
         return subprocess.Popen(cmd, env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"})
 
     def wait_for(self, path, seconds):
@@ -194,8 +217,11 @@ class Wrapper(unittest.TestCase):
             p.kill()
         p.wait()
 
+    def ok(self):
+        return f"at=x boot={self.boot} state=ok enabled=yes rules=9 users=dt-worker\n"
+
     def test_runs_when_ok_this_boot(self):
-        self.status.write_text(f"at=x boot={self.boot} state=ok enabled=yes rules=9 users=dt-worker\n")
+        self.write(self.ok(), -3)
         p = self.start()
         self.addCleanup(self.stop, p)
         self.assertTrue(self.wait_for(self.marker, 5))
@@ -212,11 +238,33 @@ class Wrapper(unittest.TestCase):
                 if text is None:
                     self.status.unlink(missing_ok=True)
                 else:
-                    self.status.write_text(text)
+                    self.write(text, -3)
                 p = self.start()
                 self.assertFalse(self.wait_for(self.marker, 1.5))
                 self.assertIsNone(p.poll())
                 self.stop(p)
+
+    def test_waits_for_ok_written_after_it_started(self):
+        """P1-02：门卫判定失败、旧的 ok 作废不掉（只清了进程）时，launchd 重起的外壳不能拿旧的 ok 放行；
+        门卫下一次核对成功写了新的 ok 才起来。"""
+        self.write(self.ok(), 5)                     # 这段 sh 起来之前写的 ok（哪怕只早 5 秒）
+        p = self.start()
+        self.addCleanup(self.stop, p)
+        self.assertFalse(self.wait_for(self.marker, 1.5))
+        self.assertIsNone(p.poll())
+        self.write(self.ok(), -3)                    # 门卫又写了一次 ok
+        self.assertTrue(self.wait_for(self.marker, 5))
+
+    def test_waits_when_ok_is_stale(self):
+        """ok 写了超过 10 分钟没刷新（门卫停了）：不算。起始时间换成 0，只看新不新鲜。"""
+        script = self.script.replace("w=$(/bin/date +%s)", "w=0")
+        self.assertNotEqual(script, self.script)
+        self.write(self.ok(), 700)
+        p = self.start(script)
+        self.addCleanup(self.stop, p)
+        self.assertFalse(self.wait_for(self.marker, 1.5))
+        self.write(self.ok(), 30)
+        self.assertTrue(self.wait_for(self.marker, 5))
 
 
 class Install(unittest.TestCase):
@@ -249,6 +297,8 @@ class Install(unittest.TestCase):
         self.assertIn(("disable", f"gui/{UID}/agent-autoloop"), verbs)
         self.assertIn("已停用", out)
         self.assertIn("接单程序起来了", out)
+        self.assertIn(("kickstart", f"system/{S.GATE_LABEL}"), verbs)      # 叫门卫马上写一次新的状态
+        self.assertIn("令牌文件在", out)
         # 读 LaunchAgent、跑检查都以 dt-worker 身份
         self.assertTrue(all(c[1] == "dt-worker" for c in self.host.calls if c[0] == "as_user"))
 
@@ -277,6 +327,44 @@ class Install(unittest.TestCase):
                     with self.assertRaisesRegex(GH.Stop, "什么都没改"):
                         self.run_install()
                     self.assert_untouched()
+
+    def test_stops_when_token_file_wrong(self):
+        """P2-04：没有令牌文件时 claude-proxy.sh 会退回钥匙串，检查可能碰巧过；令牌文件本身要在、权限对。"""
+        bad = [(1, b"", "stat: No such file or directory"),
+               (0, f"drwx------ {UID} 96\n".encode(), ""),
+               (0, f"drwxr-xr-x {UID} 96\n-rw------- {UID} 108\n".encode(), ""),
+               (0, f"drwx------ {UID} 96\n-rw-r--r-- {UID} 108\n".encode(), ""),
+               (0, f"drwx------ {UID} 96\nlrwxr-xr-x {UID} 20\n".encode(), ""),
+               (0, f"drwx------ {UID} 96\n-rw------- 0 108\n".encode(), ""),
+               (0, f"drwx------ {UID} 96\n-rw------- {UID} 0\n".encode(), "")]
+        for r in bad:
+            with self.subTest(r=r):
+                self.host = FakeHost()
+                self.host.token = r
+                with self.assertRaisesRegex(GH.Stop, "什么都没改"):
+                    self.run_install()
+                self.assert_untouched()
+
+    def test_reinstall_task_started_before_unload(self):
+        """P1-01：查完「没派单在跑」到卸下旧服务之间（中间有最长 2 分钟的登录检查），旧服务还在接单、刚接到一张：
+        卸下后再看一次就发现了，把旧服务原样装回去接着管它，停下，plist 不动。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.busy_from_ps = 2                   # 第 1 次（卸之前）没有，第 2 次（卸之后）有
+        with self.assertRaisesRegex(GH.Stop, "已把旧服务装回去"):
+            self.run_install()
+        self.assertTrue(self.host.loaded)
+        self.assertEqual(self.plist.read_bytes(), b"old")
+        verbs = [c[1:] for c in self.host.calls if c[0] == "launchctl"]
+        self.assertIn(("bootstrap", "system", str(self.plist)), verbs)
+        self.assertNotIn(("disable", f"gui/{UID}/agent-autoloop"), verbs)
+
+    def test_first_install_task_appears_after_unload(self):
+        """原来没装服务时卸之后才看到派单：不装回什么，停下，不写 plist。"""
+        self.host.busy_from_ps = 2
+        with self.assertRaisesRegex(GH.Stop, "什么都没改"):
+            self.run_install()
+        self.assert_untouched()
 
     def test_stops_without_agent_plist(self):
         self.host.agent = None
@@ -314,17 +402,48 @@ class Install(unittest.TestCase):
 
 
 class Remove(unittest.TestCase):
-    def test_remove_unloads_deletes_and_enables(self):
-        host = FakeHost()
+    def setUp(self):
+        self.host = FakeHost()
         GH.daemons().mkdir(parents=True, exist_ok=True)
-        f = GH.daemons() / f"{S.LABEL}.plist"
-        f.write_bytes(b"x")
-        host.loaded = True
-        host.disabled = True
-        self.assertEqual(S.cmd_remove(host, say=quiet), 0)
-        self.assertFalse(f.exists())
-        self.assertFalse(host.loaded)
-        self.assertFalse(host.disabled)
+        self.f = GH.daemons() / f"{S.LABEL}.plist"
+        self.f.write_bytes(b"x")
+        self.addCleanup(lambda: self.f.unlink(missing_ok=True))
+        self.host.loaded = True
+        self.host.disabled = True
+
+    def test_remove_unloads_deletes_and_enables(self):
+        self.assertEqual(S.cmd_remove(self.host, say=quiet), 0)
+        self.assertFalse(self.f.exists())
+        self.assertFalse(self.host.loaded)
+        self.assertFalse(self.host.disabled)
+
+    def test_stops_while_task_running(self):
+        """P1-01：有派单在跑时拆服务会把那一轮掐断：停下，什么都不动。"""
+        self.host.busy = True
+        with self.assertRaisesRegex(GH.Stop, "派单正在跑"):
+            S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.f.exists())
+        self.assertTrue(self.host.loaded)
+        self.assertNotIn("bootout", [c[1] for c in self.host.calls if c[0] == "launchctl"])
+
+    def test_task_started_before_unload(self):
+        self.host.busy_from_ps = 2
+        with self.assertRaisesRegex(GH.Stop, "已把旧服务装回去"):
+            S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.f.exists())
+        self.assertTrue(self.host.loaded)
+        self.assertTrue(self.host.disabled)
+
+    def test_reports_half_done_when_enable_fails(self):
+        """P2-01：放开原 LaunchAgent 没成（返回非 0，或返回 0 但 print-disabled 里还是停用）：不报成功。"""
+        for result in ((1, "Operation not permitted"), (0, "")):
+            with self.subTest(result=result):
+                self.setUp()
+                self.host.enable_result = result
+                lines = []
+                self.assertEqual(S.cmd_remove(self.host, say=lines.append), 1)
+                self.assertIn("只拆了一半", "\n".join(lines))
+                self.assertIn(f"sudo launchctl enable gui/{UID}/agent-autoloop", "\n".join(lines))
 
 
 class Status(unittest.TestCase):

@@ -10,6 +10,7 @@
 
 - **根因**：接单程序是 `agent-autoloop join` 装的 LaunchAgent（gui/502 域，KeepAlive）。门卫重载时 `pkill -KILL -u dt-worker` 连 dt-worker 的 loginwindow 一起清掉，图形会话结束、gui/502 域没了，KeepAlive 管不到；重启电脑同样起不来（dt-worker 不自动登录）。中台自带的「接单程序没连上」只在有任务排队时才发（今天 11:57 那张：已离线 1080 分钟）。
 - **常浩选甲**（三选一，方案在协调会话共享笔记）：改成 LaunchDaemon `cn.digital-twin.worker-up`，以 dt-worker 身份开机自起；门卫状态是本次开机的 state=ok 才启动接单程序；Claude 改用 `claude setup-token` 长期令牌存文件（没登录时钥匙串锁着），Codex 本来就存文件；原 LaunchAgent 只 disable。门卫规则的承诺和清进程（DECIDED 11-21 第 4 条）不变。
+- **L3 第 1 轮返修（常浩 11-24 回「按这个返修」）**：① 装 / 拆服务时卸下旧服务后再查一次派单，有就把旧服务装回去、停下；② 服务外壳只认它起来之后门卫新写的 ok（门卫判定失败、作废不了旧 ok 时不会被 launchd 重起放行；代价是门卫重载后最多 5 分钟回来）；③ 拆服务核实原 LaunchAgent 真放开了、核原 LaunchAgent 的 Label、装之前核令牌文件权限。令牌一年过期的提醒另开 issue。
 - **写了**：`ops/dt_worker_service.py`（install / status / remove）、`ops/dt_worker_setup.sh` 第 4b 步和 `claude-proxy.sh` 读令牌、巡检加「工人接单程序在不在跑」；未安装。
 - **装法（合并前就可以在 PR 分支上实测）**：① 登录 dt-worker 跑 `bash <仓库>/ops/dt_worker_setup.sh`（共享副本合并后再更新）补令牌 → 注销 dt-worker；② 主账号 `sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py install`：它先实测「没登录时两家 CLI 登录读不读得到」，不过就停下、什么都不改；③ 验收：门卫强制重载一次、重启电脑一次，接单程序都自己回来（中台「在线」）。
 ## 2026-11-24 · #379 工作台记录页、沉淀页（并进 PR #378，待常浩合并）
