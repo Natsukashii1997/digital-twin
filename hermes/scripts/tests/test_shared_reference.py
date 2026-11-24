@@ -9,6 +9,7 @@
   4. 已经作废的说法不再出现（打字「派单 <确认码>」批准，0E-3b 常浩 11-23 定删掉），参考库里不夹带私聊号这类个人信息。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -22,6 +23,29 @@ MODULE = LIB / "references" / "decision-request.md"
 
 def read(p):
     return p.read_text(encoding="utf-8")
+
+
+def func(tree, name):
+    found = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name]
+    assert len(found) == 1, f"{name} 应该正好有一个，找到 {len(found)} 个"
+    return found[0]
+
+
+def calls(node, name):
+    """node 里所有调用 name(...) 或 x.name(...) 的节点。"""
+    return [c for c in ast.walk(node) if isinstance(c, ast.Call)
+            and (getattr(c.func, "id", None) == name or getattr(c.func, "attr", None) == name)]
+
+
+def bound(call, fn):
+    """按 fn 的参数表，把 call 的位置参数和关键字参数对到参数名上（不支持 *args / **kw，遇到就报错）。"""
+    names = [a.arg for a in fn.args.args]
+    assert not any(isinstance(a, ast.Starred) for a in call.args) and all(k.arg for k in call.keywords), "调用里有 * / **，静态对不上参数"
+    out = dict(zip(names, call.args))
+    for k in call.keywords:
+        assert k.arg not in out, f"参数 {k.arg} 重复"
+        out[k.arg] = k.value
+    return out
 
 
 class Files(unittest.TestCase):
@@ -145,16 +169,38 @@ class References(unittest.TestCase):
         src = read(SCRIPTS / "pdaily_act.py")
         self.assertIn('r.add_argument("--note")', src)
         self.assertNotIn("message", src.split('r = sub.add_parser("record")', 1)[1].split("sub.add_parser", 1)[0])
-        # --note 要真的一路存进拍板账：cmd_record 交给 record_choices，record_choices 写进 note（#383 第 2 轮 P2-03）
-        cmd = src.split("def cmd_record(a):", 1)[1].split("\ndef ", 1)[0]
-        self.assertRegex(cmd, r"record_choices\([^)]*\ba\.note\)")
-        self.assertRegex(src, r"def record_choices\([^)]*\bnote=None\)")
-        self.assertIn('e["note"] = P.clip(note, 200)', src)
         self.assertIn("不自己找个文件代替账本", self.text)
         self.assertIn("依赖这个决定的动作也先不做", self.text)
-        # 账本只要多了任何子命令（不管叫什么），就回来改模块第 4 节第 2 条的过渡办法（#383 第 2 轮 P2-03）
-        subs = set(re.findall(r'add_parser\("([a-z_-]+)"', read(SCRIPTS / "openloop.py")))
-        self.assertEqual(subs, {"scan", "show"}, "账本命令变了：改模块第 4 节第 2 条的过渡办法")
+
+    def test_note_reaches_ledger(self):
+        # --note 要真的一路存进拍板账（#383 第 2、3 轮 P2-03）：按语法树把 cmd_record 里调 record_choices 的
+        # 每个参数对到参数名上，a.note 必须落在 note 这个参数；record_choices 里要把 note 截到 200 字写进 e["note"]，
+        # 再把 e 追加进账
+        tree = ast.parse(read(SCRIPTS / "pdaily_act.py"))
+        rc = func(tree, "record_choices")
+        hits = calls(func(tree, "cmd_record"), "record_choices")
+        self.assertEqual(len(hits), 1)
+        note = bound(hits[0], rc).get("note")
+        self.assertEqual(ast.dump(note) if note else None, ast.dump(ast.parse("a.note", mode="eval").body))
+        want = ast.dump(ast.parse('e["note"] = P.clip(note, 200)').body[0])
+        self.assertIn(want, [ast.dump(n) for n in ast.walk(rc) if isinstance(n, ast.Assign)])
+        self.assertTrue(any(len(c.args) == 1 and getattr(c.args[0], "id", None) == "e" for c in calls(rc, "append")))
+
+    def test_ledger_has_no_disposition_entry_yet(self):
+        # 账本只要多了任何子命令（不管叫什么、怎么写引号），就回来改模块第 4 节第 2 条的过渡办法（#383 第 2、3 轮 P2-03）
+        names = []
+        for c in calls(ast.parse(read(SCRIPTS / "openloop.py")), "add_parser"):
+            self.assertTrue(c.args and isinstance(c.args[0], ast.Constant) and isinstance(c.args[0].value, str),
+                            f"第 {c.lineno} 行的 add_parser 第一个参数不是字面字符串，静态核不了")
+            names.append(c.args[0].value)
+        self.assertEqual(sorted(names), ["scan", "show"], "账本命令变了：改模块第 4 节第 2 条的过渡办法")
+
+    def test_ledger_exception_keeps_own_approval(self):
+        # 没地方存时的那条例外：只是先产生第一份记录，派单通道自己的批准照旧（#383 第 3 轮 P2-03）
+        item = next(l for l in self.text.splitlines() if l.strip().startswith("- 账本里的事"))
+        rest = item.split("唯一的例外", 1)[1]
+        for w in ("递派单提议", "开车间单", "原任务号、消息号、原话", "再按那条通道自己的批准走", "原话里有受限内容的不抄"):
+            self.assertIn(w, rest)
 
 
 class NoStaleOrPrivate(unittest.TestCase):
