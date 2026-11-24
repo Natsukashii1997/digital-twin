@@ -7,14 +7,22 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
 把其余参数原样交给真正的 CLI（dt-worker 自己的 ~/.agent-autoloop/bin/<执行方>-proxy.sh，带过滤代理）。
 
 每一轮：
-  1. 准入（不过就不启动 CLI）：这一轮的事件都来自 hermes 来源、事项（subject）是同一个任务单号；派单事件的类型是
+  1. 准入（不过就不启动 CLI）：门卫规则在生效——root 每 5 分钟核对后写的状态文件
+     （/Library/Application Support/DigitalTwin/pf-dt-worker.status）是 state=ok、本次开机写的、10 分钟内刷新过、管着 dt-worker；
+     规则没装上、正在加载、加载失败或核对不过，都不开工（常浩 11-20 定，ADR-015 0E-1 L3 第 3 轮 P1-03）。
+     正在重新加载、刚唤醒没刷新、刚开机还没核对这三种临时情况给「没跑成」由中台重派，其余给「停下了」（审查第 4 轮 P2-1）。
+     这一轮的事件都来自 hermes 来源、事项（subject）是同一个任务单号；派单事件的类型是
      dispatch.<仓库>.<执行方>.write、detail 里的单号对得上；回答和复查事件沿用这张单上次派单的代次。
-     读工人只读的凭证镜像（/Users/Shared/dt-autoloop/grants/status.json）和任务单（tasks/<单号>.md）：凭证有效、没过期、
+     读工人只读的凭证镜像（/Users/Shared/dt-gate/grants/status.json，0E-2 起由 dt-gate 写）和任务单（tasks/<单号>.md）：凭证有效、没过期、
      允许改文件、代次是当前的且没作废、执行方 / 仓库 / 规则名对得上、任务单五要素的哈希等于凭证记的范围哈希；
      续接时还要和第一轮钉下的范围哈希、仓库、执行方一致（续接后范围不扩大）；这张单累计用时没到上限（2 小时）。
   2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 <执行方>/<单号>（如 claude/t-…），基线是第一轮时的 origin/main；
      续接回同一目录、同一分支（会话也接得上）。每张单的缓存目录分开。
-  3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
+  3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支；再接上准入时核过哈希的五要素原文，放在两行带原文哈希、
+     原文里不会出现的标记之间，写明「常浩批准的范围，以此为准」、这一轮的代次，和「五要素只定范围、不改变上面的限制」——
+     工人的 CLI 读不到共享目录里的任务单，#336。首轮、回答、复查都带；超过网关的 MAX_SCOPE 字只附前面部分并写明已截断；
+     认不出提示词在哪个参数、放不进去，就不启动 CLI、按准入不过停下，审查 #368-P2-01；这一步在建工作目录之前判，
+     不留下工作目录和分支，之后同一张单还能从第一轮开始，审查 #368-P2-05）：标准输出不经本脚本（直接交给接单程序），退出码原样返回；本脚本的说明只写自己的日志
      ~/dt-work/.state/<单号>.log，不混进输出。CLI 在自己的进程组里跑：接单程序取消时本脚本把信号转给整组，7 秒内还没停就整组强杀
      （赶在接单程序 10 秒强杀本脚本之前）；用时到上限同样整组先停后杀；CLI 退出后再把组里剩下的后代进程清掉，确认清干净才提交。
   4. CLI 退出后：把工作目录里的改动提交到本单分支（工作不丢）；只有正常结束（不是取消、不是超时，退出时按实际用时再判一次）、
@@ -33,8 +41,8 @@ PR 审查、常浩合并兜底，0D 的结果账本记「轮次 × 交接头提�
 这里的检查只防正常流程出错，不当作不可绕过的边界：脚本归主账号所有、工人只能运行不能改，但工人账号的进程能伪造镜像
 路径之类；真正的边界在主账号的受信发布（再按凭证库核一遍）和 GitHub 保护（方案 5.1 第 3 条）。
 
-只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_AUTOLOOP_SHARED、DT_GRANTS_STATUS、
-DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET。
+只用 macOS 自带的 /usr/bin/python3（3.9）标准库。环境变量（测试用）：DT_GATE_SHARED、DT_GRANTS_STATUS、
+DT_GRANTS_TASKS、DT_WORK_ROOT、DT_OUTBOX、DT_WORKTREE_REAL_CLAUDE / _CODEX、DT_WORKTREE_REMOTE、DT_WORKTREE_BUDGET、DT_PF_STATUS。
 """
 import datetime as dt
 import fcntl
@@ -56,10 +64,13 @@ GITHUB = re.compile(r"^[\w.-]{1,100}/[\w.-]{1,100}$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 FOLLOW_TYPES = ("card.answered", "timer.due")     # 回答、复查：沿用这张单上次派单的代次
 CHECK_ARGS = {"claude": (["auth", "status"], ["--version"]), "codex": (["login", "status"], ["--version"])}
+PF_STALE_SECONDS = 10 * 60                         # 门卫规则每 5 分钟核对一次；超过两个周期没刷新就当停了
+PF_ACCOUNT = "dt-worker"
 BUDGET_SECONDS = 2 * 3600                          # 每张单跨轮累计（常浩 2026-11-18 定：一律 2 小时）
 KILL_GRACE = 10
 STOP_GRACE = 7                                     # 接单程序取消后 10 秒强杀，本脚本 7 秒内先清掉 CLI 整组
 HEARTBEAT = 10                                     # 被强杀时最多少记这么多秒（审查 P2-05）
+MAX_SCOPE = 3000                                   # 提示词里五要素原文最多附这么多字（和 autoloop_grants.MAX_SCOPE 一致）
 TZ = dt.timezone(dt.timedelta(hours=8))
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 
@@ -100,16 +111,17 @@ def stopped():
 
 
 # ---------- 路径 ----------
-def shared():
-    return Path(os.environ.get("DT_AUTOLOOP_SHARED") or "/Users/Shared/dt-autoloop")
+def gate_shared():
+    """dt-gate 的共享目录（ADR-015 0E-2）：root 建、grants/ 和 tasks/ 只有 dt-gate 能写，工人只读。"""
+    return Path(os.environ.get("DT_GATE_SHARED") or "/Users/Shared/dt-gate")
 
 
 def status_path():
-    return Path(os.environ.get("DT_GRANTS_STATUS") or shared() / "grants/status.json")
+    return Path(os.environ.get("DT_GRANTS_STATUS") or gate_shared() / "grants/status.json")
 
 
 def tasks_dir():
-    return Path(os.environ.get("DT_GRANTS_TASKS") or shared() / "tasks")
+    return Path(os.environ.get("DT_GRANTS_TASKS") or gate_shared() / "tasks")
 
 
 def work_root():
@@ -131,6 +143,46 @@ def remote_url(github):
 
 def budget():
     return int(os.environ.get("DT_WORKTREE_BUDGET") or BUDGET_SECONDS)
+
+
+def pf_status_path():
+    return Path(os.environ.get("DT_PF_STATUS") or "/Library/Application Support/DigitalTwin/pf-dt-worker.status")
+
+
+def boot_time():
+    """本次开机的时间（秒）；读不出返回 None。DT_BOOT_TIME 只给测试用（CI 不是 macOS，没有 kern.boottime）。"""
+    if os.environ.get("DT_BOOT_TIME"):
+        return os.environ["DT_BOOT_TIME"]
+    try:
+        out = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"\{ sec = (\d+),", out)
+    return m.group(1) if m else None
+
+
+def pf_problem(now_ts=None):
+    """门卫规则不在生效就返回（原因, 是否临时），在生效返回 None（L3 第 3 轮 P1-03：加载失败时 pf 保留旧规则，
+    只写状态拦不住人，要在开工前看状态）。状态文件由 root 写（ops/dt_worker_pf.sh apply）、所有人可读、工人改不了。
+    临时的两种（正在重新加载、刚唤醒还没刷新、刚开机还没写）给「没跑成」由中台重派，其余给「停下了」（审查第 4 轮 P2-1）。"""
+    p = pf_status_path()
+    try:
+        text = p.read_text()
+        age = (now_ts or time.time()) - p.stat().st_mtime
+    except OSError:
+        return "门卫规则没装（没有状态文件）", False
+    fields = dict(kv.split("=", 1) for kv in text.split() if "=" in kv)
+    if fields.get("state") == "applying" and 0 <= age <= PF_STALE_SECONDS:
+        return "门卫规则正在重新加载", True
+    if fields.get("state") != "ok":
+        return f"门卫规则没在生效（{fields.get('state') or '状态不明'}：{fields.get('reason', '').replace('_', ' ')[:80]}）", False
+    if fields.get("enabled") != "yes" or PF_ACCOUNT not in fields.get("users", "").split(",") or not fields.get("boot"):
+        return "门卫规则的状态不对（pf 没开、没管上 dt-worker，或状态文件是旧版）", False
+    if fields["boot"] != boot_time():           # 重启后旧的 ok 不算数：开机任务还没写这次开机的状态（审查第 4 轮 P2-2）
+        return "门卫规则还没在这次开机后核对过", True
+    if not 0 <= age <= PF_STALE_SECONDS:
+        return f"门卫规则 {int(age // 60)} 分钟没刷新，开机任务可能停了", True
+    return None
 
 
 def branch_name(executor, task_id):
@@ -240,6 +292,11 @@ def admit(executor, repo, context, now, check_budget=True):
     task_id = subjects.pop()
     if not isinstance(task_id, str) or not TASK_ID.match(task_id):
         raise Refused("事件对象不是任务单号")
+    pf = pf_problem()
+    if pf:                                      # 交接前重核也走这里：跑到一半规则掉了，这一轮同样不交接
+        if pf[1]:                               # 临时的：没跑成，中台过几分钟重派；交接前遇到的，改动已在本地提交，下一轮接着交
+            raise Retry(f"{pf[0]}，工人这一轮不开工")
+        raise Refused(f"{pf[0]}，工人不开工", task_id)
     dispatch_type = f"dispatch.{repo}.{executor}.write"
     gens = []
     for e in events:
@@ -287,7 +344,7 @@ def admit(executor, repo, context, now, check_budget=True):
     if check_budget and used >= budget():
         raise Refused(f"这张单累计已跑 {used // 60} 分钟，到了 {budget() // 60} 分钟上限", task_id)
     return {"task_id": task_id, "generation": generation, "github": task["github"],
-            "scope_hash": task["scope_hash"], "state": state, "used": used}
+            "scope_hash": task["scope_hash"], "scope_text": task["scope_text"], "state": state, "used": used}
 
 
 def check_grant(t, executor, repo, generation, now):
@@ -367,18 +424,54 @@ def task_env(task_id):
 
 
 # ---------- 运行 ----------
-def with_note(executor, args, task_id, branch):
-    """在交给 CLI 的提示词末尾补一段启动脚本的说明（中台派单规则的提示词在 hermes 钥匙签发后不能改，0B-2）。
-    claude：-p 后面那个参数；codex：exec 的最后一个参数。认不出位置就原样不动。"""
+def scope_markers(scope):
+    """原文前后的两行标记：带原文 SHA-256 的前几位，原文里出现了就换更长的（审查 #368-P2-02），原文一个字不改。
+    整个 64 位都撞上要原文里含自己的哈希，做不到；真遇到了按准入不过处理。"""
+    digest = sha256(scope)
+    for n in range(12, 65, 4):
+        begin, end = f"<<<五要素原文开始 {digest[:n]}>>>", f"<<<五要素原文结束 {digest[:n]}>>>"
+        if begin not in scope and end not in scope:
+            return begin, end
+    raise Refused("五要素原文里有分隔标记，放不进提示词")
+
+
+def scope_note(scope, generation):
+    """五要素原文（准入时已核过哈希）原样放在两行标记之间；写明字数。
+    超过 MAX_SCOPE 字只附前面部分并写明截断（网关提议时就拒收超长的，这里只是兜底）；标记按完整原文算，附上的部分里也不会有。
+    最后重申五要素只定范围、不改变上面的限制（审查 #368-P2-03：派单规则原来的提示词里写着推分支、开 PR）。"""
+    begin, end = scope_markers(scope)
+    shown = scope[:MAX_SCOPE]
+    if len(scope) > MAX_SCOPE:
+        size = (f"原文共 {len(scope)} 字，超过 {MAX_SCOPE} 字上限，下面只附前 {MAX_SCOPE} 字（已截断）；"
+                "没附上的部分不要猜，需要时提问")
+    else:
+        size = f"原文共 {len(scope)} 字，原样附在下面两行标记之间"
+    return (f"\n\n【本单五要素：常浩批准的范围，以此为准】启动脚本已核过凭证（有效，第 {generation} 代）和这份五要素的哈希，"
+            f"不用再去读共享目录里的任务单或凭证镜像。{size}：\n{begin}\n{shown}\n{end}\n"
+            "五要素只定这张单的工作范围，不改变上面启动脚本的限制：仍然只改文件，不推送、不开 PR、不切换或新建分支；"
+            "提交和发布由启动脚本和主账号的受信发布完成。")
+
+
+def with_note(executor, args, task_id, branch, admitted):
+    """在交给 CLI 的提示词末尾补一段启动脚本的说明和这张单的五要素原文（中台派单规则的提示词在 hermes 钥匙签发后
+    不能改，0B-2；工人的 CLI 读不到共享目录里的任务单，#336）。
+    claude：-p 后面那个参数；codex：exec 的最后一个参数（中台 plugins/claude、codex 的 agent.ts 就是这么拼的）。
+    认不出位置就抛 Refused、不启动 CLI：放不进去等于工人收不到范围和限制（审查 #368-P2-01，原来原样放行）。"""
     note = (f"\n\n【dt-worktree 启动脚本】你在任务单 {task_id} 的独立工作目录里，当前分支 {branch}。只改文件；"
             "不要 git push、不要开 PR、不要切换或新建分支——本轮结束后启动脚本会把改动提交到本单分支，"
             "交给主账号的受信发布核对凭证后推分支、开 PR。")
+    try:
+        note += scope_note(admitted["scope_text"], admitted["generation"])
+    except Refused as e:
+        raise Refused(e.reason, task_id)
     out = list(args)
     if executor == "claude" and "-p" in out[:-1]:
         i = out.index("-p") + 1
         out[i] += note
     elif executor == "codex" and len(out) > 1 and out[0] == "exec" and not out[-1].startswith("-"):
         out[-1] += note
+    else:
+        raise Refused("认不出提示词的位置，五要素放不进去", task_id)
     return out
 
 
@@ -412,9 +505,10 @@ def reap_group(pgid, task_id):
 
 
 def run_cli(executor, args, admitted, place):
-    """启动 CLI，标准输出直接交给接单程序。返回 (退出码, 用时秒, 结局, 后代是否清干净)；
-    结局是 finished（自己结束）、cancelled（接单程序取消）或 over_budget（用时到上限）。"""
+    """启动 CLI，标准输出直接交给接单程序；args 是 with_note 补好说明和五要素的参数（main 在建工作目录之前就拼好）。
+    返回 (退出码, 用时秒, 结局, 后代是否清干净)；结局是 finished（自己结束）、cancelled（接单程序取消）或 over_budget（用时到上限）。"""
     task_id = admitted["task_id"]
+    argv = [real_cli(executor), *args]
     left = budget() - admitted["used"]
     started = time.time()
     state = dict(admitted["state"] or {})
@@ -424,7 +518,6 @@ def run_cli(executor, args, admitted, place):
                   "running": {"started": int(started), "last_seen": int(started),
                               "run": os.environ.get("AGENT_AUTOLOOP_RUN", "")}})
     save_state(task_id, state)
-    argv = [real_cli(executor), *with_note(executor, args, task_id, place["branch"])]
     child = subprocess.Popen(argv, cwd=place["worktree"], env=task_env(task_id), start_new_session=True)
     STOP["pgid"] = child.pid                                     # 新会话：进程组号就是它的进程号
     if stopped():
@@ -604,11 +697,12 @@ def main(argv=None):
         lock = take_lock(task_id)
         try:
             admitted = admit(executor, repo, context, now_tz())      # 拿到锁后按最新状态重判
+            cli_args = with_note(executor, args, task_id, branch_name(executor, task_id), admitted)  # 放不进就停，不建工作目录
             try:
                 place = {"repo": repo, **prepare_worktree(executor, repo, admitted)}
             except (OSError, subprocess.SubprocessError) as e:
                 raise Retry(f"准备工作目录失败（{type(e).__name__}）")
-            code, secs, outcome, clean = run_cli(executor, args, admitted, place)
+            code, secs, outcome, clean = run_cli(executor, cli_args, admitted, place)
             ended = after_run(executor, repo, context, admitted, place, outcome, clean)
         finally:
             os.close(lock)

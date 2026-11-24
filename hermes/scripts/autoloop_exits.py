@@ -38,8 +38,9 @@ executing 先落盘 → 这个动作已经开始（撤不回），冻结的输�
 
   autoloop_exits.py show [--json]                       只读：账本、冻结的范围
   autoloop_exits.py settle --key K --result done|failed --note 说明 --confirm   常浩核实后手动结算一条核不清的
-环境变量：DT_EXITS_DB、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置）。对账读 GitHub 一律用
-dt-gate 的最小环境和 root 装的 gh 副本（gate_github.py，没配好记连不上），不从环境变量换 gh（测试在进程内换 TEST_GH）。不调用 AI。
+环境变量：DT_EXITS_DB、DT_LARK_CLI、DT_EXITS_LARK_PROFILE（对账读飞书用哪个机器人的登录配置；门卫进程里改由
+autoloop_feishu.use 经 use_reader 换成门卫自己的身份，不看这个变量）。对账读 GitHub 一律用 dt-gate 的最小环境和 root 装的
+gh 副本（gate_github.py，没配好记连不上），不从环境变量换 gh（测试在进程内换 TEST_GH）。不调用 AI。
 """
 import argparse
 import contextlib
@@ -55,6 +56,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoloop_grants as G  # noqa: E402
+import lark_pages  # noqa: E402  读列表翻到底，翻不完报错（#312）
 
 KINDS = ("push_branch", "open_pr", "send_feishu", "merge")
 KEY = re.compile(r"^(push_branch|open_pr|send_feishu|merge):[\w./@:+-]{1,300}$")
@@ -91,6 +93,10 @@ class Definite(Exception):
 
 class Unreachable(Exception):
     """对账时外部系统连不上：保持 unknown，下次再对。"""
+
+
+class TooMany(Exception):
+    """对账读列表翻到轮数上限：外部系统连得上，但确定读不全（#338 乙）。记核不清交常浩，不当连不上。"""
 
 
 def now_tz():
@@ -463,9 +469,23 @@ def read_merge(t, row, now):
     return None, {"state": p.get("state"), "head": p.get("headRefOid")}
 
 
+_READER = [None]
+
+
+def use_reader(fn):
+    """换对账读飞书的机器人（autoloop_feishu.use 换成门卫时调）：fn(args, what) 以那个机器人的身份跑只读 lark-cli、
+    返回 data，出错抛异常。门卫发的消息只有门卫看得到，对账必须用同一个机器人读（#255 L3 P2-22）。"""
+    _READER[0] = fn
+
+
 def lark_read(args, what):
-    """以机器人身份只读调 lark-cli。用哪个机器人的登录配置由 DT_EXITS_LARK_PROFILE 定（默认猛鬼兽应用；0E 搬进 dt-gate 后
-    改成门卫应用——对账读的必须是**发这条消息的那个机器人**能看到的会话，不为对账把别的机器人凭据复制过来，审查 P2-02）。"""
+    """以机器人身份只读调 lark-cli。换过机器人（门卫，use_reader）就用它，否则用 DT_EXITS_LARK_PROFILE 指的登录配置
+    （默认猛鬼兽应用）——对账读的必须是**发这条消息的那个机器人**能看到的会话，不为对账把别的机器人凭据复制过来，审查 P2-02。"""
+    if _READER[0] is not None:
+        try:
+            return _READER[0](args, what)
+        except Exception as e:                   # 门卫的 lark-cli 跑不起来、报错、输出读不懂：一律当读不到（保持不明）
+            raise Unreachable(f"{what}：{str(e)[:200] or type(e).__name__}")
     import tidings_weekly as W
     profile = os.environ.get("DT_EXITS_LARK_PROFILE") or W.PROFILE
     try:
@@ -496,9 +516,12 @@ def _walk(x):
             yield from _walk(v)
 
 
+MARKER_KEYS = ("autoloop", "gate_grant")
+
+
 def is_ours(m, t):
     """这条消息是不是本次发出的那条（审查 P1-05）：机器人发的、消息类型对、有消息号，并且
-    卡片：某个按钮回调值里正好是 {"autoloop": 令牌}；文字：正文里有这次的随机标记。只在整份 JSON 里搜到令牌不算。"""
+    卡片：某个按钮回调值里正好是 {"autoloop": 令牌}（门卫派单确认卡是 {"gate_grant": 令牌}，target 里 marker_key 写明）；文字：正文里有这次的随机标记。只在整份 JSON 里搜到令牌不算。"""
     if (m.get("sender") or {}).get("sender_type") != "app" or not m.get("message_id"):
         return False
     if m.get("msg_type") != t.get("msg_type", "interactive"):
@@ -509,7 +532,10 @@ def is_ours(m, t):
     except ValueError:
         return False
     if t.get("msg_type", "interactive") == "interactive":
-        return any(d.get("autoloop") == t["marker"] for d in _walk(content))
+        key = t.get("marker_key", "autoloop")      # 中台卡片按钮带 autoloop 令牌；门卫派单确认卡带 gate_grant 令牌（0E-3b）
+        if key not in MARKER_KEYS:
+            return False
+        return any(d.get(key) == t["marker"] for d in _walk(content))
     return isinstance(content, dict) and t["marker"] in str(content.get("text") or "")
 
 
@@ -518,9 +544,17 @@ def read_send(t, row, now):
     一条也找不到**不能证明没发**（列表可能滞后、可能看不到，审查 P1-05）：动作开始 5 分钟内保持不明，之后记核不清交常浩，
     从不因为「没找到」就给重发资格。真飞书上这个读法未实测（演练用假 lark-cli），上线前实测。"""
     start = G.parse_iso(row["started_at"]) - dt.timedelta(minutes=1)
-    data = lark_read(["im", "+chat-messages-list", "--chat-id", t["chat"], "--start", start.isoformat(),
-                      "--end", (now + dt.timedelta(minutes=1)).isoformat(), "--order", "asc", "--page-all"], "对账")
-    hits = [m for m in (data.get("messages") or []) if isinstance(m, dict) and is_ours(m, t)]
+    args = ["im", "+chat-messages-list", "--chat-id", t["chat"], "--start", start.isoformat(),
+            "--end", (now + dt.timedelta(minutes=1)).isoformat(), "--order", "asc", "--page-all"]
+    # --page-all 默认只翻 10 页（约 500 条）、到顶不报错：只看前半截会把发了两条的认成一条。接着翻到底，
+    # 不拿半截列表下结论（#312）。读不全分两种：返回不对、没翻页标记等按连不上办（保持不明，下次再对）；
+    # 翻到轮数上限是连得上、确定读不全，再对也一样，记核不清交常浩 settle 结算（#338 乙）
+    try:
+        msgs = lark_pages.read_all(lambda extra: lark_read(args + extra, "对账"), "对账", Unreachable,
+                                   exhausted=TooMany)["messages"]
+    except TooMany as e:
+        return None, {"note": f"{e}；交常浩核实"}
+    hits = [m for m in msgs if isinstance(m, dict) and is_ours(m, t)]
     if len(hits) == 1:
         return "done", {"message_id": hits[0]["message_id"]}
     if len(hits) > 1:
@@ -599,6 +633,13 @@ def settle(key, result, note, confirm=False, ref=None):
             raise Refused("只有「核不清」的条目能手动结算；结果不明的先对账")
         log(con, key, result, f"常浩确认：{note[:200]}" + (f"（{ref}）" if ref else ""))
     return {"key": key, "state": result, **({"ref": ref} if ref else {})}
+
+
+def attempt(key):
+    """只读：这个幂等键在账本里的那一行（dict，outcome 已解析），没有返回 None。门卫收尾过期的派单确认卡时用（#369 P2-01）。"""
+    with db(write=False) as con:
+        r = con.execute("SELECT key, state, outcome FROM exits WHERE key = ?", (key,)).fetchone()
+    return r and {"key": r["key"], "state": r["state"], "outcome": json.loads(r["outcome"] or "{}")}
 
 
 def show():

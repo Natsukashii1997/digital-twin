@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """任务凭证与派单网关（批 0B-1，#195；方案 docs/agent-autoloop-底座-方案.md 5.1，规格 docs/秘书代批-规格.md §2、§5、§8）。
 
-写入类派单是 D 档：只有常浩本人在私聊里批准，才签发一张任务凭证。凭证写明仓库、范围（五要素原文的哈希）、执行方、
-允许的动作（只有 edit / push_branch / open_pr）、到期时间、状态和**执行代次**。秘书（猛鬼兽）不签凭证、不往凭证里加权限。
+写入类派单是 D 档：只有常浩本人在门卫确认卡上点「批准派单」，才签发一张任务凭证。凭证写明仓库、范围（五要素原文的哈希）、
+执行方、允许的动作（只有 edit / push_branch / open_pr）、到期时间、状态和**执行代次**。秘书（猛鬼兽）不签凭证、不往凭证里加权限。
 
-批准分两步，把常浩的话绑定到这一单的具体内容（防止模型拼参数）：
-  1. propose：猛鬼兽给出仓库、执行方、五要素；本脚本随机生成 8 位确认码（插入不覆盖，撞号重抽），提议里记完整的
-     GitHub 仓库和内容哈希，并**由本脚本自己**以猛鬼兽机器人把五要素原文和「派单 <确认码>」发到常浩私聊（不让模型转述）；
-     确认消息没发成的提议不能批；
-  2. approve：常浩在私聊回「派单 <确认码>」，本脚本用 twin_identity 回读核验（常浩本人、私聊、10 分钟内、消息没用过），
-     口令以回读原文为准；确认码对得上一条没过期、确认消息已送达、内容哈希没变、名册里仓库映射也没变的提议，才签凭证
-     （代次 1），写工人可读的任务单，再发第一个派单事件。
+批准分两步，把常浩的点击绑定到这一单的具体内容（ADR-015 §3.3、批 0E-3b：私聊打字口令不再算授权，常浩 11-23 定删掉打字批准）：
+  1. propose：秘书经 dt-gate 的窄窗口（gate_intake.py，127.0.0.1:3353）递仓库、执行方、五要素；本脚本随机生成 8 位提议号
+     和 16 位卡片令牌（插入不覆盖，撞号重抽），提议里记完整的 GitHub 仓库和内容哈希。**不发任何消息**：确认卡由门卫
+     （gatekeeper.py run）以「卫士」应用发到绑定的私聊（cards_to_send → mark_card），卫士的凭据只在门卫进程里；
+  2. decide：门卫收到点击、核过点击人和私聊是绑定的常浩之后调用：令牌对上一张提议、点的就是登记的那条卡片消息、没过期
+     （30 分钟）、没定过；批准时再核内容哈希、名册里仓库映射、中台派单规则都没变，才签凭证（代次 1），写工人可读的任务单，
+     再发第一个派单事件。「不派」、过期、核对不过都只把提议标成作废，不签。结果写回提议，门卫按它把卡片原地改成结果。
+  防重放：门卫按回调 event_id 去重；一张提议只能定一次；令牌只在这张卡上；消息号必须等于登记的卡片消息。
 
-网关只有两个入口往中台发 hermes 来源的事件：approve（本人批准建任务）和 resume（凭证有效时续接：重派、返修、更正）。
+网关只有两个入口往中台发 hermes 来源的事件：decide（本人点卡批准建任务）和 resume（凭证有效时续接：重派、返修、更正）。
 事件只带单号、代次和类别（方案 5.1 第 1 条「凭证内容不进事件」）；五要素原文写在工人只读的任务单
-/Users/Shared/dt-autoloop/tasks/<单号>.md（644，不含消息号），0C 的启动脚本据此取任务。
+/Users/Shared/dt-gate/tasks/<单号>.md（644，不含消息号；0E-2 起在 dt-gate 的共享目录），0C 的启动脚本据此取任务。
 
 发事件（send_pending）：先记账后发。每个事件在一个写事务里：先按已提交的状态重写镜像（写不成就不领取、不发），
 再现读凭证判定（状态、到期、作废代次、代次）后领取（在途），提交后才 POST；送达后条件更新为已送达。所以发出去的每个事件，
@@ -31,11 +32,11 @@
 并且这次冻结已经由推翻流程记过更正（规格 §8 第 4 步「更正先持久记在账本」，record_resolution，0B-5 调用，本批不给命令行，
 所以本批恢复入口实际关闭）；恢复时代次 +1，被作废的旧代次永久失效。
 
-恢复闸与出口账本（批 0D）：propose（发确认消息）和 send_pending（往中台发事件）先过 autoloop_recovery.ensure_open()，
+恢复闸与出口账本（批 0D）：propose 和 send_pending（往中台发事件）先过 autoloop_recovery.ensure_open()（确认卡由门卫经出口账本发），
 关着就不发（事件留在账里，开闸后 send-pending 补发）；冻结、撤销照常立刻生效，输出里的 in_flight 列出冻结前已经开始的
 受保护动作（出口账本 autoloop_exits 在凭证库写锁里落盘 executing，所以和冻结有先后，见那边的头注释）。
 
-工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-autoloop/grants/status.json（状态、代次、到期、动作）和
+工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-gate/grants/status.json（状态、代次、到期、动作）和
 任务单，读不到凭证库，也改不了镜像。check() 是主账号出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
 工人侧按镜像做的检查只防正常流程误操作，不当作不可绕过的边界；权威判定在主账号的出口（方案 5.1 第 3 条）。
 
@@ -46,14 +47,17 @@
 是否这样做，在 0A–0D 之后、真实切换前的 ADR-015 里决定。在那之前，写入单只派名册里的沙盒和明确允许写入的仓库。
 
   autoloop_grants.py propose --repo dt-sandbox --executor claude --scope-file 五要素.md [--hours 12]
-  autoloop_grants.py approve --message-id om_xxx          常浩回了「派单 <确认码>」后由猛鬼兽调用
+      （秘书不直接调：经 3353 窄窗口 POST /v1/dispatch/proposal，窗口在 dt-gate 里跑这条；批准没有命令行，只认门卫点击）
   autoloop_grants.py resume-dispatch --task T --kind redispatch|rework|correction --reason 原因
   autoloop_grants.py freeze --task T --reason 原因 | revoke --task T [--reason] | complete --task T
+      命令行的 freeze / revoke 生效之后接着把中台里这张单排队、在跑的轮次取消（stop_runs；输出 runs_stopped / runs_stop_error）
   autoloop_grants.py unfreeze --message-id om_xxx        常浩私聊「恢复 <单号> <冻结码>」（要先记过更正）
   autoloop_grants.py check --task T --action edit --generation 1
   autoloop_grants.py show [--task T] | send-pending
 环境变量：DT_GRANTS_DB（默认 DigitalTwin/autoloop/grants.db）、DT_GRANTS_STATUS（共享镜像）、DT_GRANTS_TASKS（任务单目录）、
 DT_HUB（中台地址）、DT_HERMES_SOURCE_KEY_FILE（hermes 来源密钥文件，600；0B-2 建）。
+propose 先只读查中台正在用的规则（AGENT_AUTOLOOP_HOME 下的 hub.db）里有没有 dispatch-<仓库>-<执行方>，没有、或接的事件
+类型对不上、或读不到，就拒绝并写明原因（常浩 11-23 定）；规则暂停着不拦。
 任务锁（task_lock）不另设环境变量：固定在凭证库旁边的 task-locks/<单号>.lock（跟着 DT_GRANTS_DB 走），续接、受信发布、
 秘书 ② / ③ 共用这一把（续审第 3 轮）；拿到后交出 TaskLock 凭证，已持锁的调用方把凭证传给 resume_dispatch（续审第 4 轮）。
 """
@@ -70,12 +74,14 @@ import secrets
 import sqlite3
 import stat
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import hub_listener  # noqa: E402
 import twin_identity as I  # noqa: E402
 
 TZ = dt.timezone(dt.timedelta(hours=8))
@@ -88,13 +94,17 @@ KINDS = ("redispatch", "rework", "correction")
 PROPOSAL_TTL = dt.timedelta(minutes=30)
 STALE = dt.timedelta(seconds=60)          # 在途超过这么久没结果，才当结果不明补发（POST 超时 15 秒）
 MAX_HOURS = 72
-APPROVE_TEXT = re.compile(r"^派单\s*([0-9a-f]{8})$")
+CARD_TOKEN = re.compile(r"^[0-9a-f]{16}$")
+REQUEST_ID = re.compile(r"^[0-9a-f]{16,64}$")               # 提议的请求号（客户端生成，重试带同一个，#369 P2-02）
+MAX_PENDING = 3                             # 同时等常浩点的派单提议最多几张（#369 P2-02）：秘书不可信，不能让卡淹没私聊
+MAX_PER_HOUR = 10                           # 一小时里最多登记几张派单提议
+CHOICES = ("ok", "no")                     # 确认卡上的两个按钮：批准派单、不派
 UNFREEZE_TEXT = re.compile(r"^恢复\s*(t-\d{8}-[0-9a-f]{6})\s+([0-9a-f]{6})$")
 TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")
 REF = re.compile(r"^[A-Za-z0-9][\w.-]{0,63}$")              # 续接的决定号（秘书决定号 d-…）
 REPO_NAME = re.compile(r"^[\w.-]{1,100}$")
 MAX_SCOPE = 3000
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3                          # 第 3 版（0E-3b）：提议改成门卫确认卡；dt-gate 从空库开始
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS grants (
   task_id TEXT PRIMARY KEY, repo TEXT NOT NULL, github TEXT NOT NULL, scope_text TEXT NOT NULL, scope_hash TEXT NOT NULL,
@@ -110,7 +120,10 @@ CREATE TABLE IF NOT EXISTS grant_log (id INTEGER PRIMARY KEY AUTOINCREMENT, task
   what TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS proposals (code TEXT PRIMARY KEY, repo TEXT NOT NULL, github TEXT NOT NULL,
   executor TEXT NOT NULL, scope_text TEXT NOT NULL, actions TEXT NOT NULL, valid_until TEXT NOT NULL,
-  content_hash TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, notice_message TEXT, task_id TEXT);
+  content_hash TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, card_token TEXT NOT NULL UNIQUE,
+  card_state TEXT NOT NULL DEFAULT 'pending' CHECK (card_state IN ('pending','sent','unsure')), card_message TEXT, card_note TEXT,
+  decision TEXT CHECK (decision IN ('approved','rejected','expired','void')), decided_at TEXT, decided_note TEXT,
+  click_event TEXT, closed_at TEXT, task_id TEXT, request_id TEXT UNIQUE, request_hash TEXT);
 CREATE TABLE IF NOT EXISTS used_messages (message_id TEXT PRIMARY KEY, purpose TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hub_events (event_key TEXT PRIMARY KEY, task_id TEXT NOT NULL, rule TEXT NOT NULL,
   executor TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, hub_event INTEGER, at TEXT NOT NULL,
@@ -120,6 +133,10 @@ CREATE TABLE IF NOT EXISTS hub_events (event_key TEXT PRIMARY KEY, task_id TEXT 
 
 class Rejected(Exception):
     """拒绝：说人话的原因，不带身份值、不带密钥。"""
+
+
+class CardNotReady(Rejected):
+    """派单确认卡已经发出、门卫还没登记上消息号时被点了：核不了点的是不是这张卡，不定结果，请他几秒后再点。"""
 
 
 class Busy(Rejected):
@@ -195,11 +212,11 @@ def db_path():
 
 
 def status_path():
-    return Path(os.environ.get("DT_GRANTS_STATUS") or "/Users/Shared/dt-autoloop/grants/status.json").expanduser()
+    return Path(os.environ.get("DT_GRANTS_STATUS") or "/Users/Shared/dt-gate/grants/status.json").expanduser()
 
 
 def tasks_dir():
-    return Path(os.environ.get("DT_GRANTS_TASKS") or "/Users/Shared/dt-autoloop/tasks").expanduser()
+    return Path(os.environ.get("DT_GRANTS_TASKS") or "/Users/Shared/dt-gate/tasks").expanduser()
 
 
 def now_tz():
@@ -394,6 +411,7 @@ def post_event(body):
                                  headers={"Authorization": f"Bearer {source_key()}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
+        hub_listener.check(hub_url())            # dt-gate 里：端口上不是 dt-gate 在听就不带来源钥匙去（0E-2）
         with opener.open(req, timeout=15) as r:
             return json.loads(r.read().decode())["event"]
     except urllib.error.HTTPError as e:
@@ -487,10 +505,28 @@ def send_pending(path=None, post=None, now=None):
         if ev is None:
             return results
         seen.add(ev["event_key"])
+        unsure = None
         try:
-            hub_event = post(event_body(ev, row))
-        except Rejected as e:
-            results.append({"event_key": ev["event_key"], "sent": None, "why": f"结果不明（{e}），凭证仍有效时下次补发"})
+            with route_lock():                    # 发之前在配置锁里再核一次派单规则（#369 第 4 轮 P1-01）：核过到送达之间换不掉
+                why = route_problem(row["repo"], row["executor"])
+                if why is None:
+                    try:
+                        hub_event = post(event_body(ev, row))
+                    except Rejected as e:
+                        unsure = e
+        except HubBusy as e:
+            why = f"{e}（中台配置正在变更）"
+        except Rejected as e:                     # 拿锁之前就出错（装机目录缺 autoloop_config）：没发
+            why = str(e)
+        if unsure is not None:
+            results.append({"event_key": ev["event_key"], "sent": None, "why": f"结果不明（{unsure}），凭证仍有效时下次补发"})
+            continue
+        if why is not None:                       # 没发：放回领取前的样子，规则恢复后 send-pending 补发
+            with tx(path) as con:                 # 领取时改了 sent、claimed_at、tries，原样改回（没发就不算一次尝试）
+                con.execute("UPDATE hub_events SET sent = ?, claimed_at = ?, tries = ? WHERE event_key = ? AND sent = 2",
+                            (ev["sent"], ev["claimed_at"], ev["tries"], ev["event_key"]))
+            results.append({"event_key": ev["event_key"], "sent": False, "held": True,
+                            "why": f"{why}；事件没发，留着，派单规则恢复后 send-pending 补发"})
             continue
         with tx(path) as con:
             con.execute("UPDATE hub_events SET sent = 1, hub_event = ? WHERE event_key = ? AND sent IN (2, -2)",
@@ -507,25 +543,8 @@ def _try_send(path, post, now):
 
 # ---------- 身份、私聊 ----------
 def fetch_message(message_id):
-    """回读一条消息并带正文；测试打桩这里。"""
+    """回读一条消息并带正文（只剩恢复冻结「恢复 <单号> <冻结码>」在用，改点卡是后面的小批）；测试打桩这里。"""
     return I.lark_fetch(message_id, with_text=True)
-
-
-def notify_owner(text, key):
-    """以猛鬼兽机器人把确认消息发到常浩私聊（批准口令必须来自的同一个会话）；返回消息号。测试打桩这里。"""
-    import tidings_weekly as W
-    import twin_state as T
-    try:
-        chat = T.owner_chat_id()
-    except T.StateError as e:
-        raise Rejected(str(e))
-    try:
-        mid = W.send(chat, "text", {"text": text}, key)
-    except W.SendError as e:
-        raise Rejected(f"确认消息没发出去：{e}")
-    if not mid:
-        raise Rejected("确认消息没发出去：飞书没回消息号")
-    return mid
 
 
 def verify_owner(message_id, now):
@@ -554,39 +573,41 @@ def claim_message(con, message_id, purpose, now):
     con.execute("INSERT INTO used_messages (message_id, purpose, at) VALUES (?,?,?)", (message_id, purpose, iso(now)))
 
 
-# ---------- 入口一：本人批准建任务 ----------
+# ---------- 入口一：本人点门卫确认卡建任务 ----------
 def content_hash(repo, github, executor, actions, valid_until, scope_text):
     return sha256("\n".join([repo, github, executor, ",".join(actions), valid_until, scope_text]))
 
 
-def notice_text(code, github, executor, actions, valid_until, scope_text):
-    until = parse_iso(valid_until).astimezone(TZ)
-    return "\n".join([
-        "【派单确认】猛鬼兽整理了一张写入任务，请核对：",
-        f"仓库：{github}", f"执行方：{executor}", f"允许的动作：{'、'.join(ACTION_WORDS[a] for a in actions)}",
-        f"有效到：{until:%m-%d %H:%M}", "", "五要素：", scope_text, "",
-        f"同意就回：派单 {code}", f"（{int(PROPOSAL_TTL.total_seconds() // 60)} 分钟内有效，只认你本人在这个私聊里回；不同意不用回）"])
+def require_hub_rule(repo, executor):
+    """中台正在用的配置里，这一类派单事件要正好交给受控的工人（常浩 11-23 定：名册放行、但中台没有派单规则的项目，
+    提议时就拒绝；PR #369 L3 第 3 轮 P1-01：不只看有没有规则接这类事件，还要整条规则——交给哪个 Agent、工作目录、提示词、
+    通道等——和生成的一样，那个 Agent 的定义也一样，没有别的规则也接，否则卡片上写的「交给 X」和实际执行的对不上）。
+    逐字段比对在 autoloop_config.dispatch_route_problem。只读中台库里它当前载入的配置（和 autoloop_config 核对装机同一个
+    读法），读不到不放行；规则暂停着不拦（现在的流程是先暂停、批准前由常浩恢复），暂停只豁免暂停本身。点卡批准时再核一次。
+    剩余风险：核过之后、中台接到事件之前配置又被换掉，这里拦不住；hermes 钥匙在时 autoloop_config install 不许改派单规则，
+    工人侧启动脚本还会按凭证核规则名、执行方和仓库。"""
+    name = rule_name(repo, executor)
+    try:                                       # 装机目录缺 autoloop_config、配置形状不对，也都要说清原因，不吐 Python 报错
+        import autoloop_config as C
+        why = C.dispatch_route_problem(C.loaded_rules(), repo, executor)
+    except Exception as e:                     # noqa: BLE001
+        why = str(e) if type(e).__name__ == "Rejected" else f"{type(e).__name__}：{e}"
+        raise Rejected(f"{why}；查不了中台有没有 {name} 这条派单规则，不提议")
+    if why and why.startswith("中台没有接"):
+        raise Rejected(f"{repo} 名册放行了写入，但中台没有接 {executor} 派单的规则 {name}（中台配置现在只给沙盒生成派单规则），"
+                       f"这一单批准了也派不出去；要派，先由常浩决定给 {repo} 加派单规则")
+    if why:
+        raise Rejected(f"派单规则 {name} 核对不过：{why}；不提议、不签")
 
 
-def _notify_once(code, text):
-    """确认消息走出口账本（批 0D，审查 P1-03）：先记账、在登记的写事务里核开闸资格、再发；结果不明不重发（确认码正文里有，
-    对账按它在私聊里找那条文字消息）。发不成的提议本来就批不了，所以这里任何异常都按结果不明记、不重发。"""
-    import autoloop_exits as E
-    import twin_state as T
-    try:
-        chat = T.owner_chat_id()
-    except T.StateError as e:
-        raise Rejected(str(e))
-    try:
-        return E.guard("send_feishu", f"send_feishu:grant-{code}", f"chat:grant-{code}",
-                       {"chat": chat, "marker": f"派单 {code}", "msg_type": "text"},
-                       lambda: {"message_id": notify_owner(text, f"dt-grant-{code}")})["message_id"]
-    except E.Refused as e:
-        raise Rejected(str(e))
-
-
-def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None):
+def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, path=None, request_id=None):
+    """登记一张派单提议，等门卫发确认卡（本函数不发任何消息）。
+    request_id（#369 L3 第 3 轮 P2-02）：同一个请求号再交一次，内容一样就原样返回原来那张提议（again: true），不另登记、
+    不多发一张卡；内容不一样拒绝。待批的提议（没定、没过期）最多 MAX_PENDING 张、一小时最多登记 MAX_PER_HOUR 张，
+    都在凭证库写事务里数，超了拒绝。"""
     now = now or now_tz()
+    if request_id is not None and not REQUEST_ID.match(request_id):
+        raise Rejected("请求号写法不对（16 到 64 位小写十六进制）")
     if not REPO_NAME.match(repo or ""):
         raise Rejected(f"{repo} 不在名册能派写入单的仓库里")
     github = allowed_repos().get(repo)
@@ -602,52 +623,230 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
         raise Rejected(f"五要素不能为空，最多 {MAX_SCOPE} 字")
     if not 0 < hours <= MAX_HOURS:
         raise Rejected(f"有效期 1 到 {MAX_HOURS} 小时")
+    require_hub_rule(repo, executor)
     valid_until = iso(now + dt.timedelta(hours=hours))
     h = content_hash(repo, github, executor, actions, valid_until, scope_text)
-    require_recovery()                         # 确认消息是往私聊发飞书：恢复闸关着就不提议
+    require_recovery()                         # 闸关着门卫也发不出确认卡：先说清，不留一张必然过期的提议
+    rhash = sha256("\n".join([repo, executor, ",".join(actions), str(hours), scope_text]))
+    card = "门卫会把确认卡发到常浩私聊，他点「批准派单」才签"
     with tx(path) as con:
+        if request_id is not None:
+            old = con.execute("SELECT * FROM proposals WHERE request_id = ?", (request_id,)).fetchone()
+            if old is not None:
+                if old["request_hash"] != rhash:
+                    raise Rejected("这个请求号已经交过一张内容不同的提议，不登记")
+                return {**proposal_out(old), "card": card, "again": True}
+        pending = con.execute("SELECT COUNT(*) FROM proposals WHERE decision IS NULL AND expires_at > ?",
+                              (iso(now),)).fetchone()[0]
+        if pending >= MAX_PENDING:
+            raise Rejected(f"已经有 {pending} 张派单确认卡等常浩点，先等他处理（每张 {int(PROPOSAL_TTL.total_seconds() // 60)} 分钟"
+                           f"不点自动作废），不再登记新的")
+        recent = con.execute("SELECT COUNT(*) FROM proposals WHERE created_at > ?",
+                             (iso(now - dt.timedelta(hours=1)),)).fetchone()[0]
+        if recent >= MAX_PER_HOUR:
+            raise Rejected(f"一小时里已经登记了 {recent} 张派单提议，到上限了，过一会儿再提")
         for _ in range(5):
-            code = secrets.token_hex(4)
+            code, token = secrets.token_hex(4), secrets.token_hex(8)
             try:
                 con.execute("INSERT INTO proposals (code, repo, github, executor, scope_text, actions, valid_until, "
-                            "content_hash, created_at, expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            "content_hash, created_at, expires_at, card_token, request_id, request_hash) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (code, repo, github, executor, scope_text, json.dumps(list(actions)), valid_until, h,
-                             iso(now), iso(now + PROPOSAL_TTL)))
+                             iso(now), iso(now + PROPOSAL_TTL), token, request_id, rhash))
                 break
-            except sqlite3.IntegrityError:
+            except sqlite3.IntegrityError:     # 请求号不会撞：同一个请求号上面已经按原提议返回（同一写事务）
                 continue
         else:
-            raise Rejected("确认码连撞 5 次，请重试")
-    notice = _notify_once(code, notice_text(code, github, executor, actions, valid_until, scope_text))
-    with tx(path) as con:
-        con.execute("UPDATE proposals SET notice_message = ? WHERE code = ? AND notice_message IS NULL", (notice, code))
-    return {"code": code, "repo": repo, "github": github, "executor": executor, "actions": list(actions),
-            "valid_until": valid_until, "expires_at": iso(now + PROPOSAL_TTL), "notice": "已发到常浩私聊"}
+            raise Rejected("提议号连撞 5 次，请重试")
+        return {**proposal_out(con.execute("SELECT * FROM proposals WHERE code = ?", (code,)).fetchone()), "card": card}
 
 
-def approve(message_id, now=None, path=None, post=None):
-    """常浩回了「派单 <确认码>」：核验后签凭证（代次 1），写任务单，记一个 start 事件并发出去。"""
+def proposal_out(row):
+    """propose 返回给秘书的样子：不含卡片令牌和内容哈希。已经定了结果的另带 decision。"""
+    out = {"code": row["code"], "repo": row["repo"], "github": row["github"], "executor": row["executor"],
+           "actions": json.loads(row["actions"]), "valid_until": row["valid_until"], "expires_at": row["expires_at"]}
+    if row["decision"]:
+        out["decision"] = row["decision"]
+    return out
+
+
+def proposal_view(row):
+    """门卫画卡片要的字段（不含内容哈希）。"""
+    d = {k: row[k] for k in ("code", "repo", "github", "executor", "scope_text", "valid_until", "expires_at", "card_token",
+                             "card_state", "card_message", "decision", "decided_at", "decided_note", "task_id")}
+    d["actions"] = json.loads(row["actions"])
+    d["action_words"] = [ACTION_WORDS[a] for a in d["actions"]]
+    return d
+
+
+def cards_to_send(now=None, path=None):
+    """还没登记卡片消息号、没过期、没定过的提议（门卫发卡循环用）。发卡结果不明的（unsure）也在里面：门卫照样走出口账本，
+    账本不会重发（结果不明的先对账，对上了回原消息号），所以这里不用另判。"""
     now = now or now_tz()
-    text = verify_owner(message_id, now)
-    m = APPROVE_TEXT.match(text)
-    if not m:
-        raise Rejected("这条消息不是批准派单的口令（应为「派单 <8 位确认码>」）")
     with tx(path) as con:
-        p = con.execute("SELECT * FROM proposals WHERE code = ?", (m.group(1),)).fetchone()
-        if p is None:
-            raise Rejected("没有这个确认码的派单提议")
-        if p["task_id"]:
-            raise Rejected(f"这个提议已经签过凭证（{p['task_id']}）")
-        if now >= parse_iso(p["expires_at"]):
-            raise Rejected("这个提议已过期（30 分钟），请猛鬼兽重新整理后再批")
-        if not p["notice_message"]:
-            raise Rejected("这个提议的确认消息没发到你私聊，不能批；请猛鬼兽重新提")
-        actions = json.loads(p["actions"])
+        rows = con.execute("SELECT * FROM proposals WHERE decision IS NULL AND card_message IS NULL AND expires_at > ? "
+                           "ORDER BY created_at", (iso(now),)).fetchall()
+        return [proposal_view(r) for r in rows]
+
+
+def mark_card(code, message_id=None, unsure=None, path=None):
+    """记确认卡发出去了（消息号）或结果不明（原因）。已经记过消息号的不改（只认第一次）。"""
+    with tx(path) as con:
+        if message_id:
+            con.execute("UPDATE proposals SET card_state = 'sent', card_message = ?, card_note = NULL "
+                        "WHERE code = ? AND card_message IS NULL", (message_id, code))
+        else:
+            con.execute("UPDATE proposals SET card_state = 'unsure', card_note = ? WHERE code = ? AND card_message IS NULL",
+                        ((unsure or "结果不明")[:300], code))
+
+
+def expire_due(now=None, path=None):
+    """过了 30 分钟还没定的提议标成过期（卡片由门卫改成「已作废」）。返回这次过期的提议号。"""
+    now = now or now_tz()
+    with tx(path) as con:
+        codes = [r[0] for r in con.execute("SELECT code FROM proposals WHERE decision IS NULL AND expires_at <= ?", (iso(now),))]
+        con.execute("UPDATE proposals SET decision = 'expired', decided_at = ?, decided_note = ? "
+                    "WHERE decision IS NULL AND expires_at <= ?",
+                    (iso(now), f"过了 {int(PROPOSAL_TTL.total_seconds() // 60)} 分钟没批", iso(now)))
+        return codes
+
+
+def cards_to_close(path=None):
+    """定了结果、卡片已发出、还没改成结果样子的提议（门卫改卡循环用）。"""
+    with tx(path) as con:
+        return [proposal_view(r) for r in con.execute("SELECT * FROM proposals WHERE decision IS NOT NULL AND "
+                                                      "card_message IS NOT NULL AND closed_at IS NULL ORDER BY decided_at")]
+
+
+def cards_to_settle(path=None):
+    """定了结果（实际上只会是过期作废）、卡片消息号一直没登记上、还没收尾的提议（#369 L3 第 3 轮 P2-01）：发卡结果不明，
+    或者发成了但门卫在登记消息号前退出。门卫对这些只按出口账本对账、不再发卡，对上了补登记消息号、再改成结果卡。"""
+    with tx(path) as con:
+        return [proposal_view(r) for r in con.execute("SELECT * FROM proposals WHERE decision IS NOT NULL AND "
+                                                      "card_message IS NULL AND closed_at IS NULL ORDER BY decided_at")]
+
+
+def card_closed(code, now=None, path=None, note=None):
+    """卡片收尾完了（改成了结果卡，或者确认根本没有卡要改）；note 写为什么不用改。"""
+    with tx(path) as con:
+        con.execute("UPDATE proposals SET closed_at = ?, card_note = COALESCE(?, card_note) WHERE code = ?",
+                    (iso(now or now_tz()), note, code))
+
+
+def send_note(task_id, send):
+    """签了凭证后这张单的派单事件送没送到中台，一句白话（写回提议、卡片上显示）。"""
+    if isinstance(send, dict):
+        return f"凭证已签，还没送到中台：{str(send.get('error') or '')[:80]}（开闸后自动补送）"
+    mine = [s for s in send or [] if str(s.get("event_key", "")).startswith(f"{task_id}:")]
+    if mine and mine[0].get("sent") is True:
+        return "已送到中台，等工人接单"
+    if mine and mine[0].get("held"):          # 暂缓不是作废（#369 第 5 轮 P2-03）：事件留着，不要重提一张
+        return (f"凭证已签，派单消息暂缓发送：{str(mine[0].get('why') or '')[:80]}。事件留着没作废，"
+                "派单规则恢复后在电脑上跑 send-pending 补发，不要重提一张")
+    if mine and mine[0].get("sent") is False:
+        return "凭证已签，但派单消息作废没发"
+    return "凭证已签，还没确认送到中台（会自动补送）"
+
+
+def _void(con, code, decision, note, now, event_id=None):
+    con.execute("UPDATE proposals SET decision = ?, decided_at = ?, decided_note = ?, click_event = ? "
+                "WHERE code = ? AND decision IS NULL", (decision, iso(now), note, event_id, code))
+    return {"code": code, "decision": decision, "note": note}
+
+
+class HubBusy(Exception):
+    """中台配置正在变更（配置锁等不到）：这次点击不定结果，请常浩过一会儿再点。"""
+
+
+_ROUTE = threading.local()
+
+
+@contextlib.contextmanager
+def route_lock():
+    """和 autoloop_config.install 同一把配置锁（#369 第 4 轮 P1-01）。等不到报 HubBusy；装机目录缺 autoloop_config 报 Rejected。
+    同一线程里可重入（批准持着锁调 send_pending，不自己等自己）。"""
+    if getattr(_ROUTE, "n", 0):
+        _ROUTE.n += 1
+        try:
+            yield
+        finally:
+            _ROUTE.n -= 1
+        return
+    try:
+        import autoloop_config as C
+    except Exception as e:                     # noqa: BLE001
+        raise Rejected(f"查不了中台派单规则（{type(e).__name__}），不发")
+    try:
+        cm = C.config_lock()
+        cm.__enter__()
+    except C.Busy as e:
+        raise HubBusy(str(e))
+    _ROUTE.n = 1
+    try:
+        yield
+    finally:
+        _ROUTE.n = 0
+        cm.__exit__(None, None, None)
+
+
+def route_problem(repo, executor):
+    """在配置锁里用：这一类派单事件现在是不是正好交给受控的工人。返回 None 或一句原因（读不到中台也算有问题）。"""
+    try:
+        require_hub_rule(repo, executor)
+    except Rejected as e:
+        return str(e)
+    return None
+
+
+def decide(token, choice, message_id, event_id, now=None, path=None, post=None):
+    """见 _decide。批准这一路从核中台派单规则、签凭证到把 start 事件发给中台，全程持配置锁（route_lock，和 install 同一把），
+    核过的规则在事件送到中台之前换不掉（#369 第 4 轮 P1-01）；锁等不到报 HubBusy，不定结果。不派不拿锁。"""
+    if choice != "ok":
+        return _decide(token, choice, message_id, event_id, now, path, post)
+    with route_lock():
+        return _decide(token, choice, message_id, event_id, now, path, post)
+
+
+def _decide(token, choice, message_id, event_id, now=None, path=None, post=None):
+    """常浩在门卫确认卡上点了按钮（门卫已核过点击人、私聊是绑定的常浩，回调 event_id 没处理过）。
+    令牌、消息号对不上抛 Rejected（不是这张卡，门卫不回话）；其余都定一个结果写回提议并返回：
+      {"code", "decision": approved|rejected|expired|void, "note", "task_id"?, "send"?, "already"?}
+    批准：再核内容哈希、名册映射、中台派单规则，都过了才签凭证（代次 1，approval_message 记卡片消息号）、写任务单、
+    记 start 事件，提交后发中台。核对不过记 void 和原因，不签。已定过的照原结果返回（already），不重复签。"""
+    now = now or now_tz()
+    if not CARD_TOKEN.match(token or "") or choice not in CHOICES:
+        raise Rejected("按钮值不对")
+    with tx(path) as con:
+        p = con.execute("SELECT * FROM proposals WHERE card_token = ?", (token,)).fetchone()
+    if p is None:
+        raise Rejected("没有这张派单确认卡")
+    if not p["card_message"] and not p["decision"]:
+        raise CardNotReady("派单确认卡还在登记")
+    if p["card_message"] != message_id:
+        raise Rejected("点的不是登记的那张派单确认卡")
+    why = None
+    if choice == "ok" and not p["decision"] and now < parse_iso(p["expires_at"]):
+        actions = json.loads(p["actions"])     # 中台规则、名册是外部状态：在写事务外先读
         if content_hash(p["repo"], p["github"], p["executor"], actions, p["valid_until"], p["scope_text"]) != p["content_hash"]:
-            raise Rejected("提议内容和提出时对不上，不签")
-        if allowed_repos().get(p["repo"]) != p["github"]:
-            raise Rejected(f"名册里 {p['repo']} 的仓库变了或已不能派写入单，请猛鬼兽重新提")
-        claim_message(con, message_id, f"批准派单 {p['code']}", now)
+            why = "提议内容和提出时对不上，不签"
+        elif allowed_repos().get(p["repo"]) != p["github"]:
+            why = f"名册里 {p['repo']} 的仓库变了或已不能派写入单"
+        else:
+            try:
+                require_hub_rule(p["repo"], p["executor"])
+            except Rejected as e:
+                why = str(e)
+    with tx(path) as con:
+        p = con.execute("SELECT * FROM proposals WHERE card_token = ?", (token,)).fetchone()
+        if p["decision"]:
+            return {"code": p["code"], "decision": p["decision"], "note": p["decided_note"], "task_id": p["task_id"],
+                    "already": True}
+        if now >= parse_iso(p["expires_at"]):
+            return _void(con, p["code"], "expired", f"过了 {int(PROPOSAL_TTL.total_seconds() // 60)} 分钟没批", now, event_id)
+        if choice == "no":
+            return _void(con, p["code"], "rejected", "你点了不派", now, event_id)
+        if why:
+            return _void(con, p["code"], "void", why, now, event_id)
         task_id = f"t-{now.astimezone(TZ):%Y%m%d}-{secrets.token_hex(3)}"
         con.execute("INSERT INTO grants (task_id, repo, github, scope_text, scope_hash, executor, rule, actions, "
                     "valid_until, status, generation, generation_started_at, approval_message, created_at, updated_at) "
@@ -655,12 +854,17 @@ def approve(message_id, now=None, path=None, post=None):
                     (task_id, p["repo"], p["github"], p["scope_text"], sha256(p["scope_text"]), p["executor"],
                      rule_name(p["repo"], p["executor"]), p["actions"], p["valid_until"], iso(now), message_id,
                      iso(now), iso(now)))
-        con.execute("UPDATE proposals SET task_id = ? WHERE code = ?", (task_id, p["code"]))
-        log(con, task_id, "签发", now, message=message_id, code=p["code"])
+        con.execute("UPDATE proposals SET task_id = ?, decision = 'approved', decided_at = ?, click_event = ?, "
+                    "decided_note = ? WHERE code = ?", (task_id, iso(now), event_id, "凭证已签，正在送中台", p["code"]))
+        log(con, task_id, "签发", now, card=message_id, event=event_id, code=p["code"])
         row = grant_row(con, task_id)
         record_event(con, row, "start", f"{task_id}:g1:start", now)
         write_task_file(row)          # 写不成整笔回滚：没有任务单就没有凭证
-    return {"task_id": task_id, "send": _try_send(path, post, now)}    # 发之前在领取的写锁下先写镜像
+    send = _try_send(path, post, now)              # 发之前在领取的写锁下先写镜像
+    note = send_note(task_id, send)
+    with tx(path) as con:
+        con.execute("UPDATE proposals SET decided_note = ? WHERE code = ?", (note, p["code"]))
+    return {"code": p["code"], "decision": "approved", "note": note, "task_id": task_id, "send": send}
 
 
 # ---------- 入口二：依据已有凭证续接 ----------
@@ -800,6 +1004,93 @@ def revoke(task_id, reason="常浩撤销", now=None, path=None):
     return _tighten(task_id, "revoked", "撤销", reason, now or now_tz(), path)
 
 
+RUN_LIVE = ("queued", "claimed")             # 中台的取消接口只认这两种（引擎 kernel/decide.ts 的 cancel）
+RUN_UNSURE = "unknown"                       # 接单程序 5 分钟没报：可能还在跑，但中台不让取消，只能报出来
+RUN_OVER = ("done", "nothing", "cancelled")  # 已经结束
+
+
+def stop_runs(task_id, now=None, path=None):
+    """停单之后，把中台里这张单还在排队、在跑的轮次取消（方案 5.1 第 4 条「撤销 … 并停掉正在跑的轮次」；规格 §8 推翻第 2 步
+    「网关取消正在跑的轮次」的前半，确认停下由调用方回读）。只对已经不能用的凭证做（冻结、撤销、完成、过期）：停单先在凭证库
+    生效，再来停轮次；凭证还有效的单不经这里停。
+    轮次按中台库里「事项 = 单号、规则 = 凭证里记的规则」找（只读打开中台库，和秘书控制面 hub_runs 同一个查法），取消走中台的
+    本人接口 POST /v1/runs/<号>/cancel：排队的直接取消；在跑的由接单程序停掉整个进程组后才算停下，这里不等它。
+    状态是 unknown 的（接单程序 5 分钟没报，可能还在跑）中台不让取消，记进 failed 交人看；取消被拒时再读一次这一轮，
+    已经自己结束了的记进 finished，不算停不成。停单生效时别的进程正在发的派单事件（hub_events 里 sent 为 2 / -2）
+    可能稍后才进中台、排出新的一轮，查不到也停不了，只报条数（工人侧准入看镜像会把它挡成「停下了」）。
+    返回 {"stopped": [已发出取消的], "finished": [取消前已结束的], "failed": {轮次号: 原因}, "in_transit": 条数}，
+    记日志出错时多一项 log_error；中台库读不了抛 Rejected（也记一笔日志）。停不成不影响已经生效的停单。"""
+    import autoloop_config as C            # 这两个脚本都 import 本脚本，所以在这里才导入
+    import autoloop_publish as P
+    now = now or now_tz()
+    with tx(path) as con:
+        row = grant_row(con, task_id)
+        if check_row(row, None, row["generation"], now, voided_of(con, task_id)) is None:
+            raise Rejected(f"{task_id} 的凭证还有效，不停它的轮次；要停先撤销或冻结")
+        rule = row["rule"]
+        in_transit = con.execute("SELECT count(*) FROM hub_events WHERE task_id = ? AND sent IN (2, -2)",
+                                 (task_id,)).fetchone()[0]
+    try:
+        hub = P._hub()
+        try:
+            states = (*RUN_LIVE, RUN_UNSURE)
+            found = [tuple(r) for r in hub.execute(f"SELECT id, state FROM runs WHERE lane = ? AND rule = ? AND state IN "
+                                                   f"({','.join('?' * len(states))}) ORDER BY id", (task_id, rule, *states))]
+        finally:
+            hub.close()
+    except sqlite3.Error as e:
+        why = f"中台库读不了（{type(e).__name__}），没查到要停的轮次"
+        with tx(path) as con:
+            log(con, task_id, "停轮次", now, error=why)
+        raise Rejected(why)
+    out = {"stopped": [], "finished": [], "failed": {}, "in_transit": in_transit}
+    for rid, state in found:
+        if state == RUN_UNSURE:
+            out["failed"][str(rid)] = "接单程序 5 分钟没报这一轮，可能还在跑，中台不让取消：要在电脑上看工人的进程"
+            continue
+        try:
+            C.hub("POST", f"/v1/runs/{rid}/cancel", {})
+            out["stopped"].append(rid)
+        except C.Rejected as e:
+            now_state = (P.hub_run(rid) or {}).get("state")
+            if now_state in RUN_OVER:                     # 查的时候还活着，取消前自己结束了
+                out["finished"].append(rid)
+            else:
+                out["failed"][str(rid)] = str(e)
+    if found or in_transit:
+        try:
+            with tx(path) as con:
+                log(con, task_id, "停轮次", now, **{k: out[k] for k in ("stopped", "finished", "failed", "in_transit")})
+        except sqlite3.Error as e:                        # 取消已经发出去了：结果照样交回，只说日志没记上
+            out["log_error"] = f"凭证库日志没记上（{type(e).__name__}）"
+    return out
+
+
+def _stop_after(out, task_id):
+    """命令行的冻结、撤销做完之后接着停轮次，结果并进输出：runs_stopped（已发出取消的轮次号）、runs_finished（取消前已结束，
+    有才写）；停不成、有在途事件、日志没记上写 runs_stop_error。任何错都只写进输出、不改退出码，停单本身的结果（含冻结码）
+    照样打出来。库函数 freeze / revoke 不自动停：推翻流程要自己分步做（规格 §8 第 1、2 步）。"""
+    try:
+        r = stop_runs(task_id)
+    except Exception as e:                       # noqa: BLE001  停单已生效，停轮次出什么错都不能吞掉上面的结果
+        out["runs_stop_error"] = str(e) if isinstance(e, Rejected) else f"停轮次出错（{type(e).__name__}）"
+        return out
+    out["runs_stopped"] = r["stopped"]
+    if r["finished"]:
+        out["runs_finished"] = r["finished"]
+    notes = [f"轮次 {k}：{v}" for k, v in sorted(r["failed"].items(), key=lambda kv: int(kv[0]))]
+    if notes:
+        notes.append("没停成的可在电脑上用 agent-autoloop stop <轮次号> 停")
+    if r["in_transit"]:
+        notes.append(f"还有 {r['in_transit']} 个派单事件发出后没确认送到中台，可能稍后排出新的一轮"
+                     "（工人侧准入会挡下、不会开工）")
+    if r.get("log_error"):
+        notes.append(r["log_error"])
+    if notes:
+        out["runs_stop_error"] = "；".join(notes)
+    return out
+
+
 def complete(task_id, now=None, path=None):
     return _tighten(task_id, "done", "完成", "任务完成", now or now_tz(), path)
 
@@ -852,7 +1143,14 @@ def unfreeze(message_id, now=None, path=None):
     return _publish_after_commit({"task_id": row["task_id"], "status": "active", "generation": gen}, path, now)
 
 
-def show(task_id=None, path=None):
+SENT_WORDS = {0: "待发", 2: "在途或结果不明", 1: "已送到中台", -1: "作废没发", -2: "作废前已领取（可能已送达，靠代次拦）"}
+
+
+def show(task_id=None, path=None, now=None):
+    """不改任何数据（但走的是写事务 tx：会短暂拿凭证库写锁，库不存在时会新建空库）。除了凭证字段，另给两样查进度要用的（autoloop 技能读）：usable / why_not 是按现在的时间现判的
+    「这张凭证现在还能不能用」（status 写着 active 的凭证过了 valid_until 也不能用，和 check() 同一套判定）；
+    events 是这张单每个派单事件送没送到中台。"""
+    now = now or now_tz()
     with tx(path) as con:
         rows = [grant_row(con, task_id)] if task_id else list(con.execute("SELECT * FROM grants ORDER BY created_at"))
         out = []
@@ -860,12 +1158,18 @@ def show(task_id=None, path=None):
             d = {k: r[k] for k in r.keys() if k not in ("scope_text", "approval_message", "freeze_code")}
             d["actions"] = json.loads(r["actions"])
             d["voided_generations"] = sorted(voided_of(con, r["task_id"]))
+            d["why_not"] = check_row(r, None, r["generation"], now, d["voided_generations"])
+            d["usable"] = d["why_not"] is None
+            d["events"] = [{"event_key": e["event_key"], "kind": e["kind"], "generation": e["generation"],
+                            "state": SENT_WORDS[e["sent"]], "hub_event": e["hub_event"], "at": e["at"]}
+                           for e in con.execute("SELECT * FROM hub_events WHERE task_id = ? ORDER BY at, rowid",
+                                                (r["task_id"],))]
             out.append(d)
         return out
 
 
 # ---------- 命令行 ----------
-def main(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("propose")
@@ -873,8 +1177,8 @@ def main(argv=None):
     p.add_argument("--executor", required=True)
     p.add_argument("--scope-file", required=True)
     p.add_argument("--hours", type=int, default=12)
-    for name in ("approve", "unfreeze"):
-        sub.add_parser(name).add_argument("--message-id", required=True)
+    p.add_argument("--request-id")
+    sub.add_parser("unfreeze").add_argument("--message-id", required=True)
     p = sub.add_parser("resume-dispatch")
     p.add_argument("--task", required=True)
     p.add_argument("--kind", required=True)
@@ -892,20 +1196,23 @@ def main(argv=None):
     p.add_argument("--generation", type=int, required=True)
     sub.add_parser("show").add_argument("--task")
     sub.add_parser("send-pending")
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
     try:
         if a.cmd == "propose":
-            out = propose(a.repo, a.executor, Path(a.scope_file).read_text(encoding="utf-8"), a.hours)
-        elif a.cmd == "approve":
-            out = approve(a.message_id)
+            out = propose(a.repo, a.executor, Path(a.scope_file).read_text(encoding="utf-8"), a.hours,
+                          request_id=a.request_id)
         elif a.cmd == "unfreeze":
             out = unfreeze(a.message_id)
         elif a.cmd == "resume-dispatch":
             out = resume_dispatch(a.task, a.kind, a.reason)
         elif a.cmd == "freeze":
-            out = freeze(a.task, a.reason)
+            out = _stop_after(freeze(a.task, a.reason), a.task)
         elif a.cmd == "revoke":
-            out = revoke(a.task, a.reason)
+            out = _stop_after(revoke(a.task, a.reason), a.task)
         elif a.cmd == "complete":
             out = complete(a.task)
         elif a.cmd == "check":

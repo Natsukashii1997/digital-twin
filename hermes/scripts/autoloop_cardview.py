@@ -24,7 +24,14 @@ title、text、options、recommend、choice、answer、by、result、rule、crea
       认不出、卡片已结束都返回 None。
       只给出「想选哪一项」，算不算批准由调用方定（ADR-015 修订 1：私聊打字只能发起提议，批准要门卫卡上的点击）。
   button_values(content) -> list[dict]            从渲染结果里取出全部按钮回调值（回读核对、测试用）
+  render_grant(p, value_for, mark=None) -> dict    派单确认卡（批 0E-3b，常浩 11-23 定沿用丙版）：p 是
+      autoloop_grants.proposal_view 的提议；value_for("ok" | "no") -> 按钮回调值（门卫传 {"gate_grant": 令牌, "a": …}）。
+      开着时大字写要派什么、可信的几行（仓库、交给谁、能做的事、有效到；由 dt-gate 按凭证库和名册写）、
+      「猛鬼兽整理的五要素（原文）」纯文本（秘书写的，ADR-015 §3.3 第 4 条）、一个通栏大按钮「✅ 批准派单」，「不派」收在
+      「不同意？· 展开」折叠面板里；定了以后（approved / rejected / expired / void）没有按钮，大字写结果，原内容收进
+      「当时批的是什么 · 展开」。
 """
+import datetime as dt
 import re
 
 NUMS = "①②③④⑤⑥⑦⑧⑨⑩"
@@ -212,6 +219,53 @@ def button_values(content):
                 walk(v)
     walk(content.get("body"))
     return out
+
+
+# ---------- 派单确认卡（批 0E-3b：沿用丙版的样子）----------
+EXECUTOR_NAMES = {"claude": "Claude", "codex": "Codex"}
+GRANT_HEAD = {None: ("indigo", None), "approved": ("green", "✅ 已批准，单号 {task_id}"), "rejected": ("grey", "⏹ 不派了"),
+              "expired": ("grey", "⏹ 已作废：{note}"), "void": ("grey", "⏹ 已作废")}
+
+
+def hhmm(iso_text):
+    """凭证库里的时间（带 +08:00）→「11-23 21:30」。"""
+    return dt.datetime.fromisoformat(iso_text).strftime("%m-%d %H:%M")
+
+
+def grant_facts(p):
+    """dt-gate 按凭证库、名册写的几行（可信部分）。"""
+    who_does = EXECUTOR_NAMES.get(p["executor"], p["executor"])
+    return md("\n".join([f"仓库：{esc(p['github'])}", f"交给：{esc(who_does)}（在单独的工人账号里做，碰不到你的账号）",
+                         f"能做的事：{esc('、'.join(p['action_words']))}", f"任务有效到：{hhmm(p['valid_until'])}"]))
+
+
+def grant_scope(p):
+    return [md("**猛鬼兽整理的五要素（原文，核对后再批）**"), plain(p["scope_text"])]
+
+
+def render_grant(p, value_for, mark=None):
+    """见文件头接口说明。"""
+    decision = p.get("decision")
+    color, line = GRANT_HEAD.get(decision, ("grey", "⏹ 已作废"))
+    who_does = EXECUTOR_NAMES.get(p["executor"], p["executor"])
+    els = []
+    if decision is None:
+        els.append(md(f"**要派一张改文件的任务给 {esc(who_does)}**", text_size="heading"))
+        els += [grant_facts(p), *grant_scope(p)]
+        els.append(button("✅ 批准派单", value_for("ok"), "primary_filled", width="fill", size="large"))
+        els.append(panel("不同意？· 展开", [button("不派", value_for("no"), "default", width="fill")]))
+        tail = f"只认你在这个私聊里点，只能点一次；不理它，到 {hhmm(p['expires_at'])} 自动作废"
+        bits = [f"提议 {esc(p['code'])}", *([esc(mark)] if mark else []), tail]
+    else:
+        els.append(md(f"**{line.format(task_id=esc(p.get('task_id')), note=esc(p.get('decided_note')))}**", text_size="heading"))
+        if decision == "approved" and p.get("decided_note"):
+            els.append(plain(p["decided_note"]))
+        elif decision == "void" and p.get("decided_note"):
+            els.append(plain(f"原因：{p['decided_note']}"))
+        els.append(panel("当时批的是什么 · 展开", [grant_facts(p), *grant_scope(p)]))
+        bits = [f"提议 {esc(p['code'])}"]
+    els.append(grey("｜".join(bits)))
+    return card_json(head(f"派单确认 · {p['repo']}", color), els)
 
 
 # ---------- 引用回答 ----------

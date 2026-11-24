@@ -55,6 +55,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoloop_grants as G  # noqa: E402
+import hub_listener  # noqa: E402
 
 SOURCE = "hermes"
 WORKER = "dt-worker"
@@ -63,8 +64,8 @@ PROGRAM_DIR = "/Users/Shared/dt-autoloop/bin"     # 工人侧启动脚本（ops/
 NEW_CHANNELS = ("feishu", "secretary")
 SECRETARY = "秘书"
 PAUSE_REASON = "0C 启动脚本就绪前暂停（#195 0B-2），由常浩决定恢复"
-PROMPT = ("这一轮的事件对象是任务单号。任务的五要素在 /Users/Shared/dt-autoloop/tasks/<任务单号>.md；"
-          "开工前核对 /Users/Shared/dt-autoloop/grants/status.json 里这张单有效、动作在列。"
+PROMPT = ("这一轮的事件对象是任务单号。任务的五要素在 /Users/Shared/dt-gate/tasks/<任务单号>.md；"
+          "开工前核对 /Users/Shared/dt-gate/grants/status.json 里这张单有效、动作在列。"
           "只做任务单写明的范围，只改文件、推非 main 分支、开 PR，不合并。")
 KEY_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 LOCK_WAIT = 10.0                          # 等另一个配置操作结束的最长秒数
@@ -72,6 +73,10 @@ LOCK_WAIT = 10.0                          # 等另一个配置操作结束的最
 
 class Rejected(Exception):
     """拒绝：说人话的原因，不带钥匙。"""
+
+
+class Busy(Rejected):
+    """配置锁在别人手里，等不到：不是拒绝这件事本身，过一会儿再来。"""
 
 
 # ---------- 路径 ----------
@@ -106,7 +111,9 @@ def lock_file():
 
 @contextlib.contextmanager
 def config_lock():
-    """install 和 issue-source-key 共用的跨进程排他锁（flock）：检查到签发之间不会插进另一个配置操作。"""
+    """install、issue-source-key 共用的跨进程排他锁（flock）：检查到签发之间不会插进另一个配置操作。派单网关点卡批准
+    （核规则 → 签凭证 → 发事件）和 send_pending 发每个派单事件也拿它（#369 第 4 轮 P1-01）：核过的规则在事件送到中台之前
+    不会被 install 换掉。不可重入（重入由 autoloop_grants.route_lock 自己管）。"""
     f = lock_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(f.parent, 0o700)
@@ -119,7 +126,7 @@ def config_lock():
                 break
             except BlockingIOError:
                 if time.monotonic() >= end:
-                    raise Rejected("另一个中台配置操作还在进行，稍后再试")
+                    raise Busy("另一个中台配置操作还在进行，稍后再试")
                 time.sleep(0.1)
         yield
     finally:
@@ -145,6 +152,61 @@ def dispatch_rule(repo, executor):
             "parallel": 2, "resume": True, "channels": list(NEW_CHANNELS)}
 
 
+def agent_spec(executor):
+    """派单规则交给的 Agent（dt-claude / dt-codex）应有的定义：跑在 dt-worker、program 挂工人侧启动脚本。"""
+    return {"name": AGENTS[executor][1], "worker": WORKER, "use": executor, "access": "edit",
+            "program": f"{PROGRAM_DIR}/dt-worktree-{executor}"}
+
+
+def type_hits(pattern, etype):
+    """中台 when.types 里的一项会不会接到 etype：原样相等、「*」、「x.*」前缀；别的带 * 的写法认不准，一律当接得到。"""
+    if not isinstance(pattern, str):
+        return True
+    if pattern == etype or pattern == "*":
+        return True
+    if pattern.endswith(".*") and "*" not in pattern[:-2]:
+        return etype.startswith(pattern[:-1])
+    return "*" in pattern
+
+
+def dispatch_route_problem(live, repo, executor):
+    """中台正在用的配置 live 里，repo / executor 这一类派单事件实际交给谁（PR #369 L3 第 3 轮 P1-01）。
+    要正好一条同名规则、整条（交给哪个 Agent、工作目录、标题、提示词、并发、续接、通道）和 dispatch_rule 生成的一样
+    （中台载入时补的 group = 规则名、tell = needed 两个默认值照补；暂停状态不算规则内容，不拦），它交给的 Agent 定义也和
+    agent_spec 一样，并且没有别的规则也接 hermes 来源的这类事件。都对返回 None，否则返回一句原因。"""
+    name, etype = G.rule_name(repo, executor), G.event_type(repo, executor)
+    rules = live.get("rules") if isinstance(live, dict) else None
+    if not isinstance(rules, list) or not all(isinstance(r, dict) for r in rules):
+        return "中台配置里的规则不是列表，核不了"
+    same = [r for r in rules if r.get("name") == name]
+    if not same:
+        return f"中台没有接 {executor} 派单的规则 {name}"
+    if len(same) > 1:
+        return f"中台有 {len(same)} 条同名的派单规则 {name}"
+    have = {k: v for k, v in same[0].items() if k != "paused"}
+    have.setdefault("group", name)
+    have.setdefault("tell", "needed")
+    want = {"group": name, "tell": "needed", **dispatch_rule(repo, executor)}
+    if have != want:
+        diff = sorted(k for k in set(have) | set(want) if have.get(k) != want.get(k))
+        return f"中台的派单规则 {name} 和应有的不一样（{'、'.join(diff)}），实际交给谁、在哪做对不上卡片"
+    aid = AGENTS[executor][0]
+    agents = live.get("agents")
+    if not isinstance(agents, dict) or agents.get(aid) != agent_spec(executor):
+        return f"中台里 Agent {aid} 的定义和应有的不一样（或没有），派单规则交给的不是受控的工人"
+    others = []
+    for r in rules:
+        when = r.get("when")
+        if r is same[0] or not isinstance(when, dict) or when.get("source") != SOURCE:
+            continue
+        types = when.get("types")
+        if not isinstance(types, list) or any(type_hits(t, etype) for t in types):
+            others.append(str(r.get("name")))
+    if others:
+        return f"中台还有别的规则也接 {etype}：{'、'.join(others[:3])}，批准后不只交给 {aid}"
+    return None
+
+
 def render(current, owner_open_id, repos):
     """在现有配置上生成数字分身这一块；同样的输入总得到同样的输出（可重复跑）。"""
     if not re.match(r"^ou_[\w-]+$", owner_open_id or ""):
@@ -152,12 +214,14 @@ def render(current, owner_open_id, repos):
     others = secretary_routes(current)
     if others:      # 秘书通道只收派单规则的卡片（规格 §6）；别的规则点名它，秘书就能领到、答到不该它答的卡片
         raise Rejected(f"这些规则把卡片发给秘书通道，不装：{'、'.join(others)}")
+    listeners = hermes_listeners(current)
+    if listeners:   # hermes 来源只给派单规则用（#369 第 4 轮 P1-01）：别的规则接 hermes 事件，批准过的派单会被它一起接走
+        raise Rejected(f"这些不是派单规则却接 hermes 来源的事件，不装：{'、'.join(listeners)}")
     new = copy.deepcopy(current)
     new.setdefault("sources", {})[SOURCE] = {"name": "猛鬼兽派单网关"}
     agents = new.setdefault("agents", {})
-    for executor, (aid, name) in AGENTS.items():
-        agents[aid] = {"name": name, "worker": WORKER, "use": executor, "access": "edit",
-                       "program": f"{PROGRAM_DIR}/dt-worktree-{executor}"}
+    for executor, (aid, _) in AGENTS.items():
+        agents[aid] = agent_spec(executor)
     channels = new.setdefault("channels", {})
     if "defaultChannels" in new:
         new["defaultChannels"] = [c for c in new["defaultChannels"] if c != "secretary"]
@@ -169,6 +233,13 @@ def render(current, owner_open_id, repos):
     rules += [dispatch_rule(repo, ex) for repo in sorted(repos) for ex in sorted(AGENTS)]
     new["rules"] = rules
     return new
+
+
+def hermes_listeners(rules):
+    """不是派单规则（名字不以 dispatch- 开头）、却接 hermes 来源事件的规则名。"""
+    return [str(r.get("name")) for r in rules.get("rules", []) if isinstance(r, dict)
+            and not str(r.get("name", "")).startswith("dispatch-")
+            and isinstance(r.get("when"), dict) and r["when"].get("source") == SOURCE]
 
 
 def secretary_routes(rules):
@@ -215,11 +286,15 @@ def hub_config():
 
 
 def hub(method, path, body=None):
-    url, owner = hub_config()
+    try:
+        url, owner = hub_config()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:   # 没装、读不了、缺字段：一律说人话，不抛原始异常
+        raise Rejected(f"中台配置读不了（{type(e).__name__}，{home() / 'config.json'}）")
     req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
                                  headers={"Authorization": f"Bearer {owner}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
+        hub_listener.check(url)                  # dt-gate 里：端口上不是 dt-gate 在听就不带本人密钥去（0E-2）
         with opener.open(req, timeout=15) as r:
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
@@ -287,6 +362,7 @@ def mismatches(rules):
         a = rules.get("agents", {}).get(aid)
         pairs.append((f"agents.{aid}", a and {"access": "edit", **a}, live.get("agents", {}).get(aid)))
     bad += [name for name, a, b in pairs if a != b]
+    bad += [f"{name}←hermes" for name in hermes_listeners(live)]     # 别的规则接 hermes 事件（#369 第 4 轮 P1-01）
     return bad + [f"{name}→secretary" for name in secretary_routes(live)]
 
 

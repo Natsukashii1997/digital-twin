@@ -284,6 +284,11 @@ class Base(unittest.TestCase):
         p = mock.patch.object(G, "post_event", self.fake_post)
         p.start()
         self.addCleanup(p.stop)
+        live = {"rules": [AC.dispatch_rule("dt-sandbox", x) for x in AC.AGENTS],        # 中台在用的派单规则合规（#369 P1-01：
+                "agents": {AC.AGENTS[x][0]: AC.agent_spec(x) for x in AC.AGENTS}}       # 发事件前在配置锁里再核一次）
+        p = mock.patch.object(AC, "loaded_rules", lambda: live)
+        p.start()
+        self.addCleanup(p.stop)
         self.make_grant()
         self.ask_card()
         self.feishu(7, T - dt.timedelta(minutes=40))
@@ -971,6 +976,29 @@ class RedispatchTests(Base):
         self.assertEqual([json.loads(b["detail"])["kind"] for b in self.posted], ["redispatch"])
         self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=6)), [(out["decision"], "done")])
         self.assertEqual(self.get(out["decision"])["status"], "done")
+
+    @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
+    def test_held_redispatch_is_told_as_held_and_sent_once_later(self):
+        """#369 第 5 轮 P2-03：② 的续接事件网关暂缓没发（派单规则核不过）：秘书照样记 unknown（只差网关补发），但结果带
+        held、白话说暂缓没发出去，不说成发送结果不明；规则恢复后 send-pending 用原事件号补发一次，秘书对账结成 done，
+        再补发不会多出第二个事件。"""
+        with mock.patch.object(G, "route_problem", lambda repo, ex: "中台的派单规则 x 和应有的不一样（to）"):
+            out = self.submit()
+        self.assertEqual((out["result"], out.get("held")), ("unknown", True), out["msg"])
+        self.assertIn("暂缓发送没发出去", out["msg"])
+        self.assertNotIn("结果不明", out["msg"])
+        self.assertEqual(self.posted, [])
+        self.assertTrue(self.get(out["decision"])["outcome"]["held"])
+        self.assertIsNone(R._secretary()[0])                                  # 只差网关补发，不挡恢复闸
+        epoch = {"boot": "1", "wake": "1", "hub_commit": "a" * 40, "hub_process": "1@x"}
+        with mock.patch.object(R, "ensure_open", REAL_ENSURE_OPEN), mock.patch.object(R, "admit", REAL_ADMIT), \
+                mock.patch.object(R, "current_epoch", return_value=epoch), mock.patch.object(R, "pinned", return_value="a" * 40):
+            sent = G.send_pending(now=T + dt.timedelta(minutes=5))
+            self.assertEqual(G.send_pending(now=T + dt.timedelta(minutes=7)), [])     # 再补发：没有第二个
+        self.assertEqual([x.get("sent") for x in sent], [True], sent)
+        self.assertEqual([(b["id"], json.loads(b["detail"])["kind"]) for b in self.posted],
+                         [(f"{TASK}:g1:redispatch:1", "redispatch")])
+        self.assertEqual(SG.reconcile(now=T + dt.timedelta(minutes=8)), [(out["decision"], "done")])
 
     @mock.patch.object(G, "now_tz", lambda: T + dt.timedelta(minutes=1))
     def test_redispatch_stuck_in_executing_does_not_deadlock_the_gate(self):

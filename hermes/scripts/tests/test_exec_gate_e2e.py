@@ -63,6 +63,13 @@ def prod_snapshot():
     return snap
 
 
+def click_card(G, code):
+    """模拟门卫：发确认卡（登记消息号）、常浩点「批准派单」（0E-3b 起批准只认门卫卡上的点击）。"""
+    (p,) = [x for x in G.cards_to_send() if x["code"] == code]
+    G.mark_card(code, f"om_card_{code}")
+    return G.decide(p["card_token"], "ok", f"om_card_{code}", f"ev-{code}")
+
+
 @unittest.skipIf(SKIP, "本机没有 agent-autoloop 命令行")
 class ExecGateEndToEnd(HubFixture):
     def setUp(self):
@@ -89,7 +96,10 @@ class ExecGateEndToEnd(HubFixture):
         for ex in G.EXECUTORS:
             (self.program_dir / f"dt-worktree-{ex}").symlink_to(SCRIPT)
         self.status = r / "shared/grants/status.json"
+        pf_status = r / "pf-dt-worker.status"                          # 门卫规则在生效（L3 P1-03 的开工闸）
+        pf_status.write_text("at=2026-11-20T10:00:00+0800 boot=1795125811 state=ok enabled=yes rules=15 users=dt-worker reloaded=no\n")
         env = {"DT_GRANTS_DB": str(r / "dt/autoloop/grants.db"), "DT_GRANTS_STATUS": str(self.status),
+               "DT_PF_STATUS": str(pf_status), "DT_BOOT_TIME": "1795125811",
                "DT_GRANTS_TASKS": str(r / "shared/tasks"), "DT_WORK_ROOT": str(self.work), "DT_OUTBOX": str(self.outbox),
                "DT_WORKTREE_REAL_CLAUDE": str(fake), "DT_WORKTREE_REMOTE": f"file://{r}/remote/{{github}}.git",
                "FAKE_LOG": str(self.fake_log), "DT_OWNER_CHAT_ID": CHAT,
@@ -111,7 +121,6 @@ class ExecGateEndToEnd(HubFixture):
                   mock.patch.object(C, "dispatch_rule", side_effect=rule_here),
                   mock.patch.dict(os.environ, {"DT_OWNER_OPEN_ID": GRANT_OWNER}),
                   mock.patch.object(G, "fetch_message", side_effect=self._fetch),
-                  mock.patch.object(G, "notify_owner", return_value="om_notice0001"),
                   mock.patch.object(Rv, "ensure_open"), mock.patch.object(Rv, "admit"),   # 恢复闸放行（闸本身见 0D 测试）
                   mock.patch.object(P, "GATE_USER", __import__("pwd").getpwuid(os.geteuid()).pw_name),
                   mock.patch.object(P, "TEST_BACKEND", backend)):
@@ -144,7 +153,7 @@ class ExecGateEndToEnd(HubFixture):
         C.issue_source_key(confirm=True, target=self.home)
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})      # 只在临时中台里恢复
         code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n范围：只改 README.md", hours=2)["code"]
-        return G.approve(self.say(f"派单 {code}"))["task_id"]
+        return click_card(G, code)["task_id"]
 
     def test_unreachable_repo_is_queued_for_retry_not_done(self):
         """P1-04：第一轮取不到仓库，启动脚本写「没跑成」→ 中台判 failed、放回排队、5 分钟后重派，不是 done。"""
@@ -229,7 +238,7 @@ class ExecGateEndToEnd(HubFixture):
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})      # 只在临时中台里恢复
 
         code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n范围：只改 README.md", hours=2)["code"]
-        tid = G.approve(self.say(f"派单 {code}"))["task_id"]
+        tid = click_card(G, code)["task_id"]
         (run,) = self.wait_runs(tid, 1)
         self.assertEqual(run["state"], "done", run)
         (c,) = [x for x in self.calls() if x["argv"][:1] == ["-p"]]

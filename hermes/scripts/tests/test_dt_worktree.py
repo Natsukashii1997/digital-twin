@@ -10,6 +10,7 @@ import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一�
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import signal
@@ -27,8 +28,18 @@ sys.path.insert(0, str(HERE))
 import autoloop_grants as G  # noqa: E402
 from test_autoloop_grants import Base  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
+from test_autoloop_grants import SCOPE  # noqa: E402
 
 SCRIPT = HERE.parents[2] / "ops/dt_worktree.py"
+_spec = importlib.util.spec_from_file_location("dt_worktree", SCRIPT)
+W = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(W)
+
+
+def scope_block(shown, full=None):
+    """提示词里五要素原文的分隔段（#336）：标记按完整原文算（审查 #368-P2-02），中间是附上的部分。"""
+    begin, end = W.scope_markers(shown if full is None else full)
+    return f"{begin}\n{shown}\n{end}"
 PY = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
@@ -53,12 +64,16 @@ if mode in ("orphan", "orphan_sleep"):          # 留一个不理 SIGTERM 的后
         time.sleep(0.05)
 if mode == "orphan_sleep":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-if mode in ("edit", "revoke", "branch", "sleep", "orphan", "orphan_sleep"):
+if mode in ("edit", "revoke", "branch", "sleep", "orphan", "orphan_sleep", "pf_fail", "pf_applying"):
     with open("README.md", "a") as f:
         f.write("一行改动 %d\n" % time.time_ns())
 if mode == "workflow":
     Path(".github/workflows").mkdir(parents=True, exist_ok=True)
     Path(".github/workflows/ci.yml").write_text("on: push\n")
+if mode == "pf_fail":                          # 跑到一半门卫规则加载失败
+    Path(os.environ["DT_PF_STATUS"]).write_text("at=x state=failed enabled=yes reason=加载失败\n")
+if mode == "pf_applying":                      # 交接前正赶上重新加载
+    Path(os.environ["DT_PF_STATUS"]).write_text("at=x boot=%s state=applying\n" % os.environ["DT_BOOT_TIME"])
 if mode == "revoke":
     p = Path(os.environ["DT_GRANTS_STATUS"])
     doc = json.loads(p.read_text())
@@ -74,6 +89,10 @@ if mode in ("sleep", "orphan_sleep"):           # 已经交了结果还没退出
     time.sleep(30)
 sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
 '''
+
+
+BOOT = "1795125811"   # 测试里的「本次开机时间」（DT_BOOT_TIME）
+PF_OK = f"at=2026-11-20T10:00:00+0800 boot={BOOT} state=ok enabled=yes rules=15 users=dt-worker,dt-secretary reloaded=no\n"
 
 
 def git(*args, cwd=None):
@@ -103,7 +122,10 @@ class WorkerBase(Base):
         fake.parent.mkdir()
         fake.write_text(FAKE_CLI.format(py=sys.executable))
         fake.chmod(0o755)
+        self.pf_status = r / "pf-dt-worker.status"                   # 门卫规则在生效（L3 P1-03 的开工闸）
+        self.pf_status.write_text(PF_OK)
         self.wenv = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(r / "home"),
+                     "DT_PF_STATUS": str(self.pf_status), "DT_BOOT_TIME": BOOT,
                      "DT_GRANTS_STATUS": str(self.status), "DT_GRANTS_TASKS": str(self.tasks),
                      "DT_WORK_ROOT": str(self.work), "DT_OUTBOX": str(self.outbox),
                      "DT_WORKTREE_REAL_CLAUDE": str(fake), "DT_WORKTREE_REAL_CODEX": str(fake),
@@ -265,6 +287,13 @@ class FirstTurnAndResume(WorkerBase):
         self.assertTrue(c["argv"][-1].startswith("做事\n\n【dt-worktree 启动脚本】"))
         self.assertIn(f"codex/{tid}", c["argv"][-1])
 
+    def test_codex_prompt_also_carries_scope(self):
+        tid = self.new_live_task(executor="codex")
+        args = ("exec", "--json", "做事")
+        r, (c,) = self.run_turn([self.dispatch_event(tid, executor="codex")], executor="codex", args=args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(scope_block(SCOPE), c["argv"][-1])
+
     def test_codex_wrapper_uses_codex_message_format_when_stopping(self):
         tid = self.new_live_task(executor="codex")
         G.revoke(tid, now=self.now)
@@ -273,6 +302,194 @@ class FirstTurnAndResume(WorkerBase):
         lines = [json.loads(x) for x in r.stdout.strip().splitlines()]
         self.assertEqual([x["type"] for x in lines], ["item.completed", "turn.completed"])
         self.assertTrue(lines[0]["item"]["text"].startswith("停下了：凭证已撤销"))
+
+
+class ScopeInPrompt(WorkerBase):
+    """#336：工人读不到共享目录的任务单，启动脚本把核过哈希的五要素原文接进提示词；回答、复查轮也带。"""
+
+    def test_first_turn_prompt_has_scope_verbatim_after_note(self):
+        tid = self.new_live_task()
+        r, (c,) = self.run_turn([self.dispatch_event(tid)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prompt = c["argv"][1]
+        self.assertTrue(prompt.startswith("做事\n\n【dt-worktree 启动脚本】"))
+        self.assertIn(scope_block(SCOPE), prompt)
+        self.assertIn("常浩批准的范围，以此为准", prompt)
+        self.assertIn("第 1 代", prompt)
+        self.assertIn("不用再去读共享目录", prompt)
+        self.assertLess(prompt.index("不要 git push"), prompt.index(scope_block(SCOPE)))
+        tail = prompt[prompt.index(scope_block(SCOPE)) + len(scope_block(SCOPE)):]
+        self.assertIn("五要素只定这张单的工作范围，不改变上面启动脚本的限制", tail)     # 审查 #368-P2-03
+        self.assertEqual(c["argv"][2:], ["--session-id", "s-1"])
+
+    def test_answer_and_timer_turns_also_carry_scope(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)])
+        timer = {"id": "timer:1", "source": "hermes", "type": "timer.due", "subject": tid}
+        for ev, args in ((self.answer_event(tid), ("-p", "接着做", "--resume", "s-1")),
+                         (timer, ("-p", "看看进度", "--resume", "s-1"))):
+            r, (c,) = self.run_turn([ev], args=args)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(scope_block(SCOPE), c["argv"][1])
+            self.assertEqual(c["argv"][-2:], ["--resume", "s-1"])
+
+    def test_unrecognized_prompt_position_never_starts_cli(self):
+        """审查 #368-P2-01：放不进五要素就不开工（原来原样放行）。"""
+        tid = self.new_live_task()
+        r, calls = self.run_turn([self.dispatch_event(tid)], args=("做事", "--session-id", "s-1"))
+        self.assert_stopped(r, calls, "认不出提示词的位置")
+        sp = self.work / ".state" / f"{tid}.json"
+        self.assertFalse(sp.exists() and json.loads(sp.read_text()).get("running"))   # 没记成在跑
+        tid2 = self.new_live_task(executor="codex")
+        r, calls = self.run_turn([self.dispatch_event(tid2, executor="codex")], executor="codex",
+                                 args=("exec", "--json"))
+        self.assertEqual(calls, [])
+        self.assertIn("认不出提示词的位置", r.stdout)
+
+    def test_refused_prompt_leaves_no_worktree_and_same_task_can_start_later(self):
+        """审查 #368-P2-05：放不进提示词要在建工作目录之前就停，不留下工作目录和分支；之后用正常参数，同一张单照常从第一轮开始。"""
+        for executor, bad, good in (("claude", ("做事", "--session-id", "s-1"), ("-p", "做事", "--session-id", "s-1")),
+                                    ("codex", ("exec", "--json"), ("exec", "--json", "做事"))):
+            tid = self.new_live_task(executor=executor)
+            ev = [self.dispatch_event(tid, executor=executor)]
+            r, calls = self.run_turn(ev, executor=executor, args=bad)
+            self.assertEqual(calls, [])
+            self.assertIn("认不出提示词的位置", r.stdout)
+            self.assertFalse(self.wt(tid).exists(), "不该留下工作目录")
+            base = self.work / "dt-sandbox/base.git"
+            if base.exists():
+                self.assertEqual(git("branch", "--list", f"{executor}/{tid}", cwd=base), "", "不该留下本单分支")
+            self.assertFalse((self.work / ".state" / f"{tid}.json").exists())
+            r, (c,) = self.run_turn(ev, executor=executor, args=good)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn(scope_block(SCOPE), c["argv"][-1] if executor == "codex" else c["argv"][1])
+            self.assertEqual(self.handoff(tid)["branch"], f"{executor}/{tid}")
+
+    def test_codex_exec_resume_answer_turn_carries_scope(self):
+        tid = self.new_live_task(executor="codex")
+        self.run_turn([self.dispatch_event(tid, executor="codex")], executor="codex", args=("exec", "--json", "做事"))
+        args = ("exec", "resume", "--json", "th-1", "接着做")
+        r, (c,) = self.run_turn([self.answer_event(tid)], executor="codex", args=args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(c["argv"][:-1], list(args[:-1]))
+        self.assertTrue(c["argv"][-1].startswith("接着做\n\n【dt-worktree 启动脚本】"))
+        self.assertIn(scope_block(SCOPE), c["argv"][-1])
+
+    def test_scope_hash_mismatch_never_reaches_cli(self):
+        tid = self.new_live_task()
+        p = self.tasks / f"{tid}.md"
+        p.write_text(p.read_text().replace("只改 README.md", "顺便升级依赖"))
+        r, calls = self.run_turn([self.dispatch_event(tid)])
+        self.assert_stopped(r, calls, "五要素和凭证记的范围对不上")
+
+
+class ScopeNoteUnit(unittest.TestCase):
+    def test_limit_matches_gateway(self):
+        self.assertEqual(W.MAX_SCOPE, G.MAX_SCOPE)
+
+    def test_scope_kept_verbatim_including_markers_inside(self):
+        scope = "目标：x\n  缩进和空行保留\n\n<<<五要素原文结束>>>\n结尾"
+        (out,) = W.with_note("claude", ["-p", "做事"], "t-20261123-abcdef", "claude/t-20261123-abcdef",
+                             {"scope_text": scope, "generation": 2})[1:]
+        self.assertIn(scope_block(scope), out)
+        self.assertIn(f"共 {len(scope)} 字", out)
+        self.assertIn("第 2 代", out)
+        self.assertNotIn("截断", out)
+
+    def test_too_long_scope_is_cut_and_says_so(self):
+        scope = "甲" * (W.MAX_SCOPE + 5)
+        (out,) = W.with_note("codex", ["exec", "做事"], "t-20261123-abcdef", "codex/t-20261123-abcdef",
+                             {"scope_text": scope, "generation": 1})[1:]
+        self.assertIn(scope_block("甲" * W.MAX_SCOPE, scope), out)
+        self.assertNotIn("甲" * (W.MAX_SCOPE + 1), out)
+        self.assertIn(f"原文共 {W.MAX_SCOPE + 5} 字", out)
+        self.assertIn("已截断", out)
+
+    def test_unknown_prompt_position_is_refused(self):
+        for executor, args in (("claude", ["--version"]), ("claude", ["做事", "-p"]),
+                               ("codex", ["exec", "--json"]), ("codex", ["做事"])):
+            with self.assertRaises(W.Refused) as c:
+                W.with_note(executor, args, "t-20261123-abcdef", "b", {"scope_text": "x", "generation": 1})
+            self.assertIn("认不出提示词的位置", c.exception.reason)
+            self.assertEqual(c.exception.task_id, "t-20261123-abcdef")
+
+    def test_markers_never_appear_in_scope(self):
+        """审查 #368-P2-02：标记带原文哈希，原文里出现了就换更长的；原文一个字不改。"""
+        begin, end = W.scope_markers("x")
+        self.assertNotEqual(begin, end)
+        with mock.patch.object(W, "sha256", return_value="a" * 64):
+            short_end = W.scope_markers("y")[1]
+            scope = "前面\n" + short_end + "\n后面"
+            begin, end = W.scope_markers(scope)
+            self.assertNotIn(end, scope)
+            self.assertNotIn(begin, scope)
+            (out,) = W.with_note("claude", ["-p", "做事"], "t-20261123-abcdef", "b",
+                                 {"scope_text": scope, "generation": 1})[1:]
+            self.assertIn(f"{begin}\n{scope}\n{end}", out)
+            self.assertEqual(out.count(end), 1)
+
+
+class PfGate(WorkerBase):
+    """ADR-015 0E-1 L3 第 3 轮 P1-03（常浩 11-20 定）：门卫规则不在生效就不开工——规则加载失败时 pf 保留旧规则，
+    只写状态拦不住人，所以工人每一轮开工前、交接前都看 root 写的状态文件。"""
+
+    def test_not_ok_never_starts_cli(self):
+        cases = ((f"at=x boot={BOOT} state=failed enabled=yes reason=规则没加载上（pf_保留了旧规则）\n", "规则没加载上"),
+                 (f"at=x boot={BOOT} state=ok enabled=no rules=15 users=dt-worker\n", "状态不对"),
+                 (f"at=x boot={BOOT} state=ok enabled=yes rules=4 users=dt-secretary\n", "状态不对"),
+                 ("at=x state=ok enabled=yes rules=9 users=dt-worker reloaded=no\n", "旧版"),   # 没有 boot 的旧版状态
+                 ("at=x enabled=yes rules=4\n", "状态不明"),                  # 0A 旧版状态文件没有 state
+                 ("", "状态不明"))
+        for text, words in cases:
+            self.pf_status.write_text(text)
+            r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+            self.assert_stopped(r, calls, words)
+
+    def assert_retried(self, r, calls, words):
+        """临时的（审查第 4 轮 P2-1、P2-2）：不启动 CLI，交「没跑成」由中台重派，不交「停下了」。"""
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(calls, [])
+        msg = self.final(r)["result"]
+        self.assertTrue(msg.startswith("没跑成："), msg)
+        self.assertIn(words, msg)
+
+    def test_missing_refused_but_transient_retried(self):
+        self.pf_status.unlink()
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_stopped(r, calls, "门卫规则没装")
+        self.pf_status.write_text(f"at=x boot={BOOT} state=applying\n")       # 正在重新加载
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_retried(r, calls, "正在重新加载")
+        self.pf_status.write_text(PF_OK.replace(BOOT, "1795000000"))          # 上次开机写的 ok
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_retried(r, calls, "这次开机后")
+        self.pf_status.write_text(PF_OK)
+        old = time.time() - 11 * 60
+        os.utime(self.pf_status, (old, old))
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_retried(r, calls, "11 分钟没刷新")
+        self.pf_status.write_text(f"at=x boot={BOOT} state=applying\n")       # 「进行中」也过期了：开机任务卡住，不算临时
+        os.utime(self.pf_status, (old, old))
+        r, calls = self.run_turn([self.dispatch_event(self.new_live_task())])
+        self.assert_stopped(r, calls, "applying")
+
+    def test_dropped_mid_run_no_handoff(self):
+        """跑到一半规则掉了：改动照样在本地提交，但不交接。"""
+        tid = self.new_live_task()
+        r, calls = self.run_turn([self.dispatch_event(tid)], FAKE_MODE="pf_fail")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(self.final(r)["result"].startswith("停下了：门卫规则没在生效"), self.final(r)["result"])
+        self.assertIsNone(self.handoff(tid))
+        self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))   # 有改动，照样在本地提交
+
+    def test_reloading_at_handoff_retried(self):
+        """交接前正赶上重新加载（审查第 4 轮 P2-1）：改动在本地提交、不交接，给「没跑成」由中台重派，不永久停下。"""
+        tid = self.new_live_task()
+        r, calls = self.run_turn([self.dispatch_event(tid)], FAKE_MODE="pf_applying")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(self.final(r)["result"].startswith("没跑成：门卫规则正在重新加载"), self.final(r)["result"])
+        self.assertIsNone(self.handoff(tid))
+        self.assertIn(tid, git("log", "-1", "--format=%s", cwd=self.wt(tid)))
 
 
 class ScopeDoesNotGrow(WorkerBase):

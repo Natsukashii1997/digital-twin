@@ -79,11 +79,28 @@ class Isolation(unittest.TestCase):
     def test_env_points_into_this_runs_temp_dir(self):
         self.assertFalse(inside(ISO.ROOT, ISO.REAL_HOME))
         for k in ("HOME", "AGENT_AUTOLOOP_HOME", "HERMES_HOME", "XDG_CONFIG_HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
-                  "DT_GRANTS_STATUS", "DT_GRANTS_TASKS", "DT_AUTOLOOP_SHARED", "DT_PUBLISH_OUTBOX"):
+                  "DT_GRANTS_STATUS", "DT_GRANTS_TASKS", "DT_GATE_SHARED", "DT_GATE_ROOT", "DT_GATE_LOGS",
+                  "DT_GATE_DAEMONS", "DT_PUBLISH_OUTBOX"):
             self.assertTrue(inside(os.environ[k], ISO.ROOT), k)
         self.assertEqual(Path.home(), ISO.HOME)
         self.assertEqual(os.path.expanduser("~"), str(ISO.HOME))
         self.assertEqual(os.environ["DT_HUB"], "http://127.0.0.1:9")
+
+    def test_every_script_default_outside_home_is_redirected(self):
+        """被测脚本里凡是「环境变量 or 家目录以外的真机路径」的默认值（/Users/Shared、/Library、/Users/dt-…），隔离都要指到
+        临时目录：新加一个忘了登记，这条先失败（11-22：DT_GATE_LAUNCHERS、DT_PF_DIR、DT_PF_STATUS 漏了，首单在真机装了
+        启动脚本和门卫之后测试读到了真机文件）。"""
+        import re
+        pat = re.compile(r'"(DT_[A-Z_]+)"\)?\s*(?:or|,)\s*"(?:/Users/Shared|/Library|/Users/dt-)')
+        repo = HERE.parents[2]
+        found = {}
+        for f in [*(repo / "ops").glob("*.py"), *(repo / "hermes/scripts").glob("*.py")]:
+            for name in pat.findall(f.read_text(encoding="utf-8")):
+                found.setdefault(name, f.name)
+        self.assertIn("DT_GATE_LAUNCHERS", found)                   # 扫描本身没失灵
+        for name, f in sorted(found.items()):
+            with self.subTest(name=name, file=f):
+                self.assertTrue(inside(os.environ.get(name) or "/nonexistent-real", ISO.ROOT), f"{name}（{f}）没指到临时目录")
 
     def test_rewrites_real_home_and_prod_vars_without_outer_protection(self):
         real = str(ISO.REAL_HOME)
@@ -120,7 +137,7 @@ class Isolation(unittest.TestCase):
         self.assertIsInstance(cm.exception.reason, ISO.BlockedNetwork)
 
     def test_local_prod_service_ports_are_refused(self):
-        for port in (3350, 3352, 8090):
+        for port in (3350, 3352, 3353, 8090):
             with socket.socket() as s, self.assertRaises(ISO.BlockedNetwork):
                 s.connect(("127.0.0.1", port))
 

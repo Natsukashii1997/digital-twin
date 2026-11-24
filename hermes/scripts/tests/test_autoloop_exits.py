@@ -305,6 +305,19 @@ class Reconcile(Base):
         self.assertEqual(E.settle("merge:o/r:1:h", "failed", "GitHub 上看过没合并", confirm=True)["state"], "failed")
         self.assertEqual(E.show()["frozen"], [])
 
+    def test_too_many_rounds_can_be_settled(self):
+        """#338 乙：真走一遍对账 → 核不清 → 常浩 settle 结算；范围在结算前冻结。"""
+        key = "send_feishu:card-9"
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        self.unknown(key, kind="send_feishu", scope="card:9", target=t)
+        n = iter(range(10 ** 6))
+        with mock.patch.object(E, "lark_read", side_effect=lambda a, w: {"messages": [], "has_more": True, "page_token": f"t{next(n)}"}):
+            notes = E.reconcile(now=E.now_tz() + dt.timedelta(minutes=10))
+        self.assertEqual([x["state"] for x in notes if x["key"] == key], ["unreconciled"])
+        with self.assertRaisesRegex(E.Refused, "核不清"):
+            E.guard("send_feishu", "send_feishu:card-9b", "card:9", {}, self.act())
+        self.assertEqual(E.settle(key, "failed", "私聊里核过没发出", confirm=True)["state"], "failed")
+
     def test_settle_done_writes_the_ref_and_feishu_needs_one(self):
         """第 2 轮预审 P2-B2：发飞书核不清、常浩结算成做成了，必须写核到的消息号，同一动作之后直接回它（桥接要拿它报送达）。"""
         key = "send_feishu:card-7"
@@ -444,15 +457,60 @@ class Readers(Base):
         card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
         msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
                "body": {"content": json.dumps(card)}}
-        with mock.patch.object(E, "lark_read", return_value={"messages": [msg]}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg], "has_more": False}):
             self.assertEqual(E.read_send(t, row, now), ("done", {"message_id": "om_1"}))
-        with mock.patch.object(E, "lark_read", return_value={"messages": [msg, msg]}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg, msg], "has_more": False}):
             self.assertIsNone(E.read_send(t, row, now)[0])
-        with mock.patch.object(E, "lark_read", return_value={"messages": []}):
+        with mock.patch.object(E, "lark_read", return_value={"messages": [], "has_more": False}):
             self.assertIsNone(E.read_send(t, row, now)[0])         # 审查 P1-05：查不到 ≠ 没发，交常浩，不给重发资格
             with self.assertRaises(E.Unreachable):                 # 刚发不久：列表可能滞后，先保持不明
                 E.read_send(t, {"started_at": E.iso(now)}, now)
         with mock.patch.object(E, "lark_read", side_effect=E.Unreachable("断网")), self.assertRaises(E.Unreachable):
+            E.read_send(t, row, now)
+
+    def test_read_send_reads_every_page(self):
+        """#312：--page-all 默认只翻 10 页，到顶不报错、只留 has_more=true。只看第一轮会把发了两条的认成一条、记成做成。"""
+        now = E.now_tz()
+        row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
+        msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
+               "body": {"content": json.dumps(card)}}
+        pages = [{"messages": [msg], "has_more": True, "page_token": "t2"}, {"messages": [{**msg, "message_id": "om_2"}], "has_more": False}]
+        with mock.patch.object(E, "lark_read", side_effect=pages) as m:
+            self.assertEqual(E.read_send(t, row, now), (None, {"hits": 2}))
+        self.assertEqual([c[0][0][-2:] == ["--page-token", "t2"] for c in m.call_args_list], [False, True])
+        with mock.patch.object(E, "lark_read", return_value={"messages": [msg], "has_more": True}):
+            with self.assertRaisesRegex(E.Unreachable, "对账：还有下一页，但飞书没给翻页标记，没读全"):   # 保持不明，不记成做成
+                E.read_send(t, row, now)
+
+    def test_read_send_needs_proof_that_the_list_is_complete(self):
+        """PR #335 审查 P1-01：返回里没有 has_more（或是 null）时没法证明读全了。正好看到一条也不能记成做成，保持不明。"""
+        now = E.now_tz()
+        row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        card = {"body": {"elements": [{"tag": "button", "behaviors": [{"value": {"autoloop": "abcdef0123456789", "o": 0}}]}]}}
+        msg = {"message_id": "om_1", "msg_type": "interactive", "sender": {"sender_type": "app"},
+               "body": {"content": json.dumps(card)}}
+        for partial in ({"messages": [msg]}, {"messages": [msg], "has_more": None}, {"messages": None, "has_more": False}, {}, None):
+            with self.subTest(partial=partial), mock.patch.object(E, "lark_read", return_value=partial):
+                with self.assertRaisesRegex(E.Unreachable, "对账：.*没法确认读没读全"):
+                    E.read_send(t, row, now)
+
+    def test_read_send_too_many_rounds_goes_to_owner(self):
+        """#338 乙：翻到轮数上限 = 连得上、确定读不全。记核不清交常浩结算，不再永远停在结果不明；其他读不全照旧保持不明。"""
+        now = E.now_tz()
+        row = {"started_at": E.iso(now - dt.timedelta(minutes=10))}
+        t = {"chat": "oc_x", "marker": "abcdef0123456789", "msg_type": "interactive"}
+        n = iter(range(10 ** 6))
+        endless = lambda args, what: {"messages": [], "has_more": True, "page_token": f"t{next(n)}"}
+        with mock.patch.object(E, "lark_read", side_effect=endless) as m:
+            verdict, evidence = E.read_send(t, row, now)
+        self.assertIsNone(verdict)
+        self.assertRegex(evidence["note"], "翻了 100 轮还没到底.*交常浩核实")
+        self.assertEqual(m.call_count, 100)
+        with mock.patch.object(E, "lark_read", return_value={"messages": [], "has_more": True}), \
+                self.assertRaises(E.Unreachable):                                  # 没给翻页标记：仍按连不上
             E.read_send(t, row, now)
 
     def test_only_the_real_message_counts(self):

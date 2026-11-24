@@ -3,6 +3,9 @@
 
 用 feishu 通道钥匙向中台领卡片，以猛鬼兽机器人发到常浩私聊，报送达；卡片状态变了就改那条消息。点击不在这里收：
 猛鬼兽网关的 merge-buttons 插件把按钮点击转给 autoloop_answer.py（这里只负责发卡和登记）。
+机器人身份（ADR-015 修订 1 批 0E-3，全局坑 G-43）：用哪个飞书机器人发卡、回话，常浩在这个机器人下的 open_id 和私聊号从哪来，
+只在 Bot 一处定义；默认是猛鬼兽（Bot，读 twin_state 的身份配置）。门卫（gatekeeper.py，跑在 dt-gate）换成 GateBot，
+发卡、改卡、报送达、状态机、本人点击核对和卡片库都和这里共用一份，不另写。
 
 0B-3 实测：网关转来的点击里有点击人 open_id 和聊天号，**没有原消息号**。所以每张卡发出前先登记一个随机令牌，
 按钮里只带 {"autoloop": 令牌, "o": 选项号, "v": 这条消息展示的版本}；点击回来按令牌找到卡片号和送达的消息号（中台要求 ref 和
@@ -73,6 +76,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoloop_config as C  # noqa: E402
+import hub_listener  # noqa: E402
 from tidings_weekly import SendError, lark  # noqa: E402
 
 CHANNEL = "feishu"
@@ -107,6 +111,48 @@ class HubError(Fail):
     def __init__(self, msg, status=None, sent=True):
         super().__init__(msg)
         self.status, self.sent = status, sent
+
+
+class Bot:
+    """发卡、回话、认本人的那一个飞书机器人。open_id 按应用区分（G-43），所以本人的 open_id、私聊号跟着机器人走。
+    默认是猛鬼兽：lark-cli 用猛鬼兽应用（tidings_weekly），身份读 twin_state（twin_identity.py setup / setup-chat 配的）。"""
+    name = "猛鬼兽"
+    unbound = "本机没配置常浩的 open_id 或私聊号（twin_identity.py setup / setup-chat）"
+    no_chat = "没配置常浩私聊的 chat_id（先 twin_identity.py setup-chat），或格式不对"
+
+    def lark(self, args, what):
+        return lark(args, what)                  # 运行时取本模块的 lark（测试替换 F.lark 照样生效）
+
+    def send_text(self, chat, text, key):
+        from tidings_weekly import send
+        send(chat, "text", {"text": text}, key)
+
+    def owner(self):
+        """(常浩的 open_id, 常浩私聊号)，没配置的项是空值；读配置出错抛 Fail。"""
+        import twin_state as T
+        try:
+            return T.owner_open_id(), T.owner_chat_id()
+        except T.StateError as e:
+            raise Fail(str(e))
+
+    def owner_chat(self):
+        """只要私聊号（发卡、提醒用）：只读私聊号的配置，不连带读 open_id（审查 P2-6：原链路发卡只看私聊号）。"""
+        import twin_state as T
+        try:
+            return T.owner_chat_id()
+        except T.StateError as e:
+            raise Fail(str(e))
+
+
+BOT = Bot()
+
+
+def use(bot):
+    """换机器人（门卫启动时调用一次）。一个进程只用一个机器人：出口账本对账读私聊也跟着换成它（#255 L3 P2-22）。"""
+    global BOT
+    BOT = bot
+    import autoloop_exits as E
+    E.use_reader(None if type(bot) is Bot else bot.lark)   # 猛鬼兽照旧走 DT_EXITS_LARK_PROFILE，不变
 
 
 def owner_holds(con, card_id):
@@ -235,6 +281,10 @@ def hub(method, path, body=None, timeout=20, channel=CHANNEL):
                                  headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
+        hub_listener.check(url)                  # dt-gate 里：端口上不是 dt-gate 在听就不带通道钥匙去（0E-2）
+    except OSError as e:
+        raise HubError(str(e), sent=False)
+    try:
         with opener.open(req, timeout=timeout) as r:
             raw = r.read().decode()
     except urllib.error.HTTPError as e:
@@ -283,13 +333,9 @@ def render(card, token):
 
 # ---------- 发送 ----------
 def owner_chat():
-    import twin_state as T
-    try:
-        chat = T.owner_chat_id()
-    except T.StateError as e:
-        raise Fail(str(e))
+    chat = BOT.owner_chat()
     if not (chat or "").startswith("oc_"):
-        raise Fail("没配置常浩私聊的 chat_id（先 twin_identity.py setup-chat），或格式不对")
+        raise Fail(BOT.no_chat)
     return chat
 
 
@@ -306,7 +352,7 @@ def token_for(card, chat):
 
 
 def send_card(chat, content, key):
-    out = lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "interactive",
+    out = BOT.lark(["im", "+messages-send", "--chat-id", chat, "--msg-type", "interactive",
                 "--content", json.dumps(content, ensure_ascii=False), "--idempotency-key", key], "发卡片")
     mid = out.get("message_id")
     if not mid:
@@ -336,19 +382,24 @@ def _deliver(card):
         raise Fail(f"本地已登记第 {r['version']} 版，不把消息改回第 {card['version']} 版")
     if card.get("ref"):
         with db() as con:
-            r = con.execute("SELECT token, message_id FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
+            r = con.execute("SELECT token, message_id, chat_id FROM feishu_cards WHERE card_id = ?", (card["id"],)).fetchone()
         if not r and card["state"] == "open":          # 开着、却不是本桥接发的卡：不改（改了按钮也对不上任何登记）
             raise Fail("这张卡不是飞书桥接发的，改不了")
         if r and r["message_id"] and r["message_id"] != card["ref"]:   # 中台记的消息号和登记的不一致：不猜，不改
             raise Fail(f"中台给的消息号和登记的对不上（卡片 {card['id']}）")
         content = render(card, r["token"] if r else "")
         try:
-            lark(["im", "messages", "patch", "--message-id", card["ref"],
+            BOT.lark(["im", "messages", "patch", "--message-id", card["ref"],
                   "--data", json.dumps({"content": json.dumps(content, ensure_ascii=False)}, ensure_ascii=False)], "改卡片")
         except SendError:
             if card["state"] == "open":                # 开着的卡：原消息的按钮还能用，不另发
                 raise
-            send_card(owner_chat(), content, f"autoloop-card-{card['id']}-v{card['version']}")
+            if not r:                                  # 本机没登记过这张卡：证明不了原消息发给的是现在绑定的人，不另发（#255 L3 P2-14）
+                raise Fail(f"卡片 {card['id']} 本机没有发送登记，改不了原消息，也不另发")
+            chat = owner_chat()
+            if r["chat_id"] != chat:                   # 发卡后换绑过：结果不另发到新私聊（门卫 #255 独立复核 P2-6）
+                raise Fail(f"卡片 {card['id']} 发在换绑前的私聊，改不了原消息，也不另发到新私聊")
+            send_card(chat, content, f"autoloop-card-{card['id']}-v{card['version']}")
         with db(write=True) as con:                    # 开着的卡改版送到了：送达时间从这一版起算（结束的卡不再计时）
             con.execute("UPDATE feishu_cards SET delivered_at = CASE WHEN ? AND version != ? THEN ? ELSE delivered_at END, "
                         "hub_delivered_at = CASE WHEN version != ? THEN NULL ELSE hub_delivered_at END, "
@@ -470,9 +521,8 @@ def _alert(key, text, every):
             age = float("inf")
         if every is None or age < every:
             return False
-    from tidings_weekly import send
     try:
-        send(owner_chat(), "text", {"text": text}, f"al-alert-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
+        BOT.send_text(owner_chat(), text, f"al-alert-{secrets.token_hex(8)}")   # 飞书幂等键限 50 字
     except (SendError, Fail):
         return False
     with db(write=True) as con:
@@ -518,9 +568,12 @@ def check_given_up():
     return told
 
 
-def once(wait=50):
+def once(wait=50, ready=None):
     """领一张、处理一张；没有卡片返回 None。恢复闸关着（批 0D）就不领卡（返回 paused）；领卡前先确认中台库能读（读不到这轮不领，
-    返回 paused）；处理在桥接锁里做，锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。"""
+    返回 paused）；处理在桥接锁里做，锁里先核这张卡的版本；报完送达放锁，再提交排队的本人回答。
+    ready（门卫用，同 run）：长轮询要等一阵，领到卡后发卡前再问一次；这时不能干活（收点击的长连接断了）就不发，
+    向中台报 failed 写明原因（中台退避重递）。这一问只在桥接锁里、核过恢复闸之后做：报 failed 也是写中台，维护停写时
+    不许写（#255 L3 P1-05）。猛鬼兽不传，行为不变。"""
     import autoloop_exits as E
     import autoloop_recovery as R
     try:
@@ -534,11 +587,20 @@ def once(wait=50):
     card = hub("GET", f"/v1/cards/next?wait={wait}", timeout=wait + 20).get("card")
     if not card:
         return None
+    def not_ready():
+        try:
+            return ready() if ready else None
+        except Exception as e:                   # 核对本身出错也报 failed，不让卡空等中台租约过期（复核 P2-6）
+            return f"领到卡后核对能不能发时出错（{type(e).__name__}）"
     with bridge_lock():
         try:
             _still_open(epoch)
         except Deferred as e:                    # 领卡之后闸关了：什么都不写，中台过一会儿再给这张卡
             return {"card": card["id"], "ok": False, "deferred": True, "why": str(e)}
+        why = not_ready()                        # 长轮询和等锁期间长连接都可能断了：锁里、核过闸才问（#255 复核 P2-5、L3 P1-05）
+        if why:
+            hub("POST", f"/v1/cards/{card['id']}/failed", {"version": card["version"], "error": why[:300]})
+            return {"card": card["id"], "ok": False, "paused": why}
         got = newer_elsewhere(card)
         if got and got[0] == "stale":            # 旧版本：不改消息、不报送达，中台 1 分钟后递最新版本
             return {"card": card["id"], "ok": True, "skipped": f"领到的是第 {card['version']} 版，{got[1]}，不处理"}
@@ -609,18 +671,28 @@ def _flush(card_id):
     A.flush(card_id)
 
 
-def run():
+def run(ready=None):
+    """常驻。ready：每轮先问一次能不能干活（门卫没绑定常浩时返回原因：这时不对账、不领卡，领了也发不出去，
+    还会用掉中台的重试次数），返回 None 才干活。"""
     import autoloop_answer as A
     held_back = []                                     # 维护刚开始时被压下的对账回话：只在内存里，维护结束后补发
+    paused = None
     while True:
         try:
             held = maintenance()
+            why = None
             if held:                                   # 维护停写：对账回话、放弃提醒、领卡都停（P1-06），结束后照常补上
                 why = (f"维护中（恢复点 {held}）" if held != "?"
                        else "读不了出口账本的闸状态，当作维护中、先不发提醒（核对出口账本）")
-                print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
+            elif ready:                                # 门卫：没绑定 / 收点击的长连接不在，不对账、不领卡
+                why = ready()
+            if why:
+                if why != paused:                      # 只在暂停原因变化时记一行
+                    print(json.dumps({"at": now(), "ok": False, "paused": why}, ensure_ascii=False), flush=True)
+                paused = why
                 time.sleep(30)
                 continue
+            paused = None
             notes, held_back = held_back, []
             for cid, text in A.reconcile():            # 在途过久、结果不明、排队的本人回答，每轮先对一次账
                 print(json.dumps({"at": now(), "card": cid, "reconcile": text}, ensure_ascii=False), flush=True)
@@ -630,7 +702,7 @@ def run():
                     held_back.append((cid, text))
             for cid in check_given_up():               # 中台已放弃送达的卡：每一轮放弃私聊说一次
                 print(json.dumps({"at": now(), "card": cid, "given_up": True}, ensure_ascii=False), flush=True)
-            out = once()
+            out = once(ready=ready)
             if out:
                 print(json.dumps({"at": now(), **out}, ensure_ascii=False), flush=True)
             if out and out.get("paused"):              # 恢复闸关着、或中台库读不到：歇 30 秒再看，别空转

@@ -453,21 +453,43 @@ class WorkerIsolation(unittest.TestCase):
         s.close()
         self.assertIn("没在运行", hc.check_egress(port)[0])
 
-    def status(self, text, age_min=1):
+    def status(self, text, age_min=1, accounts=("dt-worker",)):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         p = Path(d.name) / "pf.status"
         p.write_text(text)
-        return hc.check_pf(p, now=p.stat().st_mtime + age_min * 60)
+        return hc.check_pf(p, now=p.stat().st_mtime + age_min * 60, accounts=list(accounts))
 
     def test_pf_ok(self):
         self.assertEqual(self.status("at=x enabled=yes rules=6\n"), [])
+        both = ("dt-worker", "dt-secretary")
+        self.assertEqual(self.status("at=x enabled=yes rules=15 users=dt-worker,dt-secretary\n", accounts=both), [])
+        # 监听者规则开着时状态多一个 guard=yes（0E-1 监听者规则）：巡检照常判、不报异常
+        self.assertEqual(self.status("at=x boot=1 state=ok enabled=yes rules=15 users=dt-worker,dt-secretary guard=yes "
+                                     "reloaded=no reenabled=no\n", accounts=both), [])
+
+    def test_pf_secretary_not_managed(self):
+        """秘书账号建了，门卫规则还是 0A 旧版（没有 users）或没管上秘书：要报。"""
+        both = ("dt-worker", "dt-secretary")
+        for text in ("at=x enabled=yes rules=6\n", "at=x enabled=yes rules=6 users=dt-worker\n"):
+            issues = self.status(text, accounts=both)
+            self.assertEqual(len(issues), 1)
+            self.assertIn("没管上 dt-secretary", issues[0])
 
     def test_pf_missing_disabled_or_stale(self):
         self.assertIn("没装", hc.check_pf(Path("/nonexistent/pf.status"))[0])
         self.assertIn("没在生效", self.status("at=x enabled=no rules=6\n")[0])
         self.assertIn("没在生效", self.status("没有 dt-worker 这个账号\n")[0])
         self.assertIn("没刷新", self.status("at=x enabled=yes rules=6\n", age_min=60)[0])
+        self.assertIn("没刷新", self.status("at=x enabled=yes rules=6\n", age_min=11)[0])
+
+    def test_pf_state_not_ok(self):
+        """0E-1 起加载前先写 applying、出错写 failed：都要报，原因带出来（L3 P1-03）。"""
+        both = ("dt-worker", "dt-secretary")
+        self.assertEqual(self.status("at=x state=ok enabled=yes rules=9 users=dt-worker,dt-secretary\n", accounts=both), [])
+        issues = self.status("at=x state=failed enabled=yes reason=加载上的规则和应有的不一致\n", accounts=both)
+        self.assertIn("failed：加载上的规则和应有的不一致", issues[0])
+        self.assertIn("applying", self.status("at=x state=applying\n")[0])
 
 
 if __name__ == "__main__":

@@ -317,7 +317,7 @@ class Cards(Drill):
         p = self.child("send", {"card": card, "chat_file": str(chat_file)})
         self.kill_when(p, lambda: chat_file.exists() and len(json.loads(chat_file.read_text())) == 1, "卡片发到私聊")
         msgs = json.loads(chat_file.read_text())
-        with mock.patch.object(E, "lark_read", return_value={"messages": msgs}):  # 对账：在私聊里按令牌找那条
+        with mock.patch.object(E, "lark_read", return_value={"messages": msgs, "has_more": False}):  # 对账：在私聊里按令牌找那条
             ref = F.deliver(card)
         self.assertEqual((ref, self.sent), ("om_drill_1", []))                  # 用找到的消息号，不重发
         F.confirm(card["id"])                                                  # 报送达用的也是这条
