@@ -23,6 +23,22 @@
 - 工作台设计稿 8 页完成 6 页，剩记录、沉淀。
 - **下一步**：常浩合并 PR（改了 PRD、DECIDED，属例外）；之后设计记录页，先拟逻辑等确认。
 
+## 2026-11-24 上午：门卫「卫士」真机接通，第 1 单联调走通到交接包（协调会话 dt-coord-5）
+
+- **合并**（都没送审，常浩逐个点头，记为已知风险）：#375 `09bbf78`（门卫入口写死派单卡变量，全量 2694 OK、CI 过，常浩「先合 375 不送审」）、#376 `735ac1d`（lark-cli 配置目录挪到 `~/.dt/lark`，全量 2695 OK、CI 过，常浩「过了就合」）。
+- **门卫真机清单（`evidence/0e3-gatekeeper/门卫真机清单-搬家后.md`）**，常浩亲手敲 sudo：
+  - 第 4 步自检 **通过**：按 `09bbf78` 重装 22 个文件和入口（逐字节核过、属 root），`doctor --online` 读到「卫士」。
+  - 第 5 步代码信任 **通过**：主账号写代码目录被拒、`PYTHONPATH` 带不进、放链接被识破、删后恢复（`changhao-05-代码信任.txt`）。
+  - 第 6 步起初长连接起不来（`bus did not become ready within 3s`）。根因：lark-cli 把总线套接字建在 `<配置目录>/events/<应用编号>/bus.sock`，原位置 105 字节超过 macOS 上限 103；本机对照实测证实。#376 修后长连接 connected；绑定 **通过**（API 调试台取卫士下 open_id，尾号 `b013cf`；常浩登录飞书不用邮箱）；`doctor --online` 的 `ok: true`。
+  - 第 7 步 **通过**：dt-gate 的 `owner_open_id` 写成卫士下的编号；`autoloop_config install`（只改了飞书回答人 + 派单规则提示词里的任务单目录 `dt-autoloop` → `dt-gate`，规则照旧暂停，备份 `~dt-gate/…/evidence/autoloop-config/rules-before-20261124-113318.json`）；签 feishu 通道钥匙（600）。恢复闸开、锁定 `abc8d41`。
+  - 第 10 步常驻 **已装**：`cn.digital-twin.gate.gatekeeper` LaunchDaemon 在跑（11:54），日志 `/Library/Logs/DigitalTwin/gate/gatekeeper.log`。
+  - 第 8 步（点中台卡）**没验**：中台没有开着的卡；用来源钥匙 `tell` 出的卡 #3 是不属于规则的通知，按 `defaultChannels`（`desktop`）只走桌面通道，不走飞书，不是故障。要等派单规则产生的提问 / 通知卡来验。
+- **dt-gate 中台副本更新到 `735ac1d`**（引擎不变 `abc8d41`）：`stage` + `update --confirm`，三个服务重启在跑，健康检查正常，换前备份 `~dt-gate/.agent-autoloop-update-20261124T034144Z`。新旧 `autoloop_config` 渲染结果一致，不用重装配置。
+- **hermes 来源钥匙重签**（600，dt-gate 里）；**恢复了 `dispatch-dt-sandbox-claude`**（codex 那条仍暂停）。
+- **第 1 单（联调单，不计入五单）**：猛鬼兽派单技能搬家后第 1、4–7 节读不到中台，改由协调会话在电脑上 `gate_intake.py dispatch-propose`（仓库要写短名 `dt-sandbox`、`--request-id` 要 16–64 位十六进制；前两次被窗口拒，未登记）→ 门卫发确认卡 → 常浩点「批准派单」**通过**（凭证 `t-20261124-459329` 签出、任务单写好）→ 工人：接单程序从 11-23 17:56 搬家时 pf 重载起离线（重载按设计结束 dt-worker 全部进程，LaunchAgent 不会自己回来，没登录时 kickstart 报 125），常浩快速用户切换登录 dt-worker 后上线 → 第 5 轮 12:02–12:03 做完：只改 README.md（+11 −2，「怎么跑测试」一节，命令和 Python 版本已对照 dt-sandbox 的 pyproject、CI 核实），交接包 `~dt-worker/dt-outbox/t-20261124-459329/`（handoff.json + bundle）在；dt-sandbox main 仍是 `2b4ec97`。没推分支、没开 PR（受信发布 `REAL_PUBLISH` 关着）。工人那一轮说它不被允许跑命令，没自己跑测试；中台给这一轮排了一次复查（查 PR），到点会再起一轮。证据 `evidence/0e3-gatekeeper/changhao-*`、`claude-12-*`。
+- **剩下 4 单卡在受信发布**：验收单第 2 节第 4 条，除 11-22 首单外，推分支、开 PR 要等受信发布接通（#319 第 2 段 + #320，`publish on` 前必须先合 #320）。
+- **新提的两条线（等常浩点卡）**：派单技能搬家后修补（第 1、4–7 节）；工人接单程序在门卫重载后自动回来（或至少掉线提醒）。
+
 ## 2026-11-24 凌晨补记（协调会话 dt-coord-4，上下文到 54% 交接）
 
 - **门卫取令牌已修**：PR #373 合并 `fb8daf4`（全量 Ran 2654 OK、CI 过；常浩 23:28 回「不送审直接合」，记为已知风险）。门卫在进程里用密钥换租户令牌、经 `LARKSUITE_CLI_TENANT_ACCESS_TOKEN` 交给 lark-cli；event consume 同样要它；bus.log 位置核过（P2-17 可关）。
