@@ -1,0 +1,291 @@
+"""工人接单程序改成开机自起的系统服务（常浩 2026-11-24 选方案甲）：门卫重载、重启电脑之后自己回来，不用登录 dt-worker。
+
+用法（主账号终端，要输管理员密码；先在 dt-worker 里跑过 setup-dt-worker.sh 补好 Claude 长期令牌，再注销 dt-worker）：
+  sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py install   核对 → 实测没登录时两家 CLI 的登录 → 停用原 LaunchAgent → 装服务
+  sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py status    只看
+  sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py remove    拆服务、放开原 LaunchAgent（下次登录 dt-worker 它照旧起来）
+
+为什么：接单程序原来是 `agent-autoloop join` 装的 LaunchAgent（gui/<uid> 域，RunAtLoad、KeepAlive）。门卫脚本
+dt_worker_pf.sh 重新加载规则时按设计结束 dt-worker 的全部进程（DECIDED 11-21 第 4 条），其中有 dt-worker 自己的
+loginwindow：图形会话结束，gui/<uid> 域整个没了，KeepAlive 管不到，接单程序就一直不回来；重启电脑也一样。
+
+服务是什么样：/Library/LaunchDaemons/cn.digital-twin.worker-up.plist（root 所有），以 dt-worker 身份跑（UserName），
+开机自起、退出了 launchd 10 秒后重起。命令照抄原 LaunchAgent 里引擎自己写的那一条（node + agent-autoloop.ts up），
+前面套一小段 sh（写在 plist 里，root 所有）：门卫状态文件是本次开机写的 state=ok 才启动接单程序，不然每 10 秒再看一次
+——门卫规则不在生效时工人照旧不在线（原来是图形会话被清掉、碰巧不在线）。日志由这段 sh 以 dt-worker 身份追加到
+~/.agent-autoloop/logs/up.log（不用 StandardOutPath：那是 launchd 以 root 打开的，路径在 dt-worker 能改的目录里）。
+门卫规则的承诺不变：pf 按进程的账号认，服务里的进程仍是 dt-worker；门卫清进程照旧清全部，服务在新规则下重起。
+
+没图形登录时，登录钥匙串是锁着的：Claude 改用 `claude setup-token` 出的长期令牌，存在 ~dt-worker/.dt/claude-oauth-token
+（600），claude-proxy.sh 读它设 CLAUDE_CODE_OAUTH_TOKEN（setup-dt-worker.sh 那一步）；Codex 本来就存在 ~/.codex/auth.json。
+install 先以 dt-worker 身份、只有系统 PATH、在它没有图形会话时跑一遍引擎自己用的两条检查（claude auth status 要
+loggedIn、codex login status 退出码 0），不过就停下、什么都不改：这就是「没登录读不读得到凭据」的实测。
+
+原 LaunchAgent 不删文件（引擎以后升级会重写它，install 从它读命令），只 `launchctl disable`（记在 launchd 自己的库里，
+不碰 dt-worker 的家目录）：再登录 dt-worker 也不会起第二个（引擎有单实例锁，起了也只会反复退出）。
+已知：在 dt-worker 里跑 `agent-autoloop update` / `join` 会重装 LaunchAgent，被 disable 挡住而报错；升级引擎后
+在主账号重跑一次 install（它照新的 LaunchAgent 改服务）。
+
+root 不按路径碰 dt-worker 的家目录：读 LaunchAgent、跑检查都以 dt-worker 身份（sudo -u）。写 plist 前核对
+/Library/LaunchDaemons 从 / 起只有 root 能改（ops/dt_root_guard.sh）。Host、装卸服务、原子写文件复用 dt_gate_hub.py。
+"""
+import argparse
+import json
+import os
+import plistlib
+import re
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import dt_gate_hub as GH  # noqa: E402
+
+LABEL = "cn.digital-twin.worker-up"
+AGENT_LABEL = "agent-autoloop"            # 引擎 join 装的 LaunchAgent（默认 AGENT_AUTOLOOP_HOME 时的标签）
+FLAG = "--disable-warning=ExperimentalWarning"
+ABS = re.compile(r"^/[A-Za-z0-9._+/-]+$")
+SEARCH_PATH = re.compile(r"^/[A-Za-z0-9._+/:-]+$")
+START_WAIT = 60                           # 装好后等接单程序起来最多几秒
+CHECK_TIMEOUT = 60
+
+# 门卫状态是本次开机写的 state=ok 才启动；日志以 dt-worker 身份追加。"$@" 是原 LaunchAgent 的命令。
+WRAPPER = r'''s="/Library/Application Support/DigitalTwin/pf-dt-worker.status"
+while :; do
+  b=$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null | /usr/bin/sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+  l=$(/bin/cat "$s" 2>/dev/null)
+  if [ -n "$b" ]; then
+    case " $l " in *" state=ok "*) case " $l " in *" boot=$b "*) break ;; esac ;; esac
+  fi
+  /bin/sleep 10
+done
+/bin/mkdir -p "$HOME/.agent-autoloop/logs"
+exec "$@" >>"$HOME/.agent-autoloop/logs/up.log" 2>&1
+'''
+
+
+def worker():
+    return GH.worker_account()
+
+
+def plist_path():
+    return GH.daemons() / f"{LABEL}.plist"
+
+
+def agent_plist(home):
+    return f"{home}/Library/LaunchAgents/{AGENT_LABEL}.plist"
+
+
+def autoloop_home(home):
+    return f"{home}/.agent-autoloop"
+
+
+def parse_agent(data, home):
+    """从原 LaunchAgent 里取命令：只认引擎 host/service.ts 写的那种样子，别的一律停下（不猜）。"""
+    try:
+        p = plistlib.loads(data)
+    except Exception as e:                           # plistlib 对坏文件抛的异常种类很多
+        raise GH.Stop(f"读不懂原 LaunchAgent（{type(e).__name__}）")
+    args = p.get("ProgramArguments") if isinstance(p, dict) else None
+    env = p.get("EnvironmentVariables") if isinstance(p, dict) else None
+    ah = autoloop_home(home)
+    program = f"{ah}/app/bin/agent-autoloop.ts"
+    if not (isinstance(args, list) and len(args) == 4 and all(isinstance(a, str) for a in args)):
+        raise GH.Stop("原 LaunchAgent 的命令不是引擎写的那种（node、参数、agent-autoloop.ts、up 四段）")
+    node, flag, prog, up = args
+    if not ABS.match(node) or flag != FLAG or prog != program or up != "up":
+        raise GH.Stop(f"原 LaunchAgent 的命令对不上（应为 <node> {FLAG} {program} up）")
+    if not isinstance(env, dict) or env.get("AGENT_AUTOLOOP_HOME") != ah:
+        raise GH.Stop(f"原 LaunchAgent 的 AGENT_AUTOLOOP_HOME 不是 {ah}")
+    search = env.get("PATH")
+    if not isinstance(search, str) or not SEARCH_PATH.match(search):
+        raise GH.Stop("原 LaunchAgent 的 PATH 不对")
+    return {"node": node, "program": program, "autoloop_home": ah, "path": search}
+
+
+def plist_for(name, home, cmd):
+    return {"Label": LABEL, "UserName": name,
+            "ProgramArguments": ["/bin/sh", "-c", WRAPPER, "dt-worker-up", cmd["node"], FLAG, cmd["program"], "up"],
+            "EnvironmentVariables": {"HOME": home, "USER": name, "LOGNAME": name, "PATH": cmd["path"],
+                                     "AGENT_AUTOLOOP_HOME": cmd["autoloop_home"]},
+            "WorkingDirectory": home, "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10, "Umask": 0o077}
+
+
+def processes(host):
+    """全部进程：(uid, 命令行)。"""
+    code, out, err = host.run_ps()
+    if code != 0:
+        raise GH.Stop(f"ps 出错（{err.strip()[:80]}）")
+    rows = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            rows.append((int(parts[0]), parts[1]))
+    return rows
+
+
+def gui_session(rows, uid):
+    return any(u == uid and a.split()[0].endswith("/loginwindow") for u, a in rows)
+
+
+def busy(rows, uid):
+    """有派单正在跑（工人启动脚本 dt-worktree 在跑）：这时停接单程序会把那一轮掐断。"""
+    return any(u == uid and "dt-worktree-" in a for u, a in rows)
+
+
+def up_running(rows, uid, cmd):
+    """接单程序本身（node 起的那个；外面那层 sh 的命令行里也有这几个字，不算）。"""
+    return any(u == uid and a.split()[0] == cmd["node"] and f"{cmd['program']} up" in a for u, a in rows)
+
+
+def check_logins(host, name, home):
+    """以 dt-worker 身份、只有系统 PATH，跑引擎自己用的两条检查（plugins/claude、codex 的 agent.ts）。
+    返回 {执行方: (通过, 说明)}。"""
+    out = {}
+    bins = f"{autoloop_home(home)}/bin"
+    try:
+        code, so, err = host.as_user(name, [f"{bins}/claude-proxy.sh", "auth", "status"], timeout=CHECK_TIMEOUT)
+        try:
+            ok = code == 0 and json.loads(so.decode("utf-8", "replace")).get("loggedIn") is True
+        except (ValueError, AttributeError):
+            ok = False
+        out["claude"] = (ok, "已登录" if ok else f"没登录或读不到（退出码 {code}，{(err or so.decode('utf-8', 'replace')).strip()[:120]}）")
+    except Exception as e:                           # 超时、sudo 出错都算没过
+        out["claude"] = (False, f"检查没跑成（{type(e).__name__}）")
+    try:
+        code, so, err = host.as_user(name, [f"{bins}/codex-proxy.sh", "login", "status"], timeout=CHECK_TIMEOUT)
+        out["codex"] = (code == 0, "已登录" if code == 0 else f"没登录或读不到（退出码 {code}，{(err or so.decode('utf-8', 'replace')).strip()[:120]}）")
+    except Exception as e:
+        out["codex"] = (False, f"检查没跑成（{type(e).__name__}）")
+    return out
+
+
+def agent_disabled(host, uid):
+    code, out = host.launchctl("print-disabled", f"gui/{uid}")
+    return code == 0 and re.search(rf'"{re.escape(AGENT_LABEL)}" => (true|disabled)', out) is not None
+
+
+def account(host):
+    name = worker()
+    try:
+        a = host.account(name)
+    except KeyError:
+        raise GH.Stop(f"没有 {name} 这个账号")
+    if host.guard("uid_ok", name) != 0:
+        raise GH.Stop(f"{name} 的 uid 是 0、和别的账号重复，或目录服务查不清")
+    if a["home"] != f"/Users/{name}":
+        raise GH.Stop(f"{name} 的家目录不是 /Users/{name}")
+    return a
+
+
+def cmd_install(host, say=print):
+    a = account(host)
+    name, uid, home = a["name"], a["uid"], a["home"]
+    GH.root_dir(host, GH.daemons(), make=False)
+    rows = processes(host)
+    if gui_session(rows, uid):
+        raise GH.Stop(f"{name} 现在登录着（有图形会话）：请先在 {name} 里点苹果菜单 → 注销，再来装。"
+                      "要在没登录的情况下实测它读不读得到 Claude、Codex 的登录")
+    if busy(rows, uid):
+        raise GH.Stop("有派单正在跑（dt-worktree 进程在），现在装会把那一轮掐断；等它做完再来")
+    code, data, err = host.as_user(name, ["/bin/cat", agent_plist(home)])
+    if code != 0:
+        raise GH.Stop(f"读不到原 LaunchAgent {agent_plist(home)}（{err.strip()[:80]}）：dt-worker 是不是还没接过中台")
+    cmd = parse_agent(data, home)
+    say(f"接单程序：{cmd['node']} {cmd['program']} up")
+    logins = check_logins(host, name, home)
+    for who, (ok, why) in logins.items():
+        say(f"  {who}（没登录、后台环境）：{why}")
+    if not all(ok for ok, _ in logins.values()):
+        raise GH.Stop("没登录时读不到上面那家的登录，什么都没改。Claude：登录 dt-worker 重跑 "
+                      "`bash /Users/Shared/dt-autoloop/setup-dt-worker.sh` 补长期令牌；Codex：确认 ~/.codex/auth.json 在。"
+                      "补完注销 dt-worker 再来")
+    # 先装服务再停 LaunchAgent：没有图形会话时 LaunchAgent 本来就没在跑，disable 只管下次登录
+    if not GH.unload(host, f"system/{LABEL}"):
+        raise GH.Stop(f"{LABEL} 卸不下来（launchctl 一直显示还在）")
+    GH.write_root_file(plist_path(), plistlib.dumps(plist_for(name, home, cmd)), 0o644)
+    host.chown(plist_path(), 0, 0)
+    GH.load(host, plist_path())
+    host.launchctl("bootout", f"gui/{uid}/{AGENT_LABEL}")
+    host.launchctl("disable", f"gui/{uid}/{AGENT_LABEL}")
+    if agent_disabled(host, uid):
+        say(f"原 LaunchAgent：已停用（gui/{uid}/{AGENT_LABEL}，文件保留）")
+    else:
+        say(f"[注意] 原 LaunchAgent 没停用成（launchctl print-disabled gui/{uid} 里没有它）：下次登录 {name} 时它会起来、"
+            "撞上单实例锁反复退出，不影响服务；手动停：sudo launchctl disable gui/{uid}/{AGENT_LABEL}")
+    for _ in range(START_WAIT):
+        if up_running(processes(host), uid, cmd):
+            say(f"已装好：{LABEL} 在跑，接单程序起来了（几十秒内中台显示 {name} 在线）")
+            return 0
+        host.sleep(1)
+    say(f"[注意] 服务装上了，但 {START_WAIT} 秒没看到接单程序起来：门卫状态不是本次开机的 state=ok 时它会一直等；"
+        f"看 sudo /usr/bin/python3 -B -E -s {Path(__file__).name} status 和 ~{name}/.agent-autoloop/logs/up.log")
+    return 1
+
+
+def cmd_status(host, say=print):
+    a = account(host)
+    name, uid, home = a["name"], a["uid"], a["home"]
+    installed = os.path.lexists(plist_path())
+    say(f"服务 {LABEL}：{'已装' if installed else '没装'}（{plist_path()}）")
+    if installed:
+        code, out = host.launchctl("print", f"system/{LABEL}")
+        keep = [ln.strip() for ln in out.splitlines() if re.match(r"\s*(state|pid|last exit code|runs) =", ln)]
+        say("  " + ("；".join(keep) if code == 0 else f"launchctl 里没有（{out[:80]}）"))
+    rows = processes(host)
+    code, data, _ = host.as_user(name, ["/bin/cat", agent_plist(home)])
+    try:
+        cmd = parse_agent(data, home) if code == 0 else None
+    except GH.Stop as e:
+        cmd = None
+        say(f"原 LaunchAgent：{e}")
+    if cmd:
+        say(f"接单程序：{'在跑' if up_running(rows, uid, cmd) else '没在跑'}")
+    say(f"原 LaunchAgent：{'已停用' if agent_disabled(host, uid) else '没停用'}")
+    logged_in = gui_session(rows, uid)
+    say(f"{name} 图形会话：{'登录着' if logged_in else '没登录'}")
+    for who, (ok, why) in check_logins(host, name, home).items():
+        say(f"  {who}：{why}" + ("（登录着时钥匙串开着，这一项不代表没登录时）" if logged_in else ""))
+    return 0
+
+
+def cmd_remove(host, say=print):
+    a = account(host)
+    if not GH.unload(host, f"system/{LABEL}"):
+        raise GH.Stop(f"{LABEL} 卸不下来（launchctl 一直显示还在），plist 留着；看清原因后再来")
+    f = plist_path()
+    if os.path.lexists(f):
+        if f.is_symlink() or not f.is_file():
+            raise GH.Stop(f"{f} 不是普通文件，没删；请人工查看")
+        f.unlink()
+    host.launchctl("enable", f"gui/{a['uid']}/{AGENT_LABEL}")
+    say(f"已拆掉 {LABEL}，原 LaunchAgent 已放开：登录 {a['name']} 后接单程序照旧起来（不登录就不在线）")
+    return 0
+
+
+class Host(GH.Host):
+    def run_ps(self):
+        import subprocess
+        r = subprocess.run(["/bin/ps", "-axww", "-o", "uid=,args="], capture_output=True, text=True)
+        return r.returncode, r.stdout, r.stderr
+
+
+def main(argv=None, host=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("cmd", choices=("install", "status", "remove"))
+    a = ap.parse_args(argv)
+    host = host or Host()
+    if not host.is_root():
+        print(f"要用 sudo 运行：sudo /usr/bin/python3 -B -E -s {__file__} {a.cmd}")
+        return 2
+    os.chdir("/")                        # 主账号家目录 700，以 dt-worker 身份起的进程进不去
+    try:
+        return {"install": cmd_install, "status": cmd_status, "remove": cmd_remove}[a.cmd](host)
+    except GH.Stop as e:
+        print(f"[停下] {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
