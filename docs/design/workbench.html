@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap">
 <style>
-/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：数字条 + 一夜时间轴 + 黑底拍板卡片 + 逐件白话叙述 + 额度条。分身页：一张卡片走过的 8 道闸 + 右栏现在状态、授权四档、私聊口令。执行页：按工位分（你的账号里五个执行方、活挂在下面 + dt-worker）+ 不用 AI 的脚本 + 切默认执行方 + 出了问题怎么办 */
+/* 版式：侧栏外壳（四组八个入口）。首页：刊头 + 等距系统图，往下是拍板清单行，再分主栏（工作流）和窄栏（今日运行、托管、自动化）。汇报页：数字条 + 一夜时间轴 + 黑底拍板卡片 + 逐件白话叙述 + 额度条。分身页：一张卡片走过的 8 道闸 + 右栏现在状态、授权四档、私聊口令。执行页：按工位分（你的账号里五个执行方、活挂在下面 + dt-worker）+ 不用 AI 的脚本 + 切默认执行方 + 出了问题怎么办。记录页：数字条 + 一天的时间轴（六类各一道）+ 要留意和按钟点。沉淀页：四列看板（等你定 → 没落地 → 写进规矩 → 再犯）+ 规矩库 */
 @font-face{font-family:"BM";src:local("Berkeley Mono"),local("BerkeleyMono-Regular"),local("TX-02"),local("TX-02 Regular"),local("TX02-Regular");font-weight:400;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 @font-face{font-family:"BM";src:local("Berkeley Mono Bold"),local("BerkeleyMono-Bold"),local("TX-02 Bold"),local("TX02-Bold");font-weight:700;unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
 :root{
@@ -735,6 +735,110 @@ svg.iso .led-ok{fill:var(--ok)} svg.iso .led-warn{fill:var(--warn)}
 .ex-rules li{counter-increment:r;display:grid;gap:2px;align-content:start;padding-left:22px;position:relative;font-size:12.5px;line-height:1.5}
 .ex-rules li::before{content:counter(r);position:absolute;left:0;top:1px;width:15px;height:15px;display:grid;place-items:center;background:var(--ink);color:var(--bg);font-size:10px;font-weight:700}
 .ex-rules li>b{font-size:13px}
+/* ---------- 记录页（11-24 定稿：乙 · 时间轴） ---------- */
+.jl{display:grid;gap:30px}
+.jl>.h-sec{margin-bottom:-12px}
+.jl .m{color:var(--mute);font-size:11.5px;font-style:normal;font-weight:400}
+.jl .code.me,.sdn .code.me{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.jl-day{display:flex;align-items:center;gap:10px;font-size:13px}
+.jl-day .btn{padding:2px 9px;font-size:12px}
+.jl-day .btn:disabled{border-color:var(--line);color:var(--mute);cursor:default}
+.jl-nums{display:grid;grid-template-columns:repeat(5,minmax(0,1fr)) 1.6fr;border:1px solid var(--ink);background:var(--panel)}
+.jl-nums>div{padding:10px 14px;display:grid;gap:2px;align-content:start}
+.jl-nums>div+div{border-left:1px solid var(--line)}
+.jl-nums b{font-size:32px;line-height:1;font-weight:700}
+.jl-nums span{font-size:12.5px}
+.jl-nums .bad b{color:var(--bad)} .jl-nums .me b{color:var(--accent)} .jl-nums .warn b{color:var(--warn)}
+.jl-nums .me{background:var(--acc-soft)}
+.jl-nums .cov b{font-size:20px}
+.jl-r{display:inline-flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;font-style:normal}
+.jl-r i{width:8px;height:8px;display:inline-block;flex:none;background:var(--ok)}
+.jl-r.bad{color:var(--bad)} .jl-r.bad i{background:var(--bad)}
+.jl-r.me{color:var(--accent)} .jl-r.me i{background:var(--accent)}
+.jl-r.warn{color:var(--warn)} .jl-r.warn i{background:var(--warn)}
+.jl-steps{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:5px;font-size:11.5px}
+.jl-steps>span{display:inline-flex;gap:4px;align-items:center;border:1px solid var(--ink);padding:1px 5px;background:var(--bg)}
+.jl-steps>span.fail{border-color:var(--bad);color:var(--bad)}
+.jl-steps>span.wait{border-style:dashed;color:var(--mute);border-color:var(--mute)}
+.jl-steps i{font-style:normal;color:var(--mute)}
+.jl-cov{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12px;border-top:1px solid var(--ink);padding-top:10px}
+.jl-cov .l{font-weight:700}
+.jl-cov span b{font-weight:500}
+.jl-cov span.no{color:var(--bad)}
+.jl-cov em{font-style:normal;margin-left:4px}
+.jl-cov .later{color:var(--mute);margin-left:auto}
+/* 时间轴 */
+.jl-axis{position:relative;border:1px solid var(--ink);background:var(--panel);padding:26px 14px 10px}
+.jl-ticks{position:absolute;left:124px;right:14px;top:6px;height:16px}
+.jl-ticks span{position:absolute;transform:translateX(-50%);font-size:10.5px;color:var(--mute)}
+.jl-lane{display:grid;grid-template-columns:110px minmax(0,1fr);align-items:center;height:30px;border-top:1px dashed var(--line)}
+.jl-lane .nm{font-size:12.5px}
+.jl-lane .tr{position:relative;height:100%;background-image:linear-gradient(to right,var(--line) 1px,transparent 1px);background-size:16.666% 100%}
+.jl-lane .dot{position:absolute;top:50%;width:12px;height:12px;transform:translate(-50%,-50%);background:var(--ok);border:1.5px solid var(--panel)}
+.jl-lane .dot.bad{background:var(--bad)} .jl-lane .dot.me{background:var(--accent)} .jl-lane .dot.warn{background:var(--warn)}
+.jl-lane .bar{position:absolute;top:9px;height:12px;background:repeating-linear-gradient(90deg,var(--ok) 0 2px,transparent 2px 5px);border:1px solid var(--ok)}
+.jl-lane .bar em{position:absolute;right:-30px;top:-3px;font-style:normal;font-size:11px;color:var(--mute)}
+.jl-now{position:absolute;top:22px;bottom:34px;border-left:1.5px solid var(--accent)}
+.jl-now b{position:absolute;top:-18px;left:4px;font-size:10.5px;color:var(--accent)}
+.jl-axis .lg{margin-top:8px}
+.jl-two{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:28px;align-items:start}
+.jl-nl{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.jl-nl li{display:grid;grid-template-columns:44px minmax(0,1fr);gap:10px;border:1px solid var(--ink);background:var(--panel);padding:9px 12px;box-shadow:inset 3px 0 0 var(--bad);font-size:12.5px}
+.jl-nl li.me{box-shadow:inset 3px 0 0 var(--accent)} .jl-nl li.warn{box-shadow:inset 3px 0 0 var(--warn)}
+.jl-nl b{font-size:13.5px;font-weight:500}
+.jl-nl p{margin:2px 0}
+.jl-hours{display:grid;gap:0;border:1px solid var(--ink);background:var(--panel)}
+.jl-hours .h{display:grid;grid-template-columns:52px minmax(0,1fr);gap:8px;padding:6px 10px;border-top:1px dashed var(--line)}
+.jl-hours .h:first-child{border-top:0}
+.jl-hours b{font-size:12px;font-weight:500;padding-top:2px}
+.jl-hours ul{list-style:none;margin:0;padding:0;display:grid;gap:3px}
+.jl-hours li{display:grid;grid-template-columns:92px minmax(0,1fr) auto;gap:6px;align-items:center;font-size:12px}
+.jl-hours li.need span:nth-child(2){font-weight:700}
+/* ---------- 沉淀页（11-24 定稿：乙 · 看板） ---------- */
+.sdn{display:grid;gap:30px}
+.sdn>.h-sec{margin-bottom:-12px}
+.sdn .m{color:var(--mute);font-size:11.5px;font-style:normal;font-weight:400}
+.sdn-dlist,.sdn-plain{list-style:none;margin:0;padding:0}
+.sdn-p,.sdn-l{border:1px solid var(--ink);background:var(--panel);padding:11px 13px;display:grid;gap:5px;align-content:start;font-size:12.5px}
+.sdn-p{box-shadow:inset 3px 0 0 var(--accent)}
+.sdn-p .top,.sdn-l .top{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-size:12px}
+.sdn-p .age,.sdn-l .age{margin-left:auto;color:var(--mute);font-size:11.5px}
+.sdn-p b,.sdn-l b{font-size:14px;line-height:1.45}
+.sdn-src{white-space:nowrap;display:inline-flex;gap:4px;align-items:center;background:var(--ink);color:var(--bg);padding:0 6px;font-size:11.5px}
+.sdn-src.hint{background:var(--accent);color:var(--on-accent)}
+.sdn-rec{display:inline-block;font-size:11.5px;border:1px solid var(--ok);color:var(--ok);padding:0 5px;margin-right:8px}
+.sdn-rec.n{border-color:var(--mute);color:var(--mute)}
+.sdn-acts{display:flex;gap:8px;align-items:center;margin-top:4px}
+.sdn-acts .btn{font-size:12px;padding:3px 10px}
+.sdn-acts .btn .fs{display:inline;font-size:10.5px;opacity:.75;margin-left:2px}
+.sdn-sent{font-size:12px;color:var(--accent)}
+.sdn-sent .undo{font:inherit;border:0;background:none;color:var(--mute);text-decoration:underline;cursor:pointer;margin-left:6px;padding:0}
+.sdn-l{box-shadow:inset 3px 0 0 var(--warn)}
+.sdn-st{justify-self:start;font-size:11.5px;border:1px dashed var(--warn);color:var(--warn);padding:0 6px}
+.sdn-st.ok{border:1px solid var(--ok);color:var(--ok)}
+.sdn-st.n{border-color:var(--mute);color:var(--mute)}
+.sdn-a{display:grid;grid-template-columns:52px minmax(0,1fr);gap:8px;border:1px solid var(--bad);background:var(--panel);padding:7px 10px;font-size:12.5px}
+.sdn-a .id{font-weight:700;color:var(--bad)}
+.sdn-a b{display:block;font-weight:500}
+.sdn-plain li{font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)}
+.sdn-dlist{display:grid}
+.sdn-d{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:10px;align-items:start;padding:7px 0;border-bottom:1px dashed var(--line);font-size:12.5px}
+.sdn-d b{display:block;font-weight:500}
+.sdn-shot{font-size:11px;border:1px solid var(--line);color:var(--mute);padding:0 5px;white-space:nowrap}
+/* 看板 */
+.sdn-board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:start}
+.sdn-col{border:1px solid var(--ink);background:var(--bg)}
+.sdn-col .ch{display:flex;justify-content:space-between;align-items:baseline;padding:8px 12px;border-bottom:1px solid var(--ink);background:var(--panel)}
+.sdn-col .ch b{font-size:14px}
+.sdn-col .ch span{font-size:20px;font-weight:700}
+.sdn-col.me .ch{background:var(--acc-soft)} .sdn-col.me .ch span{color:var(--accent)}
+.sdn-col.warn .ch span{color:var(--warn)} .sdn-col.bad .ch span{color:var(--bad)}
+.sdn-col ul{list-style:none;margin:0;padding:10px;display:grid;gap:8px}
+.sdn-col .sdn-p,.sdn-col .sdn-l{padding:9px 10px}
+.sdn-col .sdn-p b,.sdn-col .sdn-l b{font-size:13px}
+.sdn-lib{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}
+.sdn-lib h4{margin:0 0 6px;font-size:13px}
+
 @media (max-width:1240px){
   .split{grid-template-columns:minmax(0,1fr)}
   .rail{position:static;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
@@ -1037,7 +1141,7 @@ function wfRow(w){
     <div class="mini">${strip(w)}<div class="caps">${caps}</div></div>
   </div>`;
 }
-/* 侧栏首页、汇报、主线、协同、执行、分身六页有稿；其余两页（记录、沉淀）还没设计 */
+/* 侧栏八页都有稿：首页、汇报、主线、协同、执行、分身、记录、沉淀 */
 const state={page:'home',cw:0,msg:'',ms:{0:4,1:3},exsent:0};
 /* 首页：清单行。能一眼定的在这里点主按钮发起，要看详情的去汇报；点了只算发起，批准在飞书门卫卡上 */
 function homeDecide(){
@@ -1646,16 +1750,136 @@ document.addEventListener('click',e=>{
   if(e.target.closest('[data-exundo]')){state.exsent=0;render()}
 });
 
+/* ---------- 记录页（11-24 定稿：乙 · 时间轴）：分身和工人都做了什么、凭什么做的、结果怎样 ---------- */
+/* 常浩 2026-11-24 认可的逻辑（按推荐）：完整流水账，能往回翻，出了事能查到证据；不放规则、不放要拍板的事。
+   一天按 04:00 到次日 04:00 算；要留意的（失败、转给你、授权不够、结果不明）置顶；高频定时任务一天合成一行；一张工作流的单一行、点开看每步。
+   依据 actions.py（七个来源现读现转 + actions.jsonl）；示例数据和首页「今天的运行」一致（11-19 14:20）。 */
+const JK={merge:'合并',dispatch:'派单',cron:'定时任务',ruling:'判断',supervise:'看管',install:'安装'};
+const JR={ok:['成功','ok'],ver:['结果核实过','ok'],fail:['失败','bad'],unk:['不明','warn'],esc:['转给你','me']};
+const JL=[
+  {t:'04:01–14:15',k:'cron',p:'Hermes',w:'Tidings 周报 · 到点检查',who:'sc',src:'已登记的定时任务',r:'ok',n:41,note:'41 次全部成功，没到发送时间'},
+  {t:'07:30',k:'cron',p:'记忆日报',w:'记忆日报写进当月汇总文档',who:'ag',src:'已登记的定时任务',r:'ver',ev:'回读核过 · 私聊已推送'},
+  {t:'09:00–14:00',k:'ruling',p:'7 个仓库',w:'合并官给新 PR 判建议',who:'sc',src:'合并规则 v12',r:'ok',n:11,note:'建议合并 6 · 退回 3 · 问你 2（单列在下面）'},
+  {t:'09:15',k:'cron',p:'个人项目日报',w:'个人项目日报写稿',who:'mg',src:'已登记的定时任务',r:'ok',ev:'卡片要素核对通过'},
+  {t:'09:45',k:'cron',p:'AI HOT',w:'AI HOT 热点榜发到私聊',who:'sc',src:'已登记的定时任务',r:'ver',ev:'回读核过'},
+  {t:'09:52',k:'supervise',p:'Hermes',w:'每日巡检没发出去',who:'sc',src:'launchd 每日巡检',r:'fail',ev:'飞书接口 502；10:22 重试成功'},
+  {t:'10:00',k:'cron',p:'个人项目日报',w:'个人项目日报发到私聊，带工程自检',who:'mg',src:'已登记的定时任务',r:'ver',ev:'回读核过'},
+  {t:'10:00',k:'cron',p:'群学习报告',w:'群学习报告写稿',who:'mg',src:'已登记的定时任务',r:'ok',ev:'核对不过重写 1 处后通过'},
+  {t:'10:45',k:'cron',p:'群学习报告',w:'群学习报告发到私聊',who:'mg',src:'已登记的定时任务',r:'ver',ev:'回读核过'},
+  {t:'11:06',k:'dispatch',p:'dt-sandbox',w:'车间派单：补对账脚本的测试',who:'cx',tier:'D',src:'你私聊回「派 1」',r:'ok',ev:'回执 t-1119-03 · 分支已推'},
+  {t:'11:20',k:'dispatch',p:'digital-twin',w:'标准开发 #221 卡在第 3 步',who:'cc',tier:'D',src:'你飞书派单',r:'fail',ev:'GPT 网页未登录，审不了',steps:[['mg','拆单派单','ok'],['cc','写代码 · 开 PR','ok'],['gp','审','fail'],['cx','测试','wait'],['me','合并','wait']]},
+  {t:'12:10',k:'merge',p:'agent-kit',w:'按策略合并 agent-kit#88（只改文档）',who:'sc',tier:'A',src:'合并策略记录（11-22 签）',r:'ver',ev:'合并回执 3f2a91c'},
+  {t:'12:31',k:'merge',p:'my-skills',w:'按策略合并 my-skills#112',who:'sc',tier:'A',src:'合并策略记录（11-22 签）',r:'unk',ev:'请求 60 秒没回，等巡视对账'},
+  {t:'13:05',k:'ruling',p:'digital-twin',w:'合并官：digital-twin#229 改了 PRD，问你',who:'sc',src:'合并规则 v12 · 例外',r:'esc',ev:'卡片已发私聊'},
+  {t:'13:40',k:'dispatch',p:'digital-twin',w:'标准开发 #222 走到最后一步，等你合并',who:'cc',tier:'D',src:'你飞书派单',r:'esc',ev:'PR #222 · CI 全绿',steps:[['mg','拆单派单','ok'],['cc','写代码 · 开 PR','ok'],['gp','审','ok'],['cx','测试','ok'],['me','合并','wait']]},
+  {t:'14:02',k:'install',p:'digital-twin',w:'装 openloop.py 到猛鬼兽脚本目录',who:'cc',tier:'C',src:'夜间授权文件第 3 条',r:'ver',ev:'安装副本和仓库一致',gap:'安装应有 D 档，这次凭的是 C 档文件'}
+];
+const JSRC=[['合并官',11,1],['按策略合并',2,1],['派单台账',3,1],['定时任务库',47,1],['夜跑',0,1],['merge-runs',0,1],['actions.jsonl',1,1],['裁决文件',null,0,'读取超时']];
+const JLATER=['中台轮次','受信发布','秘书账本'];
+const jlNeed=a=>a.r==='fail'||a.r==='esc'||a.r==='unk'||!!a.gap;
+const jlCnt=a=>a.n||1;
+const jlChip=id=>id==='sc'?'<span class="code none">脚</span>':codeChip(id);
+const jlWho=id=>id==='sc'?'脚本':(R[id].full||R[id].name);
+const jlRes=a=>{const x=JR[a.r];return `<span class="jl-r ${x[1]}"><i></i>${x[0]}</span>`};
+const jlStat=()=>{const all=JL.reduce((s,a)=>s+jlCnt(a),0);const c=f=>JL.filter(f).length;
+  return [[all,'一共'],[c(a=>a.r==='fail'),'失败','bad'],[c(a=>a.r==='esc'),'转给你','me'],[c(a=>!!a.gap),'授权不够','warn'],[c(a=>a.r==='unk'),'结果不明','warn']]};
+const jlHead=()=>`<div class="h-sec"><h2><i class="sq"></i>记录</h2><span class="hint num">一天按 04:00 到次日 04:00 算</span>
+  <div class="right"><div class="jl-day"><button type="button" class="btn">‹ 11-18</button><b class="num">11-19 周四 · 04:00 → 现在 14:20</b><button type="button" class="btn" disabled>11-20 ›</button></div></div></div>`;
+const jlNums=()=>`<div class="jl-nums">${jlStat().map(s=>`<div class="${s[2]||''}"><b class="num">${s[0]}</b><span>${s[1]}</span></div>`).join('')}<div class="cov"><span>来源</span><b class="num">${JSRC.filter(s=>s[2]).length} / ${JSRC.length}</b><span class="m">${JSRC.filter(s=>!s[2]).map(s=>s[0]+' '+s[3]).join('、')}</span></div></div>`;
+const jlWhy=a=>a.gap?`授权不够：${a.gap}`:a.r==='fail'?`失败：${a.ev}`:a.r==='esc'?`转给你：${a.ev}`:`结果不明：${a.ev}`;
+const jlSteps=a=>a.steps?`<div class="jl-steps">${a.steps.map((s,i)=>`${i?'<i>→</i>':''}<span class="${s[2]}">${s[0]==='me'?'<span class="code me">我</span>':codeChip(s[0])}${s[1]}</span>`).join('')}</div>`:'';
+const jlCov=()=>`<div class="jl-cov"><span class="l">来源</span>${JSRC.map(s=>`<span class="${s[2]?'':'no'}">${s[0]} <b class="num">${s[1]===null?'没取到':s[1]}</b>${s[3]?`<em>${s[3]}</em>`:''}</span>`).join('')}<span class="later">以后接：${JLATER.join('、')}（等批次）</span></div>`;
+/* 11-24 定稿：乙 · 时间轴 —— 一天一条轴，六类各一道，下面要留意和按钟点 */
+function recPage(){
+  const T0=4*60,T1=28*60,NOWm=14*60+20,X=m=>((m-T0)/(T1-T0)*100).toFixed(2)+'%';
+  const tm=s=>{const[h,m]=s.split('–')[0].split(':').map(Number);return h*60+m};
+  const span=s=>s.includes('–')?s.split('–').map(x=>{const[h,m]=x.split(':').map(Number);return h*60+m}):null;
+  const lanes=Object.keys(JK);
+  const lane=k=>`<div class="jl-lane"><span class="nm">${JK[k]}</span><div class="tr">${JL.filter(a=>a.k===k).map(a=>{const sp=span(a.t);return sp?`<span class="bar ${JR[a.r][1]}" style="left:${X(sp[0])};width:calc(${X(sp[1])} - ${X(sp[0])})" title="${a.w} ×${a.n}"><em class="num">×${a.n}</em></span>`:`<span class="dot ${a.gap?'warn':JR[a.r][1]}" style="left:${X(tm(a.t))}" title="${a.t} ${a.w}"></span>`}).join('')}</div></div>`;
+  const ticks=[4,8,12,16,20,24,28];
+  const byH={};JL.forEach(a=>{const h=a.t.slice(0,2);(byH[h]=byH[h]||[]).push(a)});
+  return `<div class="jl">${jlHead()}${jlNums()}
+  <section class="jl-axis">
+    <div class="jl-ticks">${ticks.map(h=>`<span class="num" style="left:${X(h*60)}">${String(h%24).padStart(2,'0')}:00</span>`).join('')}</div>
+    ${lanes.map(lane).join('')}
+    <div class="jl-now" style="left:calc(124px + (100% - 138px) * ${((NOWm-T0)/(T1-T0)).toFixed(4)})"><b>14:20</b></div>
+    <div class="lg"><span><i class="jl-r ok"><i></i></i>成功</span><span><i class="jl-r bad"><i></i></i>失败</span><span><i class="jl-r me"><i></i></i>转给你</span><span><i class="jl-r warn"><i></i></i>不明 / 授权不够</span><span>横条 = 一天跑了好多次的合成一条</span></div>
+  </section>
+  <div class="jl-two">
+    <section><div class="h-rail"><h3><i class="sq"></i>要留意 <span class="num mute">${JL.filter(jlNeed).length}</span></h3></div>
+      <ul class="jl-nl">${JL.filter(jlNeed).map(a=>`<li class="${a.gap?'warn':JR[a.r][1]}"><span class="num">${a.t}</span><div><b>${a.w}</b><p>${jlWhy(a)}</p>${jlSteps(a)}<span class="m">${a.p} · ${jlChip(a.who)} ${jlWho(a.who)} · ${a.tier?a.tier+' 档 · ':''}${a.src}</span></div></li>`).join('')}</ul></section>
+    <section><div class="h-rail"><h3><i class="sq"></i>按钟点</h3><span class="more">只看要留意</span></div>
+      <div class="jl-hours">${Object.keys(byH).sort().map(h=>`<div class="h"><b class="num">${h}:00</b><ul>${byH[h].map(a=>`<li class="${jlNeed(a)?'need':''}">${jlRes(a)}<span>${a.w}${a.n?` <span class="num m">×${a.n}</span>`:''}</span><span class="m">${jlChip(a.who)}</span></li>`).join('')}</ul></div>`).join('')}</div></section>
+  </div>
+  ${jlCov()}</div>`;
+}
+
+/* ---------- 沉淀页（11-24 定稿：乙 · 看板）：分身从做事里学到了什么，哪些已经变成规矩 ---------- */
+/* 常浩 2026-11-24 认可的逻辑（按推荐）：一条线「发现了 → 你定了 → 写进规矩了 → 再犯了没有」。
+   四块：等你定的提案（侧栏角标就是这个数）、定了还没落地的、坑（再犯置顶）、已定内容。优化线索算提案的来源之一。
+   按钮只算发起（F11.7），真正的决定还在飞书。示例数据到 11-19 为止。 */
+const SP=[
+  {src:'会话复盘',id:'A1',t:'给参考物时只借鉴点名的维度',rec:'采纳',why:'跨会话四次返工，补明参考边界成本低',age:'3 天',to:'全局 CLAUDE.md'},
+  {src:'牛马之家每周整理',id:'W10-23-9',t:'L-07 补上「在临时克隆里跑全量测试」的做法',rec:'采纳',why:'巡检误报两次，都因为测的不是真实部署',age:'12 天',to:'digital-twin LESSONS'},
+  {src:'再犯与待提升',id:'G-20',t:'睡眠时定时任务慢到被自己的超时中断，本周又犯 2 次',rec:'采纳',why:'两个项目各一次，统一改成先等网络',age:'2 天',to:'agent-kit LESSONS'},
+  {src:'优化线索',id:'线索 3',t:'群学习报告写稿连续 3 天重写 1 处：提示词补「出处写到帖子一级」',rec:'采纳',why:'每天多花一轮模型调用',age:'1 天',to:'群学习报告提示词',ai:'mg'}
+];
+const SL=[
+  {id:'B1',t:'Claude Code 改文件前没先读，会连续失败',when:'11-07 你回「采纳」',to:'agent-kit LESSONS',st:'还没写进去',age:'12 天'},
+  {id:'carvomoto/L-06',t:'提升成全局坑',when:'11-17 你回「采纳」',to:'agent-kit LESSONS',st:'agent-kit#91 开着，等合并',age:'2 天'}
+];
+const SDONE=[
+  {id:'L-09',t:'全量测试慢被误判卡死，写进项目坑',when:'11-19'},
+  {id:'G-15',t:'Safari 程序坞网页应用黑屏，和 G-16 合成一条',when:'11-18'},
+  {id:'A2',t:'只让审核时不开工',when:'11-18',no:1}
+];
+const SAGAIN=[['G-04','并行会话共用一个工作区，提交带上别人的改动',2,'digital-twin、agent-kit'],['G-20','睡眠时定时任务被自己的超时中断',2,'digital-twin、niuma-home'],['G-11','无头 Chrome 截图不可靠',1,'digital-twin']];
+const SLX=['L-01 测试碰到本机正式环境','L-02 PR 分支从本地 main 拉，带出没推的提交','L-03 唤醒后网络没通，定时任务取数失败','L-04 结论没定就写进 PRD','L-05 PR 刚开就按旧版本合并','L-06 记忆日报撞上单文档 4 万块上限','L-07 巡检和自检自己误报','L-08 Hermes 在安装位置改技能','L-09 全量测试慢被误判卡死','L-10 重启网关撞上日报写稿'];
+const SGX=['G-27 没走代理的终端登录命令行 AI 工具','G-28 Artifact 里声明全局变量 claude 整页空白','G-29 测试读写了正式环境'];
+const SDEC=[['11-19','工作台分身页','一张卡片走过的 8 道闸',1],['11-19','工作台主线页','地铁线',1],['11-19','工作台协同页','工作流泳道 + 规则接在下面',1],['11-19','个人项目日报卡片（乙版）','四板块、风险按原因一类一行',1],['11-19','工作台汇报页（重做）','数字条 + 时间轴 + 逐件白话',1],['11-19','工作台第 4 版','侧栏四组八个入口、首页拍板清单行',1],['11-19','工作台首页（第 3 版）','刊头 + 等距系统图',1]];
+const sdBtns=(p,i)=>`<div class="sdn-acts">${state.sdd&&state.sdd[i]?`<span class="sdn-sent">已发起「${state.sdd[i]}」· 待飞书确认<button class="undo" type="button" data-sdu="${i}">撤回</button></span>`:`<button class="btn pri" type="button" data-sdp="${i}" data-v="${p.rec}">发起${p.rec}<span class="fs">↗ 飞书</span></button><button class="btn link" type="button" data-sdp="${i}" data-v="${p.rec==='采纳'?'否决':'采纳'}">${p.rec==='采纳'?'否决':'采纳'}</button>`}</div>`;
+const sdSrc=p=>`<span class="sdn-src${p.src==='优化线索'?' hint':''}">${p.src}${p.ai?` · ${R[p.ai].name}发现`:''}</span>`;
+const sdHead=()=>`<div class="h-sec"><h2><i class="sq"></i>沉淀</h2><span class="hint num">提案 ${SP.length} 条等你定 · 坑 ${SLX.length} + 47 条 · 已定内容 ${SDEC.length} 条</span></div>`;
+const sdProp=(p,i)=>`<li class="sdn-p"><div class="top">${sdSrc(p)}<span class="num m">${p.id}</span><span class="age num">等了 ${p.age}</span></div><b>${p.t}</b><p><span class="sdn-rec ${p.rec==='采纳'?'y':'n'}">推荐${p.rec}</span>${p.why}</p><span class="m">定了写进：${p.to}</span>${sdBtns(p,i)}</li>`;
+const sdLand=s=>`<li class="sdn-l"><div class="top"><span class="num m">${s.id}</span><span class="age num">已过 ${s.age}</span></div><b>${s.t}</b><p class="m">${s.when} → ${s.to}</p><span class="sdn-st">${s.st}</span></li>`;
+const sdAgain=g=>`<li class="sdn-a"><span class="num id">${g[0]}</span><div><b>${g[1]}</b><span class="m">本周 ${g[2]} 次 · ${g[3]}</span></div></li>`;
+const sdDec=d=>`<li class="sdn-d"><span class="num m">${d[0]}</span><div><b>${d[1]}</b><span class="m">${d[2]}</span></div>${d[3]?'<span class="sdn-shot">有基线截图</span>':''}</li>`;
+
+/* 11-24 定稿：乙 · 看板 —— 四列就是那条线，下面是规矩库 */
+function sdPage(){
+  const col=(h,n,cls,body)=>`<div class="sdn-col ${cls}"><div class="ch"><b>${h}</b><span class="num">${n}</span></div><ul>${body}</ul></div>`;
+  return `<div class="sdn">${sdHead()}
+  <div class="sdn-board">
+    ${col('发现了，等你定',SP.length,'me',SP.map(sdProp).join(''))}
+    ${col('你定了，还没落地',SL.length,'warn',SL.map(sdLand).join(''))}
+    ${col('本周写进规矩',SDONE.length,'',SDONE.map(s=>`<li class="sdn-l"><div class="top"><span class="num m">${s.id}</span><span class="age num">${s.when}</span></div><b>${s.t}</b>${s.no?'<span class="sdn-st n">你否决了，不写</span>':'<span class="sdn-st ok">已写进</span>'}</li>`).join(''))}
+    ${col('本周再犯的坑',SAGAIN.length,'bad',SAGAIN.map(sdAgain).join(''))}
+  </div>
+  <section><div class="h-rail"><h3><i class="sq"></i>规矩库</h3><span class="mute" style="font-size:12px">已经定下的，平时不变</span></div>
+    <div class="sdn-lib">
+      <div><h4>本项目坑 <span class="num m">${SLX.length}</span></h4><ul class="sdn-plain">${SLX.map(x=>`<li>${x}</li>`).join('')}</ul></div>
+      <div><h4>全局坑 <span class="num m">47</span></h4><ul class="sdn-plain">${SGX.map(x=>`<li>${x}</li>`).join('')}<li class="m">…… 另 44 条</li></ul></div>
+      <div><h4>已定内容 <span class="num m">${SDEC.length}</span></h4><ul class="sdn-dlist">${SDEC.map(sdDec).join('')}</ul></div>
+    </div></section></div>`;
+}
+
+document.addEventListener('click',e=>{
+  const p=e.target.closest('[data-sdp]');if(p){state.sdd=state.sdd||{};state.sdd[p.dataset.sdp]=p.dataset.v;render();return}
+  const u=e.target.closest('[data-sdu]');if(u){delete state.sdd[u.dataset.sdu];render()}
+});
+
 function render(){
-  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`,'main'],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`,'exec'],['分身','',`<span class="n">关</span>`,'twin'],['grp','留痕'],['记录','',''],['沉淀','',`<span class="n num">4</span>`]];
+  const nav=[['首页','fill','','home'],['汇报','',`<span class="n hot num">${DECISIONS.length}</span>`,'report'],['grp','在跑'],['主线','',`<span class="n num">2</span>`,'main'],['协同','',`<span class="n num">${WF.length} · ${AUTO.length}</span>`,'collab'],['grp','规则'],['执行','',`<span class="n"><span class="led warn"></span></span>`,'exec'],['分身','',`<span class="n">关</span>`,'twin'],['grp','留痕'],['记录','','','rec'],['沉淀','',`<span class="n num">${SP.length}</span>`,'sd']];
   $('#nav').innerHTML=nav.map(n=>n[0]==='grp'?`<li class="grp">${n[1]}<i></i></li>`:`<li><a href="#" ${n[3]?`data-page="${n[3]}"`:''} ${n[3]===state.page?'aria-current="page"':''}><span class="ico ${n[1]}"></span>${n[0]}${n[2]}</a></li>`).join('');
-  document.querySelector('.bar h1').textContent={report:'汇报',main:'主线',collab:'协同',twin:'分身',exec:'执行'}[state.page]||'首页';
+  document.querySelector('.bar h1').textContent={report:'汇报',main:'主线',collab:'协同',twin:'分身',exec:'执行',rec:'记录',sd:'沉淀'}[state.page]||'首页';
   $('#sideLeds').innerHTML=AI.map(id=>`<span title="${R[id].full||R[id].name} ${R[id].stateText}"><span class="led ${R[id].state==='ok'?'':'warn'}"></span>${R[id].code}</span>`).join('');
   if(state.page==='report'){ $('#content').innerHTML=reportPage(); return }
   if(state.page==='main'){ $('#content').innerHTML=mainPage(); return }
   if(state.page==='collab'){ $('#content').innerHTML=collabPage(); cbPost(); return }
   if(state.page==='twin'){ $('#content').innerHTML=twinPage(); return }
   if(state.page==='exec'){ $('#content').innerHTML=execPage(); return }
+  if(state.page==='rec'){ $('#content').innerHTML=recPage(); return }
+  if(state.page==='sd'){ $('#content').innerHTML=sdPage(); return }
 
   const done=RUNS.filter(r=>r[3]!=='wait').length, warn=RUNS.filter(r=>r[3]==='warn').length, wait=RUNS.filter(r=>r[3]==='wait').length;
   $('#content').innerHTML=`
