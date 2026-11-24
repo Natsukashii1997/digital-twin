@@ -21,6 +21,10 @@
       没给 --request-id 就新生成一个，输出里都带 request_id；结果不明时带同一个 --request-id 再跑一次，网关收过就原样返回
       那张提议（again: true），不会多出一张卡。
       退出码：0 网关收下了，1 网关拒了（原因在 result.why）或请求不对，2 连不上窗口或结果不明。
+  gate_intake.py revoke --task 单号 [--reason 原话]
+      客户端（猛鬼兽派单技能「停 t-…」用）：POST /v1/tasks/<单号>/revoke，原样打印网关 revoke 的结果（含 runs_stopped、
+      runs_stop_error、in_flight、mirror_error）。退出码：0 撤销生效（mirror_error 也算生效，看字段），1 网关拒了（已经是终态、
+      没有这张单等，原因在 why）或请求不对，2 连不上窗口或结果不明（停可能已经生效，要在电脑上核）。
 环境变量：DT_INTAKE_TOKEN_FILE（默认 DigitalTwin/autoloop/intake.token）、DT_INTAKE_INBOX（提议暂存，默认 DigitalTwin/secretary/intake）、
 DT_INTAKE_URL（客户端用，默认 http://127.0.0.1:3353）。
 """
@@ -236,19 +240,13 @@ def intake_url():
     return (os.environ.get("DT_INTAKE_URL") or "http://127.0.0.1:3353").rstrip("/")
 
 
-def propose_dispatch(repo, executor, scope_text, hours=12, timeout=TIMEOUT + 20, request_id=None):
-    """客户端：把派单提议交给窗口。返回 (退出码, 要打印的 JSON，都带 request_id)。不走代理。"""
-    rid = request_id or secrets.token_hex(16)
-
-    def said(code, out):
-        return code, {**out, "request_id": rid}
+def _post(path, payload, timeout):
+    """客户端：带本账号的令牌 POST 到窗口（不走代理）。返回 (退出码, 窗口回的 JSON)；出错返回 (退出码, {"ok": False, "why"})。"""
     try:
         token = load_token()
     except (Refused, OSError) as e:
-        return said(2, {"ok": False, "why": f"读不到窗口令牌：{e}"})
-    body = json.dumps({"repo": repo, "executor": executor, "scope": scope_text, "hours": hours, "request_id": rid},
-                      ensure_ascii=False).encode()
-    req = urllib.request.Request(intake_url() + "/v1/dispatch/proposal", data=body, method="POST",
+        return 2, {"ok": False, "why": f"读不到窗口令牌：{e}"}
+    req = urllib.request.Request(intake_url() + path, data=json.dumps(payload, ensure_ascii=False).encode(), method="POST",
                                  headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
@@ -258,13 +256,39 @@ def propose_dispatch(repo, executor, scope_text, hours=12, timeout=TIMEOUT + 20,
             why = json.loads(e.read() or b"{}").get("error")
         except ValueError:
             why = None
-        return said(2 if e.code >= 500 else 1, {"ok": False, "why": f"窗口拒收（HTTP {e.code}）：{why or '没有说明'}"})
+        return (2 if e.code >= 500 else 1), {"ok": False, "why": f"窗口拒收（HTTP {e.code}）：{why or '没有说明'}"}
     except (OSError, ValueError) as e:
-        return said(2, {"ok": False, "why": f"连不上 dt-gate 的窗口或回应不对（{type(e).__name__}），结果不明"})
-    result = out.get("result") if isinstance(out, dict) else None
+        return 2, {"ok": False, "why": f"连不上 dt-gate 的窗口或回应不对（{type(e).__name__}），结果不明"}
+    return 0, out if isinstance(out, dict) else {}
+
+
+def propose_dispatch(repo, executor, scope_text, hours=12, timeout=TIMEOUT + 20, request_id=None):
+    """客户端：把派单提议交给窗口。返回 (退出码, 要打印的 JSON，都带 request_id)。"""
+    rid = request_id or secrets.token_hex(16)
+    code, out = _post("/v1/dispatch/proposal", {"repo": repo, "executor": executor, "scope": scope_text, "hours": hours,
+                                                "request_id": rid}, timeout)
+    if code:
+        return code, {**out, "request_id": rid}
+    result = out.get("result")
     if out.get("code") == 0 and isinstance(result, dict) and result.get("code"):
-        return said(0, result)
-    return said(1, result if isinstance(result, dict) else {"ok": False, "why": f"网关没给结果（退出码 {out.get('code')}）"})
+        return 0, {**result, "request_id": rid}
+    return 1, {**(result if isinstance(result, dict) else {"ok": False, "why": f"网关没给结果（退出码 {out.get('code')}）"}),
+               "request_id": rid}
+
+
+def revoke_task(task_id, reason="", timeout=TIMEOUT + 20):
+    """客户端：撤销一张单。返回 (退出码, 要打印的 JSON)：0 生效（网关退出码 0，或 2 = 已生效但镜像没写成），1 拒了，2 不明。"""
+    if not TASK_ID.match(task_id or ""):
+        return 1, {"ok": False, "why": "单号要像 t-20261124-ab12cd"}
+    code, out = _post(f"/v1/tasks/{task_id}/revoke", {"reason": reason[:200]}, timeout)
+    if code:
+        return code, out
+    result = out.get("result")
+    if not isinstance(result, dict):        # 网关没打印 JSON（报错堆栈）：停可能已经生效
+        return 2, {"ok": False, "why": f"网关没给结果（退出码 {out.get('code')}），停可能已经生效，要在电脑上核"}
+    if out.get("code") in (0, 2):
+        return 0, result
+    return 1, result
 
 
 def main(argv=None):
@@ -277,7 +301,14 @@ def main(argv=None):
     d.add_argument("--scope-file", required=True)
     d.add_argument("--hours", type=int, default=12)
     d.add_argument("--request-id")
+    r = sub.add_parser("revoke")
+    r.add_argument("--task", required=True)
+    r.add_argument("--reason", default="")
     a = ap.parse_args(argv)
+    if a.cmd == "revoke":
+        code, out = revoke_task(a.task, a.reason)
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return code
     if a.cmd == "dispatch-propose":
         try:
             scope = Path(a.scope_file).read_text(encoding="utf-8")
