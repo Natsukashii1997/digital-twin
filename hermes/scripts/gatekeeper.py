@@ -206,8 +206,11 @@ READY_WAIT = 120                          # 秒：consume 起来后一直不打�
 NOTICE_RETRY_WINDOW = 50 * 60             # 秒：通知只在这么久内自动重发（飞书幂等键只保证一小时内去重），过了交人工核查
 ENTRY_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 ENTRY_ENV = {"PATH", "LANG", "CPATH", "LIBRARY_PATH", "MANPATH", "SDKROOT", "__CF_USER_TEXT_ENCODING",
-             "DT_HUB_LISTENER_UID"}   # 入口 env -i 之后，/usr/bin/python3（xcrun 转发壳）自己会补 CPATH 到
-#   __CF_USER_TEXT_ENCODING 这五个（本机 11-20 实测）；DT_HUB_LISTENER_UID 由入口写死；别的变量出现就说明没经入口
+             "DT_HUB_LISTENER_UID", "DT_ROSTER", "DT_HUB", "DT_GRANTS_STATUS", "DT_GRANTS_TASKS"}
+#   入口 env -i 之后，/usr/bin/python3（xcrun 转发壳）自己会补 CPATH 到 __CF_USER_TEXT_ENCODING 这五个（本机 11-20 实测）；
+#   DT_ 开头的由入口定（0E-3c，和 dt_gate_hub.py gate_env 一致）；别的变量出现就说明没经入口
+GATE_ROOT = "/Library/Application Support/DigitalTwin/gate"   # dt_gate_hub 的 root 副本（current.json 指当前副本）
+GATE_SHARED = "/Users/Shared/dt-gate"                         # 凭证镜像、任务单（dt_gate_hub shared()）
 EVENT_KEEP = 30 * 86400                  # 秒：回调去重记录留这么久（飞书重投远短于这个）
 DEFAULT_LARK = "/Library/Application Support/DigitalTwin/bin/lark-cli"
 SCHEMA = """
@@ -371,8 +374,9 @@ def launch_flags():
 
 
 def launch_env():
-    """防误用：PATH 正好是入口写的，除入口给的 PATH、LANG、DT_HUB_LISTENER_UID 和 xcrun 转发壳自己补的几个外没有别的变量，
-    DT_HUB_LISTENER_UID 等于运行账号的 uid（中台监听核对，见 hub_listener）。只核变量名和这一个值，
+    """防误用：PATH 正好是入口写的，除入口给的 PATH、LANG、DT_ 几个和 xcrun 转发壳自己补的几个外没有别的变量，
+    DT_HUB_LISTENER_UID 等于运行账号的 uid（中台监听核对，见 hub_listener），名册、中台、镜像、任务单是入口给的那种位置。
+    只核变量名和这几个值的样子，
     直接跑 Python 的人照样能凑出这套环境，所以它不是「走过入口」的证明（L3 第 3 轮 P1-04-B）；真正的边界是 root 装的
     入口、固定解释器、root 代码目录和 LaunchDaemon（0E-3c 实装验收）。"""
     extra = sorted(set(os.environ) - ENTRY_ENV)
@@ -382,6 +386,14 @@ def launch_env():
         # 中台由 dt-gate 自己跑（0E-2）：门卫带钥匙连中台前要核端口上在听的是本账号（hub_listener）。没设就不核，
         # 别的账号抢先占了 3350 门卫会把通道钥匙交给它，所以必须有、且等于运行账号（#255 合并后补，常浩 11-23「启用前单独修」）
         raise F.Fail("门卫只经入口脚本跑（入口没写中台监听核对 DT_HUB_LISTENER_UID，或不是运行账号的 uid）")
+    roster = os.environ.get("DT_ROSTER") or ""
+    # 派单卡要的凭证位置（0E-3b / 0E-3c）：名册在 root 副本里、中台在本机，镜像和任务单在共享目录。缺了 autoloop_grants
+    # 会落回默认值（名册去找门卫代码目录上两级的 projects.json，那里没有），所以入口必须给、且是入口给的那种
+    if not (roster.startswith(GATE_ROOT + "/repo/") and roster.endswith("/projects.json") and "/../" not in roster) \
+            or not (os.environ.get("DT_HUB") or "").startswith("http://127.0.0.1:") \
+            or os.environ.get("DT_GRANTS_STATUS") != GATE_SHARED + "/grants/status.json" \
+            or os.environ.get("DT_GRANTS_TASKS") != GATE_SHARED + "/tasks":
+        raise F.Fail("门卫只经入口脚本跑（入口没写名册、中台地址或凭证镜像、任务单的位置，或不是入口给的那种）")
 
 
 def launch_ok():
