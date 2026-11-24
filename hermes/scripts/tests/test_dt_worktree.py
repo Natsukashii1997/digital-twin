@@ -603,6 +603,81 @@ class GrantMustBeValid(WorkerBase):
         self.assert_stopped(r, calls, "这一轮没有派单事件")
 
 
+class GenerationStart(WorkerBase):
+    """#320：这一代从哪个提交起（gen_base）；换代第一轮退回代次边界，多出来的提交进备份引用。"""
+    def branch_head(self, tid):
+        return git("rev-parse", f"refs/heads/claude/{tid}", cwd=self.wt(tid))
+
+    def new_generation(self, tid):
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+
+    def test_first_generation_starts_at_base_and_says_so_in_manifest(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)])
+        m = self.handoff(tid)
+        self.assertEqual((m["schema"], m["gen_base"]), (2, m["base"]))
+        self.run_turn([self.answer_event(tid)])                                   # 同一代续接：起点不变
+        self.assertEqual(self.handoff(tid)["gen_base"], m["base"])
+
+    def test_new_generation_goes_back_to_boundary_and_keeps_rest_in_backup(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)])
+        h1 = self.branch_head(tid)
+        G.record_published(tid, 1, h1, now=self.now)                              # 第 1 代推出去的
+        self.run_turn([self.answer_event(tid)])
+        late = self.branch_head(tid)                                              # 推出去之后第 1 代又做的
+        self.assertNotEqual(late, h1)
+        self.new_generation(tid)
+        self.assertEqual(self.mirror()[tid]["boundary"], h1)
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        m = self.handoff(tid)
+        self.assertEqual((m["generation"], m["gen_base"]), (2, h1))
+        log = git("rev-list", f"{m['base']}..{m['head']}", cwd=self.wt(tid)).split()
+        self.assertIn(h1, log)
+        self.assertNotIn(late, log)                                               # 作废后的提交不在本代分支上
+        backups = git("for-each-ref", "--format=%(objectname)", f"refs/dt-voided/{tid}/", cwd=self.wt(tid)).split()
+        self.assertEqual(backups, [late])                                         # 但没删，留在备份引用
+        self.run_turn([self.answer_event(tid)])                                   # 第 2 代续接不再退
+        self.assertEqual(self.handoff(tid)["gen_base"], h1)
+        self.assertEqual(git("for-each-ref", "--format=%(objectname)", f"refs/dt-voided/{tid}/",
+                             cwd=self.wt(tid)).split(), [late])
+
+    def test_nothing_published_means_back_to_base(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)])
+        base = self.handoff(tid)["base"]
+        self.new_generation(tid)
+        self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        m = self.handoff(tid)
+        self.assertEqual(m["gen_base"], base)
+        self.assertEqual(len(git("rev-list", f"{base}..{m['head']}", cwd=self.wt(tid)).split()), 1)   # 只有第 2 代这一轮
+
+    def test_bad_or_foreign_boundary_never_starts_cli(self):
+        tid = self.new_live_task()
+        self.run_turn([self.dispatch_event(tid)])
+        self.new_generation(tid)
+        self.patch_mirror(tid, boundary="xyz")
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assert_stopped(r, calls, "代次边界不合格式")
+        self.patch_mirror(tid, boundary="0" * 40)
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assert_stopped(r, calls, "代次边界的提交不在本单的仓库里")
+        main = git("rev-parse", "main", cwd=self.remote)
+        seed = self.root / "other"
+        git("clone", "-q", str(self.remote), str(seed))
+        (seed / "x.txt").write_text("别处的提交\n")
+        git("add", "-A", cwd=seed)
+        git("commit", "-q", "-m", "x", cwd=seed)
+        git("push", "-q", str(self.remote), "HEAD:refs/heads/elsewhere", cwd=seed)
+        git("fetch", "-q", str(self.remote), "refs/heads/elsewhere:refs/x/elsewhere", cwd=self.wt(tid))
+        self.patch_mirror(tid, boundary=git("rev-parse", "refs/x/elsewhere", cwd=self.wt(tid)))
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assert_stopped(r, calls, "代次边界不在本单分支上")
+        self.assertEqual(git("rev-parse", "main", cwd=self.remote), main)
+
+
 class TimeBudget(WorkerBase):
     def test_run_is_stopped_at_budget_and_next_turn_refused(self):
         tid = self.new_live_task()

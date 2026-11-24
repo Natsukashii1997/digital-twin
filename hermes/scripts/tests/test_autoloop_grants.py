@@ -1098,5 +1098,47 @@ class Cli(Base):
             G.main(["record-resolution", "--task", "t-20261117-000000"])
 
 
+class GenerationBoundary(Base):
+    """#320（常浩 2026-11-24 选甲）：凭证库记已发布的头提交，第 g 代的边界 = 更旧代次最后推出去的那个；镜像带出边界。"""
+    H1, H2, H3 = "1" * 40, "2" * 40, "3" * 40
+
+    def test_boundary_is_last_head_published_by_an_older_generation(self):
+        tid = self.new_task()
+        self.assertIsNone(self.mirror()[tid]["boundary"])                  # 第 1 代：从基线起
+        G.record_published(tid, 1, self.H1, now=T0)
+        G.record_published(tid, 1, self.H2, now=T0)
+        self.assertEqual(G.record_published(tid, 1, self.H2, now=T0)["new"], False)   # 同一个头提交只记一次
+        self.assertIsNone(self.mirror()[tid]["boundary"])                  # 第 1 代自己推的不算第 1 代的边界
+        code = G.freeze(tid, "推翻", now=T0)["freeze_code"]
+        self.unfreeze_ok(tid, code)
+        self.assertEqual(self.mirror()[tid]["boundary"], self.H2)          # 第 2 代从第 1 代最后推出去的起
+        G.record_published(tid, 2, self.H3, now=T0)
+        with G.tx() as con:
+            self.assertEqual(G.boundary(con, tid, 2), self.H2)
+            self.assertEqual(G.boundary(con, tid, 3), self.H3)
+
+    def test_record_rejects_bad_input_and_unknown_task(self):
+        tid = self.new_task()
+        for head, gen in (("abc", 1), ("A" * 40, 1), (self.H1, 0), (self.H1, True)):
+            with self.subTest(head=head, gen=gen), self.assertRaises(G.Rejected):
+                G.record_published(tid, gen, head, now=T0)
+        with self.assertRaises(G.Rejected):
+            G.record_published("t-20260101-abcdef", 1, self.H1, now=T0)
+
+    def test_version_3_database_is_upgraded_in_place(self):
+        """dt-gate 里在用的第 3 版凭证库原地加表升到第 4 版，原有凭证不动；更旧的照旧拒用。"""
+        tid = self.new_task()
+        self.sql("DROP TABLE published_heads")
+        self.sql("PRAGMA user_version = 3")
+        before = self.sql("SELECT * FROM grants")
+        self.assertEqual(G.show(tid)[0]["status"], "active")
+        self.assertEqual(self.sql("PRAGMA user_version")[0][0], 4)
+        self.assertEqual(self.sql("SELECT * FROM grants"), before)
+        G.record_published(tid, 1, self.H1, now=T0)
+        self.sql("PRAGMA user_version = 2")
+        with self.assertRaisesRegex(G.Rejected, "第 2 版"):
+            G.show(tid)
+
+
 if __name__ == "__main__":
     unittest.main()

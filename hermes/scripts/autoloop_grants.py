@@ -36,7 +36,7 @@
 关着就不发（事件留在账里，开闸后 send-pending 补发）；冻结、撤销照常立刻生效，输出里的 in_flight 列出冻结前已经开始的
 受保护动作（出口账本 autoloop_exits 在凭证库写锁里落盘 executing，所以和冻结有先后，见那边的头注释）。
 
-工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-gate/grants/status.json（状态、代次、到期、动作）和
+工人（dt-worker）只能读共享目录里的状态镜像 /Users/Shared/dt-gate/grants/status.json（状态、代次、到期、动作、代次边界）和
 任务单，读不到凭证库，也改不了镜像。check() 是主账号出口共用的判定：存在、有效、没过期、动作在列、代次是当前的。
 工人侧按镜像做的检查只防正常流程误操作，不当作不可绕过的边界；权威判定在主账号的出口（方案 5.1 第 3 条）。
 
@@ -104,7 +104,11 @@ TASK_ID = re.compile(r"^t-\d{8}-[0-9a-f]{6}$")
 REF = re.compile(r"^[A-Za-z0-9][\w.-]{0,63}$")              # 续接的决定号（秘书决定号 d-…）
 REPO_NAME = re.compile(r"^[\w.-]{1,100}$")
 MAX_SCOPE = 3000
-SCHEMA_VERSION = 3                          # 第 3 版（0E-3b）：提议改成门卫确认卡；dt-gate 从空库开始
+SCHEMA_VERSION = 4                          # 第 4 版（#320）：加 published_heads（代次边界）；第 3 版的库原地加表升级
+PUBLISHED_HEADS = """
+CREATE TABLE IF NOT EXISTS published_heads (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+  generation INTEGER NOT NULL, head TEXT NOT NULL, at TEXT NOT NULL, UNIQUE (task_id, head))
+"""
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS grants (
   task_id TEXT PRIMARY KEY, repo TEXT NOT NULL, github TEXT NOT NULL, scope_text TEXT NOT NULL, scope_hash TEXT NOT NULL,
@@ -127,8 +131,8 @@ CREATE TABLE IF NOT EXISTS proposals (code TEXT PRIMARY KEY, repo TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS used_messages (message_id TEXT PRIMARY KEY, purpose TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS hub_events (event_key TEXT PRIMARY KEY, task_id TEXT NOT NULL, rule TEXT NOT NULL,
   executor TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, hub_event INTEGER, at TEXT NOT NULL,
-  sent INTEGER NOT NULL DEFAULT 0, claimed_at TEXT, tries INTEGER NOT NULL DEFAULT 0)
-"""
+  sent INTEGER NOT NULL DEFAULT 0, claimed_at TEXT, tries INTEGER NOT NULL DEFAULT 0);
+""" + PUBLISHED_HEADS
 
 
 class Rejected(Exception):
@@ -240,6 +244,10 @@ def _ensure_schema(con):
     v = con.execute("PRAGMA user_version").fetchone()[0]
     if v == SCHEMA_VERSION:
         return
+    if v == 3:                                # 第 3 版 → 第 4 版：只加一张表，原有数据不动（#320）
+        con.execute(PUBLISHED_HEADS)
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
     if v or con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table'").fetchone():
         raise Rejected(f"凭证库结构是第 {v} 版，本脚本要第 {SCHEMA_VERSION} 版；没有自动迁移，请把旧库备份后移走")
     for stmt in SCHEMA.split(";"):
@@ -287,6 +295,35 @@ def grant_row(con, task_id):
 
 def voided_of(con, task_id):
     return {r[0] for r in con.execute("SELECT generation FROM voided_generations WHERE task_id = ?", (task_id,))}
+
+
+# ---------- 代次边界（#320，常浩 2026-11-24 选甲） ----------
+# 一张单只有一条分支 <执行方>/<单号>。受信发布每次确认本单分支在 GitHub 上就是这个头提交，就记一笔（published_heads）。
+# 第 g 代的「代次边界」= 比 g 旧的代次最后一次推出去的头提交（没推过就是 None，表示从基线起）：推出去的只能是推那一刻
+# 凭证有效的代次（出口账本在凭证库锁里现读凭证），所以作废代次在冻结之后做的提交不会在里面。镜像把它交给工人：新代次第一轮
+# 开工前，启动脚本把分支退回边界（退下来的提交挪进备份引用），交接清单记「本代起点」；发布时核本代起点 = 边界。
+# 代价（常浩知情）：冻结前做完、但还没推出去的旧代次改动不自动带进新代次。
+def boundary(con, task_id, generation):
+    """第 generation 代的代次边界：更旧代次最后记下的已发布头提交；没有返回 None（从基线起）。"""
+    r = con.execute("SELECT head FROM published_heads WHERE task_id = ? AND generation < ? ORDER BY id DESC LIMIT 1",
+                    (task_id, generation)).fetchone()
+    return r[0] if r else None
+
+
+def record_published(task_id, generation, head, now=None, path=None):
+    """受信发布确认本单分支在 GitHub 上就是 head 之后记一笔（同一个头提交只记第一次）；代次照推的那一代记，
+    不管凭证此刻是不是已换代（推的时候已在凭证库锁里核过）。镜像按已提交的状态重写（边界可能变了）。"""
+    if not re.fullmatch(r"[0-9a-f]{40}", head or "") or type(generation) is not int or generation < 1:
+        raise Rejected("记已发布头提交：头提交或代次不合格式")
+    now = now or now_tz()
+    with tx(path) as con:
+        grant_row(con, task_id)
+        new = con.execute("INSERT OR IGNORE INTO published_heads (task_id, generation, head, at) VALUES (?,?,?,?)",
+                          (task_id, generation, head, iso(now))).rowcount == 1
+        if new:
+            log(con, task_id, "已发布头提交", now, generation=generation, head=head)
+    out = {"task_id": task_id, "generation": generation, "head": head, "new": new}
+    return _publish_after_commit(out, path, now) if new else out
 
 
 # ---------- 名册 ----------
@@ -361,7 +398,7 @@ def write_status(con, now):
         tasks[r["task_id"]] = {"repo": r["repo"], "executor": r["executor"], "rule": r["rule"], "status": r["status"],
                                "generation": r["generation"], "voided_generations": sorted(voided_of(con, r["task_id"])),
                                "valid_until": r["valid_until"], "actions": json.loads(r["actions"]),
-                               "scope_hash": r["scope_hash"]}
+                               "scope_hash": r["scope_hash"], "boundary": boundary(con, r["task_id"], r["generation"])}
     doc = {"schema": 1, "updated_at": iso(now), "tasks": tasks}
     _write_shared(status_path(), json.dumps(doc, ensure_ascii=False, indent=1, sort_keys=True))
 

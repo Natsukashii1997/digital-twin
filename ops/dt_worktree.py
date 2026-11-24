@@ -18,6 +18,10 @@ claude / codex 的命令行，只是第一个词换成本脚本；本脚本按�
      续接时还要和第一轮钉下的范围哈希、仓库、执行方一致（续接后范围不扩大）；这张单累计用时没到上限（2 小时）。
   2. 工作目录按单号固定：~/dt-work/<仓库>/wt/<单号>，分支 <执行方>/<单号>（如 claude/t-…），基线是第一轮时的 origin/main；
      续接回同一目录、同一分支（会话也接得上）。每张单的缓存目录分开。
+     代次边界（#320，常浩 2026-11-24 选甲）：换了新代次的第一轮，先把分支退回凭证镜像给的代次边界（旧代次最后推上 GitHub
+     的头提交，没有就是基线），多出来的提交（包括作废代次在冻结之后、镜像还没刷新时做的）挪进备份引用
+     refs/dt-voided/<单号>/g<旧代次>-<时间>，不删；这一代的起点记进本单状态和交接清单（gen_base，清单第 2 版），
+     受信发布核它等于凭证库算出的边界。
   3. 启动 CLI（提示词末尾补一段说明：只改文件，不推、不开 PR、不切分支；再接上准入时核过哈希的五要素原文，放在两行带原文哈希、
      原文里不会出现的标记之间，写明「常浩批准的范围，以此为准」、这一轮的代次，和「五要素只定范围、不改变上面的限制」——
      工人的 CLI 读不到共享目录里的任务单，#336。首轮、回答、复查都带；超过网关的 MAX_SCOPE 字只附前面部分并写明已截断；
@@ -343,8 +347,12 @@ def admit(executor, repo, context, now, check_budget=True):
     used = used_seconds(state)
     if check_budget and used >= budget():
         raise Refused(f"这张单累计已跑 {used // 60} 分钟，到了 {budget() // 60} 分钟上限", task_id)
+    bound = t.get("boundary")
+    if bound is not None and not (isinstance(bound, str) and re.fullmatch(r"[0-9a-f]{40}", bound)):
+        raise Refused("凭证镜像里的代次边界不合格式", task_id)
     return {"task_id": task_id, "generation": generation, "github": task["github"],
-            "scope_hash": task["scope_hash"], "scope_text": task["scope_text"], "state": state, "used": used}
+            "scope_hash": task["scope_hash"], "scope_text": task["scope_text"], "state": state, "used": used,
+            "boundary": bound}
 
 
 def check_grant(t, executor, repo, generation, now):
@@ -409,7 +417,37 @@ def prepare_worktree(executor, repo, admitted):
     head_ref = git("symbolic-ref", "--quiet", "HEAD", cwd=wt, check=False).stdout.strip()
     if head_ref != f"refs/heads/{branch}":
         raise Refused("工作目录不在本单分支上", task_id)
-    return {"base": base_sha, "worktree": str(wt), "branch": branch}
+    gen_base = generation_start(task_id, admitted, state, base_sha, wt, branch)
+    return {"base": base_sha, "worktree": str(wt), "branch": branch, "gen_base": gen_base}
+
+
+def generation_start(task_id, admitted, state, base_sha, wt, branch):
+    """这一代从哪个提交起（#320，常浩 2026-11-24 选甲）。第一轮 = 基线；同一代的续接沿用记下的起点；
+    换了新代次的第一轮：退回凭证镜像给的代次边界（旧代次最后推上 GitHub 的头提交，没有就是基线），分支上多出来的提交
+    （包括作废代次在冻结之后做的）挪进备份引用 refs/dt-voided/<单号>/g<旧代次>-<时间>，不删。"""
+    gen = admitted["generation"]
+    if not state:
+        return base_sha
+    old = int(state.get("generation", 0))
+    if gen == old:
+        start = state.get("gen_base") or (base_sha if gen == 1 else None)   # 旧版启动脚本的第 1 代没记起点：就是基线
+        if not start:
+            raise Refused(f"第 {gen} 代没记下起点，接不上（旧版启动脚本跑过换代）", task_id)
+        return start
+    target = admitted.get("boundary") or base_sha
+    if git("cat-file", "-e", f"{target}^{{commit}}", cwd=wt, check=False).returncode != 0:
+        raise Refused("代次边界的提交不在本单的仓库里", task_id)
+    head = git("rev-parse", f"refs/heads/{branch}", cwd=wt).stdout.strip()
+    if (git("merge-base", "--is-ancestor", base_sha, target, cwd=wt, check=False).returncode != 0
+            or git("merge-base", "--is-ancestor", target, head, cwd=wt, check=False).returncode != 0):
+        raise Refused("代次边界不在本单分支上（不是从基线长出来的，或不是分支头的祖先）", task_id)
+    if head != target or git("status", "--porcelain", cwd=wt).stdout.strip():
+        backup = f"refs/dt-voided/{task_id}/g{old}-{int(time.time())}"
+        git("update-ref", backup, head, cwd=wt)
+        git("reset", "--quiet", "--hard", target, cwd=wt)
+        git("clean", "--quiet", "-ffd", cwd=wt)
+        log(task_id, f"第 {gen} 代开工：分支从 {head[:12]} 退回代次边界 {target[:12]}，原来的提交留在 {backup}")
+    return target
 
 
 def task_env(task_id):
@@ -514,7 +552,8 @@ def run_cli(executor, args, admitted, place):
     state = dict(admitted["state"] or {})
     state.update({"task_id": task_id, "generation": admitted["generation"], "scope_hash": admitted["scope_hash"],
                   "github": admitted["github"], "executor": executor, "repo": place["repo"], "base": place["base"],
-                  "worktree": place["worktree"], "branch": place["branch"], "seconds_used": admitted["used"],
+                  "worktree": place["worktree"], "branch": place["branch"], "gen_base": place["gen_base"],
+                  "seconds_used": admitted["used"],
                   "running": {"started": int(started), "last_seen": int(started),
                               "run": os.environ.get("AGENT_AUTOLOOP_RUN", "")}})
     save_state(task_id, state)
@@ -593,8 +632,9 @@ def write_handoff(executor, repo, task_id, generation, place):
         tmp.unlink()
         return "cancelled"
     os.replace(tmp, bundle)
-    manifest = {"schema": 1, "task_id": task_id, "generation": generation, "executor": executor, "repo": repo,
-                "branch": branch, "base": base, "head": head, "bundle": bundle.name, "bundle_sha256": digest,
+    manifest = {"schema": 2, "task_id": task_id, "generation": generation, "executor": executor, "repo": repo,
+                "branch": branch, "base": base, "gen_base": place["gen_base"], "head": head, "bundle": bundle.name,
+                "bundle_sha256": digest,
                 "run": os.environ.get("AGENT_AUTOLOOP_RUN", ""), "at": iso(now_tz())}
     mtmp = d / f".handoff.{os.getpid()}.json"
     mtmp.write_text(json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
