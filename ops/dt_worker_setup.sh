@@ -70,7 +70,20 @@ say "登录 Codex：终端会显示一个网址和一串验证码，在任意浏
 
 # 4b. 给后台用的 Claude 长期令牌：接单程序是开机自起的系统服务，dt-worker 没登录时登录钥匙串是锁着的，
 #     claude 读不到浏览器登录的凭据；setup-token 出的令牌存成只有本账号能读的文件，claude-proxy.sh 读它
-TOKEN_FILE="$HOME/.dt/claude-oauth-token"
+TOKEN_DIR="$HOME/.dt"
+TOKEN_FILE="$TOKEN_DIR/claude-oauth-token"
+# 先核目录和文件，再写任何东西（#382 L3 第 2 轮 P2-07）：~/.dt 要是本账号的真目录、不是链接，
+# 令牌文件和临时文件都不能是链接，令牌文件有的话要是普通文件
+[ -L "$TOKEN_DIR" ] && stop "$TOKEN_DIR 是链接，不对；删掉后重跑这个脚本。"
+if [ -e "$TOKEN_DIR" ]; then
+  [ -d "$TOKEN_DIR" ] || stop "$TOKEN_DIR 不是目录；删掉后重跑这个脚本。"
+else
+  mkdir -m 700 "$TOKEN_DIR"
+fi
+{ [ -d "$TOKEN_DIR" ] && [ ! -L "$TOKEN_DIR" ] && [ -O "$TOKEN_DIR" ]; } || stop "$TOKEN_DIR 不是本账号的目录；删掉后重跑这个脚本。"
+chmod 700 "$TOKEN_DIR"
+{ [ -L "$TOKEN_FILE" ] || [ -L "$TOKEN_FILE.tmp" ]; } && stop "$TOKEN_FILE（或 .tmp）是链接，不对；删掉后重跑这个脚本。"
+{ [ ! -e "$TOKEN_FILE" ] || [ -f "$TOKEN_FILE" ]; } || stop "$TOKEN_FILE 不是普通文件；删掉后重跑这个脚本。"
 if [ -s "$TOKEN_FILE" ]; then
   echo "Claude 长期令牌已经有了，跳过（过期或要换就删掉 $TOKEN_FILE 再跑）。"
 else
@@ -84,18 +97,16 @@ else
     sk-ant-oat*) ;;
     *) unset tok; stop "这不像 Claude 的长期令牌（应以 sk-ant-oat 开头），没保存。重跑这个脚本再试。" ;;
   esac
-  mkdir -p -m 700 ~/.dt
-  chmod 700 ~/.dt
-  ( umask 077; printf '%s\n' "$tok" > "$TOKEN_FILE.tmp" )
+  rm -f "$TOKEN_FILE.tmp"
+  # set -C：临时文件已经在（包括别人刚放的链接）就不写
+  ( umask 077; set -C; printf '%s\n' "$tok" > "$TOKEN_FILE.tmp" ) || { unset tok; stop "写不进 $TOKEN_FILE.tmp，没保存。"; }
   unset tok
   chmod 600 "$TOKEN_FILE.tmp"
   mv -f "$TOKEN_FILE.tmp" "$TOKEN_FILE"
   echo "已存到 $TOKEN_FILE（只有本账号能读）"
 fi
-# 每次都重核权限（已有的文件也核，#382 L3 第 1 轮 P2-04）：令牌要是普通文件、不是链接，目录 700、文件 600
-[ -L ~/.dt ] || [ -L "$TOKEN_FILE" ] && stop "~/.dt 或 $TOKEN_FILE 是链接，不对；删掉后重跑这个脚本。"
-[ -f "$TOKEN_FILE" ] || stop "$TOKEN_FILE 不是普通文件；删掉后重跑这个脚本。"
-chmod 700 ~/.dt
+# 每次都重核（已有的文件也核，第 1 轮 P2-04）：令牌是普通文件、不是链接，文件 600
+{ [ -f "$TOKEN_FILE" ] && [ ! -L "$TOKEN_FILE" ]; } || stop "$TOKEN_FILE 不是普通文件；删掉后重跑这个脚本。"
 chmod 600 "$TOKEN_FILE"
 
 # 5. 给中台用的启动脚本：先补代理再启动（后台读不到终端设置）

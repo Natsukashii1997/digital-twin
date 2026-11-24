@@ -54,8 +54,11 @@ SEARCH_PATH = re.compile(r"^/[A-Za-z0-9._+/:-]+$")
 START_WAIT = 120                          # 装好后等接单程序起来最多几秒（含门卫核对一次）
 GATE_LABEL = "cn.digital-twin.pf-dt-worker"   # 门卫规则的定时服务（ops/dt_worker_pf.sh），每 5 分钟核对并写状态
 CHECK_TIMEOUT = 60
+GATE_DELAY = 3                            # 装好后等几秒再叫门卫（外壳要先起来、记下起来时间）
 
-# 门卫状态是本次开机写的 state=ok、10 分钟内、而且是这段 sh 起来之后写的，才启动；日志以 dt-worker 身份追加。
+# 门卫状态是本次开机写的 state=ok、10 分钟内（0 ≤ 现在 − 修改时间 ≤ 600，和 dt_worktree 准入一样；时钟往回调过、
+# 修改时间在「现在」之后的不认，#382 L3 第 2 轮 P1-02）、而且是这段 sh 起来之后写的（修改时间 > 起来时间，按秒比：
+# 同一秒里写的不认，宁可多等门卫一轮，#382 L3 第 2 轮 P2-06），才启动；日志以 dt-worker 身份追加。
 # 先读修改时间再读内容：状态文件是整个换掉的（mv），后读的内容只会比修改时间那一版更新，不会拿旧的 ok 配新的时间。
 # "$@" 是原 LaunchAgent 的命令。
 WRAPPER = r'''s="/Library/Application Support/DigitalTwin/pf-dt-worker.status"
@@ -66,7 +69,7 @@ while :; do
   l=$(/bin/cat "$s" 2>/dev/null)
   n=$(/bin/date +%s)
   case "$b:$m:$w:$n" in *[!0-9:]*|:*|*::*|*:) ;; *)
-    if [ "$m" -gt "$w" ] && [ $((n - m)) -le 600 ]; then
+    if [ "$m" -gt "$w" ] && [ "$n" -ge "$m" ] && [ $((n - m)) -le 600 ]; then
       case " $l " in *" state=ok "*) case " $l " in *" boot=$b "*) break ;; esac ;; esac
     fi ;;
   esac
@@ -196,8 +199,31 @@ def check_logins(host, name, home):
 
 
 def agent_disabled(host, uid):
+    """原 LaunchAgent 停没停用：True 停用、False 没停用、None 查不清（print-disabled 自己出错）。"""
     code, out = host.launchctl("print-disabled", f"gui/{uid}")
-    return code == 0 and re.search(rf'"{re.escape(AGENT_LABEL)}" => (true|disabled)', out) is not None
+    if code != 0:
+        return None
+    return re.search(rf'"{re.escape(AGENT_LABEL)}" => (true|disabled)', out) is not None
+
+
+def service_loaded(host):
+    """服务现在装没装：True / False；launchctl print 既不是 0 也不是 113（找不到）就是查不清，停下、什么都不动。"""
+    code, out = host.launchctl("print", f"system/{LABEL}")
+    if code == 0:
+        return True
+    if code == GH.LAUNCHCTL_NOT_FOUND:
+        return False
+    raise GH.Stop(f"查不清 {LABEL} 现在装没装（launchctl print 返回 {code}：{out[:80]}），什么都没改")
+
+
+def old_plist():
+    """服务 plist 原来的内容（没有就是 None）；只认普通文件。"""
+    f = plist_path()
+    if not os.path.lexists(f):
+        return None
+    if f.is_symlink() or not f.is_file():
+        raise GH.Stop(f"{f} 不是普通文件，什么都没改；请人工查看")
+    return f.read_bytes()
 
 
 def account(host):
@@ -236,31 +262,38 @@ def cmd_install(host, say=print):
                       "`bash /Users/Shared/dt-autoloop/setup-dt-worker.sh` 补长期令牌；Codex：确认 ~/.codex/auth.json 在。"
                       "补完注销 dt-worker 再来")
     # 先装服务再停 LaunchAgent：没有图形会话时 LaunchAgent 本来就没在跑，disable 只管下次登录
-    unload_idle(host, uid, "装")
-    GH.write_root_file(plist_path(), plistlib.dumps(plist_for(name, home, cmd)), 0o644)
-    host.chown(plist_path(), 0, 0)
-    GH.load(host, plist_path())
+    before = old_plist()
+    was_loaded = unload_idle(host, uid, "装")
+    try:
+        GH.write_root_file(plist_path(), plistlib.dumps(plist_for(name, home, cmd)), 0o644)
+        host.chown(plist_path(), 0, 0)
+        GH.load(host, plist_path())
+    except Exception as e:                           # 写不进、装不上：退回原样（#382 L3 第 2 轮 P2-08）
+        raise GH.Stop(f"新服务没装上（{e}）；{roll_back(host, before, was_loaded)}")
     # 叫门卫马上核对一次、写新的状态（外壳只认它起来之后写的 ok）；规则没变时门卫不重新加载、不清进程。
+    # 先等几秒：外壳按秒比时间，门卫要在外壳起来之后的下一秒以后写，才算数（P2-06）。
     # 没叫成也不要紧：门卫每 5 分钟自己核对一次，只是要多等
+    host.sleep(GATE_DELAY)
     code, out = host.launchctl("kickstart", f"system/{GATE_LABEL}")
     if code != 0:
         say(f"[注意] 没叫成门卫马上核对（{out[:80]}）：接单程序要等门卫下一次核对（5 分钟内）才起来")
     host.launchctl("bootout", f"gui/{uid}/{AGENT_LABEL}")
     host.launchctl("disable", f"gui/{uid}/{AGENT_LABEL}")
-    if agent_disabled(host, uid):
+    if agent_disabled(host, uid) is True:
         say(f"原 LaunchAgent：已停用（gui/{uid}/{AGENT_LABEL}，文件保留）")
     else:
-        say(f"[注意] 原 LaunchAgent 没停用成（launchctl print-disabled gui/{uid} 里没有它）：下次登录 {name} 时它会起来、"
+        say(f"[注意] 原 LaunchAgent 没停用成或查不清（launchctl print-disabled gui/{uid} 里没看到它停用）：下次登录 {name} 时它会起来、"
             f"撞上单实例锁反复退出，不影响服务；手动停：sudo launchctl disable gui/{uid}/{AGENT_LABEL}")
     for _ in range(START_WAIT):
         if up_running(processes(host), uid, cmd):
             say(f"已装好：{LABEL} 在跑，接单程序起来了（几十秒内中台显示 {name} 在线）")
             return 0
         host.sleep(1)
-    say(f"[注意] 服务装上了，但 {START_WAIT} 秒没看到接单程序起来：门卫状态不是它起来之后写的本次开机 state=ok 时它会一直等"
-        "（门卫每 5 分钟核对一次）；"
-        f"看 sudo /usr/bin/python3 -B -E -s {Path(__file__).name} status 和 ~{name}/.agent-autoloop/logs/up.log")
-    return 1
+    say(f"[注意] 服务装好了，但 {START_WAIT} 秒内还没看到接单程序起来（不是没装上）：它在等门卫写一份它起来之后的"
+        "本次开机 state=ok，门卫每 5 分钟核对一次，正常最多再等 5 分钟。5 分钟后跑 "
+        f"sudo /usr/bin/python3 -B -E -s {Path(__file__).name} status 核对；还不在跑就看 ~{name}/.agent-autoloop/logs/up.log "
+        "和门卫状态文件")
+    return 3
 
 
 def cmd_status(host, say=print):
@@ -281,7 +314,7 @@ def cmd_status(host, say=print):
         say(f"原 LaunchAgent：{e}")
     if cmd:
         say(f"接单程序：{'在跑' if up_running(rows, uid, cmd) else '没在跑'}")
-    say(f"原 LaunchAgent：{'已停用' if agent_disabled(host, uid) else '没停用'}")
+    say(f"原 LaunchAgent：{ {True: '已停用', False: '没停用', None: '查不清'}[agent_disabled(host, uid)] }")
     logged_in = gui_session(rows, uid)
     say(f"{name} 图形会话：{'登录着' if logged_in else '没登录'}")
     say(f"  claude 令牌：{check_token(host, name, uid, home)[1]}")
@@ -293,20 +326,46 @@ def cmd_status(host, say=print):
 def unload_idle(host, uid, verb):
     """卸掉服务，保证卸的时候没有派单在跑（#382 L3 第 1 轮 P1-01）。卸之前查过一次，但从那时到卸下，旧服务还在接单
     （install 中间还跑了最长 2 分钟的登录检查）；卸下之后不会再接新单，所以再查一次就没有空档了。这时有派单在跑，
-    就把旧服务原样装回去（引擎把派单放在单独的进程组里跑、状态记在文件里，接单程序回来会接着管它），然后停下。"""
-    was_loaded = host.launchctl("print", f"system/{LABEL}")[0] == 0
+    就把旧服务原样装回去（引擎把派单放在单独的进程组里跑、状态记在文件里，接单程序回来会接着管它），然后停下。
+    返回服务原来装没装。卸下后进程表查不清（ps 出错）也按「可能有派单」办：装回去、停下（#382 L3 第 2 轮 P1-01）。"""
+    was_loaded = service_loaded(host)
     if not GH.unload(host, f"system/{LABEL}"):
         raise GH.Stop(f"{LABEL} 卸不下来（launchctl 一直显示还在），什么都没改；看清原因后再来")
-    if not busy(processes(host), uid):
-        return
+    try:
+        why = "卸旧服务前刚接到一张派单（dt-worktree 在跑）" if busy(processes(host), uid) else None
+    except Exception as e:                           # ps 出错、超时：查不清不能当没有
+        why = f"卸下旧服务后查不清有没有派单在跑（{e}）"
+    if why is None:
+        return was_loaded
     if not was_loaded:
-        raise GH.Stop(f"有派单正在跑（dt-worktree 进程在），现在{verb}会把那一轮掐断，什么都没改；等它做完再来")
+        raise GH.Stop(f"{why}，现在{verb}可能把那一轮掐断，什么都没改；等它做完、进程表查得清再来")
     try:
         GH.load(host, plist_path())
-    except GH.Stop as e:
-        raise GH.Stop(f"卸旧服务前刚接到一张派单（dt-worktree 在跑），想把旧服务装回去接着管它，没装上：{e}。"
-                      f"派单进程还在跑；请马上跑 status 看，必要时 sudo launchctl bootstrap system {plist_path()}")
-    raise GH.Stop(f"卸旧服务前刚接到一张派单（dt-worktree 在跑），已把旧服务装回去接着管它，什么都没改；等它做完再来{verb}")
+    except Exception as e:
+        raise GH.Stop(f"{why}，想把旧服务装回去接着管它，没装上：{e}。派单可能还在跑、没人管："
+                      f"请马上手动装回 sudo launchctl bootstrap system {plist_path()}，再跑 status 看")
+    raise GH.Stop(f"{why}，已把旧服务装回去接着管它，什么都没改；等它做完再来{verb}")
+
+
+def roll_back(host, before, was_loaded):
+    """新服务写不进或装不上时退回原样：原来有 plist 就写回原内容，原来装着就装回去；原来没有就删掉新写的。
+    原 LaunchAgent 这时还没动（停用在装好之后）。返回一句话说清现在是什么样。"""
+    f = plist_path()
+    try:
+        GH.unload(host, f"system/{LABEL}")
+        if before is None:
+            if os.path.lexists(f):
+                f.unlink()
+            return "已退回原样（原来没装服务，新写的 plist 已删掉；原 LaunchAgent 没动）"
+        GH.write_root_file(f, before, 0o644)
+        host.chown(f, 0, 0)
+        if was_loaded:
+            GH.load(host, f)
+            return "已退回原样（旧 plist 写回、旧服务已装回去）"
+        return "已退回原样（旧 plist 写回，原来就没装着，没装）"
+    except Exception as e:
+        return (f"退回也没成（{e}）：现在服务可能没在跑。请跑 status 看；原来装着服务的，手动 "
+                f"sudo launchctl bootstrap system {f}（plist 内容不对就先 remove 再 install）")
 
 
 def cmd_remove(host, say=print):
@@ -320,8 +379,8 @@ def cmd_remove(host, say=print):
             raise GH.Stop(f"{f} 不是普通文件，没删；请人工查看")
         f.unlink()
     code, out = host.launchctl("enable", f"gui/{a['uid']}/{AGENT_LABEL}")
-    if code != 0 or agent_disabled(host, a["uid"]):
-        say(f"[注意] 只拆了一半：{LABEL} 已拆掉，但原 LaunchAgent 没放开（{out[:80]}）。现在登录 {a['name']} 也不会接单；"
+    if code != 0 or agent_disabled(host, a["uid"]) is not False:     # 查不清也不算放开了（第 2 轮 P2-01）
+        say(f"[注意] 只拆了一半：{LABEL} 已拆掉，但原 LaunchAgent 没放开或查不清（{out[:80]}）。现在登录 {a['name']} 也不会接单；"
             f"手动放开：sudo launchctl enable gui/{a['uid']}/{AGENT_LABEL}，再跑 status 核对")
         return 1
     say(f"已拆掉 {LABEL}，原 LaunchAgent 已放开：登录 {a['name']} 后接单程序照旧起来（不登录就不在线）")
