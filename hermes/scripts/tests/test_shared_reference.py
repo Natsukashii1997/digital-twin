@@ -144,11 +144,17 @@ class References(unittest.TestCase):
         self.assertIn("写进 `--note`（脚本只留前 200 字", self.text)
         src = read(SCRIPTS / "pdaily_act.py")
         self.assertIn('r.add_argument("--note")', src)
-        self.assertIn("P.clip(note, 200)", src)
         self.assertNotIn("message", src.split('r = sub.add_parser("record")', 1)[1].split("sub.add_parser", 1)[0])
+        # --note 要真的一路存进拍板账：cmd_record 交给 record_choices，record_choices 写进 note（#383 第 2 轮 P2-03）
+        cmd = src.split("def cmd_record(a):", 1)[1].split("\ndef ", 1)[0]
+        self.assertRegex(cmd, r"record_choices\([^)]*\ba\.note\)")
+        self.assertRegex(src, r"def record_choices\([^)]*\bnote=None\)")
+        self.assertIn('e["note"] = P.clip(note, 200)', src)
         self.assertIn("不自己找个文件代替账本", self.text)
-        self.assertNotRegex(read(SCRIPTS / "openloop.py"), r'add_parser\("(dispose|record)"',
-                            "账本已有处置记录入口：改模块第 4 节第 2 条的过渡办法")
+        self.assertIn("依赖这个决定的动作也先不做", self.text)
+        # 账本只要多了任何子命令（不管叫什么），就回来改模块第 4 节第 2 条的过渡办法（#383 第 2 轮 P2-03）
+        subs = set(re.findall(r'add_parser\("([a-z_-]+)"', read(SCRIPTS / "openloop.py")))
+        self.assertEqual(subs, {"scan", "show"}, "账本命令变了：改模块第 4 节第 2 条的过渡办法")
 
 
 class NoStaleOrPrivate(unittest.TestCase):
