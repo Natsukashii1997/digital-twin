@@ -213,7 +213,7 @@ def cmd_install(host, say=print):
         say(f"原 LaunchAgent：已停用（gui/{uid}/{AGENT_LABEL}，文件保留）")
     else:
         say(f"[注意] 原 LaunchAgent 没停用成（launchctl print-disabled gui/{uid} 里没有它）：下次登录 {name} 时它会起来、"
-            "撞上单实例锁反复退出，不影响服务；手动停：sudo launchctl disable gui/{uid}/{AGENT_LABEL}")
+            f"撞上单实例锁反复退出，不影响服务；手动停：sudo launchctl disable gui/{uid}/{AGENT_LABEL}")
     for _ in range(START_WAIT):
         if up_running(processes(host), uid, cmd):
             say(f"已装好：{LABEL} 在跑，接单程序起来了（几十秒内中台显示 {name} 在线）")

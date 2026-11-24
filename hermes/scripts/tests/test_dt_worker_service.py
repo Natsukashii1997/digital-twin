@@ -291,6 +291,21 @@ class Install(unittest.TestCase):
         self.assertTrue(self.plist.exists())
         self.assertIn("没看到接单程序起来", out)
 
+    def test_warns_when_disable_did_not_stick(self):
+        """launchctl disable 没记上：服务照装，提示里给出能直接照抄的命令（uid 填好）。"""
+        self.host.launchctl_orig = self.host.launchctl
+
+        def no_disable(*args):
+            if args[0] == "disable":
+                self.host.calls.append(("launchctl", *args))
+                return 1, "failed"
+            return self.host.launchctl_orig(*args)
+        self.host.launchctl = no_disable
+        code, out = self.run_install()
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"sudo launchctl disable gui/{UID}/agent-autoloop", out)
+        self.assertNotIn("{", out)
+
     def test_not_root(self):
         self.host.is_root = lambda: False
         self.assertEqual(S.main(["install"], host=self.host), 2)
