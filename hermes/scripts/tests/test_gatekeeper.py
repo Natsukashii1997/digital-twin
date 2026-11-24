@@ -455,6 +455,31 @@ class Config(Base):
                            ({"repo": {"dir": str(repo)}}, {})):
             self.assertNotEqual(run(cur, state).returncode, 0, (cur, state))
 
+    def test_bus_socket_path_must_fit_macos_limit(self):
+        """11-24 真机第 6 步：配置目录在 ~/Library/Application Support/DigitalTwin/gate/lark-cli 下，总线套接字 105 字节，
+        超过 macOS 上限（103），lark-cli 起不来总线。默认配置目录挪到 ~/.dt/lark；超长时 bus_sock、doctor 报错，run 直接不起。"""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DT_GATE_SECRET_FILE", None)
+            self.assertEqual(G.lark_dir(), Path("~/.dt/lark").expanduser())
+        real_app = "cli_ab890cf1cd395d03"
+        with mock.patch.object(G, "app_id", lambda: real_app):
+            with mock.patch.object(G, "lark_dir", lambda: Path("/Users/dt-gate/.dt/lark")):
+                self.assertLessEqual(len(G.bus_sock().encode()), G.SUN_PATH_MAX)
+            old = Path("/Users/dt-gate/Library/Application Support/DigitalTwin/gate/lark-cli")
+            self.assertGreater(len(str(old / "events" / real_app / "bus.sock").encode()), G.SUN_PATH_MAX)   # 旧位置确实超长
+            with mock.patch.object(G, "lark_dir", lambda: old):
+                with self.assertRaisesRegex(F.Fail, "105 字节，超过 macOS 上限 103"):
+                    G.bus_sock()
+                out = G.doctor()
+                self.assertIn("超过 macOS 上限", out["bus_sock"]["error"])
+                self.assertFalse(out["ok"])
+                with mock.patch.object(G, "launch_ok"), mock.patch.object(G, "cards_trusted"), \
+                        mock.patch.object(G.F, "run") as card_loop, mock.patch.object(G, "consume_once") as consume:
+                    with self.assertRaisesRegex(F.Fail, "套接字"):
+                        G.run()
+                card_loop.assert_not_called()
+                consume.assert_not_called()
+
     def test_daemon_runs_the_entry_as_dt_gate_and_sets_no_environment(self):
         """0E-3c 常驻：LaunchDaemon 以 dt-gate 身份跑 root 装的入口 run，不写环境变量（入口 env -i 自己定，写了门卫也会拒起），
         开机自起、退出了重起，日志在 root 预先建好的目录里。"""
@@ -537,7 +562,9 @@ class RealCommand(unittest.TestCase):
             self.assertEqual(seen["env"]["LARKSUITE_CLI_APP_ID"], APP)
             self.assertEqual(seen["env"]["LARKSUITE_CLI_APP_SECRET"], "topsecret")
             self.assertEqual(seen["env"]["LARKSUITE_CLI_TENANT_ACCESS_TOKEN"], FAKE_TAT)   # 1.0.96 只认现成令牌（11-23 真机）
-            self.assertEqual(seen["env"]["LARKSUITE_CLI_CONFIG_DIR"], str(t / "gate/lark-cli"))
+            self.assertEqual(seen["env"]["LARKSUITE_CLI_CONFIG_DIR"], str(t / "home/.dt/lark"))    # 密钥旁边的短路径
+            with mock.patch.dict(os.environ, env):                       # 总线日志和配置目录是同一处（11-24 真机）
+                self.assertEqual(G.bus_log_file().parents[2], Path(seen["env"]["LARKSUITE_CLI_CONFIG_DIR"]))
             self.assertNotIn("HTTPS_PROXY", seen["env"])                  # 不经代理（审查 P2-10：代理解 TLS 能看到密钥）
             self.assertNotIn("DT_SHOULD_NOT_LEAK", seen["env"])
             self.assertFalse([k for k in seen["env"] if k.startswith(("DT_", "HERMES_", "LARK_"))])
@@ -963,6 +990,7 @@ class SharedLoop(unittest.TestCase):
             return 0
         with mock.patch.object(F, "run", lambda ready=None: None), mock.patch.object(G, "consume_once", consume), \
                 mock.patch.object(G, "launch_ok", lambda: None), mock.patch.object(G, "cards_trusted", lambda: None), \
+                mock.patch.object(G, "bus_sock", lambda: "/x/bus.sock"), \
                 mock.patch.object(G.time, "sleep", lambda s: None), mock.patch("builtins.print"):
             with self.assertRaises(SystemExit) as cm:
                 G.run()
@@ -1137,7 +1165,7 @@ READY = "[event] ready event_key=card.action.trigger"
         os.chmod(exe, 0o755)
         sec = Path(os.environ["DT_GATE_SECRET_FILE"])
         if not sec.exists():
-            sec.parent.mkdir(parents=True)
+            sec.parent.mkdir(parents=True, exist_ok=True)               # ~/.dt 可能已经有（总线日志也在它下面的 lark/）
             sec.write_text("s\n")
             os.chmod(sec, 0o600)
             G.setup(APP)
