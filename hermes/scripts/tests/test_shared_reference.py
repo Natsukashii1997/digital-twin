@@ -6,11 +6,15 @@
   2. 模块里点名的技能、脚本、脚本子命令、文档（含根目录的）、「某技能第 N 节」「清单第 N 节」都真的存在，引用的卡片字样真的在卡片上；
      发出通道表里新底座、旧车间两行各自的授权条件写全（卫士卡点击；先回「按老办法派」再对单回「可以」），三类例子的处理句都在（#383 第 1 轮 P2-03）；
   3. 四个档位的说法和《常设授权清单》第 2 节一字不差；
-  4. 已经作废的说法不再出现（打字「派单 <确认码>」批准，0E-3b 常浩 11-23 定删掉），参考库里不夹带私聊号这类个人信息。
+  4. 行为核对：真跑 `pdaily_act.py record --note`（临时目录），拍板账里真的存下消息号和原话；问账本的真解析器有哪些子命令；
+  5. 已经作废的说法不再出现（打字「派单 <确认码>」批准，0E-3b 常浩 11-23 定删掉），参考库里不夹带私聊号这类个人信息。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
-import ast
+import contextlib
+import io
+import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -19,33 +23,14 @@ SKILLS = ROOT / "hermes" / "skills"
 SCRIPTS = ROOT / "hermes" / "scripts"
 LIB = SKILLS / "dt-shared-reference"
 MODULE = LIB / "references" / "decision-request.md"
+sys.path.insert(0, str(SCRIPTS))
+import openloop  # noqa: E402
+import test_pdaily_act as PA  # noqa: E402  借它的隔离夹具：日报目录指到临时目录、不连飞书
 
 
 def read(p):
     return p.read_text(encoding="utf-8")
 
-
-def func(tree, name):
-    found = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name]
-    assert len(found) == 1, f"{name} 应该正好有一个，找到 {len(found)} 个"
-    return found[0]
-
-
-def calls(node, name):
-    """node 里所有调用 name(...) 或 x.name(...) 的节点。"""
-    return [c for c in ast.walk(node) if isinstance(c, ast.Call)
-            and (getattr(c.func, "id", None) == name or getattr(c.func, "attr", None) == name)]
-
-
-def bound(call, fn):
-    """按 fn 的参数表，把 call 的位置参数和关键字参数对到参数名上（不支持 *args / **kw，遇到就报错）。"""
-    names = [a.arg for a in fn.args.args]
-    assert not any(isinstance(a, ast.Starred) for a in call.args) and all(k.arg for k in call.keywords), "调用里有 * / **，静态对不上参数"
-    out = dict(zip(names, call.args))
-    for k in call.keywords:
-        assert k.arg not in out, f"参数 {k.arg} 重复"
-        out[k.arg] = k.value
-    return out
 
 
 class Files(unittest.TestCase):
@@ -172,35 +157,45 @@ class References(unittest.TestCase):
         self.assertIn("不自己找个文件代替账本", self.text)
         self.assertIn("依赖这个决定的动作也先不做", self.text)
 
-    def test_note_reaches_ledger(self):
-        # --note 要真的一路存进拍板账（#383 第 2、3 轮 P2-03）：按语法树把 cmd_record 里调 record_choices 的
-        # 每个参数对到参数名上，a.note 必须落在 note 这个参数；record_choices 里要把 note 截到 200 字写进 e["note"]，
-        # 再把 e 追加进账
-        tree = ast.parse(read(SCRIPTS / "pdaily_act.py"))
-        rc = func(tree, "record_choices")
-        hits = calls(func(tree, "cmd_record"), "record_choices")
-        self.assertEqual(len(hits), 1)
-        note = bound(hits[0], rc).get("note")
-        self.assertEqual(ast.dump(note) if note else None, ast.dump(ast.parse("a.note", mode="eval").body))
-        want = ast.dump(ast.parse('e["note"] = P.clip(note, 200)').body[0])
-        self.assertIn(want, [ast.dump(n) for n in ast.walk(rc) if isinstance(n, ast.Assign)])
-        self.assertTrue(any(len(c.args) == 1 and getattr(c.args[0], "id", None) == "e" for c in calls(rc, "append")))
-
     def test_ledger_has_no_disposition_entry_yet(self):
-        # 账本只要多了任何子命令（不管叫什么、怎么写引号），就回来改模块第 4 节第 2 条的过渡办法（#383 第 2、3 轮 P2-03）
-        names = []
-        for c in calls(ast.parse(read(SCRIPTS / "openloop.py")), "add_parser"):
-            self.assertTrue(c.args and isinstance(c.args[0], ast.Constant) and isinstance(c.args[0].value, str),
-                            f"第 {c.lineno} 行的 add_parser 第一个参数不是字面字符串，静态核不了")
-            names.append(c.args[0].value)
-        self.assertEqual(sorted(names), ["scan", "show"], "账本命令变了：改模块第 4 节第 2 条的过渡办法")
+        # 账本只要多了任何子命令，就回来改模块第 4 节第 2 条的过渡办法（#383 第 2～4 轮 P2-03）。
+        # 不看源码写法，直接问真解析器有哪些子命令：起别名、getattr 间接调用都绕不过去
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as end:
+            openloop.main(["-h"])
+        self.assertEqual(end.exception.code, 0)
+        usage = buf.getvalue().split("\n", 1)[0]
+        found = re.findall(r"\{([^}]*)\}", usage)
+        self.assertEqual(len(found), 1, usage)
+        self.assertEqual(sorted(found[0].split(",")), ["scan", "show"], "账本命令变了：改模块第 4 节第 2 条的过渡办法")
 
     def test_ledger_exception_keeps_own_approval(self):
         # 没地方存时的那条例外：只是先产生第一份记录，派单通道自己的批准照旧（#383 第 3 轮 P2-03）
         item = next(l for l in self.text.splitlines() if l.strip().startswith("- 账本里的事"))
         rest = item.split("唯一的例外", 1)[1]
-        for w in ("递派单提议", "开车间单", "原任务号、消息号、原话", "再按那条通道自己的批准走", "原话里有受限内容的不抄"):
+        for w in ("递派单提议", "开车间单", "原任务号、消息号、原话", "再按那条通道自己的批准走", "原话里有受限内容的不抄",
+                  "只写消息号和一句不含受限内容的转述", "同 `autoloop` 技能第 0 节"):
             self.assertIn(w, rest)
+
+
+
+class NoteReachesLedger(unittest.TestCase):
+    """模块让猛鬼兽把消息号、原话写进 `pdaily_act.py record --note`：真跑一遍，看拍板账里真的存下了（#383 第 4 轮 P2-03）。"""
+    setUp = PA.ActTests.setUp
+    tearDown = PA.ActTests.tearDown
+    run_cmd = PA.ActTests.run_cmd
+
+    def test_note_saved_and_clipped(self):
+        note = "消息号 om_test0001 原话「① 按推荐」 理解：按推荐派单" + "，补充说明" * 50
+        self.assertGreater(len(note), 200)
+        rc, out = self.run_cmd("record", "--n", "2", "--choice", "按推荐", "--note", note)
+        self.assertEqual(rc, 0, out)
+        rows = [json.loads(l) for l in (self.tmp / "decisions.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+        mine = [r for r in rows if r.get("id") == out["entries"][0]["id"]]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0].get("note"), note[:200] + "…")   # 只留前 200 字：消息号、原话在最前面，一定留得住
+        self.assertTrue(mine[0].get("note", "").startswith("消息号 om_test0001 原话「① 按推荐」"))
+        self.assertEqual(mine[0]["via"], "回复")
 
 
 class NoStaleOrPrivate(unittest.TestCase):
