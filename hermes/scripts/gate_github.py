@@ -6,6 +6,7 @@
     （dt-sandbox 规则集 main-merge-reserved-to-admin 只对管理员豁免，hermes/baselines/dt-sandbox-github.json；所以管理员的令牌
     一律拒发——常浩名下的令牌能推 main）。常浩用这个账号建经典令牌，只勾 public_repo。
   - 放在哪：dt-gate 自己家目录的 ~/.dt/github-publish.token（目录 700、文件 600、属 dt-gate、没有放行别人的 ACL、不跟随链接），
+    只收经典令牌 ghp_：细粒度令牌 github_pat_ 没有可核的权限范围，仓库接口给的是账号角色、不是令牌权限（#319 L3 P1-01）。
     由 root 入口 `dt-gate-hub put-publish-token --confirm` 以 dt-gate 身份写入；主账号、秘书账号、工人账号都读不到。
     家目录按有效用户的系统账号取，不认环境变量 HOME。
   - gh 用 root 装的副本 GATE/bin/gh（stage --gh 复制、记 SHA-256）：Homebrew 的 gh 属主账号、主账号能换，dt-gate 不跑它。
@@ -25,7 +26,7 @@ https://github.com 从环境变量 GH_TOKEN 取令牌，令牌不进命令行、
 git / gh 的输出进异常和日志前先 mask()（像令牌的串一律换成 ***）。
 
 **真发布前核对**（ready()）：开关开着、仓库在开关和 REPOS 里、和名册的 GitHub 对得上 → 令牌文件 → gh 副本 →
-`gh api -i user` 正是登记的账号、经典令牌只勾了 public_repo（多勾 repo、workflow、delete_repo 都拒）→ 对这个仓库
+`gh api -i user` 正是登记的账号、经典令牌的权限范围正好是 public_repo（多勾、少勾、没有 X-OAuth-Scopes 的细粒度令牌都拒）→ 对这个仓库
 admin 严格为 false、push 严格为 true（缺项、null 都拒）。任何一步不对 → NotReady。
 对账回读（autoloop_exits）用 readback_env()：不要求开关开着（结果不明之后关了开关也要能对账），代理照开关文件读得到的用。
 
@@ -64,7 +65,7 @@ SWITCH = GATE + "/publish.json"       # root 写的真发布开关；测试里�
 TRUSTED_UIDS = (0,)                   # gh 副本、开关文件和它们往上的目录只认这些属主；测试里在进程内替换
 GIT_BIN = "/usr/bin/git"
 SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
-TOKEN_RE = re.compile(r"^(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,255})$")
+TOKEN_RE = re.compile(r"^ghp_[A-Za-z0-9]{36}$")    # 只收经典令牌：细粒度令牌（github_pat_）核不了它实际获准的权限（#319 L3 P1-01）
 TOKEN_ANY = re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{20,255})")
 PROXY_RE = re.compile(r"^http://127\.0\.0\.1:([1-9]\d{0,4})$")
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
@@ -169,7 +170,7 @@ def read_token():
     except UnicodeDecodeError:
         tok = ""
     if len(data) > MAX_TOKEN or not TOKEN_RE.fullmatch(tok):
-        raise NotReady("令牌文件的内容不是一个 GitHub 令牌")
+        raise NotReady("令牌文件的内容不是一个经典 GitHub 令牌（ghp_…；细粒度令牌 github_pat_… 不收）")
     return tok
 
 
@@ -298,17 +299,17 @@ def identity(github, e):
     perm = repo.get("permissions") if isinstance(repo, dict) else None
     perm = perm if isinstance(perm, dict) else {}
     return {"login": me.get("login") if isinstance(me, dict) else None, "scopes": _scopes(head),
-            "fine_grained": str(e.get("GH_TOKEN", "")).startswith("github_pat_"),
             "admin": perm.get("admin"), "push": perm.get("push"), "maintain": perm.get("maintain")}
 
 
 def require_identity(who, github, login):
     if who["login"] != login:
         raise NotReady(f"发布令牌不是登记的账号 {login} 的（是 {who['login']}）")
-    if who["scopes"] is None and not who["fine_grained"]:
-        raise NotReady("读不出经典令牌勾了哪些权限范围（响应里没有 X-OAuth-Scopes）")
-    if who["scopes"] is not None and not who["scopes"] <= {"public_repo"}:
-        raise NotReady(f"发布令牌多勾了权限（只许 public_repo，现在：{'、'.join(sorted(who['scopes']))}），请重建令牌")
+    if who["scopes"] is None:                 # 细粒度令牌没有这个头；仓库接口给的是账号角色、不是令牌权限，不能拿来代替
+        raise NotReady("读不出令牌勾了哪些权限范围（响应里没有 X-OAuth-Scopes）：只收只勾 public_repo 的经典令牌")
+    if who["scopes"] != {"public_repo"}:
+        raise NotReady(f"发布令牌的权限范围不对（只许正好 public_repo，现在：{'、'.join(sorted(who['scopes'])) or '（无）'}），"
+                       "请重建令牌")
     if not isinstance(who["admin"], bool) or not isinstance(who["push"], bool):
         raise NotReady(f"读不出 {login} 对 {github} 的权限（admin={who['admin']}、push={who['push']}）")
     if who["admin"] is not False or who["push"] is not True or who["maintain"] is True:

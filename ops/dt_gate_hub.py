@@ -25,6 +25,7 @@
                          打开真发布：副本里的受信发布要有代次边界（#320），以 dt-gate 身份 doctor --online 全过，才写 root 的
                          开关文件 GATE/publish.json，写完以 dt-gate 身份回读，读不出「开着」就删掉、算没打开
   sudo "$GATE/bin/dt-gate-hub" publish off        关真发布：删掉开关文件（关永远允许，不用 --confirm）
+  开关打开以后，stage 或 update 退回上一份时，要换上的副本没有 #320 的代次边界，就在换之前删掉开关（#319 L3 P1-02）
   sudo "$GATE/bin/dt-gate-hub" rollback --confirm 退回搬家前；搬家中途被打断（进程被杀、关了终端）也用它收拾
 
 migrate 做的事（顺序固定；每一步做完记进 gate/migrating.json，被打断也能 rollback）：
@@ -585,6 +586,7 @@ def cmd_stage(host, a):
         current["gh"] = gh
     if prev and (prev["engine"]["commit"], prev["repo"]["commit"], prev["node"]) != (esha, rsha, str(node)):
         write_json(root / "previous.json", prev)
+    close_switch_unless_boundary(current, "要换上")
     write_json(old, current)
     write_entry(rdir)
     say(f"副本好了：引擎 {esha[:12]}、本仓库 {rsha[:12]}、node {version}"
@@ -1487,6 +1489,7 @@ def cmd_update(host, a):
             raise
         say(f"新副本没起来（{e}），退回上一份副本")
         old = read_json(prev)
+        close_switch_unless_boundary(old, "退回到")
         _install_all(host, old, s, which_list)
         write_json(gate_root() / "current.json", old)
         raise Stop(f"新副本没起来，已退回上一份（引擎 {old['engine']['commit'][:12]}、本仓库 {old['repo']['commit'][:12]}）")
@@ -1520,7 +1523,7 @@ def cmd_put_publish_token(host, a):
         raise Stop("副本里没有 gate_github.py：先用合并了 0E-4 的提交重新 stage")
     tok = host.read_secret(f"粘贴 {GG.LOGIN} 的经典令牌（只勾 public_repo；输入不显示），回车：").strip()
     if not GG.TOKEN_RE.fullmatch(tok):
-        raise Stop("这不像一个 GitHub 令牌（ghp_… 或 github_pat_…），没写")
+        raise Stop("这不像一个经典令牌（ghp_ 开头；细粒度令牌 github_pat_… 不收），没写")
     path = gate_home(host) / ".dt/github-publish.token"
     run_helper(host, current, gate_account(), ["put", str(path), "--mode", "600", "--mkdir"], stdin=(tok + "\n").encode())
     tok = None
@@ -1532,6 +1535,27 @@ def cmd_put_publish_token(host, a):
         raise Stop("令牌放进去了，但核对没过（见上）：按原因处理（重建令牌就再跑一次本命令），不要打开真发布")
     say("令牌核对通过。下一步：sudo …/dt-gate-hub run gate_github doctor --repo dt-sandbox --online，全过再 publish on --confirm")
     return 0
+
+
+def has_boundary(copy):
+    """这份副本（current.json 的写法）的受信发布有没有 #320 的代次边界。"""
+    pub = Path(copy["repo"]["dir"]) / "hermes/scripts/autoloop_publish.py"
+    try:
+        return pub.is_file() and bool(BOUNDARY_MARK.search(pub.read_text(encoding="utf-8")))
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def close_switch_unless_boundary(copy, why):
+    """要换到的副本没有 #320 的代次边界，就在换之前删掉真发布开关（#319 L3 P1-02）：开关只在 publish on 那一刻核过
+    副本，之后换成旧代码而开关还在，旧代码会照常真推。由当前副本（换之前的入口）执行，旧代码自己不会做这一步。"""
+    f = gate_root() / "publish.json"
+    if has_boundary(copy) or not os.path.lexists(f):
+        return False
+    os.unlink(f)
+    say(f"  真发布开关已关：{why}的本仓库 {copy['repo']['commit'][:12]} 没有 #320 的代次边界，删掉了 {f}；"
+        "换回有代次边界的副本后，要放开再跑 publish on --confirm")
+    return True
 
 
 def read_switch_file():
@@ -1569,8 +1593,7 @@ def cmd_publish(host, a):
             raise Stop(str(e))
     root_dir(host, gate_root(), make=False)
     current = load_current()
-    pub = Path(current["repo"]["dir"]) / "hermes/scripts/autoloop_publish.py"
-    if not pub.is_file() or not BOUNDARY_MARK.search(pub.read_text(encoding="utf-8")):
+    if not has_boundary(current):
         raise Stop("副本里的受信发布还没有代次边界（#320，DECIDED 11-22：放开之前必须合并）：#320 合并、重新 stage 后再打开")
     if not current.get("gh"):
         raise Stop("副本里没有 gh：先 stage … --gh <gh 程序>")

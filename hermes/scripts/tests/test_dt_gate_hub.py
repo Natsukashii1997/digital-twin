@@ -1439,11 +1439,11 @@ class PublishCredTest(unittest.TestCase):
         code, out = self.main("put-publish-token", secret=self.TOKEN)
         self.assertEqual(code, 1)
         self.assertIn("--confirm", out)
-        for bad in ("", "hunter2", "ghp_short", self.TOKEN + " extra"):
+        for bad in ("", "hunter2", "ghp_short", self.TOKEN + " extra", "github_pat_" + "Ab3_" * 20):
             with self.subTest(bad=bad):
                 code, out = self.main("put-publish-token", "--confirm", secret=bad)
                 self.assertEqual(code, 1)
-                self.assertIn("不像一个 GitHub 令牌", out)
+                self.assertIn("不像一个经典令牌", out)
         self.assertFalse(self.token_file().exists())
         self.assertEqual(self.tool_calls, [])
 
@@ -1551,6 +1551,57 @@ class PublishCredTest(unittest.TestCase):
         self.switch().write_text("{}")
         code, out = self.main("publish", "off")
         self.assertEqual(code, 0)
+        self.assertFalse(self.switch().exists())
+
+    # ---------- 换副本时开关跟着核（#319 L3 P1-02） ----------
+    def copy_dir(self, boundary):
+        d = Path(tempfile.mkdtemp(dir=self.d))
+        (d / "hermes/scripts").mkdir(parents=True)
+        (d / "hermes/scripts/autoloop_publish.py").write_text("GENERATION_BOUNDARY = 1\n" if boundary else "x = 1\n")
+        return {"repo": {"commit": "f" * 40, "dir": str(d)}}
+
+    def test_switch_closed_before_moving_to_copy_without_boundary(self):
+        self.switch().write_text("{}")
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            self.assertFalse(H.close_switch_unless_boundary(self.copy_dir(True), "要换上"))
+            self.assertTrue(self.switch().exists())                      # 有代次边界：开关不动
+            self.assertTrue(H.close_switch_unless_boundary(self.copy_dir(False), "要换上"))
+        self.assertFalse(self.switch().exists())
+        self.assertIn("真发布开关已关", out.getvalue())
+        self.assertFalse(H.close_switch_unless_boundary(self.copy_dir(False), "要换上"))   # 没开关：什么都不做
+
+    def test_stage_of_old_commit_closes_switch(self):
+        """开关开着时 stage 一个没有 #320 的提交：换副本之前删掉开关，current.json 换成新的。"""
+        self.switch().write_text("{}")
+        old = self.copy_dir(False)
+        edir = Path(tempfile.mkdtemp(dir=self.d))
+        (edir / "bin").mkdir()
+        (edir / "bin/agent-autoloop.ts").write_text("")
+        rdir = Path(old["repo"]["dir"])
+        for f in ("ops/dt_gate_user.py", "ops/dt_gate_hub.py", "hermes/scripts/gate_intake.py",
+                  "hermes/scripts/hub_listener.py", "projects.json"):
+            (rdir / f).parent.mkdir(parents=True, exist_ok=True)
+            (rdir / f).write_text("")
+        a = mock.Mock(owner_account="nat", engine_repo="e", engine_commit="e", repo="r", repo_commit="r", node="n", gh=None)
+        with mock.patch.object(H, "root_dir", side_effect=lambda host, p, *x, **k: Path(p)), \
+                mock.patch.object(H, "resolve_commit", side_effect=["e" * 40, "f" * 40]), \
+                mock.patch.object(H, "extract_archive", side_effect=[edir, rdir]), \
+                mock.patch.object(H, "stage_node", return_value=(Path("/n"), "v24.0.0")), \
+                mock.patch.object(H, "write_cli", return_value=Path("/c")), mock.patch.object(H, "write_entry"), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(H.cmd_stage(self.host, a), 0)
+        self.assertFalse(self.switch().exists())
+        self.assertEqual(json.loads((self.root / "current.json").read_text())["repo"]["dir"], str(rdir))
+
+    def test_update_falling_back_to_copy_without_boundary_closes_switch(self):
+        (self.root / "state.json").write_text(json.dumps({"hub_url": "http://127.0.0.1:1"}))
+        (self.root / "previous.json").write_text(json.dumps({**self.copy_dir(False), "engine": {"commit": "o" * 40}}))
+        self.switch().write_text("{}")
+        with mock.patch.object(H, "_install_all", side_effect=[H.Stop("起不来"), None]), \
+                mock.patch("sys.stdout", io.StringIO()):
+            with self.assertRaisesRegex(H.Stop, "已退回上一份"):
+                H.cmd_update(self.host, mock.Mock(confirm=True))
         self.assertFalse(self.switch().exists())
 
     # ---------- status、run ----------

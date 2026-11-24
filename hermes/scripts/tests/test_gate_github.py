@@ -96,11 +96,12 @@ class Base(unittest.TestCase):
 
 
 class Token(Base):
-    def test_reads_both_token_formats(self):
-        for value in (TOKEN, PAT):
-            with self.subTest(value=value[:12]):
-                self.put_token(value)
-                self.assertEqual(GG.read_token(), value)
+    def test_reads_classic_token_only(self):
+        self.put_token(TOKEN)
+        self.assertEqual(GG.read_token(), TOKEN)
+        self.put_token(PAT)                                # 细粒度令牌核不了实际权限，格式上就不收（#319 L3 P1-01）
+        with self.assertRaisesRegex(GG.NotReady, "不是一个经典 GitHub 令牌"):
+            GG.read_token()
 
     def test_missing_token_says_how_to_fix(self):
         with self.assertRaises(GG.NotReady) as c:
@@ -335,13 +336,19 @@ class Ready(Base):
                     GG.ready("dt-sandbox", "o/dt-sandbox")
                 self.assertNotIn(TOKEN, str(c.exception))      # 假 gh 报错时把令牌打进了 stderr：打码
 
-    def test_fine_grained_token_has_no_scope_header(self):
-        self.put_token(PAT)
-        fake_gh(self.gh, self.state, scopes=None)
+    def test_scopes_must_be_exactly_public_repo(self):
+        """#319 L3 P1-01：没有 X-OAuth-Scopes（细粒度令牌）、一个都没勾、多勾都拒；仓库权限再对也不能代替令牌权限。"""
+        for scopes, words in ((None, "只收只勾 public_repo 的经典令牌"), ("", "（无）"), ("public_repo, workflow", "workflow")):
+            with self.subTest(scopes=scopes):
+                fake_gh(self.gh, self.state, scopes=scopes)
+                with self.assertRaises(GG.NotReady) as c:
+                    GG.ready("dt-sandbox", "o/dt-sandbox")
+                self.assertIn(words, str(c.exception))
+        fake_gh(self.gh, self.state, scopes="public_repo")
         GG.ready("dt-sandbox", "o/dt-sandbox")
 
     def test_messages_say_what_is_wrong(self):
-        for kw, words in ((dict(admin="missing"), "读不出"), (dict(scopes="repo"), "只许 public_repo"),
+        for kw, words in ((dict(admin="missing"), "读不出"), (dict(scopes="repo"), "只许正好 public_repo"),
                           (dict(admin=True), "管理员")):
             with self.subTest(words):
                 fake_gh(self.gh, self.state, **kw)
