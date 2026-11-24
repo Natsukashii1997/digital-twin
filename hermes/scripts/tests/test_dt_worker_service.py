@@ -160,6 +160,7 @@ class PlistShape(unittest.TestCase):
         self.assertNotIn("StandardErrorPath", p)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "要 macOS 的 sysctl kern.boottime（CI 是 Linux）")
 class Wrapper(unittest.TestCase):
     """服务 plist 里那段 sh 真跑：门卫状态是本次开机的 state=ok 才启动接单程序，日志追加到 ~/.agent-autoloop/logs/up.log。"""
 
