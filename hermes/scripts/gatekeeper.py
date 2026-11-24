@@ -9,7 +9,7 @@ GateBot），这里只多四样：门卫应用凭据、身份绑定、收点击�
 凭据（常浩 11-19 定：真凭据存成账号家目录里只有它能读的文件，不用钥匙串）：
   应用编号  DigitalTwin/gate/app.json（setup --app-id 写）
   应用密钥  ~/.dt/gate-app.secret（常浩亲手贴进 dt-gate，600、属 dt-gate、不能是链接；不经任何 AI）
-  lark-cli 经环境变量拿凭据，配置目录单独放 DigitalTwin/gate/lark-cli/，不碰钥匙串：LARKSUITE_CLI_APP_ID /
+  lark-cli 经环境变量拿凭据，配置目录单独放 ~/.dt/lark/（路径要短：事件总线的套接字建在里面，见 lark_dir），不碰钥匙串：LARKSUITE_CLI_APP_ID /
   LARKSUITE_CLI_APP_SECRET 之外还要 LARKSUITE_CLI_TENANT_ACCESS_TOKEN——1.0.96 的环境变量凭据只读现成的租户令牌、
   不会拿密钥自己换（11-23 真机 doctor 报 no access token available；实测发消息、查机器人、event consume 启动都要它，
   consume 拉起的事件总线再用 App ID 和密钥连长连接）。所以门卫在进程里用密钥向飞书换租户令牌（tenant_token：
@@ -244,6 +244,27 @@ def secret_file():
     return Path(os.environ.get("DT_GATE_SECRET_FILE") or "~/.dt/gate-app.secret").expanduser()
 
 
+SUN_PATH_MAX = 103                        # 字节：macOS 的 unix 套接字路径上限（sockaddr_un.sun_path 104 字节，含结尾的 0）
+
+
+def lark_dir():
+    """lark-cli 的配置目录（LARKSUITE_CLI_CONFIG_DIR）：和密钥同在 dt-gate 自己的 ~/.dt 下，即 ~/.dt/lark。
+    不放 gate_home 下：lark-cli 1.0.96 把事件总线的 unix 套接字建在 <配置目录>/events/<应用编号>/bus.sock，
+    放在 ~/Library/Application Support/DigitalTwin/gate/lark-cli 下有 105 字节，超过上限，总线起不来
+    （11-24 真机第 6 步：bus did not become ready within 3s，退出码 5）；~/.dt/lark 下约 60 字节。"""
+    return secret_file().parent / "lark"
+
+
+def bus_sock():
+    """事件总线套接字的路径；字节数超过 SUN_PATH_MAX 就抛 Fail（lark-cli 会一直起不来总线，门卫跟着退避重试，原因看不出来）。"""
+    p = lark_dir() / "events" / app_id() / "bus.sock"
+    n = len(os.fsencode(str(p)))
+    if n > SUN_PATH_MAX:
+        raise F.Fail(f"lark-cli 事件总线的套接字路径 {p} 有 {n} 字节，超过 macOS 上限 {SUN_PATH_MAX}，总线起不来；"
+                     "配置目录要放短一点的位置")
+    return str(p)
+
+
 def trusted(path, what, checked=None):
     """check_path，不过就抛 F.Fail。"""
     try:
@@ -476,7 +497,7 @@ class GateBot(F.Bot):
         env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(Path.home()), "LANG": "en_US.UTF-8",
                "LARKSUITE_CLI_APP_ID": app_id(), "LARKSUITE_CLI_APP_SECRET": read_secret(),
                "LARKSUITE_CLI_TENANT_ACCESS_TOKEN": tenant_token(),
-               "LARKSUITE_CLI_BRAND": "feishu", "LARKSUITE_CLI_CONFIG_DIR": str(private_dir(home / "lark-cli")),
+               "LARKSUITE_CLI_BRAND": "feishu", "LARKSUITE_CLI_CONFIG_DIR": str(private_dir(lark_dir())),
                "LARKSUITE_CLI_LOG_DIR": str(private_dir(home / "lark-cli-log")),
                "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1", "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1"}
         return env
@@ -1037,8 +1058,9 @@ def loss_alert(line):
 
 
 def bus_log_file():
-    """门卫这个应用的 lark-cli 事件总线日志：<配置目录>/events/<应用编号>/bus.log（lark-cli 1.0.96 bus/log.go、bus.go）。"""
-    return gate_home() / "lark-cli" / "events" / app_id() / "bus.log"
+    """门卫这个应用的 lark-cli 事件总线日志：<配置目录>/events/<应用编号>/bus.log（lark-cli 1.0.96 bus/log.go、bus.go；
+    11-23 假凭据实测位置如此，中间没有 profile 一层）。配置目录见 lark_dir。"""
+    return lark_dir() / "events" / app_id() / "bus.log"
 
 
 class BusLog:
@@ -1308,6 +1330,7 @@ def run():
     启动前核启动方式、代码属 root、卡片库（P1-04、P1-02），不过就不起。"""
     launch_ok()
     cards_trusted()
+    bus_sock()                                   # 套接字路径超长：总线永远起不来，直接不起、说清原因，不进退避重试
     F.use(GATE)
     cards = threading.Thread(target=F.run, kwargs={"ready": cards_ready}, daemon=True, name="gate-cards")
     cards.start()
@@ -1333,7 +1356,8 @@ def run():
 def doctor(online=False):
     out = {}
     checks = (("app_id", app_id), ("secret", lambda: read_secret() and "ok"), ("lark_cli", lark_cli),
-              ("code_owner", lambda: root_code() or "root"), ("cards_db", lambda: cards_trusted() or "ok"))
+              ("code_owner", lambda: root_code() or "root"), ("cards_db", lambda: cards_trusted() or "ok"),
+              ("bus_sock", bus_sock))
     for name, fn in checks:
         try:
             out[name] = fn()
