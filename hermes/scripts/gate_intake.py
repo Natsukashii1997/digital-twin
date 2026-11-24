@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""秘书窄窗口（ADR-015 批 0E-2；0E-3b 加派单提议）：dt-gate 里的本机接口 127.0.0.1:3353，别的账号只能经它交四件事给控制面。
+"""秘书窄窗口（ADR-015 批 0E-2；0E-3b 加派单提议；#380 加冻结、收掉、补发）：dt-gate 里的本机接口 127.0.0.1:3353，别的账号只能经它
+交下面这几件事给控制面。
 
 控制面（凭证库、秘书账本、中台本人密钥）都在 dt-gate 里，主账号（0E-5 之前的秘书）碰不到。秘书侧要交的东西只有：
   POST /v1/secretary/proposal      秘书巡视的一份提议（JSON，最多 16 KB），等于在 dt-gate 里跑 secretary_gate.py submit --file
   POST /v1/secretary/off           关秘书（转排空），等于 secretary.py off --source 秘书窄窗口；关是安全方向，谁都可以
   POST /v1/tasks/<单号>/revoke     撤销一张单的凭证，等于 autoloop_grants.py revoke；撤销只收紧，谁都可以
      （body 可带 {"reason": "…"}，200 字内）
+  POST /v1/tasks/<单号>/freeze     冻结一张单，等于 autoloop_grants.py freeze（body 同上，没写原因记「秘书窄窗口」）；收紧，谁都可以。
+     结果里的冻结码会回到调用方（派单技能要把它转告常浩）
+  POST /v1/tasks/<单号>/complete   收掉一张单，等于 autoloop_grants.py complete；收紧，谁都可以
+  POST /v1/dispatch/send-pending   补发记了账、还没确认送到中台的派单事件，等于 autoloop_grants.py send-pending：只补发已经签过、
+     代次仍有效的事件，不新增授权（恢复闸、规则核对照网关原样做）
+     续接（resume-dispatch，会让工人再跑一轮）不开窗口，只在电脑上做（常浩 2026-11-24 选甲，#380）
   POST /v1/dispatch/proposal       写入派单提议 {"repo", "executor", "scope", "request_id", "hours"?}（0E-3b），等于在 dt-gate 里跑
      autoloop_grants.py propose --scope-file … --request-id …：只登记（同一个请求号重交返回原提议；待批张数、每小时张数有上限，
      #369 P2-02），确认卡由门卫发到常浩私聊，他点「批准派单」才签凭证。递提议不算授权
      （ADR-015 §3.3：私聊打字可以触发提议、不能完成批准），所以和秘书提议一样只要令牌
 都要 Authorization: Bearer <令牌>（DigitalTwin/autoloop/intake.token，600；dt_gate_hub.py windows 给主账号一份）。
 返回 {"code": 工具的退出码, "result": 工具最后一行 JSON}；工具本身的判定（准入、额度、交常浩）不在这里重做。
-不收别的：没有批准派单（只认门卫卡上的点击）、没有回答卡片、没有开秘书，也没有任何读接口（读用只读窗口 3352）。
-提议同一时间只办一件（排队），每件最多 10 分钟；关秘书、撤销单另排一队，不等提议（停是该最快生效的方向）。dt-worker 的门卫规则连不到这里；dt-secretary 只准连 3352、3353、8090。
+不收别的：没有批准派单（只认门卫卡上的点击）、没有续接、没有回答卡片、没有开秘书，也没有任何读接口（读用只读窗口 3352）。
+提议和补发同一时间只办一件（排队），每件最多 10 分钟；关秘书、撤销、冻结、收掉另排一队，不等提议（停是该最快生效的方向）。dt-worker 的门卫规则连不到这里；dt-secretary 只准连 3352、3353、8090。
 
   gate_intake.py serve [--port 3353]
   gate_intake.py dispatch-propose --repo R --executor claude|codex --scope-file F [--hours 12] [--request-id ID]
@@ -21,10 +28,14 @@
       没给 --request-id 就新生成一个，输出里都带 request_id；结果不明时带同一个 --request-id 再跑一次，网关收过就原样返回
       那张提议（again: true），不会多出一张卡。
       退出码：0 网关收下了，1 网关拒了（原因在 result.why）或请求不对，2 连不上窗口或结果不明。
-  gate_intake.py revoke --task 单号 [--reason 原话]
-      客户端（猛鬼兽派单技能「停 t-…」用）：POST /v1/tasks/<单号>/revoke，原样打印网关 revoke 的结果（含 runs_stopped、
-      runs_stop_error、in_flight、mirror_error）。退出码：0 撤销生效（mirror_error 也算生效，看字段），1 网关拒了（已经是终态、
-      没有这张单等，原因在 why）或请求不对，2 连不上窗口或结果不明（停可能已经生效，要在电脑上核）。
+  gate_intake.py revoke|freeze --task 单号 [--reason 原话]
+  gate_intake.py complete --task 单号
+      客户端（猛鬼兽派单技能「停 / 冻 / 收掉 t-…」用）：POST /v1/tasks/<单号>/<动作>，原样打印网关的结果（含 runs_stopped、
+      runs_stop_error、in_flight、mirror_error、冻结的 freeze_code）。退出码：0 生效（mirror_error 也算生效，看字段），1 网关拒了
+      （已经是终态、没有这张单等，原因在 why）或请求不对，2 连不上窗口或结果不明（可能已经生效，要核）。
+  gate_intake.py send-pending
+      客户端：POST /v1/dispatch/send-pending，原样打印网关补发的结果（每个事件一条，含 event_key、sent、held）。
+      退出码：0 补发跑完了（逐条看 sent），1 网关拒了，2 连不上窗口或结果不明。
 环境变量：DT_INTAKE_TOKEN_FILE（默认 DigitalTwin/autoloop/intake.token）、DT_INTAKE_INBOX（提议暂存，默认 DigitalTwin/secretary/intake）、
 DT_INTAKE_URL（客户端用，默认 http://127.0.0.1:3353）。
 """
@@ -195,7 +206,7 @@ def make_handler(token, tool=run_tool):
             if n < 0 or n > MAX_BODY:
                 return self._send(413, {"error": f"最多 {MAX_BODY} 字节"})
             body = self.rfile.read(n)
-            task = re.fullmatch(r"/v1/tasks/([^/]+)/revoke", self.path)
+            task = re.fullmatch(r"/v1/tasks/([^/]+)/(revoke|freeze|complete)", self.path)
             try:
                 if self.path == "/v1/secretary/proposal":
                     with proposals:
@@ -207,14 +218,21 @@ def make_handler(token, tool=run_tool):
                     reason_of(body)
                     with stops:
                         code, out = tool("secretary.py", ["off", "--source", SOURCE])
+                elif self.path == "/v1/dispatch/send-pending":
+                    reason_of(body)
+                    with proposals:
+                        code, out = tool("autoloop_grants.py", ["send-pending"])
                 elif task and TASK_ID.match(task.group(1)):
-                    r = reason_of(body)
+                    r, action = reason_of(body), task.group(2)
+                    args = [action, "--task", task.group(1)]
+                    if action != "complete":
+                        args += ["--reason", f"{SOURCE}：{r}" if r else SOURCE]
                     with stops:
-                        code, out = tool("autoloop_grants.py", ["revoke", "--task", task.group(1), "--reason",
-                                                                 f"{SOURCE}：{r}" if r else SOURCE])
+                        code, out = tool("autoloop_grants.py", args)
                 else:
-                    return self._send(404, {"error": "只有 /v1/secretary/proposal、/v1/secretary/off、/v1/tasks/<单号>/revoke、"
-                                                     "/v1/dispatch/proposal"})
+                    return self._send(404, {"error": "只有 /v1/secretary/proposal、/v1/secretary/off、"
+                                                     "/v1/tasks/<单号>/revoke|freeze|complete、/v1/dispatch/proposal、"
+                                                     "/v1/dispatch/send-pending"})
             except Refused as e:
                 return self._send(400, {"error": str(e)})
             if code is None:
@@ -276,19 +294,38 @@ def propose_dispatch(repo, executor, scope_text, hours=12, timeout=TIMEOUT + 20,
                "request_id": rid}
 
 
-def revoke_task(task_id, reason="", timeout=TIMEOUT + 20):
-    """客户端：撤销一张单。返回 (退出码, 要打印的 JSON)：0 生效（网关退出码 0，或 2 = 已生效但镜像没写成），1 拒了，2 不明。"""
+TASK_ACTIONS = ("revoke", "freeze", "complete")
+
+
+def task_action(action, task_id, reason="", timeout=TIMEOUT + 20):
+    """客户端：撤销 / 冻结 / 收掉一张单。返回 (退出码, 要打印的 JSON)：0 生效（网关退出码 0，或 2 = 已生效但镜像没写成），
+    1 拒了，2 不明。"""
+    if action not in TASK_ACTIONS:
+        return 1, {"ok": False, "why": f"动作只能是 {'、'.join(TASK_ACTIONS)}"}
     if not TASK_ID.match(task_id or ""):
         return 1, {"ok": False, "why": "单号要像 t-20261124-ab12cd"}
-    code, out = _post(f"/v1/tasks/{task_id}/revoke", {"reason": reason[:200]}, timeout)
+    code, out = _post(f"/v1/tasks/{task_id}/{action}", {"reason": reason[:200]} if action != "complete" else {}, timeout)
     if code:
         return code, out
     result = out.get("result")
-    if not isinstance(result, dict):        # 网关没打印 JSON（报错堆栈）：停可能已经生效
+    if not isinstance(result, dict):        # 网关没打印 JSON（报错堆栈）：可能已经生效
         return 2, {"ok": False, "why": f"网关没给结果（退出码 {out.get('code')}），停可能已经生效，要在电脑上核"}
     if out.get("code") in (0, 2):
         return 0, result
     return 1, result
+
+
+def send_pending(timeout=TIMEOUT + 20):
+    """客户端：补发。返回 (退出码, 要打印的 JSON)：0 网关跑完了（结果是每个事件一条的列表），1 拒了，2 不明。"""
+    code, out = _post("/v1/dispatch/send-pending", {}, timeout)
+    if code:
+        return code, out
+    result = out.get("result")
+    if out.get("code") == 0 and isinstance(result, list):
+        return 0, result
+    if isinstance(result, dict):
+        return 1, result
+    return 2, {"ok": False, "why": f"网关没给结果（退出码 {out.get('code')}），补发结果不明"}
 
 
 def main(argv=None):
@@ -301,12 +338,15 @@ def main(argv=None):
     d.add_argument("--scope-file", required=True)
     d.add_argument("--hours", type=int, default=12)
     d.add_argument("--request-id")
-    r = sub.add_parser("revoke")
-    r.add_argument("--task", required=True)
-    r.add_argument("--reason", default="")
+    for action in TASK_ACTIONS:
+        r = sub.add_parser(action)
+        r.add_argument("--task", required=True)
+        if action != "complete":
+            r.add_argument("--reason", default="")
+    sub.add_parser("send-pending")
     a = ap.parse_args(argv)
-    if a.cmd == "revoke":
-        code, out = revoke_task(a.task, a.reason)
+    if a.cmd in TASK_ACTIONS or a.cmd == "send-pending":
+        code, out = task_action(a.cmd, a.task, getattr(a, "reason", "")) if a.cmd in TASK_ACTIONS else send_pending()
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return code
     if a.cmd == "dispatch-propose":

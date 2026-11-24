@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-11-24 · 派单技能搬家后：3353 窄窗口加冻结、收掉、补发（选甲）
+
+- **在哪定的**：「派单技能｜搬进 dt-gate 后能从飞书派单」会话出甲 / 乙 / 丙三种方案（共享笔记 `autoloop技能搬家后-授权面方案.md`），协调会话转问常浩，常浩回「按推荐」（协调会话 11-24 转达）。
+- **代码**：PR #380（`gate_intake.py` 的新入口和客户端、`autoloop_readonly.py` 的 fetch / grant、派单技能第 1、4–7 节）。
+
+**定了什么**（逐条可对照）
+
+1. **3353 窄窗口加三个入口**：`POST /v1/tasks/<单号>/freeze`、`/v1/tasks/<单号>/complete`（收紧方向，和撤销一样谁都可以）、`POST /v1/dispatch/send-pending`（只补发已签、代次有效的派单事件，不新增授权）。冻结码随结果回到调用方，由派单技能转告常浩。
+2. **续接（resume-dispatch）不开窗口**：只在电脑上跑 `sudo "/Library/Application Support/DigitalTwin/gate/bin/dt-gate-hub" run autoloop_grants resume-dispatch …`。以后要开，先问常浩。
+3. **主账号搬家前的旧 `grants.db` 存档**：协调会话在主账号改名留档；派单技能不在主账号跑 `autoloop_grants.py` / `autoloop_config.py`。
+
+---
+
 ## 2026-11-23 · 0E-3b 派单批准改成点门卫确认卡：三件都按推荐
 
 - **在哪定的**：Claude 会话「数字分身·0E-3b｜派单批准改成点门卫卡片」写了设计页（共享笔记 `0E-3b-设计.md`），三件事经协调会话问常浩，常浩回「都按推荐」（协调会话 11-23 转达）。

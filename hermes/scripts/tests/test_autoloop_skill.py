@@ -1,9 +1,10 @@
 """隔离自测：python3 -B -m unittest discover -s hermes/scripts/tests -v。
 
 autoloop 技能（#195 批 2 派活入口，hermes/skills/autoloop/SKILL.md）的三类核对：
-  0. 搬家后的布局（0E-2）：技能在主账号里只跑 P、S（3353 窄窗口）和 R fetch / R grant（3352 只读窗口、凭证镜像），
-     网关本身（GH = dt-gate-hub run autoloop_grants）只写成「常浩在电脑上跑」；主账号里搬家前的旧 grants.db 不读；
-  1. 文档对得上脚本：技能里写的每条 GH、P、S 命令都能被命令行解析；技能表格里引用的脚本原话、字段名、卡上的结果字样，
+  0. 搬家后的布局（0E-2）：技能在主账号里只跑 P、W（3353 窄窗口：提单、停、冻、收掉、补发）和 R fetch / R grant
+     （3352 只读窗口、凭证镜像），网关本身（GH = dt-gate-hub run autoloop_grants：续接、查细节）只写成「常浩在电脑上跑」；
+     主账号里搬家前的旧 grants.db 不读；
+  1. 文档对得上脚本：技能里写的每条 GH、P、W 命令都能被命令行解析；技能表格里引用的脚本原话、字段名、卡上的结果字样，
      脚本里（或真实渲染出的确认卡上）确实有；
   2. 五要素文件 → P（客户端 → 真的 3353 窗口 → 网关 propose，0E-3b）→ 门卫发确认卡、常浩点「批准派单」（模拟门卫：
      mark_card + decide，门卫本身见 test_gatekeeper_grants）→ 派单事件发出，以及技能里写了回话的各条岔路
@@ -103,11 +104,11 @@ GATE_HUB = HERE.parents[2] / "ops/dt_gate_hub.py"
 GH = 'sudo "/Library/Application Support/DigitalTwin/gate/bin/dt-gate-hub" run autoloop_grants'
 
 
-def s_cli(argv):
-    """像猛鬼兽那样跑一条 S 命令（停单客户端）：返回 (退出码, 输出的 JSON)。"""
+def w_cli(argv):
+    """像猛鬼兽那样跑一条 W 命令（窄窗口客户端：revoke / freeze / complete / send-pending）：返回 (退出码, 输出的 JSON)。"""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        code = I.main(["revoke", *argv])
+        code = I.main(argv)
     return code, json.loads(buf.getvalue())
 
 
@@ -145,7 +146,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
         """网关命令只以 GH（常浩在电脑上跑）出现，每条都能被网关的命令行解析。"""
         cmds = set(re.findall(r"`(GH [a-z-]+[^`]*)`", self.text))
         cmds |= {line.strip() for line in self.text.splitlines() if re.match(r"^GH [a-z-]+", line.strip())}
-        self.assertGreaterEqual(len(cmds), 6, cmds)
+        self.assertGreaterEqual(len(cmds), 5, cmds)
         self.assertIn(f"`GH` = `{GH}`", self.text)
         subs = next(a for a in G.build_parser()._actions if a.dest == "cmd").choices
         seen = set()
@@ -156,7 +157,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
             with self.subTest(cmd=cmd), mock.patch("sys.stderr"):
                 a = G.build_parser().parse_args(argv)          # 解析不了会 SystemExit
                 seen.add(a.cmd)
-        self.assertEqual(seen, {"show", "send-pending", "resume-dispatch", "revoke", "freeze", "complete"})
+        self.assertEqual(seen, {"show", "resume-dispatch", "revoke", "freeze", "complete"})   # 后三条是窗口连不上时的退路
         # 提单走 P、停单走 S；批准没有命令（只认门卫卡上的点击，0E-3b）；放权方向的 unfreeze、出口用的 check 不归技能
         self.assertNotIn("approve", subs)
 
@@ -179,17 +180,27 @@ class SkillDocMatchesScripts(unittest.TestCase):
         self.assertIn('"stop"', cli_allowed)
         self.assertIn('dt-gate-hub" run agent-autoloop stop <轮次号>', self.text)
 
-    def test_every_stop_command_in_the_skill_parses(self):
-        prefix = "`/usr/bin/python3 ~/.hermes/scripts/gate_intake.py revoke`"
-        self.assertIn(f"`S` = {prefix}", self.text)
-        cmds = set(re.findall(r"`(S --[^`]*)`", self.text))
-        self.assertTrue(cmds)
+    def test_every_window_command_in_the_skill_parses(self):
+        """W 的四个子命令（常浩 11-24 选甲：停、冻、收掉、补发开窗口，续接不开）都写在技能里、都能被客户端解析。"""
+        self.assertIn("`W` = `/usr/bin/python3 ~/.hermes/scripts/gate_intake.py`", self.text)
+        cmds = set(re.findall(r"`(W [a-z-]+[^`]*)`", self.text))
+        seen = set()
         for cmd in sorted(cmds):
             filled = re.sub(r"<[^<>]*>", "x", cmd)
-            with self.subTest(cmd=cmd), mock.patch.object(I, "revoke_task", return_value=(0, {})) as m, \
-                    mock.patch("sys.stdout"):
-                self.assertEqual(I.main(["revoke", *shlex.split(filled)[1:]]), 0)
-                self.assertEqual(m.call_args[0], ("x", "x"))
+            argv = shlex.split(filled)[1:]
+            if "--" not in cmd and argv != ["send-pending"]:               # 只是提到名字（如「再跑一次 `W freeze`」）
+                self.assertIn(argv[0], I.TASK_ACTIONS, cmd)
+                continue
+            with self.subTest(cmd=cmd), mock.patch.object(I, "task_action", return_value=(0, {})) as m, \
+                    mock.patch.object(I, "send_pending", return_value=(0, [])), mock.patch("sys.stdout"):
+                self.assertEqual(I.main(argv), 0)
+                seen.add(argv[0])
+                if argv[0] != "send-pending" and len(argv) > 1:
+                    self.assertEqual(m.call_args[0][:2], (argv[0], "x"))
+        self.assertEqual(seen, {"revoke", "freeze", "complete", "send-pending"})
+        self.assertNotIn("W resume-dispatch", self.text)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):        # 续接没有窗口
+            I.main(["resume-dispatch", "--task", "x"])
 
     def test_every_propose_command_in_the_skill_parses(self):
         cmds = set(re.findall(r"`(P [^`]*)`", self.text))
@@ -209,8 +220,9 @@ class SkillDocMatchesScripts(unittest.TestCase):
 
     def test_other_script_commands_exist(self):
         self.assertIn("`R` = `/usr/bin/python3 ~/.hermes/scripts/autoloop_readonly.py`", self.text)
-        for script, sub in (("autoloop_readonly", "fetch"), ("autoloop_readonly", "grant"), ("gate_intake", "revoke")):
+        for script, sub in (("autoloop_readonly", "fetch"), ("autoloop_readonly", "grant"), ("gate_intake", "send-pending")):
             self.assertIn(f'add_parser("{sub}")', self.src[script])
+        self.assertEqual(I.TASK_ACTIONS, ("revoke", "freeze", "complete"))
         for cmd in ("R fetch", "R grant", "R grant --task <单号>"):
             self.assertIn(f"`{cmd}`", self.text)
         self.assertIn("ai_access.py status --json", self.text)
@@ -239,7 +251,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                           ("已经是终态", G._tighten), ("凭证已过期", G.check_row), ("派单确认 · ", CV.render_grant),
                           ("连不上 dt-gate 的窗口", I._post), ("✅ 批准派单", CV.render_grant),
                           ("连不上 dt-gate 的只读窗口", R.main), ("凭证镜像里没有", R.grants), ("读不到凭证镜像", R.grants),
-                          ("停可能已经生效", I.revoke_task),
+                          ("停可能已经生效", I.task_action),
                           ("不同意？· 展开", CV.render_grant),
                           ("还有没确认送到中台的派单事件", G.resume_dispatch), ("另有入口正在处理", G.task_lock),
                           ("开闸后 send-pending 补发", G.send_pending), ("恢复闸关着", RV.ensure_open),
@@ -560,35 +572,73 @@ class OneSentenceToDispatch(Base):
         self.assertIn("另有入口正在处理", out["why"])
         self.assertEqual(len(self.posted), 2)                  # 两次 start，续接没发
 
-    def test_stop_through_the_window(self):
-        """技能第 7 节：S 经 3353 窗口撤销（窗口里跑的是网关 revoke）；R grant 随后看到已停；再停是「已经是终态」。"""
+    def test_stop_freeze_complete_through_the_window(self):
+        """技能第 7 节：W revoke / freeze / complete 经 3353 窗口（窗口里跑的是网关的同名命令）；R grant 随后看到结果。"""
         tid = self.dispatch()
-        code, out = s_cli(["--task", tid, "--reason", "常浩说停"])
+        code, out = w_cli(["revoke", "--task", tid, "--reason", "常浩说停"])
         self.assertEqual((code, out["status"]), (0, "revoked"))
         self.assertTrue({"runs_stopped", "runs_stop_error"} & set(out), out)     # 叫停轮次的结果原样带回来（隔离环境没有中台库）
         (g,) = r_cli(["grant", "--task", tid])[1]
         self.assertEqual((g["status"], g["usable"], g["why_not"]), ("revoked", False, "凭证已撤销"))
-        code, out = s_cli(["--task", tid, "--reason", "再停一次"])
+        code, out = w_cli(["revoke", "--task", tid, "--reason", "再停一次"])
         self.assertEqual(code, 1)
         self.assertIn("已经是终态", out["why"])
-        self.assertEqual(s_cli(["--task", "nope"])[0], 1)             # 单号形状不对：不发
+        self.assertEqual(w_cli(["revoke", "--task", "nope"])[0], 1)  # 单号形状不对：不发
         with mock.patch.dict(os.environ, {"DT_INTAKE_URL": "http://127.0.0.1:9"}):
-            code, out = s_cli(["--task", tid])
+            code, out = w_cli(["freeze", "--task", tid])
         self.assertEqual(code, 2)
         self.assertIn("连不上 dt-gate 的窗口", out["why"])
 
-    def test_stop_exit_codes_from_what_the_window_returns(self):
-        """网关退出码 2 是「已生效但镜像没写成」：客户端算生效；网关没打印 JSON 算结果不明。"""
+        other = self.dispatch()
+        code, out = w_cli(["freeze", "--task", other])                # 没写原因：窗口记「秘书窄窗口」，网关不拒
+        self.assertEqual((code, out["status"]), (0, "frozen"))
+        self.assertRegex(out["freeze_code"], r"^[0-9a-f]{6}$")      # 冻结码回到技能，由它转告常浩
+        again = w_cli(["freeze", "--task", other, "--reason", "再冻"])           # 技能：忘了冻结码就再冻一次，给同一个
+        self.assertEqual((again[0], again[1].get("freeze_code")), (0, out["freeze_code"]))
+        self.assertEqual(r_cli(["grant", "--task", other])[1][0]["why_not"], "凭证已冻结")
+
+        third = self.dispatch()
+        code, out = w_cli(["complete", "--task", third])
+        self.assertEqual((code, out["status"]), (0, "done"))
+        self.assertEqual(r_cli(["grant", "--task", third])[1][0]["why_not"], "任务已完成")
+        self.assertEqual(len(self.posted), 3)                  # 三次 start，停、冻、收掉都不往中台发事件
+
+    def test_send_pending_through_the_window(self):
+        """技能第 5 节第 1 层：派单消息没确认送到时，W send-pending 经窗口补发；只补发已签过的，不新增凭证。"""
+        def down(body):
+            raise G.Rejected("连不上中台或回应不对：URLError")
+        res = click(self.propose()[1]["code"], post=down)
+        self.assertIsNone(res["send"][0]["sent"])
+        self.assertEqual(w_cli(["send-pending"]), (0, []))        # 不到 60 秒：跳过，空列表
+        self.window.now = LATER
+        code, sent = w_cli(["send-pending"])
+        self.assertEqual((code, [(s["event_key"], s["sent"]) for s in sent]), (0, [(f"{res['task_id']}:g1:start", True)]))
+        self.assertEqual((len(self.posted), len(G.show())), (1, 1))
+        self.assertEqual(w_cli(["send-pending"]), (0, []))        # 补过了：再跑什么都不发
+        with mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：x")):
+            code, out = w_cli(["send-pending"])
+        self.assertEqual(code, 1)                              # 闸关着：网关拒、什么都不发（技能第 5 节表：退出码 1、恢复闸关着）
+        self.assertIn("恢复闸关着", out["why"])
+
+    def test_window_exit_codes_from_what_the_gateway_returns(self):
+        """网关退出码 2 是「已生效但镜像没写成」：客户端算生效；网关没打印 JSON 算结果不明。补发要的是列表。"""
         tid = "t-20261124-abcdef"
         for reply, want in (((0, {"code": 2, "result": {"status": "revoked", "mirror_error": "x"}}), 0),
                             ((0, {"code": 0, "result": {"status": "revoked"}}), 0),
                             ((0, {"code": 1, "result": {"ok": False, "why": "已经是终态"}}), 1),
                             ((0, {"code": 1, "result": None}), 2),
                             ((2, {"ok": False, "why": "连不上"}), 2)):
-            with self.subTest(reply=reply), mock.patch.object(I, "_post", return_value=reply):
-                self.assertEqual(I.revoke_task(tid)[0], want)
+            for action in I.TASK_ACTIONS:
+                with self.subTest(reply=reply, action=action), mock.patch.object(I, "_post", return_value=reply):
+                    self.assertEqual(I.task_action(action, tid)[0], want)
         with mock.patch.object(I, "_post", return_value=(0, {"code": 2, "result": {"mirror_error": "x"}})):
-            self.assertEqual(I.revoke_task(tid)[1], {"mirror_error": "x"})
+            self.assertEqual(I.task_action("revoke", tid)[1], {"mirror_error": "x"})
+        self.assertEqual(I.task_action("resume-dispatch", tid)[0], 1)  # 续接不经窗口
+        for reply, want in (((0, {"code": 0, "result": []}), 0), ((0, {"code": 0, "result": [{"sent": True}]}), 0),
+                            ((0, {"code": 1, "result": {"ok": False, "why": "x"}}), 1), ((0, {"code": 0, "result": None}), 2),
+                            ((2, {"ok": False, "why": "连不上"}), 2)):
+            with self.subTest(reply=reply), mock.patch.object(I, "_post", return_value=reply):
+                self.assertEqual(I.send_pending()[0], want)
 
     def test_no_grant_no_event(self):
         for argv in (["resume-dispatch", "--task", "t-20261122-000000", "--kind", "redispatch", "--reason", "x"],
