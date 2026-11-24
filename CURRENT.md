@@ -6,6 +6,15 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-24 凌晨补记（协调会话 dt-coord-4，上下文到 54% 交接）
+
+- **门卫取令牌已修**：PR #373 合并 `fb8daf4`（全量 Ran 2654 OK、CI 过；常浩 23:28 回「不送审直接合」，记为已知风险）。门卫在进程里用密钥换租户令牌、经 `LARKSUITE_CLI_TENANT_ACCESS_TOKEN` 交给 lark-cli；event consume 同样要它；bus.log 位置核过（P2-17 可关）。
+- **#369（0E-3b 派单改点门卫卡）合并 `809006c`**：第 5 轮 P0/P1 清零，P2-03 修了没复审（常浩在 #369 会话回「修完不再审」，原话已核）；CI 过。合并后门卫要装的同目录脚本变成 22 个（多 `autoloop_cardview.py`）。DECIDED 11-23「0E-3b」那条「待常浩看过预览确认」还在等他回卡片样子。
+- **#375 开着**（门卫入口写死派单卡要的 `DT_ROSTER`、`DT_GRANTS_STATUS`、`DT_GRANTS_TASKS`、`DT_HUB`，从 gate/current.json、state.json 现读）：全量已放行；合并后入口和 `gatekeeper.py` 必须一起重装；合不合、送不送审待常浩定。
+- **门卫真机仍停在第 4 步**：已给常浩按 `809006c` 重装 22 个文件 + 入口、再跑 `doctor --online` 的命令，他还没回输出。之后第 5～8 步（前台 run、配回调、绑定、切飞书通道、点中台真卡）、第 10 步常驻（#370 已合并）。
+- **派活剩余 4 单前还要**：#375 合并重装；dt-gate 中台副本 `stage` + `update` 到含 #369 的提交（现在副本是 `b62fb73`，3353 窗口还不收派单提议）；中台配置重装（派单规则路径）、hermes 来源钥匙重签、恢复派单规则，都当场问常浩。
+- **另记**：搬家后主账号没有中台命令行，本机全量里约 40 条真中台端到端用例会跳过（门卫线发现），要不要补测试入口待定。
+
 ## 2026-11-23 · 第二天落地：下午到 23:40（协调会话 dt-coord-4）——中台搬进 dt-gate 完成，门卫停在第 4 步
 
 - **搬家做完了，真机验收通过**（常浩亲手敲 sudo，17:44–23:00；照抄清单 `evidence/2026-11-23-0e2-migration/claude-01-搬家照抄清单.md`）：门卫换成 #313 后的新版 → 换工人启动脚本（#368 版，逐字节核过）→ stage（引擎 `abc8d41`、仓库 `b62fb73`、node v24.16.0）→ preflight 全通过 → migrate（恢复点 `gate-migrate-20261123T095714Z`，主账号原中台改名留着、钥匙已作废）→ windows（3352、3353 起来，主账号令牌副本 600）→ rotate-worker → status（三个服务以 dt-gate 在跑，健康检查 `abc8d41`）→ verify 全部符合（`/Library/Application Support/DigitalTwin/verify/20261123-225636.json`，监听者规则 9 项全对，门卫 `guard=yes`）→ dt-gate 里 pin `abc8d41` + reconcile（`why: null`、`frozen: []`，恢复闸开）。
