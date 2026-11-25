@@ -462,15 +462,18 @@ def _claim_next(con, now, seen):
     return None, None, skipped
 
 
-def require_recovery():
+def require_recovery(event_recorded=True):
     """恢复闸（批 0D，autoloop_recovery）：开机、睡醒、中台重启或换版本、出现结果不明之后，对账走完才往外发。
-    返回核过的纪元；真正领发送资格时还要在领取的写事务里再核（admission）。"""
+    返回核过的纪元；真正领发送资格时还要在领取的写事务里再核（admission）。
+    提议在登记前调用时传 event_recorded=False，拒绝语不把尚未登记的事件说成可以补发。"""
     import autoloop_exits as E
     import autoloop_recovery as R
     try:
         return R.ensure_open()
     except E.Refused as e:
-        raise Rejected(f"{e}；事件已记账，开闸后 send-pending 补发")
+        note = ("事件已记账，开闸后 send-pending 补发" if event_recorded else
+                "本次未登记提议，也未记派单事件；开闸后重新提议")
+        raise Rejected(f"{e}；{note}")
 
 
 def in_flight(task_id):
@@ -635,7 +638,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
     require_hub_rule(repo, executor)
     valid_until = iso(now + dt.timedelta(hours=hours))
     h = content_hash(repo, github, executor, actions, valid_until, scope_text)
-    require_recovery()                         # 闸关着门卫也发不出确认卡：先说清，不留一张必然过期的提议
+    require_recovery(event_recorded=False)     # 闸关着门卫也发不出确认卡：先说清，不留一张必然过期的提议
     rhash = sha256("\n".join([repo, executor, ",".join(actions), str(hours), scope_text]))
     card = "门卫会把确认卡发到常浩私聊，他点「批准派单」才签"
     with tx(path) as con:

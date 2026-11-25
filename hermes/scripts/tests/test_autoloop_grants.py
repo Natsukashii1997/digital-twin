@@ -622,6 +622,24 @@ class RecoveryGate(Base):
     def closed(self):
         return mock.patch.object(R, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账"))
 
+    def test_maintenance_propose_reports_no_registration(self):
+        scope = self.root / "五要素.md"
+        scope.write_text(SCOPE, encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.object(R, "ensure_open", side_effect=E.Refused("维护停写中")), \
+                mock.patch("sys.stdout", output):
+            code = G.main(["propose", "--repo", "dt-sandbox", "--executor", "claude", "--scope-file", str(scope)])
+        self.assertEqual(code, 1)
+        out = json.loads(output.getvalue())
+        self.assertFalse(out["ok"])
+        self.assertIn("维护停写中", out["why"])
+        self.assertIn("未登记提议", out["why"])
+        self.assertIn("未记派单事件", out["why"])
+        self.assertIn("开闸后重新提议", out["why"])
+        self.assertNotIn("事件已记账", out["why"])
+        self.assertNotIn("send-pending", out["why"])
+        self.assertFalse(self.db.exists())
+
     def test_closed_gate_blocks_propose_and_send_but_keeps_events(self):
         with self.closed():
             with self.assertRaisesRegex(G.Rejected, "睡醒"):
