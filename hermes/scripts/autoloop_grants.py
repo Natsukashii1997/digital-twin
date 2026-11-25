@@ -86,7 +86,7 @@ import twin_identity as I  # noqa: E402
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 SUPPORT = Path("~/Library/Application Support/DigitalTwin").expanduser()
-ROSTER = Path(os.environ.get("DT_ROSTER") or HERE.parents[1] / "projects.json")
+ROSTER = Path(os.environ.get("DT_ROSTER") or "~/Documents/ChatGPT/个人/work/digital-twin/projects.json").expanduser()
 ACTIONS = ("edit", "push_branch", "open_pr")
 ACTION_WORDS = {"edit": "改文件", "push_branch": "推分支（不推 main）", "open_pr": "开 PR"}
 EXECUTORS = ("claude", "codex")
@@ -290,10 +290,19 @@ def voided_of(con, task_id):
 
 
 # ---------- 名册 ----------
+def read_roster():
+    """派单网关和中台配置共用的名册读取；安装位置不影响默认路径，读不了就明确拒绝。"""
+    try:
+        return json.loads(ROSTER.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise Rejected(f"名册读不了或不是合法 JSON：{ROSTER}（{type(e).__name__}）；"
+                       "请用 DT_ROSTER 指定正确的 projects.json 路径") from None
+
+
 def allowed_repos():
     """能派写入单的仓库（显式白名单）：名册活跃项目里 write_allowed 明确为 true、有 GitHub 的，加上 inventory 里标了
     sandbox 的。缺这个字段的一律不算（PR #199 第 2 轮审查 P1-01）。"""
-    r = json.loads(ROSTER.read_text(encoding="utf-8"))
+    r = read_roster()
     out = {}
     for p in r.get("projects", []):
         if p.get("github") and p.get("write_allowed") is True and p.get("category") == "活跃":
