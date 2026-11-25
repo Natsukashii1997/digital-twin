@@ -61,6 +61,9 @@ class FakeHost(S.Host):
         self.bootouts = 0                 # 卸服务（bootout system/…）第几次
         self.sticky_from_bootout = None   # 从第几次起 bootout 卸不掉
         self.unclear_from_bootout = None  # 从第几次起 bootout 之后 print 查不清（返回 5）
+        self.print_raise_from_bootout = None  # 从第几次起 bootout 之后 print 直接抛 OSError（第 4 轮 P1-01）
+        self.raise_if = lambda args: False    # 对这些 launchctl 调用直接抛 OSError（第 4 轮 P2-12）
+        self.ps_raise_from = None         # 第几次看进程表起 ps 超时（抛 TimeoutExpired）
 
     def is_root(self):
         return True
@@ -95,6 +98,8 @@ class FakeHost(S.Host):
 
     def launchctl(self, *args):
         self.calls.append(("launchctl", *args))
+        if self.raise_if(args):
+            raise OSError(f"launchctl {args[0]} died")
         verb = args[0]
         if verb == "bootstrap":
             if self.bootstrap_fails > 0:
@@ -113,6 +118,8 @@ class FakeHost(S.Host):
                     self.loaded = False
             return 0, ""
         if verb == "print":
+            if self.print_raise_from_bootout is not None and self.bootouts >= self.print_raise_from_bootout:
+                raise OSError("launchctl print died")
             if self.print_code is not None:
                 return self.print_code, "Could not find domain"
             return (0, "state = running\n\tpid = 99\n\tlast exit code = (never exited)") if self.loaded else (113, "not found")
@@ -134,6 +141,8 @@ class FakeHost(S.Host):
 
     def run_ps(self):
         self.ps_calls += 1
+        if self.ps_raise_from is not None and self.ps_calls >= self.ps_raise_from:
+            raise subprocess.TimeoutExpired(["/bin/ps"], S.PS_TIMEOUT)
         if self.ps_fail_from is not None and self.ps_calls >= self.ps_fail_from:
             return 1, "", "ps: sysctl failed"
         rows = ["  1 /sbin/launchd", "501 /usr/bin/whatever"]
@@ -437,6 +446,57 @@ class Install(unittest.TestCase):
         with self.assertRaisesRegex(GH.Stop, "没装上.*sudo launchctl bootstrap system"):
             self.run_install()
 
+    def test_reinstall_print_raises_after_bootout(self):
+        """第 4 轮 P1-01：bootout 之后 launchctl print 直接出错（不是返回码）：不能让异常逃出去，按查不清停下、给手动步骤。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.print_raise_from_bootout = 1
+        with self.assertRaisesRegex(GH.Stop, "bootout 之后查不清.*sudo launchctl bootstrap system"):
+            self.run_install()
+        self.assertEqual(self.plist.read_bytes(), b"old")
+
+    def test_reinstall_ps_times_out_after_unload(self):
+        """第 4 轮 P1-01：卸下旧服务后 ps 超时：按可能有派单办，把旧服务装回去再停下。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.ps_raise_from = 2
+        with self.assertRaisesRegex(GH.Stop, "查不清有没有派单.*TimeoutExpired.*已把旧服务装回去"):
+            self.run_install()
+        self.assertTrue(self.host.loaded)
+        self.assertEqual(self.plist.read_bytes(), b"old")
+
+    def test_reinstall_ps_times_out_and_restore_fails(self):
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.ps_raise_from = 2
+        self.host.raise_if = lambda a: a[0] == "bootstrap"
+        with self.assertRaisesRegex(GH.Stop, "没装上.*派单可能还在跑.*sudo launchctl bootstrap system"):
+            self.run_install()
+
+    def test_stops_when_plist_missing_but_loaded(self):
+        """第 4 轮 P2-08：plist 不在、服务却装着：卸了就没有原样可装回去，动手之前停下，不 bootout、不写 plist。"""
+        self.host.loaded = True
+        self.host.bootstrap_fails = 5
+        with self.assertRaisesRegex(GH.Stop, "plist 却不在.*什么都没改"):
+            self.run_install()
+        self.assertFalse(self.plist.exists())
+        self.assertTrue(self.host.loaded)
+        verbs = [c[1] for c in self.host.calls if c[0] == "launchctl"]
+        self.assertNotIn("bootout", verbs)
+        self.assertNotIn("bootstrap", verbs)
+
+    def test_after_install_launchctl_errors_are_reported(self):
+        """第 4 轮 P2-12：服务装好之后，叫门卫、停用原 LaunchAgent、回读停用状态的 launchctl 直接出错：不抛出去，
+        说清服务已装好、原 LaunchAgent 怎么手动停。"""
+        self.host.raise_if = lambda a: (a[0] in ("kickstart", "disable", "print-disabled")
+                                        or a[:2] == ("bootout", f"gui/{UID}/agent-autoloop"))
+        code, out = self.run_install()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.host.loaded)
+        self.assertIn("没叫成门卫马上核对", out)
+        self.assertIn("服务已装好；原 LaunchAgent 没停用成或查不清", out)
+        self.assertIn(f"sudo launchctl disable gui/{UID}/agent-autoloop", out)
+
     def test_stops_when_print_unclear(self):
         """第 2 轮 P1-01：launchctl print 既不是 0 也不是 113：查不清服务装没装，什么都不动。"""
         self.host.print_code = 5
@@ -644,6 +704,32 @@ class Remove(unittest.TestCase):
         self.assertTrue(self.f.exists())
         self.assertTrue(self.host.loaded)
 
+    def test_stops_when_plist_missing_but_loaded(self):
+        """第 4 轮 P2-08：plist 不在、服务却装着：不 bootout，给人工核对的步骤。"""
+        self.f.unlink()
+        with self.assertRaisesRegex(GH.Stop, "plist 却不在"):
+            S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.host.loaded)
+        self.assertNotIn("bootout", [c[1] for c in self.host.calls if c[0] == "launchctl"])
+
+    def test_print_raises_after_bootout(self):
+        self.host.print_raise_from_bootout = 1
+        with self.assertRaisesRegex(GH.Stop, "bootout 之后查不清"):
+            S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.f.exists())
+
+    def test_reports_half_done_when_enable_raises(self):
+        """第 4 轮 P2-12：放开原 LaunchAgent 的 launchctl 直接出错：报只拆了一半、给手动命令，不抛出去。"""
+        for verb in ("enable", "print-disabled"):
+            with self.subTest(verb=verb):
+                self.setUp()
+                self.host.raise_if = lambda a, v=verb: a[0] == v
+                lines = []
+                self.assertEqual(S.cmd_remove(self.host, say=lines.append), 1)
+                self.assertFalse(self.f.exists())
+                self.assertIn("只拆了一半", "\n".join(lines))
+                self.assertIn(f"sudo launchctl enable gui/{UID}/agent-autoloop", "\n".join(lines))
+
     def test_reports_half_done_when_enable_fails(self):
         """P2-01：放开原 LaunchAgent 没成（返回非 0，或返回 0 但 print-disabled 里还是停用）：不报成功。"""
         for result in ((1, "Operation not permitted"), (0, "")):
@@ -680,6 +766,28 @@ class Status(unittest.TestCase):
         text = "\n".join(lines)
         self.assertIn("接单程序：在跑", text)
         self.assertIn("没登录", text)
+
+
+class RealHostTimeouts(unittest.TestCase):
+    """第 4 轮 P1-01：真 Host 的 launchctl、ps 都带超时；超时经 lc() 变成查不清，不抛出去。"""
+
+    def test_launchctl_and_ps_pass_timeout(self):
+        from unittest import mock
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(S.subprocess, "run", return_value=done) as run:
+            S.Host().launchctl("print", "system/x")
+            S.Host().run_ps()
+        self.assertEqual([c.kwargs.get("timeout") for c in run.call_args_list], [S.LAUNCHCTL_TIMEOUT, S.PS_TIMEOUT])
+
+    def test_timeout_becomes_unclear(self):
+        from unittest import mock
+        with mock.patch.object(S.subprocess, "run", side_effect=subprocess.TimeoutExpired(["/bin/launchctl"], 30)):
+            code, out = S.lc(S.Host(), "print", "system/x")
+            self.assertEqual(code, S.LC_FAILED)
+            self.assertIn("TimeoutExpired", out)
+            self.assertIsNone(S.probe(S.Host())[0])
+            with self.assertRaisesRegex(GH.Stop, "ps 没跑成"):
+                S.processes(S.Host())
 
 
 class ProxyToken(unittest.TestCase):

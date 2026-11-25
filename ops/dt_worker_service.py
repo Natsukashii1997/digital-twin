@@ -16,7 +16,10 @@ pf 开着、管着 dt-worker、10 分钟内写的，才启动接单程序，不�
 「起来之后新发布过」（#382 L3 第 1、3 轮 P1-02）：门卫判定失败、旧的 ok 作废不掉（状态目录不安全那条分支只清进程就退出）
 时，服务被清掉后 launchd 重起，不能拿旧的 ok 又把工人放出来；要等门卫下一次核对成功换上新的状态文件（每 5 分钟一次）。
 按状态文件的身份（设备号:inode，门卫每次写临时文件再 mv 换掉）认新发布，不按时间：时钟往回调再调回来骗不过；也不在
-dt-worker 能改的地方留记录。代价：门卫重载或接单程序自己崩溃后，最多 5 分钟才回来（装好时 install 叫门卫马上核对一次）。日志由这段 sh 以 dt-worker 身份追加到
+dt-worker 能改的地方留记录。代价：门卫重载或接单程序自己崩溃后，最多 5 分钟才回来（装好时 install 叫门卫马上核对一次）。
+这个判法有两个前提（#382 L3 第 4 轮）：一、状态文件所在的卷是 APFS（本机系统盘就是），APFS 的 inode 号一直往上涨、不马上复用，
+换掉一次文件身份一定变；二、门卫每次都写临时文件再 mv 换掉（dt_worker_pf.sh 的 write_status），不在原文件上改写。
+把 /Library 换到别的文件系统、或改门卫写状态的写法，都要重新评估这个判法。日志由这段 sh 以 dt-worker 身份追加到
 ~/.agent-autoloop/logs/up.log（不用 StandardOutPath：那是 launchd 以 root 打开的，路径在 dt-worker 能改的目录里）。
 门卫规则的承诺不变：pf 按进程的账号认，服务里的进程仍是 dt-worker；门卫清进程照旧清全部，服务在新规则下重起。
 
@@ -31,13 +34,16 @@ loggedIn、codex login status 退出码 0），不过就停下、什么都不改
 在主账号重跑一次 install（它照新的 LaunchAgent 改服务）。
 
 root 不按路径碰 dt-worker 的家目录：读 LaunchAgent、跑检查都以 dt-worker 身份（sudo -u）。写 plist 前核对
-/Library/LaunchDaemons 从 / 起只有 root 能改（ops/dt_root_guard.sh）。Host、装卸服务、原子写文件复用 dt_gate_hub.py。
+/Library/LaunchDaemons 从 / 起只有 root 能改（ops/dt_root_guard.sh）。Host、原子写文件复用 dt_gate_hub.py。
+launchctl、ps 都带超时，所有 launchctl 都经 lc()：报错、超时一律当「查不清 / 没做成」，不让异常从半路逃出去，
+动过服务之后的每一步都能说清现在是什么样、给出手动命令（#382 L3 第 4 轮 P1-01、P2-12）。
 """
 import argparse
 import json
 import os
 import plistlib
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -55,6 +61,9 @@ START_WAIT = 120                          # 装好后等接单程序起来最多
 GATE_LABEL = "cn.digital-twin.pf-dt-worker"   # 门卫规则的定时服务（ops/dt_worker_pf.sh），每 5 分钟核对并写状态
 CHECK_TIMEOUT = 60
 GATE_DELAY = 3                            # 装好后等几秒再叫门卫（外壳要先起来、记下状态文件当时的身份）
+LAUNCHCTL_TIMEOUT = 30                    # 每条 launchctl 最多等几秒
+PS_TIMEOUT = 30
+LC_FAILED = -1                            # launchctl 报错或超时（没跑成）时 lc() 给的返回码：不是 0、也不是 113，算查不清
 
 # 门卫这次起来之后新发布过状态、而且新发布的那份是本次开机的 state=ok、enabled=yes、users 里有本账号、0 ≤ 现在 − 修改时间
 # ≤ 600（和 dt_worktree 准入的判法一样），才启动；日志以 dt-worker 身份追加。"$@" 是原 LaunchAgent 的命令。
@@ -141,7 +150,10 @@ def plist_for(name, home, cmd):
 
 def processes(host):
     """全部进程：(uid, 命令行)。"""
-    code, out, err = host.run_ps()
+    try:
+        code, out, err = host.run_ps()
+    except Exception as e:                           # 超时、起不来（第 4 轮 P1-01）
+        raise GH.Stop(f"ps 没跑成（{type(e).__name__}）")
     if code != 0:
         raise GH.Stop(f"ps 出错（{err.strip()[:80]}）")
     rows = []
@@ -208,9 +220,17 @@ def check_logins(host, name, home):
     return out
 
 
+def lc(host, *args):
+    """所有 launchctl 都经这里：报错、超时一律返回 (LC_FAILED, 说明)，当「查不清 / 没做成」处理（第 4 轮 P1-01、P2-12）。"""
+    try:
+        return host.launchctl(*args)
+    except Exception as e:
+        return LC_FAILED, f"launchctl {args[0]} 没跑成（{type(e).__name__}）"
+
+
 def agent_disabled(host, uid):
     """原 LaunchAgent 停没停用：True 停用、False 没停用、None 查不清（print-disabled 自己出错）。"""
-    code, out = host.launchctl("print-disabled", f"gui/{uid}")
+    code, out = lc(host, "print-disabled", f"gui/{uid}")
     if code != 0:
         return None
     return re.search(rf'"{re.escape(AGENT_LABEL)}" => (true|disabled)', out) is not None
@@ -218,7 +238,7 @@ def agent_disabled(host, uid):
 
 def probe(host):
     """服务现在装没装：(True 装着 / False 没装（print 返回 113 找不到）/ None 查不清（别的返回码）, 返回码, 输出)。"""
-    code, out = host.launchctl("print", f"system/{LABEL}")
+    code, out = lc(host, "print", f"system/{LABEL}")
     return (True if code == 0 else False if code == GH.LAUNCHCTL_NOT_FOUND else None), code, out
 
 
@@ -232,11 +252,26 @@ def service_loaded(host):
 
 def unload_sure(host):
     """卸下服务，卸没卸掉要查清楚（#382 L3 第 3 轮 P1-01）：True 卸掉了；False 还装着；None 查不清。
-    GH.unload 只在 print 返回 113 时算卸掉，返回 False 只说明「没确认」，所以再查一次。"""
-    if GH.unload(host, f"system/{LABEL}"):
-        return True
+    bootout 是异步的（全局坑 G-18），等 print 明确说找不到（113）才算卸掉；等不到再查最后一次。
+    launchctl 报错、超时都经 lc() 变成查不清，不会抛出去（第 4 轮 P1-01）。"""
+    lc(host, "bootout", f"system/{LABEL}")
+    for _ in range(40):
+        if probe(host)[0] is False:
+            return True
+        host.sleep(0.5)
     st = probe(host)[0]
     return None if st is None else not st
+
+
+def load_plist(host, f):
+    """装服务（bootstrap，最多试 5 次）；装不上抛 GH.Stop。"""
+    last = ""
+    for _ in range(5):
+        code, last = lc(host, "bootstrap", "system", str(f))
+        if code == 0:
+            return
+        host.sleep(3)
+    raise GH.Stop(f"装不上 {f}：{last[:200]}")
 
 
 def until_gone():
@@ -278,7 +313,10 @@ def cmd_install(host, say=print):
                       "要在没登录的情况下实测它读不读得到 Claude、Codex 的登录")
     if busy(rows, uid):
         raise GH.Stop("有派单正在跑（dt-worktree 进程在），现在装会把那一轮掐断；等它做完再来")
-    code, data, err = host.as_user(name, ["/bin/cat", agent_plist(home)])
+    try:
+        code, data, err = host.as_user(name, ["/bin/cat", agent_plist(home)], timeout=CHECK_TIMEOUT)
+    except Exception as e:
+        code, data, err = None, b"", type(e).__name__
     if code != 0:
         raise GH.Stop(f"读不到原 LaunchAgent {agent_plist(home)}（{err.strip()[:80]}）：dt-worker 是不是还没接过中台")
     cmd = parse_agent(data, home)
@@ -296,22 +334,22 @@ def cmd_install(host, say=print):
     try:
         GH.write_root_file(plist_path(), plistlib.dumps(plist_for(name, home, cmd)), 0o644)
         host.chown(plist_path(), 0, 0)
-        GH.load(host, plist_path())
+        load_plist(host, plist_path())
     except Exception as e:                           # 写不进、装不上：退回原样（#382 L3 第 2 轮 P2-08）
         raise GH.Stop(f"新服务没装上（{e}）；{roll_back(host, before, was_loaded)}")
     # 叫门卫马上核对一次、换上新的状态文件（外壳只认它起来之后新发布的 ok）；规则没变时门卫不重新加载、不清进程。
     # 先等几秒：外壳起来时要先记下状态文件当时的身份，门卫在那之后换掉的那份才算（P1-02、P2-06）。
     # 没叫成也不要紧：门卫每 5 分钟自己核对一次，只是要多等
     host.sleep(GATE_DELAY)
-    code, out = host.launchctl("kickstart", f"system/{GATE_LABEL}")
-    if code != 0:
+    code, out = lc(host, "kickstart", f"system/{GATE_LABEL}")
+    if code != 0:                                    # 报错、超时也一样：服务已经装好，只是要多等（第 4 轮 P2-12）
         say(f"[注意] 没叫成门卫马上核对（{out[:80]}）：接单程序要等门卫下一次核对（5 分钟内）才起来")
-    host.launchctl("bootout", f"gui/{uid}/{AGENT_LABEL}")
-    host.launchctl("disable", f"gui/{uid}/{AGENT_LABEL}")
+    lc(host, "bootout", f"gui/{uid}/{AGENT_LABEL}")
+    lc(host, "disable", f"gui/{uid}/{AGENT_LABEL}")
     if agent_disabled(host, uid) is True:
         say(f"原 LaunchAgent：已停用（gui/{uid}/{AGENT_LABEL}，文件保留）")
     else:
-        say(f"[注意] 原 LaunchAgent 没停用成或查不清（launchctl print-disabled gui/{uid} 里没看到它停用）：下次登录 {name} 时它会起来、"
+        say(f"[注意] 服务已装好；原 LaunchAgent 没停用成或查不清（launchctl print-disabled gui/{uid} 里没看到它停用）：下次登录 {name} 时它会起来、"
             f"撞上单实例锁反复退出，不影响服务；手动停：sudo launchctl disable gui/{uid}/{AGENT_LABEL}")
     unclear = None
     for _ in range(START_WAIT):
@@ -344,7 +382,10 @@ def cmd_status(host, say=print):
         keep = [ln.strip() for ln in out.splitlines() if re.match(r"\s*(state|pid|last exit code|runs) =", ln)]
         say("  " + "；".join(keep))
     rows = processes(host)
-    code, data, _ = host.as_user(name, ["/bin/cat", agent_plist(home)])
+    try:
+        code, data, _ = host.as_user(name, ["/bin/cat", agent_plist(home)], timeout=CHECK_TIMEOUT)
+    except Exception:
+        code, data = None, b""
     try:
         cmd = parse_agent(data, home) if code == 0 else None
     except GH.Stop as e:
@@ -367,6 +408,11 @@ def unload_idle(host, uid, verb):
     就把旧服务原样装回去（引擎把派单放在单独的进程组里跑、状态记在文件里，接单程序回来会接着管它），然后停下。
     返回服务原来装没装。卸下后进程表查不清（ps 出错）也按「可能有派单」办：装回去、停下（#382 L3 第 2 轮 P1-01）。"""
     was_loaded = service_loaded(host)
+    if was_loaded and not os.path.lexists(plist_path()):
+        # plist 不在、服务却装着（第 4 轮 P2-08）：卸了之后万一要装回去（有派单、新服务装不上），没有原样可装，回滚会误报
+        raise GH.Stop(f"{LABEL} 在 launchd 里装着，plist 却不在（{plist_path()}），什么都没改。请人工核对它是从哪来的："
+                      f"sudo launchctl print system/{LABEL}；确认不要了、也没有派单在跑，就 sudo launchctl bootout system/{LABEL}，"
+                      f"再来{verb}")
     gone = unload_sure(host)
     if gone is False:
         raise GH.Stop(f"{LABEL} 卸不下来（bootout 之后 launchctl 一直显示还在），服务照旧在跑，什么都没改；看清原因后再来")
@@ -383,7 +429,7 @@ def unload_idle(host, uid, verb):
     if not was_loaded:
         raise GH.Stop(f"{why}，现在{verb}可能把那一轮掐断，什么都没改；等它做完、进程表查得清再来")
     try:
-        GH.load(host, plist_path())
+        load_plist(host, plist_path())
     except Exception as e:
         raise GH.Stop(f"{why}，想把旧服务装回去接着管它，没装上：{e}。派单可能还在跑、没人管："
                       f"请马上手动装回 sudo launchctl bootstrap system {plist_path()}，再跑 status 看")
@@ -417,7 +463,7 @@ def roll_back(host, before, was_loaded):
         return f"只退回了一半：{disk}，但{state}。请 {until_gone()}{tail}；最后跑 status 核对"
     if before is not None and was_loaded:
         try:
-            GH.load(host, f)
+            load_plist(host, f)
         except Exception as e:
             return f"{disk}，但旧服务没装回去（{e}）：请 sudo launchctl bootstrap system {f}，再跑 status 核对"
         return "已退回原样（旧 plist 写回、旧服务已装回去）"
@@ -436,13 +482,13 @@ def cmd_remove(host, say=print):
             f.unlink()
     except OSError as e:                             # 卸了服务却删不掉 plist：装回去，不留下没人接单的样子
         try:
-            GH.load(host, f)
+            load_plist(host, f)
         except Exception as e2:
             raise GH.Stop(f"服务已卸下，但删不掉 {f}（{e}），想装回去也没成（{e2}）：现在没有接单程序。"
                           f"要恢复：sudo launchctl bootstrap system {f}；要拆完：sudo rm {f} 再 "
                           f"sudo launchctl enable gui/{a['uid']}/{AGENT_LABEL}；最后跑 status 核对")
         raise GH.Stop(f"删不掉 {f}（{e}），已把服务装回去，什么都没拆；看清原因后再来")
-    code, out = host.launchctl("enable", f"gui/{a['uid']}/{AGENT_LABEL}")
+    code, out = lc(host, "enable", f"gui/{a['uid']}/{AGENT_LABEL}")
     if code != 0 or agent_disabled(host, a["uid"]) is not False:     # 查不清也不算放开了（第 2 轮 P2-01）
         say(f"[注意] 只拆了一半：{LABEL} 已拆掉，但原 LaunchAgent 没放开或查不清（{out[:80]}）。现在登录 {a['name']} 也不会接单；"
             f"手动放开：sudo launchctl enable gui/{a['uid']}/{AGENT_LABEL}，再跑 status 核对")
@@ -452,9 +498,12 @@ def cmd_remove(host, say=print):
 
 
 class Host(GH.Host):
+    def launchctl(self, *args):
+        r = subprocess.run(["/bin/launchctl", *args], capture_output=True, text=True, timeout=LAUNCHCTL_TIMEOUT)
+        return r.returncode, (r.stdout + r.stderr).strip()
+
     def run_ps(self):
-        import subprocess
-        r = subprocess.run(["/bin/ps", "-axww", "-o", "uid=,args="], capture_output=True, text=True)
+        r = subprocess.run(["/bin/ps", "-axww", "-o", "uid=,args="], capture_output=True, text=True, timeout=PS_TIMEOUT)
         return r.returncode, r.stdout, r.stderr
 
 
