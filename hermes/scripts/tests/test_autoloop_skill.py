@@ -44,6 +44,7 @@ import autoloop_recovery as RV  # noqa: E402
 import gate_intake as I  # noqa: E402
 from test_autoloop_grants import CHAT, LATER, T0, Base, hub  # noqa: E402
 from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 
 SKILL = HERE.parents[1] / "skills/autoloop/SKILL.md"
 SCRIPTS = HERE.parent
@@ -225,11 +226,10 @@ class SkillDocMatchesScripts(unittest.TestCase):
         self.assertEqual((I.MAX_SCOPE, I.EXECUTORS), (G.MAX_SCOPE, G.EXECUTORS))            # 窗口先核的形状和网关一致
 
 
-class InstalledLayoutNeedsRosterPrefix(unittest.TestCase):
-    """技能给 G、C 加的 DT_ROSTER 前缀不是摆设：脚本装到 ~/.hermes/scripts/ 之后，默认的名册位置（脚本目录的上上级）
-    没有名册。不打桩 ROSTER，把脚本拷到 <临时目录>/scripts/ 真跑一次。"""
+class InstalledLayoutRoster(unittest.TestCase):
+    """#316：安装副本缺默认名册时明确拒绝；技能中的显式 DT_ROSTER 前缀仍可选定其他名册。"""
 
-    def test_prefix_is_in_the_skill_and_is_what_makes_the_installed_copy_work(self):
+    def test_missing_default_rejects_cleanly_and_skill_prefix_still_works(self):
         text = SKILL.read_text(encoding="utf-8")
         prefix = "DT_ROSTER=$HOME/Documents/ChatGPT/个人/work/digital-twin/projects.json /usr/bin/python3 ~/.hermes/scripts/"
         for script in ("autoloop_grants.py", "autoloop_config.py"):
@@ -245,10 +245,14 @@ class InstalledLayoutNeedsRosterPrefix(unittest.TestCase):
             argv = [sys.executable, "-B", str(root / "scripts/autoloop_grants.py"), "propose", "--repo", "dt-sandbox",
                     "--executor", "claude", "--scope-file", str(scope)]
             env = {k: v for k, v in os.environ.items() if k != "DT_ROSTER"}
+            env["HOME"] = str(root / "home")
             bare = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
-            self.assertNotEqual(bare.returncode, 0)                      # 不带前缀：找不到名册，输出是报错堆栈、不是 JSON
-            self.assertIn("FileNotFoundError", bare.stderr)
-            self.assertEqual(bare.stdout.strip(), "")
+            self.assertEqual(bare.returncode, 1)
+            self.assertEqual(bare.stderr, "")
+            missing = json.loads(bare.stdout)
+            self.assertFalse(missing["ok"])
+            self.assertIn(str(root / "home/Documents/ChatGPT/个人/work/digital-twin/projects.json"), missing["why"])
+            self.assertIn("DT_ROSTER", missing["why"])
             ok = subprocess.run(argv, capture_output=True, text=True, timeout=60, env={**env, "DT_ROSTER": str(roster)})
             self.assertEqual((ok.returncode, json.loads(ok.stdout)),
                              (1, {"ok": False, "why": "dt-sandbox 不在名册能派写入单的仓库里"}))
