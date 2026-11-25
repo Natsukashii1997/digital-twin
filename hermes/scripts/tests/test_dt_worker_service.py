@@ -589,12 +589,12 @@ class Install(unittest.TestCase):
 
     def test_bootstrap_times_out_then_unclear_does_not_roll_back(self):
         """第 5 轮 P1-03：bootstrap 超时、之后 print 查不清：不再 bootstrap，也不回滚（不 bootout、不改 plist），
-        新服务这时可能已经起来接了派单；交人工核对。"""
+        新服务这时可能已经起来接了派单；交人工核对。这条路径不看进程表（有没有派单都不卸），所以这里不模拟派单，
+        只断言没有 bootout（新一轮第 1 轮审查指出原来设的 busy_from_ps=3 根本没被查到）。"""
         self.plist.write_bytes(b"old")
         self.host.loaded = True
         self.host.bootstrap_raises = 1
         self.host.unclear_after_bootstrap = True
-        self.host.busy_from_ps = 3                   # 新服务起来、接了一张派单
         with self.assertRaisesRegex(GH.Stop, "查不清它装上没有.*没有自动退回：查不清新服务装没装上.*status"):
             self.run_install()
         self.assertTrue(self.host.loaded)
@@ -603,6 +603,7 @@ class Install(unittest.TestCase):
         first = lc.index(("bootstrap", "system", str(self.plist)))
         self.assertNotIn("bootout", [c[0] for c in lc[first:]])
         self.assertEqual(len([c for c in lc if c[0] == "bootstrap"]), 1)
+        self.assertEqual(self.host.ps_calls, 2)      # 只有装之前、卸旧服务后两次：回滚没看进程表就决定不卸
 
     def test_roll_back_never_unloads_a_loaded_service(self):
         """第 5 轮 P1-03：回滚时新服务装着（或查不清）就不卸、不改 plist，哪怕原来有旧的要装回。"""
