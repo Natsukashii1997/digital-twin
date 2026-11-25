@@ -63,8 +63,9 @@ class BriefContract(unittest.TestCase):
                      "不做五项语义或敏感内容分类", "真实 Hermes 案例", "分别删去五个要素"):
             self.assertIn(rule, text)
 
-    def test_unaffected_consumers_load_shared_file_before_task_file(self):
-        for skill in ("autoloop", "groupdigest-act"):
+    def test_all_four_consumers_load_shared_file_before_task_file(self):
+        # 常浩 2026-11-25 定：workshop、pdaily-act 只改任务说明这一段接入，保留旧通道的授权方式
+        for skill in ("autoloop", "groupdigest-act", "workshop", "pdaily-act"):
             with self.subTest(skill=skill):
                 text = (SKILLS / skill / "SKILL.md").read_text(encoding="utf-8")
                 self.assertIn(POINTER, text)
@@ -72,6 +73,11 @@ class BriefContract(unittest.TestCase):
         text = (SKILLS / "autoloop/SKILL.md").read_text(encoding="utf-8")
         part = text.split("## 2.", 1)[1].split("## 3.", 1)[0]
         self.assertNotIn("```", part, "统一格式只在共享模块维护")
+        workshop = (SKILLS / "workshop/SKILL.md").read_text(encoding="utf-8").split("## 2.", 1)[0]
+        self.assertNotIn("必须包含五要素", workshop, "五要素只在共享模块维护")
+        self.assertIn("没点名仍不传 `--tool`", workshop)
+        pdaily = (SKILLS / "pdaily-act/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("不再发「待确认派单」", pdaily, "日报的回复授权不改道")
 
 
 class BriefReachesWorker(WorkerBase):
