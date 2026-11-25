@@ -264,14 +264,21 @@ def unload_sure(host):
 
 
 def load_plist(host, f):
-    """装服务（bootstrap，最多试 5 次）；装不上抛 GH.Stop。"""
+    """装服务（bootstrap，最多试 5 次）。bootstrap 报失败或超时不等于没装上（launchd 可能已经收下、只是没及时回）：
+    每次失败先 print 查（#382 L3 第 5 轮 P1-03）。装着了就算成功、不再重试；确认没装着才重试；查不清就停下，不再 bootstrap。
+    装不上、查不清都抛 GH.Stop，话里说清是哪一种。"""
     last = ""
     for _ in range(5):
         code, last = lc(host, "bootstrap", "system", str(f))
         if code == 0:
             return
+        st = probe(host)[0]
+        if st is True:
+            return
+        if st is None:
+            raise GH.Stop(f"bootstrap {f} 没报成功（{last[:120]}），之后查不清它装上没有")
         host.sleep(3)
-    raise GH.Stop(f"装不上 {f}：{last[:200]}")
+    raise GH.Stop(f"装不上 {f}（launchctl print 确认没有它）：{last[:200]}")
 
 
 def until_gone():
@@ -336,7 +343,7 @@ def cmd_install(host, say=print):
         host.chown(plist_path(), 0, 0)
         load_plist(host, plist_path())
     except Exception as e:                           # 写不进、装不上：退回原样（#382 L3 第 2 轮 P2-08）
-        raise GH.Stop(f"新服务没装上（{e}）；{roll_back(host, before, was_loaded)}")
+        raise GH.Stop(f"装新服务出错（{e}）；{roll_back(host, before, was_loaded)}")
     # 叫门卫马上核对一次、换上新的状态文件（外壳只认它起来之后新发布的 ok）；规则没变时门卫不重新加载、不清进程。
     # 先等几秒：外壳起来时要先记下状态文件当时的身份，门卫在那之后换掉的那份才算（P1-02、P2-06）。
     # 没叫成也不要紧：门卫每 5 分钟自己核对一次，只是要多等
@@ -431,20 +438,23 @@ def unload_idle(host, uid, verb):
     try:
         load_plist(host, plist_path())
     except Exception as e:
-        raise GH.Stop(f"{why}，想把旧服务装回去接着管它，没装上：{e}。派单可能还在跑、没人管："
-                      f"请马上手动装回 sudo launchctl bootstrap system {plist_path()}，再跑 status 看")
+        raise GH.Stop(f"{why}，想把旧服务装回去接着管它，没成：{e}。派单可能还在跑、可能没人管：请马上跑 status 看旧服务在不在，"
+                      f"不在就手动装回 sudo launchctl bootstrap system {plist_path()}，再跑 status 看")
     raise GH.Stop(f"{why}，已把旧服务装回去接着管它，什么都没改；等它做完再来{verb}")
 
 
 def roll_back(host, before, was_loaded):
-    """新服务写不进或装不上时退回原样（第 2 轮 P2-08）：先把 plist 写回原内容（原来没有就删掉新写的），再看新服务卸没卸干净
-    （第 3 轮：unload 没确认就不能当卸掉了），卸干净了、原来装着就装回去。原 LaunchAgent 这时还没动（停用在装好之后）。
+    """新服务写不进或装不上时退回原样（第 2 轮 P2-08）。原 LaunchAgent 这时还没动（停用在装好之后）。
+    只在 launchctl 确认新服务没装着（print 返回 113）时才退回：装着、或查不清，就可能已经起来接了派单，卸掉会把那一轮掐断，
+    所以一律不卸、不改 plist，交人工核对（#382 L3 第 5 轮 P1-03）。确认没装着时不用卸，只把 plist 换回去、原来装着就装回旧服务。
     返回一句话说清现在是什么样、要人做什么。"""
     f = plist_path()
-    try:
-        gone = unload_sure(host)
-    except Exception as e:
-        gone, why = None, str(e)
+    st = probe(host)[0]
+    if st is not False:
+        state = "新服务其实装上了" if st else "查不清新服务装没装上"
+        return (f"没有自动退回：{state}，它可能已经起来、接了派单，卸掉会把那一轮掐断；{f} 现在是新写的那份。"
+                f"请跑 sudo /usr/bin/python3 -B -E -s {Path(__file__).name} status 核对：新服务在跑、接单程序起来了就算装好了"
+                "（再跑一次 install 补完停用原 LaunchAgent）；不要它就跑 remove（它会先查有没有派单）")
     try:
         if before is None:
             if os.path.lexists(f):
@@ -453,19 +463,15 @@ def roll_back(host, before, was_loaded):
             GH.write_root_file(f, before, 0o644)
             host.chown(f, 0, 0)
     except Exception as e:
-        return (f"退回没做成（写回 plist 时出错：{e}）：服务可能没在跑。请 {until_gone()}；"
-                "然后跑 status 看 plist 是什么样，必要时 remove 再 install")
+        return (f"退回没做成（写回 plist 时出错：{e}）：新服务确认没装着，现在没有接单程序。"
+                "请跑 status 看 plist 是什么样，必要时 remove 再 install")
     disk = "新写的 plist 已删掉" if before is None else "旧 plist 已写回"
-    if gone is not True:
-        state = "新服务还装着" if gone is False else "查不清新服务还装没装"
-        tail = (f"，再 sudo launchctl bootstrap system {f} 把旧服务装回去" if before is not None and was_loaded
-                else "（原来没装着服务，卸掉就行）")
-        return f"只退回了一半：{disk}，但{state}。请 {until_gone()}{tail}；最后跑 status 核对"
     if before is not None and was_loaded:
         try:
             load_plist(host, f)
         except Exception as e:
-            return f"{disk}，但旧服务没装回去（{e}）：请 sudo launchctl bootstrap system {f}，再跑 status 核对"
+            return (f"{disk}，但装回旧服务没成（{e}）：请跑 status 看旧服务在不在；不在就 sudo launchctl bootstrap system {f}，"
+                    "再跑 status 核对")
         return "已退回原样（旧 plist 写回、旧服务已装回去）"
     return f"已退回原样（{disk}，原来就没装着服务；原 LaunchAgent 没动）"
 
@@ -484,7 +490,7 @@ def cmd_remove(host, say=print):
         try:
             load_plist(host, f)
         except Exception as e2:
-            raise GH.Stop(f"服务已卸下，但删不掉 {f}（{e}），想装回去也没成（{e2}）：现在没有接单程序。"
+            raise GH.Stop(f"服务已卸下，但删不掉 {f}（{e}），想装回去也没成（{e2}）：接单程序可能没在跑，先跑 status 看。"
                           f"要恢复：sudo launchctl bootstrap system {f}；要拆完：sudo rm {f} 再 "
                           f"sudo launchctl enable gui/{a['uid']}/{AGENT_LABEL}；最后跑 status 核对")
         raise GH.Stop(f"删不掉 {f}（{e}），已把服务装回去，什么都没拆；看清原因后再来")

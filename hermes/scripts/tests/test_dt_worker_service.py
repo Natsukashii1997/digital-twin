@@ -58,6 +58,9 @@ class FakeHost(S.Host):
         self.ps_fail_from = None          # 第几次看进程表起 ps 出错
         self.bootstrap_fails = 0          # 前几次 bootstrap 失败
         self.bootstrap_fail_loads = False # bootstrap 报失败、服务却装上了
+        self.bootstrap_raises = 0         # 前几次 bootstrap 直接超时（抛 TimeoutExpired，第 5 轮 P1-03）
+        self.bootstrap_raise_loads = True # 超时的那几次服务其实装上了
+        self.unclear_after_bootstrap = False  # bootstrap 之后 print 查不清（返回 5）
         self.bootouts = 0                 # 卸服务（bootout system/…）第几次
         self.sticky_from_bootout = None   # 从第几次起 bootout 卸不掉
         self.unclear_from_bootout = None  # 从第几次起 bootout 之后 print 查不清（返回 5）
@@ -102,6 +105,13 @@ class FakeHost(S.Host):
             raise OSError(f"launchctl {args[0]} died")
         verb = args[0]
         if verb == "bootstrap":
+            if self.unclear_after_bootstrap:
+                self.print_code = 5
+            if self.bootstrap_raises > 0:
+                self.bootstrap_raises -= 1
+                if self.bootstrap_raise_loads:
+                    self.loaded = True
+                raise subprocess.TimeoutExpired(["/bin/launchctl", "bootstrap"], S.LAUNCHCTL_TIMEOUT)
             if self.bootstrap_fails > 0:
                 self.bootstrap_fails -= 1
                 if self.bootstrap_fail_loads:
@@ -443,7 +453,7 @@ class Install(unittest.TestCase):
         self.host.loaded = True
         self.host.busy_from_ps = 2
         self.host.bootstrap_fails = 5
-        with self.assertRaisesRegex(GH.Stop, "没装上.*sudo launchctl bootstrap system"):
+        with self.assertRaisesRegex(GH.Stop, "没成：装不上.*确认没有它.*sudo launchctl bootstrap system"):
             self.run_install()
 
     def test_reinstall_print_raises_after_bootout(self):
@@ -470,7 +480,7 @@ class Install(unittest.TestCase):
         self.host.loaded = True
         self.host.ps_raise_from = 2
         self.host.raise_if = lambda a: a[0] == "bootstrap"
-        with self.assertRaisesRegex(GH.Stop, "没装上.*派单可能还在跑.*sudo launchctl bootstrap system"):
+        with self.assertRaisesRegex(GH.Stop, "没成.*派单可能还在跑.*sudo launchctl bootstrap system"):
             self.run_install()
 
     def test_stops_when_plist_missing_but_loaded(self):
@@ -509,7 +519,7 @@ class Install(unittest.TestCase):
         self.plist.write_bytes(b"old")
         self.host.loaded = True
         self.host.bootstrap_fails = 5
-        with self.assertRaisesRegex(GH.Stop, "新服务没装上.*已退回原样（旧 plist 写回、旧服务已装回去）"):
+        with self.assertRaisesRegex(GH.Stop, "装新服务出错.*已退回原样（旧 plist 写回、旧服务已装回去）"):
             self.run_install()
         self.assertEqual(self.plist.read_bytes(), b"old")
         self.assertTrue(self.host.loaded)
@@ -553,34 +563,78 @@ class Install(unittest.TestCase):
         self.assertTrue(self.host.loaded)
         self.assertEqual(self.plist.read_bytes(), b"old")
 
-    def test_rollback_unload_unclear_first_install(self):
-        """第 3 轮 P2-08：新服务装不上、回滚时卸没卸掉查不清：plist 删掉，但不报「已退回原样」，给核实步骤。"""
-        self.host.bootstrap_fails = 5
-        self.host.unclear_from_bootout = 2           # 第 1 次是装之前卸旧的（没装着），第 2 次是回滚
-        with self.assertRaisesRegex(GH.Stop, "只退回了一半：新写的 plist 已删掉，但查不清新服务还装没装.*113"):
-            self.run_install()
-        self.assertFalse(self.plist.exists())
-
-    def test_rollback_unload_sticks_with_old_plist(self):
-        """原来有 plist、没装着；新服务装不上却装上了一半、回滚卸不掉：旧 plist 写回，但报「新服务还装着」，不报退回原样。"""
-        self.plist.write_bytes(b"old")
-        self.host.bootstrap_fails = 5
-        self.host.bootstrap_fail_loads = True
-        self.host.sticky_from_bootout = 2
-        with self.assertRaisesRegex(GH.Stop, "只退回了一半：旧 plist 已写回，但新服务还装着.*卸掉就行"):
-            self.run_install()
-        self.assertEqual(self.plist.read_bytes(), b"old")
-
-    def test_rollback_unload_sticks_was_loaded(self):
-        """原来装着旧服务：回滚卸不掉新的时，提示里要先卸干净（到 113）再 bootstrap 旧的。"""
+    def test_bootstrap_times_out_but_loaded_counts_as_installed(self):
+        """第 5 轮 P1-03：bootstrap 超时、其实装上了：查到装着就算装好，不再重试、不回滚，不卸掉可能已经接单的新服务。"""
         self.plist.write_bytes(b"old")
         self.host.loaded = True
+        self.host.bootstrap_raises = 1
+        code, out = self.run_install()
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.host.loaded)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["Label"], S.LABEL)
+        lc = [c[1:] for c in self.host.calls if c[0] == "launchctl"]
+        first = lc.index(("bootstrap", "system", str(self.plist)))
+        self.assertEqual([c for c in lc if c[0] == "bootstrap"], [lc[first]])          # 只 bootstrap 了一次
+        self.assertNotIn(("bootout", f"system/{S.LABEL}"), lc[first:])                 # 之后没卸过服务
+
+    def test_bootstrap_reports_failure_but_loaded_counts_as_installed(self):
+        """bootstrap 返回失败、服务却装上了（同一根因的另一种样子）：同样算装好，不回滚。"""
         self.host.bootstrap_fails = 5
         self.host.bootstrap_fail_loads = True
-        self.host.sticky_from_bootout = 2
-        with self.assertRaisesRegex(GH.Stop, "新服务还装着.*113.*再 sudo launchctl bootstrap system"):
+        code, out = self.run_install()
+        self.assertEqual(code, 0, out)
+        lc = [c[1:] for c in self.host.calls if c[0] == "launchctl"]
+        self.assertEqual(len([c for c in lc if c[0] == "bootstrap"]), 1)
+        self.assertNotIn(("bootout", f"system/{S.LABEL}"), lc[lc.index(("bootstrap", "system", str(self.plist))):])
+
+    def test_bootstrap_times_out_then_unclear_does_not_roll_back(self):
+        """第 5 轮 P1-03：bootstrap 超时、之后 print 查不清：不再 bootstrap，也不回滚（不 bootout、不改 plist），
+        新服务这时可能已经起来接了派单；交人工核对。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.bootstrap_raises = 1
+        self.host.unclear_after_bootstrap = True
+        self.host.busy_from_ps = 3                   # 新服务起来、接了一张派单
+        with self.assertRaisesRegex(GH.Stop, "查不清它装上没有.*没有自动退回：查不清新服务装没装上.*status"):
             self.run_install()
-        self.assertEqual(self.plist.read_bytes(), b"old")
+        self.assertTrue(self.host.loaded)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["Label"], S.LABEL)   # 新写的那份没被换掉
+        lc = [c[1:] for c in self.host.calls if c[0] == "launchctl"]
+        first = lc.index(("bootstrap", "system", str(self.plist)))
+        self.assertNotIn("bootout", [c[0] for c in lc[first:]])
+        self.assertEqual(len([c for c in lc if c[0] == "bootstrap"]), 1)
+
+    def test_roll_back_never_unloads_a_loaded_service(self):
+        """第 5 轮 P1-03：回滚时新服务装着（或查不清）就不卸、不改 plist，哪怕原来有旧的要装回。"""
+        self.plist.write_bytes(b"new")
+        for loaded, code in ((True, None), (False, 5)):
+            with self.subTest(loaded=loaded, print_code=code):
+                host = FakeHost()
+                host.loaded, host.print_code = loaded, code
+                msg = S.roll_back(host, b"old", True)
+                self.assertIn("没有自动退回", msg)
+                self.assertEqual(self.plist.read_bytes(), b"new")
+                self.assertNotIn("bootout", [c[1] for c in host.calls if c[0] == "launchctl"])
+                self.assertNotIn("bootstrap", [c[1] for c in host.calls if c[0] == "launchctl"])
+
+    def test_restore_old_service_times_out_but_loaded(self):
+        """第 5 轮 P1-03 同根因：卸下旧服务后发现有派单、装回旧服务时 bootstrap 超时但其实装上了：如实报「已装回去」。"""
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.busy_from_ps = 2
+        self.host.bootstrap_raises = 1
+        with self.assertRaisesRegex(GH.Stop, "已把旧服务装回去"):
+            self.run_install()
+        self.assertTrue(self.host.loaded)
+
+    def test_restore_old_service_unclear(self):
+        self.plist.write_bytes(b"old")
+        self.host.loaded = True
+        self.host.busy_from_ps = 2
+        self.host.bootstrap_raises = 1
+        self.host.unclear_after_bootstrap = True
+        with self.assertRaisesRegex(GH.Stop, "没成：bootstrap .*查不清它装上没有.*请马上跑 status 看旧服务在不在"):
+            self.run_install()
 
     def test_ps_fails_after_installed(self):
         """第 3 轮 P2-09：服务装好之后查进程表出错：不报装失败（不是 1），返回 3、plist 留着、说清查不清。"""
@@ -683,6 +737,15 @@ class Remove(unittest.TestCase):
                 S.cmd_remove(self.host, say=quiet)
         self.assertTrue(self.host.loaded)
         self.assertTrue(self.host.disabled)
+
+    def test_unlink_fails_reload_times_out_but_loaded(self):
+        """第 5 轮 P1-03 同根因：删不掉 plist、装回时 bootstrap 超时但其实装上了：如实报「已把服务装回去」。"""
+        from unittest import mock
+        self.host.bootstrap_raises = 1
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("nope")):
+            with self.assertRaisesRegex(GH.Stop, "删不掉.*已把服务装回去"):
+                S.cmd_remove(self.host, say=quiet)
+        self.assertTrue(self.host.loaded)
 
     def test_unload_unclear(self):
         self.host.unclear_from_bootout = 1
