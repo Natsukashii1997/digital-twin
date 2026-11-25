@@ -6,6 +6,19 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-24 中午：工人接单程序改成开机自起的系统服务（侧会话，常浩选甲，PR #382，L3 审查中）
+
+- **根因**：接单程序是 `agent-autoloop join` 装的 LaunchAgent（gui/502 域，KeepAlive）。门卫重载时 `pkill -KILL -u dt-worker` 连 dt-worker 的 loginwindow 一起清掉，图形会话结束、gui/502 域没了，KeepAlive 管不到；重启电脑同样起不来（dt-worker 不自动登录）。中台自带的「接单程序没连上」只在有任务排队时才发（今天 11:57 那张：已离线 1080 分钟）。
+- **常浩选甲**（三选一，方案在协调会话共享笔记）：改成 LaunchDaemon `cn.digital-twin.worker-up`，以 dt-worker 身份开机自起；门卫状态是本次开机的 state=ok 才启动接单程序；Claude 改用 `claude setup-token` 长期令牌存文件（没登录时钥匙串锁着），Codex 本来就存文件；原 LaunchAgent 只 disable。门卫规则的承诺和清进程（DECIDED 11-21 第 4 条）不变。
+- **L3 第 1 轮返修（常浩 11-24 回「按这个返修」）**：① 装 / 拆服务时卸下旧服务后再查一次派单，有就把旧服务装回去、停下；② 服务外壳只认它起来之后门卫新写的 ok（门卫判定失败、作废不了旧 ok 时不会被 launchd 重起放行；代价是门卫重载后最多 5 分钟回来）；③ 拆服务核实原 LaunchAgent 真放开了、核原 LaunchAgent 的 Label、装之前核令牌文件权限。令牌一年过期的提醒另开 issue（#386）。
+- **L3 第 2 轮返修**：外壳加「修改时间不晚于现在」（时钟往回调过不放行）；卸服务后进程表查不清也装回旧服务；新服务装不上退回原样；拆服务时查不清算没放开；setup 先核 ~/.dt 不是链接再写令牌；install 等 3 秒再叫门卫，没起来退出码 3（不是装失败）。
+- **新一轮第 1 轮审查通过**（受审 `dc65cf9`，P0 0、P1 0）。接受一条已知风险 P2-13：装服务 bootstrap 超时、当时 print 说没装着、回滚写回旧 plist 之后 launchd 才把新服务装上，会出现 launchd 里是新配置、磁盘上是旧 plist（下次重启读旧的），status 看不出内容不同；不会掐断派单。`print` 返回 113 只说明那一刻没装着，不是永久保证。真机验收 P2-05 合并后由常浩做。
+- **L3 第 5 轮返修**（5 轮到顶，常浩 11-25 经驿窗回「按甲：授权新一轮」）：P1-03 bootstrap 超时却其实装上了时，原来会重试到失败、回滚卸掉可能已经接单的新服务；改成 bootstrap 失败先查装没装（装着算成功、查不清停下），回滚只在确认新服务没装着时才做。新一轮从第 1 轮重计。
+- **L3 第 4 轮返修**（常浩 11-25「按三条修、送第 5 轮」）：launchctl、ps 加超时，launchctl 出错、超时一律当查不清、不再从半路抛出去（P1-01、P2-12）；plist 不在、服务却装着时 install、remove 动手前就停下（P2-08）；文档写明按 inode 认新发布的两个前提（APFS、门卫原子替换）。
+- **L3 第 3 轮返修**：外壳改成认「起来之后门卫换上了新的状态文件」（文件身份变了），不再按时间比，另核 enabled=yes 和 users；bootout 之后没确认卸掉就再查；回滚卸不干净只报退回了一半；装好后查不清进程表也返回 3；remove 先核 plist 类型；status 分开显示 plist 和 launchd。
+- **写了**：`ops/dt_worker_service.py`（install / status / remove）、`ops/dt_worker_setup.sh` 第 4b 步和 `claude-proxy.sh` 读令牌、巡检加「工人接单程序在不在跑」；未安装。
+- **装法（合并前就可以在 PR 分支上实测）**：① 登录 dt-worker 跑 `bash <仓库>/ops/dt_worker_setup.sh`（共享副本合并后再更新）补令牌 → 注销 dt-worker；② 主账号 `sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py install`：它先实测「没登录时两家 CLI 登录读不读得到」，不过就停下、什么都不改；③ 验收：门卫强制重载一次、重启电脑一次，接单程序都自己回来（中台「在线」）。
+
 ## 2026-11-24 · 5b-2 拍板请求模块（#359，Claude；PR 待常浩合并，未安装）
 
 - 来由：批 5b 技能部分第一项（`docs/技能架构.md` 第 9 节）。交接会话出了三份计划（共享笔记 `5b-实施计划-claude-01.md`），常浩 11-24 回「按计划开工」，只批了 5b-2。

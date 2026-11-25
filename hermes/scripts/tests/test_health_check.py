@@ -227,7 +227,7 @@ class DailySendTest(unittest.TestCase):
         self.patch(hc, "LOG_DIR", self.logs)
         self.gateway = self.patch(hc, "check_gateway", return_value=[])
         for name in ("check_fallback", "check_aux_errors", "check_cron", "check_unclean_exits", "check_skill_sync",
-                     "check_egress", "check_pf", "check_gateway_proxy", "check_job_timing"):
+                     "check_egress", "check_pf", "check_worker_up", "check_gateway_proxy", "check_job_timing"):
             self.patch(hc, name, return_value=[])
         self.sent = []
         # 保留真实 run()/send()，在最底层拦住所有子进程；意外命令立即让测试失败。
@@ -400,7 +400,7 @@ class WakeChecksTest(unittest.TestCase):
         self.plist(hc.PROXY_KEYS)
         stubs = {n: patch.object(hc, n, return_value=[]) for n in (
             "check_gateway", "check_unclean_exits", "check_fallback", "check_aux_errors", "check_skill_sync",
-            "check_cron", "check_egress", "check_pf", "check_job_timing")}
+            "check_cron", "check_egress", "check_pf", "check_worker_up", "check_job_timing")}
         for p in stubs.values():
             p.start()
             self.addCleanup(p.stop)
@@ -490,6 +490,43 @@ class WorkerIsolation(unittest.TestCase):
         issues = self.status("at=x state=failed enabled=yes reason=加载上的规则和应有的不一致\n", accounts=both)
         self.assertIn("failed：加载上的规则和应有的不一致", issues[0])
         self.assertIn("applying", self.status("at=x state=applying\n")[0])
+
+
+class WorkerUpTest(unittest.TestCase):
+    """工人接单程序在不在跑（11-24：门卫重载清掉它后 18 小时没人发现）。"""
+
+    def check(self, ps):
+        acct = type("P", (), {"pw_uid": 502})()
+        with patch.object(hc.pwd, "getpwnam", return_value=acct):
+            return hc.check_worker_up(ps=ps)
+
+    NODE = "502 /Users/dt-worker/.nvm/versions/node/v24/bin/node --disable-warning=ExperimentalWarning " \
+           "/Users/dt-worker/.agent-autoloop/app/bin/agent-autoloop.ts up"
+
+    def test_running(self):
+        self.assertEqual(self.check("  1 /sbin/launchd\n" + self.NODE + "\n"), [])
+
+    def test_missing(self):
+        issues = self.check("  1 /sbin/launchd\n502 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow\n")
+        self.assertEqual(len(issues), 1)
+        self.assertIn("工人接单程序没在跑", issues[0])
+
+    def test_wrapper_sh_or_other_account_does_not_count(self):
+        """系统服务外面那层 sh 在等门卫规则时，命令行里也有 agent-autoloop.ts up，不算在跑；别的账号的也不算。"""
+        wrapper = "502 /bin/sh -c s=x dt-worker-up /n/node --disable-warning=ExperimentalWarning " \
+                  "/Users/dt-worker/.agent-autoloop/app/bin/agent-autoloop.ts up"
+        other = self.NODE.replace("502 ", "501 ", 1)
+        self.assertEqual(len(self.check(wrapper + "\n" + other + "\n")), 1)
+
+    def test_no_account(self):
+        with patch.object(hc.pwd, "getpwnam", side_effect=KeyError("dt-worker")):
+            self.assertEqual(hc.check_worker_up(ps=""), [])
+
+    def test_ps_fails(self):
+        acct = type("P", (), {"pw_uid": 502})()
+        failed = subprocess.CompletedProcess([], 1, "", "boom")
+        with patch.object(hc.pwd, "getpwnam", return_value=acct), patch.object(hc.subprocess, "run", return_value=failed):
+            self.assertIn("查不了", hc.check_worker_up()[0])
 
 
 if __name__ == "__main__":
