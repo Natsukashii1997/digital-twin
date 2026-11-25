@@ -136,7 +136,10 @@ def config_lock():
 # ---------- 生成 ----------
 def sandbox_repos():
     """名册里的沙盒仓库：短名 → owner/repo（和 autoloop_grants 的写法一致）。"""
-    r = json.loads(G.ROSTER.read_text(encoding="utf-8"))
+    try:
+        r = G.read_roster()
+    except G.Rejected as e:
+        raise Rejected(str(e)) from None
     out = {}
     for p in r.get("inventory", []):
         if p.get("sandbox") and str(p.get("path", "")).startswith("github:"):
