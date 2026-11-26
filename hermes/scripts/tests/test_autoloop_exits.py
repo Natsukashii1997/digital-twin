@@ -378,7 +378,7 @@ class Readers(Base):
         f = self.root / "gh"
         f.write_text(f"#!/bin/sh\necho '{json.dumps(payload)}'\nexit {code}\n")
         f.chmod(0o755)
-        return mock.patch.dict(os.environ, {"DT_GH": str(f)})
+        return mock.patch.object(E, "TEST_GH", str(f))
 
     def test_read_pr(self):
         t = {"github": "o/r", "branch": "claude/x", "head": "h"}
@@ -396,6 +396,50 @@ class Readers(Base):
             self.assertIsNone(E.read_pr(t, {}, None)[0])
         with self.fake_gh([], code=1), self.assertRaises(E.Unreachable):
             E.read_pr(t, {}, None)
+
+    def test_github_readback_uses_gate_credentials(self):
+        """读真 GitHub（0E-4）：环境变量 DT_GH 不算数；gh 要令牌，没放 → 连不上（保持结果不明，不误判，也不拿主账号的 gh 去读）；
+        查远端分支用不带令牌的最小环境；配好了 gh 用 root 装的副本和带令牌的最小环境（没有代理）。"""
+        import gate_github as GG
+        root = Path(tempfile.mkdtemp(prefix="dt-exits-gate-")).resolve()
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(root)])
+        home, gh = root / "home", root / "gate/bin/gh"
+        home.mkdir()
+        gh.parent.mkdir(parents=True)
+        for d in (gh.parent, gh.parent.parent, root):
+            os.chmod(d, 0o755)
+        t = {"remote": "https://github.com/o/r.git", "github": "o/r", "branch": "claude/t-20261118-abcdef",
+             "head": "h", "number": 3}
+        with mock.patch.dict(os.environ, {"DT_GH": str(root / "nope")}), mock.patch.object(GG, "home", return_value=home), \
+                mock.patch.object(GG, "GH", str(gh)), mock.patch.object(GG, "TRUSTED_UIDS", (0, os.geteuid())):
+            for reader in (E.read_pr, E.read_merge):
+                with self.subTest(reader=reader.__name__), self.assertRaises(E.Unreachable) as c:
+                    reader(t, {}, None)
+                self.assertIn("发布凭据没就绪", str(c.exception))
+            seen, real_run = [], subprocess.run
+
+            def spy(cmd, *a, **kw):
+                seen.append(kw.get("env"))
+                return real_run(cmd, *a, **kw)
+            with mock.patch.object(E.subprocess, "run", side_effect=spy), self.assertRaises(E.Unreachable):
+                E.read_push(t, {}, None)                     # 查远端分支不要令牌：照样去读（测试里不联网，读不到）
+            self.assertEqual(seen[-1]["PATH"], GG.SAFE_PATH)
+            self.assertNotIn("GH_TOKEN", seen[-1])
+            token = "ghp_" + "Q1w2E3r4T5" * 3 + "y6U7i8"
+            (home / ".dt").mkdir(mode=0o700)
+            (home / ".dt/github-publish.token").write_text(token)
+            os.chmod(home / ".dt/github-publish.token", 0o600)
+            ours = {"number": 3, "url": "u", "state": "OPEN", "baseRefName": "main", "headRefName": t["branch"],
+                    "headRefOid": "h", "isCrossRepository": False, "headRepository": {"name": "r"},
+                    "headRepositoryOwner": {"login": "o"}}
+            gh.write_text(f"#!/bin/sh\nenv | cut -d= -f1 | sort > '{root}/envnames'\n"
+                          f"printf '%s' \"$*\" > '{root}/args'\necho '{json.dumps([ours])}'\n")
+            gh.chmod(0o755)
+            self.assertEqual(E.read_pr(t, {}, None), ("done", {"pr": "u", "number": 3}))
+        names = (root / "envnames").read_text().split()
+        self.assertIn("GH_TOKEN", names)
+        self.assertFalse([n for n in names if "proxy" in n.lower()])
+        self.assertNotIn(token, (root / "args").read_text())
 
     def test_read_merge(self):
         t = {"github": "o/r", "number": 3, "head": "h"}

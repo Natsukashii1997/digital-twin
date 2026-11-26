@@ -139,7 +139,7 @@ def call_window(url, token_file, data=None, timeout=30):
 
 def read_snapshot():
     url = window("DT_READONLY_URL")
-    return call_window(url + "/v1/snapshot", R.token_file()) if url else R.read()
+    return R.fetch(url) if url else R.read()
 
 
 # ---------- 看卡、分类 ----------

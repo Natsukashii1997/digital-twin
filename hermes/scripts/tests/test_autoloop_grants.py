@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -30,7 +31,7 @@ import autoloop_config as C  # noqa: E402
 import autoloop_exits as E  # noqa: E402
 import autoloop_grants as G  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
-from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
+from prod_guard import sandbox_env, setUpModule, tearDownModule  # noqa: E402,F401
 
 OWNER = "ou_fixture_owner_0001"
 CHAT = "oc_fixture_p2p_0001"
@@ -52,6 +53,105 @@ def hub(*pairs):
 
 def down(body):
     raise G.Rejected("连不上中台")
+
+
+class InstalledRoster(unittest.TestCase):
+    """#316：复制到临时家目录的安装位置，实际起子进程；不读本机名册、不连中台。"""
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="dt-installed-roster-")
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.home = self.root / "home"
+        self.scripts = self.home / ".hermes/scripts"
+        self.scripts.mkdir(parents=True)
+        for name in ("autoloop_grants.py", "autoloop_config.py", "twin_identity.py", "hub_listener.py"):
+            shutil.copy2(HERE.parent / name, self.scripts / name)
+        self.roster = self.home / "Documents/ChatGPT/个人/work/digital-twin/projects.json"
+        self.scope = self.root / "五要素.md"
+        self.scope.write_text(SCOPE, encoding="utf-8")
+        self.env = {**os.environ, **sandbox_env(self.root), "HOME": str(self.home)}
+        self.env.pop("DT_ROSTER", None)
+        self.env.pop("PYTHONPATH", None)
+
+    def run_python(self, *args):
+        return subprocess.run([sys.executable, "-B", *args], cwd=self.scripts, env=self.env,
+                              capture_output=True, text=True, timeout=15)
+
+    def propose(self):
+        return self.run_python(str(self.scripts / "autoloop_grants.py"), "propose", "--repo", "not-listed",
+                               "--executor", "codex", "--scope-file", str(self.scope))
+
+    def test_default_reads_main_repo_roster_instead_of_home_roster(self):
+        self.roster.parent.mkdir(parents=True)
+        self.roster.write_text(json.dumps({"projects": [], "inventory": [
+            {"sandbox": True, "path": "github:o/dt-sandbox"}]}), encoding="utf-8")
+        (self.home / "projects.json").write_text("{}", encoding="utf-8")   # 旧默认位置的干扰文件
+        r = self.run_python("-c", "import autoloop_grants as G, autoloop_config as C, json; "
+                            "print(json.dumps([str(G.ROSTER), G.allowed_repos(), C.sandbox_repos()]))")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [str(self.roster), {"dt-sandbox": "o/dt-sandbox"},
+                                               {"dt-sandbox": "o/dt-sandbox"}])
+        r = self.propose()
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("not-listed 不在名册", json.loads(r.stdout)["why"])
+
+    def test_missing_default_roster_rejects_cli_without_traceback(self):
+        r = self.propose()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stderr, "")
+        out = json.loads(r.stdout)
+        self.assertFalse(out["ok"])
+        self.assertIn(str(self.roster), out["why"])
+        self.assertIn("DT_ROSTER", out["why"])
+        self.assertEqual(len(r.stdout.splitlines()), 1)
+        self.assertFalse(Path(self.env["DT_GRANTS_DB"]).exists())
+
+    def test_explicit_roster_still_overrides_default(self):
+        explicit = self.root / "指定名册.json"
+        explicit.write_text('{"inventory": [{"sandbox": true, "path": "github:o/explicit"}]}', encoding="utf-8")
+        self.env["DT_ROSTER"] = str(explicit)
+        r = self.run_python("-c", "import autoloop_grants as G, json; print(json.dumps(G.allowed_repos()))")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"explicit": "o/explicit"})
+
+    def test_bad_roster_rejects_propose_without_traceback(self):
+        self.roster.parent.mkdir(parents=True)
+        for data, error in ((b"{broken", "JSONDecodeError"), (b"\xff", "UnicodeDecodeError")):
+            with self.subTest(error=error):
+                self.roster.write_bytes(data)
+                r = self.propose()
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stderr, "")
+                out = json.loads(r.stdout)
+                self.assertFalse(out["ok"])
+                self.assertIn(error, out["why"])
+                self.assertIn(str(self.roster), out["why"])
+                self.assertIn("DT_ROSTER", out["why"])
+
+    def test_unreadable_roster_rejects_propose_without_traceback(self):
+        self.roster.mkdir(parents=True)    # 用目录稳定复现读不了文件，不依赖运行账号的权限
+        r = self.propose()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stderr, "")
+        self.assertIn("IsADirectoryError", json.loads(r.stdout)["why"])
+
+    def test_config_plan_reports_roster_errors_without_traceback(self):
+        hub_home = Path(self.env["AGENT_AUTOLOOP_HOME"])
+        hub_home.mkdir(parents=True)
+        (hub_home / "rules.json").write_text("{}", encoding="utf-8")
+        for data in (None, b"{broken"):
+            with self.subTest(data=data):
+                if data is not None:
+                    self.roster.parent.mkdir(parents=True)
+                    self.roster.write_bytes(data)
+                r = self.run_python("-c", "import autoloop_config as C, sys; "
+                                    "C.owner_open_id = lambda: 'ou_fixture_owner'; sys.exit(C.main(['plan']))")
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stderr, "")
+                out = json.loads(r.stdout)
+                self.assertFalse(out["ok"])
+                self.assertIn(str(self.roster), out["why"])
+                self.assertIn("DT_ROSTER", out["why"])
 
 
 class Base(unittest.TestCase):
@@ -521,6 +621,24 @@ class RecoveryGate(Base):
     """批 0D：恢复闸关着时不提议（不发确认消息）、不往中台发事件；事件留在账里，开闸后补发；冻结照常立刻生效。"""
     def closed(self):
         return mock.patch.object(R, "ensure_open", side_effect=E.Refused("恢复闸关着：电脑睡醒过，要先对账"))
+
+    def test_maintenance_propose_reports_no_registration(self):
+        scope = self.root / "五要素.md"
+        scope.write_text(SCOPE, encoding="utf-8")
+        output = io.StringIO()
+        with mock.patch.object(R, "ensure_open", side_effect=E.Refused("维护停写中")), \
+                mock.patch("sys.stdout", output):
+            code = G.main(["propose", "--repo", "dt-sandbox", "--executor", "claude", "--scope-file", str(scope)])
+        self.assertEqual(code, 1)
+        out = json.loads(output.getvalue())
+        self.assertFalse(out["ok"])
+        self.assertIn("维护停写中", out["why"])
+        self.assertIn("未登记提议", out["why"])
+        self.assertIn("未记派单事件", out["why"])
+        self.assertIn("开闸后重新提议", out["why"])
+        self.assertNotIn("事件已记账", out["why"])
+        self.assertNotIn("send-pending", out["why"])
+        self.assertFalse(self.db.exists())
 
     def test_closed_gate_blocks_propose_and_send_but_keeps_events(self):
         with self.closed():
@@ -1096,6 +1214,48 @@ class Cli(Base):
     def test_no_cli_entry_for_resolution(self):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             G.main(["record-resolution", "--task", "t-20261117-000000"])
+
+
+class GenerationBoundary(Base):
+    """#320（常浩 2026-11-24 选甲）：凭证库记已发布的头提交，第 g 代的边界 = 更旧代次最后推出去的那个；镜像带出边界。"""
+    H1, H2, H3 = "1" * 40, "2" * 40, "3" * 40
+
+    def test_boundary_is_last_head_published_by_an_older_generation(self):
+        tid = self.new_task()
+        self.assertIsNone(self.mirror()[tid]["boundary"])                  # 第 1 代：从基线起
+        G.record_published(tid, 1, self.H1, now=T0)
+        G.record_published(tid, 1, self.H2, now=T0)
+        self.assertEqual(G.record_published(tid, 1, self.H2, now=T0)["new"], False)   # 同一个头提交只记一次
+        self.assertIsNone(self.mirror()[tid]["boundary"])                  # 第 1 代自己推的不算第 1 代的边界
+        code = G.freeze(tid, "推翻", now=T0)["freeze_code"]
+        self.unfreeze_ok(tid, code)
+        self.assertEqual(self.mirror()[tid]["boundary"], self.H2)          # 第 2 代从第 1 代最后推出去的起
+        G.record_published(tid, 2, self.H3, now=T0)
+        with G.tx() as con:
+            self.assertEqual(G.boundary(con, tid, 2), self.H2)
+            self.assertEqual(G.boundary(con, tid, 3), self.H3)
+
+    def test_record_rejects_bad_input_and_unknown_task(self):
+        tid = self.new_task()
+        for head, gen in (("abc", 1), ("A" * 40, 1), (self.H1, 0), (self.H1, True)):
+            with self.subTest(head=head, gen=gen), self.assertRaises(G.Rejected):
+                G.record_published(tid, gen, head, now=T0)
+        with self.assertRaises(G.Rejected):
+            G.record_published("t-20260101-abcdef", 1, self.H1, now=T0)
+
+    def test_version_3_database_is_upgraded_in_place(self):
+        """dt-gate 里在用的第 3 版凭证库原地加表升到第 4 版，原有凭证不动；更旧的照旧拒用。"""
+        tid = self.new_task()
+        self.sql("DROP TABLE published_heads")
+        self.sql("PRAGMA user_version = 3")
+        before = self.sql("SELECT * FROM grants")
+        self.assertEqual(G.show(tid)[0]["status"], "active")
+        self.assertEqual(self.sql("PRAGMA user_version")[0][0], 4)
+        self.assertEqual(self.sql("SELECT * FROM grants"), before)
+        G.record_published(tid, 1, self.H1, now=T0)
+        self.sql("PRAGMA user_version = 2")
+        with self.assertRaisesRegex(G.Rejected, "第 2 版"):
+            G.show(tid)
 
 
 if __name__ == "__main__":
