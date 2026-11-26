@@ -50,6 +50,9 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 
   autoloop_publish.py publish --task t-20261118-abcdef
   autoloop_publish.py scan                 只读：列交接目录里的单和各自能不能发
+  autoloop_publish.py watch [--interval 60] [--once]
+                                         常驻（dt-gate 的服务 cn.digital-twin.gate.publisher）：每隔一会儿扫一遍，
+                                         scan 判「可以发」、这个头提交还没处理过的逐张 publish；真发布开关关着就只睡觉
 环境变量：DT_PUBLISH_OUTBOX（交接目录，默认 /Users/dt-worker/dt-outbox）、DT_PUBLISH_MIRRORS（主账号的裸仓库副本）、
 DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://github.com/<仓库>.git、gh 固定 root 副本
 （gate_github.GH），都不能用环境变量改（测试在进程内换 TEST_BACKEND）。
@@ -612,13 +615,94 @@ def scan(now=None, path=None):
     return out
 
 
+def _done_path():
+    return log_path().parent / "publish-watch-done.json"
+
+
+def _load_done():
+    try:
+        d = json.loads(_done_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_done(d):
+    p = _done_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def watch_once(now=None, path=None):
+    """扫一遍：开关开着时，把 scan 判「可以发」、这个头提交还没处理过的单逐张发布。
+    发成了、拒发了都记进 publish-watch-done.json（按单号 → 头提交），同一个头提交不再试；出错（超时、跑不起来）不记，下一轮再试，
+    真推过、结果不明的由出口账本挡住（再试会被拒、随后记成处理过）。返回这一轮处理了哪些单。"""
+    require_gate()
+    try:
+        require_publish_enabled()
+    except Rejected:
+        return []                                            # 开关关着：什么都不做
+    done, out = _load_done(), []
+    for item in scan(now=now, path=path):
+        if item.get("check") != "可以发":
+            continue
+        tid = item["task_id"]
+        try:
+            head = read_manifest(tid)["head"]
+        except Rejected:
+            continue
+        if done.get(tid) == head:
+            continue
+        try:
+            res = publish(tid, now=now, path=path)
+            entry = {"task_id": tid, "ok": True, "pr": res.get("pr")}
+        except (Rejected, G.Rejected) as e:
+            with contextlib.suppress(OSError):
+                record({"what": "拒发", "task_id": tid, "reason": str(e), "by": "watch"})
+            entry = {"task_id": tid, "ok": False, "reason": str(e)}
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            with contextlib.suppress(OSError):
+                record({"what": "出错", "task_id": tid, "reason": GG.mask(str(e))[:300], "by": "watch"})
+            out.append({"task_id": tid, "ok": False, "retry": True})
+            continue
+        done[tid] = head
+        _save_done(done)
+        out.append(entry)
+    return out
+
+
+def watch(interval=60):
+    import time
+    while True:
+        try:
+            for r in watch_once():
+                print(json.dumps({"at": G.iso(G.now_tz()), **r}, ensure_ascii=False), flush=True)
+        except Exception as e:                               # 常驻：一轮出错只记一行，下一轮照跑
+            print(json.dumps({"at": G.iso(G.now_tz()), "error": f"{type(e).__name__}: {GG.mask(str(e))[:300]}"},
+                             ensure_ascii=False), flush=True)
+        time.sleep(interval)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="受信发布（最小版）：取 dt-worker 的交接包，核凭证后推非 main 分支、开 PR")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("publish")
     p.add_argument("--task", required=True)
     sub.add_parser("scan")
+    w = sub.add_parser("watch")
+    w.add_argument("--interval", type=int, default=60)
+    w.add_argument("--once", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd == "watch":
+        if a.once:
+            print(json.dumps({"ok": True, "result": watch_once()}, ensure_ascii=False, indent=1))
+            return 0
+        watch(max(10, a.interval))
+        return 0
     try:
         out = publish(a.task) if a.cmd == "publish" else scan()
     except (Rejected, G.Rejected) as e:
