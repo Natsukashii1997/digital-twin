@@ -32,7 +32,7 @@ metadata:
 
 逐条看推荐要做什么：
 
-1. **要 Claude / Codex 在仓库里做的**（变基、返修、补测试、写文档、核对、出小结）：读 `report` 里第三段这条的来龙去脉和 `sources`，按 workshop 技能第 1 节写任务说明（五要素齐全，车间看不到日报和你们的对话）。推荐写了谁做就用谁，没写就不带 `--tool`。
+1. **要 Claude / Codex 在仓库里做的**（变基、返修、补测试、写文档、核对、出小结）：读 `report` 里第三段这条的来龙去脉和 `sources`，先读 `skill_view(name="dt-shared-reference", file_path="references/task-brief.md")`，按共享模块核来源、过滤材料、写任务说明并逐项检查（车间看不到日报和你们的对话）；读不到模块或缺项、信息边界核不清，不新建单、不启动工人；保留日报日期、编号、拍板账号和 `sources` 作为原任务与上下文的关联。推荐写了谁做就用谁，没写就不带 `--tool`。
    - 开单：`D new --project <项目 id> [--tool claude|codex] --mode read|write --task-file <文件>`。这次点击 / 回复就是写入单的确认，**不再发「待确认派单」**，直接开跑（workshop 第 3 节，后台 `D run <单号>`）。
    - 一条推荐涉及多个项目，每个项目一张单；同一时间最多 2 张在跑，其余排队，按 workshop 的规矩。
    - 开单后马上记：`A done --entry <拍板账号> --result "<一句话：派了什么>" --order <单号>`；多张单就记多次。
