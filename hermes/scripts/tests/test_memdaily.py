@@ -529,6 +529,94 @@ class MonthlyDocs(unittest.TestCase):
         self.assertIn("4 万块上限", str(e.exception))
         self.assertEqual(run.created, [])
 
+    def test_continuation_limit_reports_chinese_error_and_stops_after_one_retry(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"}]})
+        run = Docs(counts={"NOV": 100}, limit_on={"NOV", "NEW1"})
+        with self.assertRaisesRegex(mp.GenError, "续篇.*4 万块上限.*没写进去.*不再重试"):
+            mp.write("2026-11-16", run=run)
+        self.assertEqual(self.updates(run), ["NOV", "NEW1"])
+        self.assertEqual(len(run.created), 1)
+        self.assertFalse(mp.paths("2026-11-16")["delivery.json"].exists())
+
+    def test_existing_day_in_nearly_full_month_does_not_open_continuation(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"}]})
+        old_xml = "<h2>📅 2026-11-16（周一）</h2><p>已写过</p>"
+        run = Docs(docs={"NOV": {"md": "", "xml": old_xml}}, counts={"NOV": 35999})
+        self.assertEqual(mp.write("2026-11-16", run=run), "exists")
+        self.assertEqual((run.created, self.updates(run)), ([], []))
+        self.assertEqual(run.docs["NOV"]["xml"], old_xml)
+
+    def test_incomplete_block_count_stops_before_creating_or_writing(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"}]})
+        run = Docs()
+
+        def incomplete(*args, **kw):
+            if args[:2] == ("api", "GET"):
+                return {"items": [{}], "has_more": True}
+            return run(*args, **kw)
+
+        with self.assertRaisesRegex(mp.GenError, "块数.*没读全"):
+            mp.write("2026-11-16", run=incomplete)
+        self.assertEqual((run.created, self.updates(run)), ([], []))
+        self.assertFalse(mp.paths("2026-11-16")["delivery.json"].exists())
+
+    def test_block_count_reads_all_pages_before_opening_continuation(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"}]})
+        run, pages = Docs(), []
+
+        def paged(*args, **kw):
+            if args[:2] == ("api", "GET"):
+                params = json.loads(args[args.index("--params") + 1])
+                if params["page_size"] == 500:
+                    page = int(params.get("page_token", "0"))
+                    pages.append(page)
+                    return {"items": [{}] * 500, "has_more": page < 71, "page_token": str(page + 1)}
+            return run(*args, **kw)
+
+        self.assertEqual(mp.write("2026-11-16", run=paged), "written")
+        self.assertEqual(pages, list(range(72)))  # 36,000 块，不能只数第一页的 500 块
+        self.assertEqual(self.updates(run), ["NEW1"])
+
+    def test_invalid_block_pages_never_allow_a_write(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"}]})
+        for page in (None, {}, {"items": [], "has_more": "false"},
+                     {"items": {}, "has_more": False},
+                     {"items": [], "has_more": True, "page_token": "same"}):
+            with self.subTest(page=page):
+                run = Docs()
+
+                def broken(*args, **kw):
+                    if args[:2] == ("api", "GET"):
+                        return page
+                    return run(*args, **kw)
+
+                with self.assertRaises(mp.GenError):
+                    mp.write("2026-11-16", run=broken)
+                self.assertEqual((run.created, self.updates(run)), ([], []))
+
+    def test_existing_day_in_earlier_continuation_is_not_written_again(self):
+        md.save_registry({"folder": "", "docs": [md.legacy(),
+            {"token": "NOV", "title": "t", "month": "2026-11"},
+            {"token": "NOV2", "title": "t2", "month": "2026-11"}]})
+        run = Docs(docs={"NOV": {"md": "", "xml": "<h2>📅 2026-11-16（周一）</h2>"}})
+        self.assertEqual(mp.write("2026-11-16", run=run), "exists")
+        self.assertEqual((run.created, self.updates(run)), ([], []))
+
+    def test_month_changes_follow_report_date_and_keep_previous_month_untouched(self):
+        run = Docs()
+        self.assertEqual(mp.write("2026-11-16", run=run), "written")
+        november_xml = run.docs["NEW1"]["xml"]
+        mp.build("2026-12-01", collect=lambda d: dict(facts(), work_lines=["定价"], date=d.isoformat(), title=f"📅 {md.wd(d)}"),
+                 gen=lambda t, w: (json.dumps(good_draft(), ensure_ascii=False), "s", "m"))
+        self.assertEqual(mp.write("2026-12-01", run=run), "written")
+        self.assertEqual(run.created, [("NEW1", "常浩-记忆日报汇总 · 2026-11"), ("NEW2", "常浩-记忆日报汇总 · 2026-12")])
+        self.assertEqual(run.docs["NEW1"]["xml"], november_xml)
+        self.assertTrue(run.docs["NEW2"]["xml"].startswith("<h2>📅 2026-12-01（周二）</h2>"))
+        self.assertEqual([(x["token"], x["month"]) for x in md.load_registry()["docs"]],
+                         [(md.DOC, None), ("NEW1", "2026-11"), ("NEW2", "2026-12")])
+        self.assertEqual(mp.write("2026-11-16", run=run), "exists")
+        self.assertEqual(self.updates(run), ["NEW1", "NEW2"])
+
     def test_collect_reads_month_doc_then_falls_back_to_legacy(self):
         md.save_registry({"folder": "", "docs": [md.legacy(), {"token": "NOV", "title": "t", "month": "2026-11"},
                                                  {"token": "DEC", "title": "t", "month": "2026-12"}]})
