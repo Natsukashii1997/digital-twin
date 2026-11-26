@@ -211,7 +211,7 @@ class OnlyNonMain(PublishBase):
     def test_base_not_on_main_is_refused(self):
         tid = self.worked()
         head = self.handoff(tid)["head"]
-        self.rewrite_manifest(tid, base=head)                                     # 基线写成自己的提交
+        self.rewrite_manifest(tid, base=head, gen_base=head)                      # 基线（连同本代起点）写成自己的提交
         self.rejects(tid, "基线不是 main 上的提交")
 
     def test_symlinked_manifest_is_refused(self):
@@ -363,6 +363,88 @@ class GrantAtPublish(PublishBase):
         self.assertEqual((item["task_id"], item["check"]), (tid, "可以发"))
         self.assertIsNone(self.remote_branch(tid))
         self.assertEqual(self.gh_calls(), [])
+
+
+class GenerationBoundaryAtPublish(PublishBase):
+    """#320（常浩 2026-11-24 选甲）：冻结后作废代次的提交不能经新代次发布进 PR；冻结前已推出去的照常保留。"""
+    def remote_commits(self, tid):
+        m = self.handoff(tid)
+        return git("rev-list", f"{m['base']}..refs/heads/claude/{tid}", cwd=self.remote).split()
+
+    def test_late_commit_of_voided_generation_never_reaches_new_generation_pr(self):
+        """issue #320 原场景：第 1 代在途事件在冻结后、镜像刷新前到，工人照旧开工、在分支上留下提交；
+        第 2 代接着做、发布——PR 里有冻结前推出去的第 1 代提交，没有晚到的那个。"""
+        tid = self.worked()
+        h1 = P.publish(tid)["head"]                                              # 第 1 代冻结前推出去
+        stale = self.status.read_text()
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        fresh = self.status.read_text()
+        self.status.write_text(stale)                                             # 镜像没刷新时第 1 代事件晚到
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=1, kind="redispatch")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        late = self.handoff(tid)["head"]
+        self.assertNotEqual(late, h1)
+        self.rejects_keeping_remote(tid, "第 1 代已作废")
+        self.status.write_text(fresh)
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        m = self.handoff(tid)
+        self.assertEqual((m["generation"], m["gen_base"]), (2, h1))
+        out = P.publish(tid)
+        self.assertTrue(out["pushed"])
+        commits = self.remote_commits(tid)
+        self.assertIn(h1, commits)                                                # 冻结前的第 1 代提交照常保留
+        self.assertNotIn(late, commits)                                           # 晚到的第 1 代提交不进 PR
+        self.assertEqual(commits[0], m["head"])
+        with G.tx() as con:
+            self.assertEqual(G.boundary(con, tid, 3), m["head"])                  # 记下了，下一代从这里起
+
+    def test_start_point_other_than_boundary_is_refused(self):
+        """旧版启动脚本没退回边界（或清单被改）：本代起点不等于边界就不发，交常浩。"""
+        tid = self.worked()
+        h1 = P.publish(tid)["head"]
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        head = self.handoff(tid)["head"]
+        self.rewrite_manifest(tid, gen_base=head)
+        self.rejects_keeping_remote(tid, "不是代次边界", h1)
+        m = self.handoff(tid)
+        self.rewrite_manifest(tid, gen_base=h1, schema=1)                         # 字段和版本号对不上
+        self.rejects_keeping_remote(tid, "交接清单的字段不对", h1)
+        legacy = {k: v for k, v in m.items() if k != "gen_base"}
+        (self.outbox / tid / "handoff.json").write_text(json.dumps({**legacy, "schema": 1}))
+        self.rejects_keeping_remote(tid, "只认第 1 代", h1)                         # 旧格式清单不能用在第 2 代
+
+    def test_unpublished_work_before_freeze_is_not_carried_over(self):
+        """甲的代价（常浩知情）：冻结前做完但没推出去的第 1 代改动不带进第 2 代，留在工人那边的备份引用里。"""
+        tid = self.worked()
+        g1 = self.handoff(tid)["head"]
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        P.publish(tid)
+        self.assertNotIn(g1, self.remote_commits(tid))
+        backups = git("for-each-ref", "--format=%(objectname)", f"refs/dt-voided/{tid}/", cwd=self.wt(tid)).split()
+        self.assertEqual(backups, [g1])
+
+    def test_first_generation_old_format_manifest_still_publishes(self):
+        """旧版启动脚本写的第 1 版清单（11-24 第 1 单就是）：第 1 代照常发，起点当基线。"""
+        tid = self.worked()
+        m = self.handoff(tid)
+        (self.outbox / tid / "handoff.json").write_text(
+            json.dumps({**{k: v for k, v in m.items() if k != "gen_base"}, "schema": 1}))
+        self.assertTrue(P.publish(tid)["pushed"])
+
+    def rejects_keeping_remote(self, tid, words, remote=None):
+        before = self.remote_branch(tid)
+        with self.assertRaises(P.Rejected) as c:
+            P.publish(tid)
+        self.assertIn(words, str(c.exception))
+        self.assertEqual(self.remote_branch(tid), before)
+        if remote:
+            self.assertEqual(before, remote)
 
 
 class History(PublishBase):

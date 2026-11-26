@@ -2,7 +2,9 @@
 # 数字分身 0A（digital-twin#190）：在「工人账号」dt-worker 里运行一次。
 # 用法：登录 dt-worker 后打开「终端」，粘贴：  bash /Users/Shared/dt-autoloop/setup-dt-worker.sh
 # 做的事：装 Node 24 和 Claude 命令行、登录 Claude / Codex（浏览器里点确认）、
+#         给后台用的 Claude 长期令牌（没登录 dt-worker 时钥匙串打不开，接单程序改成系统服务后靠它，常浩 11-24 选甲）、
 #         把这个账号接到主账号的中台上（只拿接单密钥，不拿 GitHub 写凭据）、建派单工作目录和交接目录（0C）。
+# 令牌过期（一年）或要换：删掉 ~/.dt/claude-oauth-token 再跑一次。
 # 可以重复跑：已经做过的步骤会跳过。
 set -euo pipefail
 
@@ -64,16 +66,62 @@ say "登录 Claude：浏览器里点确认"
 claude auth status 2>/dev/null | grep -q '"loggedIn": *true' || claude auth login
 say "登录 Codex：终端会显示一个网址和一串验证码，在任意浏览器打开网址、填入验证码"
 "$CODEX" login status >/dev/null 2>&1 || "$CODEX" login --device-auth
+[ -f ~/.codex/auth.json ] || echo "[注意] Codex 的登录不在 ~/.codex/auth.json：没登录 dt-worker 时可能读不到，回到 Claude 会话说一声"
+
+# 4b. 给后台用的 Claude 长期令牌：接单程序是开机自起的系统服务，dt-worker 没登录时登录钥匙串是锁着的，
+#     claude 读不到浏览器登录的凭据；setup-token 出的令牌存成只有本账号能读的文件，claude-proxy.sh 读它
+TOKEN_DIR="$HOME/.dt"
+TOKEN_FILE="$TOKEN_DIR/claude-oauth-token"
+# 先核目录和文件，再写任何东西（#382 L3 第 2 轮 P2-07）：~/.dt 要是本账号的真目录、不是链接，
+# 令牌文件和临时文件都不能是链接，令牌文件有的话要是普通文件
+[ -L "$TOKEN_DIR" ] && stop "$TOKEN_DIR 是链接，不对；删掉后重跑这个脚本。"
+if [ -e "$TOKEN_DIR" ]; then
+  [ -d "$TOKEN_DIR" ] || stop "$TOKEN_DIR 不是目录；删掉后重跑这个脚本。"
+else
+  mkdir -m 700 "$TOKEN_DIR"
+fi
+{ [ -d "$TOKEN_DIR" ] && [ ! -L "$TOKEN_DIR" ] && [ -O "$TOKEN_DIR" ]; } || stop "$TOKEN_DIR 不是本账号的目录；删掉后重跑这个脚本。"
+chmod 700 "$TOKEN_DIR"
+{ [ -L "$TOKEN_FILE" ] || [ -L "$TOKEN_FILE.tmp" ]; } && stop "$TOKEN_FILE（或 .tmp）是链接，不对；删掉后重跑这个脚本。"
+{ [ ! -e "$TOKEN_FILE" ] || [ -f "$TOKEN_FILE" ]; } || stop "$TOKEN_FILE 不是普通文件；删掉后重跑这个脚本。"
+if [ -s "$TOKEN_FILE" ]; then
+  echo "Claude 长期令牌已经有了，跳过（过期或要换就删掉 $TOKEN_FILE 再跑）。"
+else
+  say "给后台用的 Claude 长期令牌：浏览器里点确认，终端最后会显示一串 sk-ant-oat 开头的令牌"
+  "$CLAUDE" setup-token
+  printf '\n把上面那串令牌粘贴到这里，回车（屏幕上不显示）：'
+  IFS= read -rs tok
+  echo
+  tok=$(printf '%s' "$tok" | tr -d '[:space:]')
+  case $tok in
+    sk-ant-oat*) ;;
+    *) unset tok; stop "这不像 Claude 的长期令牌（应以 sk-ant-oat 开头），没保存。重跑这个脚本再试。" ;;
+  esac
+  rm -f "$TOKEN_FILE.tmp"
+  # set -C：临时文件已经在（包括别人刚放的链接）就不写
+  ( umask 077; set -C; printf '%s\n' "$tok" > "$TOKEN_FILE.tmp" ) || { unset tok; stop "写不进 $TOKEN_FILE.tmp，没保存。"; }
+  unset tok
+  chmod 600 "$TOKEN_FILE.tmp"
+  mv -f "$TOKEN_FILE.tmp" "$TOKEN_FILE"
+  echo "已存到 $TOKEN_FILE（只有本账号能读）"
+fi
+# 每次都重核（已有的文件也核，第 1 轮 P2-04）：令牌是普通文件、不是链接，文件 600
+{ [ -f "$TOKEN_FILE" ] && [ ! -L "$TOKEN_FILE" ]; } || stop "$TOKEN_FILE 不是普通文件；删掉后重跑这个脚本。"
+chmod 600 "$TOKEN_FILE"
 
 # 5. 给中台用的启动脚本：先补代理再启动（后台读不到终端设置）
 mkdir -p -m 700 ~/.agent-autoloop/bin
 for pair in "claude:$CLAUDE" "codex:$CODEX"; do
   name=${pair%%:*}; real=${pair#*:}
+  token_line=""
+  # claude：有长期令牌就用它（系统服务里没有图形会话、钥匙串锁着）；没有就照旧读钥匙串
+  [ "$name" = claude ] && token_line='[ -r "$HOME/.dt/claude-oauth-token" ] && { CLAUDE_CODE_OAUTH_TOKEN=$(cat "$HOME/.dt/claude-oauth-token"); export CLAUDE_CODE_OAUTH_TOKEN; }'
   cat > ~/.agent-autoloop/bin/$name-proxy.sh <<EOF
 #!/bin/sh
 export HTTPS_PROXY=$PROXY HTTP_PROXY=$PROXY NO_PROXY=localhost,127.0.0.1,::1,.local
 export https_proxy=$PROXY http_proxy=$PROXY no_proxy=localhost,127.0.0.1,::1,.local
 export PATH="$(dirname "$real"):\$PATH"
+$token_line
 exec "$real" "\$@"
 EOF
   chmod 700 ~/.agent-autoloop/bin/$name-proxy.sh
@@ -106,9 +154,10 @@ chmod 755 ~/dt-outbox
 # 7. 收尾核对
 say "核对"
 ~/.agent-autoloop/app/bin/agent-autoloop.ts --version || true
-claude auth status 2>/dev/null | grep -E '"loggedIn"' || true
+~/.agent-autoloop/bin/claude-proxy.sh auth status 2>/dev/null | grep -E '"loggedIn"' || true
+[ -s ~/.dt/claude-oauth-token ] && echo "Claude 长期令牌：已存（系统服务没登录时用它）"
 "$CODEX" login status 2>&1 | head -1 || true
 [ -e "$S/handoff/worker.key" ] && echo "交接密钥文件还在（没删掉）" || echo "交接密钥文件已删除"
 [ -d ~/dt-work/dt-sandbox ] && [ -d ~/dt-outbox ] && echo "派单工作目录 ~/dt-work、交接目录 ~/dt-outbox：已建"
 grep -q '127.0.0.1:8090' ~/.zprofile ~/.agent-autoloop/bin/claude-proxy.sh && echo "上网出口：过滤代理 8090"
-printf '\n全部做完了。回到 Claude 会话说「做好了」。\n'
+printf '\n全部做完了。点苹果菜单 → 注销 dt-worker，回到主账号装接单程序的系统服务（ops/dt_worker_service.py install）。\n'

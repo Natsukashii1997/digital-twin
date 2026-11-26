@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import memdaily_data as md  # noqa: E402
+import lark_pages  # noqa: E402  数块同样必须确认翻到底，不能拿部分结果判断容量
 
 DIR = md.DT_HOME / "memdaily"
 TEMPLATE = Path(os.environ.get("DT_MEMDAILY_TEMPLATE", DIR / "template-0715.md"))
@@ -34,7 +35,8 @@ BUDGET = int(os.environ.get("DT_MEMDAILY_BUDGET", "1500"))      # 写稿最多�
 REASONING = os.environ.get("DT_MEMDAILY_REASONING", "")          # 空 = 用亚古兽配置（2026-11-11 起 xhigh）
 DOC_URL = "https://vm94j8bzy7.feishu.cn/docx/{}"
 KEEP_BACKUPS = 14
-# 飞书单文档上限 40000 块。列块接口数出的比飞书自己数的少（11-17 实测旧文档差 213 块），留一成余量。
+# 飞书单文档上限 40000 块。留 4000 块（约 3 篇，每篇 800～1300 块）余量；
+# 列块接口数出的比飞书自己数的少（11-17 实测旧文档差 213 块），仍需保留超限后的一次兜底。
 SAFE_BLOCKS = int(os.environ.get("DT_MEMDAILY_SAFE_BLOCKS", "36000"))
 LIMIT_CODE = "DOC_TOTAL_BLOCK_LIMIT"
 
@@ -375,15 +377,12 @@ def estimate_blocks(xml):
 
 
 def count_blocks(doc, run):
-    """列块接口分页数文档现有多少块（2 万块约 40 页）。"""
-    n, token = 0, None
-    while True:
-        params = {"page_size": 500, **({"page_token": token} if token else {})}
-        data = run("api", "GET", f"/open-apis/docx/v1/documents/{doc}/blocks", "--params", json.dumps(params)) or {}
-        n += len(data.get("items") or [])
-        token = data.get("page_token")
-        if not data.get("has_more") or not token:
-            return n
+    """列块接口分页数文档现有多少块（2 万块约 40 页）；没法证明读全就停止写入。"""
+    def fetch(extra):
+        params = {"page_size": 500, **({"page_token": extra[1]} if extra else {})}
+        return run("api", "GET", f"/open-apis/docx/v1/documents/{doc}/blocks", "--params", json.dumps(params))
+
+    return len(lark_pages.read_all(fetch, "读取记忆日报文档块数", GenError, keys=("items",))["items"])
 
 
 def open_doc(reg, month, reason, run, blocks=None):
@@ -425,15 +424,26 @@ def write(d, doc=None, run=md.lark):
     if not p["xml"].exists():
         raise GenError(f"{d} 还没有排好的稿（先跑 build）")
     title = f"📅 {md.wd(dt.date.fromisoformat(d))}"
+    day_head = re.compile(rf"<h2[^>]*>[^<]*{re.escape(d)}")
     need = estimate_blocks(p["xml"].read_text(encoding="utf-8"))
     reg, opened = None, None
+    fetched = {}
     if doc:
         target = {"token": doc, "title": None}
     else:
         reg = md.load_registry()
+        # 先查当月各份文档，再决定是否开续篇；否则接近满额时重跑会把同一天写到新篇。
+        for entry in reversed(reg["docs"]):
+            if entry.get("month") != d[:7]:
+                continue
+            fetched[entry["token"]] = fetch_xml(entry["token"], run)
+            if day_head.search(fetched[entry["token"]]):
+                return "exists"
         target, opened = pick_doc(d, need, run, reg)
-    xml = fetch_xml(target["token"], run)
-    if re.search(rf"<h2[^>]*>[^<]*{re.escape(d)}", xml):
+    xml = fetched.get(target["token"])
+    if xml is None:
+        xml = fetch_xml(target["token"], run)
+    if day_head.search(xml):
         return "exists"
     backup(d, target["token"], xml)
     try:
@@ -445,7 +455,12 @@ def write(d, doc=None, run=md.lark):
             raise GenError(f"文档已到飞书单文档 4 万块上限，整篇没写进去（{e}）")
         # 估算或数块数偏小：飞书整篇拒收，没写进去一半，开续篇再写一次
         target, opened = open_doc(reg, d[:7], "full", run, count_blocks(target["token"], run))
-        insert(target["token"], p, run)
+        try:
+            insert(target["token"], p, run)
+        except md.Fail as retry_error:
+            if LIMIT_CODE not in str(retry_error):
+                raise
+            raise GenError(f"续篇《{target['title']}》仍报飞书单文档 4 万块上限，整篇没写进去，不再重试；请核对稿件块数和文档登记") from retry_error
     issues = verify(target["token"], title, rec.get("tables", 0), run)
     deliv = read_json(p["delivery.json"], {})
     deliv.update({"doc": target["token"], "doc_title": target.get("title"), "opened": opened, "blocks": need,

@@ -44,6 +44,7 @@ import autoloop_recovery as RV  # noqa: E402
 import gate_intake as I  # noqa: E402
 from test_autoloop_grants import CHAT, LATER, T0, Base, hub  # noqa: E402
 from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
+from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 
 SKILL = HERE.parents[1] / "skills/autoloop/SKILL.md"
 SCRIPTS = HERE.parent
@@ -185,7 +186,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                           ("连不上 dt-gate 的窗口", I.propose_dispatch), ("✅ 批准派单", CV.render_grant),
                           ("不同意？· 展开", CV.render_grant),
                           ("还有没确认送到中台的派单事件", G.resume_dispatch), ("另有入口正在处理", G.task_lock),
-                          ("开闸后 send-pending 补发", G.send_pending), ("恢复闸关着", RV.ensure_open),
+                          ("本次未登记提议，也未记派单事件；开闸后重新提议", G.require_recovery), ("恢复闸关着", RV.ensure_open),
                           ("派单事件发出后没确认送到中台", G._stop_after), ("中台库读不了", G.stop_runs)):
             with self.subTest(words=words):
                 self.assertIn(words, self.text)
@@ -225,11 +226,10 @@ class SkillDocMatchesScripts(unittest.TestCase):
         self.assertEqual((I.MAX_SCOPE, I.EXECUTORS), (G.MAX_SCOPE, G.EXECUTORS))            # 窗口先核的形状和网关一致
 
 
-class InstalledLayoutNeedsRosterPrefix(unittest.TestCase):
-    """技能给 G、C 加的 DT_ROSTER 前缀不是摆设：脚本装到 ~/.hermes/scripts/ 之后，默认的名册位置（脚本目录的上上级）
-    没有名册。不打桩 ROSTER，把脚本拷到 <临时目录>/scripts/ 真跑一次。"""
+class InstalledLayoutRoster(unittest.TestCase):
+    """#316：安装副本缺默认名册时明确拒绝；技能中的显式 DT_ROSTER 前缀仍可选定其他名册。"""
 
-    def test_prefix_is_in_the_skill_and_is_what_makes_the_installed_copy_work(self):
+    def test_missing_default_rejects_cleanly_and_skill_prefix_still_works(self):
         text = SKILL.read_text(encoding="utf-8")
         prefix = "DT_ROSTER=$HOME/Documents/ChatGPT/个人/work/digital-twin/projects.json /usr/bin/python3 ~/.hermes/scripts/"
         for script in ("autoloop_grants.py", "autoloop_config.py"):
@@ -245,10 +245,14 @@ class InstalledLayoutNeedsRosterPrefix(unittest.TestCase):
             argv = [sys.executable, "-B", str(root / "scripts/autoloop_grants.py"), "propose", "--repo", "dt-sandbox",
                     "--executor", "claude", "--scope-file", str(scope)]
             env = {k: v for k, v in os.environ.items() if k != "DT_ROSTER"}
+            env["HOME"] = str(root / "home")
             bare = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
-            self.assertNotEqual(bare.returncode, 0)                      # 不带前缀：找不到名册，输出是报错堆栈、不是 JSON
-            self.assertIn("FileNotFoundError", bare.stderr)
-            self.assertEqual(bare.stdout.strip(), "")
+            self.assertEqual(bare.returncode, 1)
+            self.assertEqual(bare.stderr, "")
+            missing = json.loads(bare.stdout)
+            self.assertFalse(missing["ok"])
+            self.assertIn(str(root / "home/Documents/ChatGPT/个人/work/digital-twin/projects.json"), missing["why"])
+            self.assertIn("DT_ROSTER", missing["why"])
             ok = subprocess.run(argv, capture_output=True, text=True, timeout=60, env={**env, "DT_ROSTER": str(roster)})
             self.assertEqual((ok.returncode, json.loads(ok.stdout)),
                              (1, {"ok": False, "why": "dt-sandbox 不在名册能派写入单的仓库里"}))
@@ -354,15 +358,16 @@ class OneSentenceToDispatch(Base):
 
     def test_closed_recovery_gate_is_reported_not_retried(self):
         """批 0D 的恢复闸关着时：提单被拒、原因里有「恢复闸关着」；点卡照样签凭证，但卡上写「还没送到中台」、事件留在账里；
-        开闸后 send-pending 补发。技能第 3、4 节各有一行讲这种情况。"""
+        开闸后 send-pending 补发；提单那半句照实说「本次未登记提议」（#317）。技能第 3、4 节各有一行讲这种情况。"""
         closed = mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：电脑睡醒过，要先对账"))
         with closed:
             code, out = self.propose()
         self.assertEqual((code, out["ok"]), (1, False))
         self.assertIn("恢复闸关着", out["why"])
-        # 网关拒绝语后半句「事件已记账，开闸后 send-pending 补发」对提单不成立（技能第 3 节那行叫猛鬼兽别转）：
-        # 钉住它，网关改了措辞这里会失败，技能那一行要跟着改
-        self.assertIn("事件已记账，开闸后 send-pending 补发", out["why"])
+        # 提单被拒时什么都没登记，拒绝语要照实说（#317；以前写「事件已记账，开闸后 send-pending 补发」，对提单不成立）。
+        # 钉住它，网关改了措辞这里会失败，技能第 3 节那一行要跟着改
+        self.assertIn("本次未登记提议，也未记派单事件；开闸后重新提议", out["why"])
+        self.assertNotIn("事件已记账", out["why"])
         with G.tx() as con:                                    # 真的什么都没登记：没有提议、没有事件
             self.assertEqual([con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("proposals", "hub_events")],
                              [0, 0])

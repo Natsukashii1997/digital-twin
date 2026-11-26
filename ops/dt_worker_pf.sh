@@ -146,6 +146,8 @@ write_rules() {
 }
 
 # 状态文件：一行 key=value，值里不带空格
+# 一定写临时文件再 mv 换掉、不在原文件上改写：工人接单服务（ops/dt_worker_service.py）按状态文件的 inode 认「门卫新发布过」，
+# 改这个写法要先看那边（#382 L3 第 4 轮）
 write_status() {
   # 每一步都查：fail 里是 set +e，重定向失败时不能把上次留下的 .tmp 挪进来（子 agent 审查 P3-3）
   rm -f "$STATUS.tmp" || return 1
