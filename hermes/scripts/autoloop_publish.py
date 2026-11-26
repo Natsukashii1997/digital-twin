@@ -27,6 +27,10 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
   3. 能机械判的发布边界：包里只有本单分支一个引用、头提交对得上；基线是 main 上的提交、头提交从基线长出来；
      不收合并提交；基线到头提交之间的每一个提交、以及最终差异，都不许碰合并规则 merge_rules.json 里的高风险路径
      （.github/、ops/、密钥类……；审查 P1-01：先加后删的历史也算）——碰了就不发、交常浩。
+  3b. 代次边界（#320，常浩 2026-11-24 选甲）：清单第 2 版记这一代的起点 gen_base，必须等于凭证库算出的边界
+     （autoloop_grants.boundary：更旧代次最后推上 GitHub 的头提交；没推过就是基线），且是头提交的祖先——作废代次在冻结之后、
+     镜像还没刷新时做的提交，不会经新代次的发布进 PR。确认远端分支就是这次的头提交后记进凭证库（record_published），
+     下一代的边界从这里算。第 1 版清单（旧启动脚本）只认第 1 代，起点当基线。
   4. 只推非 main：推送目标写死成 refs/heads/<执行方>/<单号>，不带 --force；远端同名分支已有别的提交就不覆盖。
      GitHub 一侧 dt-sandbox 的规则集只放行 main、agent/**、claude/**、codex/**（常浩 11-18 放行，hermes/baselines/dt-sandbox-github.json）。
   5. 同一分支已有开着的 PR，核对它的目标是本仓库 main、来源是本仓库（不是同名 fork 分支）、分支和头提交正是这次的，
@@ -69,7 +73,9 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 BRANCH = re.compile(r"^(claude|codex)/t-\d{8}-[0-9a-f]{6}$")
 KEYS = {"schema", "task_id", "generation", "executor", "repo", "branch", "base", "head", "bundle", "bundle_sha256",
-        "run", "at"}
+        "run", "at"}                                       # 清单第 1 版（#320 之前的启动脚本）：只认第 1 代
+KEYS_V2 = KEYS | {"gen_base"}                              # 第 2 版：多记这一代的起点（#320）
+GENERATION_BOUNDARY = 1         # 发布核「本代起点 = 代次边界」（#320）；dt-gate-hub publish on 认这一行才肯打开真发布
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "transfer.fsckObjects=true",
             "-c", "fetch.fsckObjects=true"]
 RULES = HERE / "merge_rules.json"
@@ -150,12 +156,17 @@ def read_manifest(task_id):
         m = json.loads(raw.decode("utf-8"))
     except ValueError:
         raise Rejected("交接清单不是合法的 JSON")
-    if not isinstance(m, dict) or set(m) != KEYS:
+    if not isinstance(m, dict) or set(m) not in (KEYS, KEYS_V2) or m.get("schema") != (1 if set(m) == KEYS else 2):
         raise Rejected("交接清单的字段不对")
-    ok = (m["schema"] == 1 and m["task_id"] == task_id and type(m["generation"]) is int and m["generation"] >= 1
+    if m["schema"] == 1:                                    # 旧版启动脚本：只有第 1 代，起点就是基线
+        if m["generation"] != 1:
+            raise Rejected("旧格式的交接清单（没记本代起点）只认第 1 代，请用新版启动脚本重跑这一轮")
+        m["gen_base"] = m["base"]
+    ok = (m["task_id"] == task_id and type(m["generation"]) is int and m["generation"] >= 1
           and m["executor"] in G.EXECUTORS and isinstance(m["repo"], str) and G.REPO_NAME.match(m["repo"])
           and m["branch"] == branch_name(m["executor"], task_id) and isinstance(m["base"], str)
           and SHA.match(m["base"]) and isinstance(m["head"], str) and SHA.match(m["head"])
+          and isinstance(m["gen_base"], str) and SHA.match(m["gen_base"])
           and m["bundle"] == f"{task_id}.bundle" and isinstance(m["bundle_sha256"], str)
           and HEX64.match(m["bundle_sha256"]) and isinstance(m["run"], str) and RUN_ID.match(m["run"]))
     if not ok:
@@ -397,8 +408,12 @@ def publish(task_id, now=None, path=None):
             must(task_id, action, gen, now, path)
         with G.tx(path) as con:
             row = dict(G.grant_row(con, task_id))
+            edge = G.boundary(con, task_id, gen)
         if (row["repo"], row["executor"]) != (m["repo"], m["executor"]):
             raise Rejected("交接清单的仓库或执行方和凭证不一致")
+        if m["gen_base"] != (edge or m["base"]):           # 代次边界（#320）：这一代必须从旧代次最后推出去的提交起
+            raise Rejected(f"第 {gen} 代的起点 {m['gen_base'][:12]} 不是代次边界 {(edge or m['base'])[:12]}"
+                           f"（{'旧代次最后推上 GitHub 的头提交' if edge else '基线'}）：分支上可能有作废代次的提交，不发，交常浩")
         github, branch, head, base = row["github"], m["branch"], m["head"], m["base"]
         assert_not_main(branch)
         reason = check_run(m["run"], row, gen)
@@ -421,6 +436,8 @@ def publish(task_id, now=None, path=None):
             raise Rejected("取进来的头提交对不上")
         if not is_ancestor(mirror, base, "refs/remotes/origin/main") or not is_ancestor(mirror, base, head):
             raise Rejected("基线不是 main 上的提交，或头提交不是从基线长出来的")
+        if not is_ancestor(mirror, m["gen_base"], head):
+            raise Rejected("头提交不是从这一代的起点长出来的")
         hits = history_hits(mirror, base, head, row["repo"])
         if hits:
             raise Rejected(f"改动或提交历史碰到高风险路径（{'、'.join(hits[:5])}），不自动发布，交常浩")
@@ -435,6 +452,7 @@ def publish(task_id, now=None, path=None):
                              {"github": github, "remote": url, "branch": branch, "head": head, "before": existing},
                              lambda: push_branch(mirror, url, branch, head))
             pushed = not got["again"]
+        G.record_published(task_id, gen, head, path=path)  # 远端分支现在就是 head：记进凭证库，下一代的边界从这里算（#320）
         pr = exit_guard("open_pr", task_id, gen, branch, head, {"github": github, "branch": branch, "head": head},
                         lambda: _open_pr_once(github, branch, head, row))
         pr = {"pr": pr.get("pr"), "pr_opened": bool(pr.get("pr_opened")) and not pr["again"]}
