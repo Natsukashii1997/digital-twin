@@ -1,14 +1,17 @@
 """隔离自测：python3 -B -m unittest discover -s hermes/scripts/tests -v。
 
 autoloop 技能（#195 批 2 派活入口，hermes/skills/autoloop/SKILL.md）的三类核对：
-  1. 文档对得上脚本：技能里写的每条 G、P 命令都能被命令行解析；技能表格里引用的脚本原话、字段名、卡上的结果字样，
+  0. 搬家后的布局（0E-2）：技能在主账号里只跑 P、W（3353 窄窗口：提单、停、冻、收掉、补发）和 R fetch / R grant
+     （3352 只读窗口、凭证镜像），网关本身（GH = dt-gate-hub run autoloop_grants：续接、查细节）只写成「常浩在电脑上跑」；
+     主账号里搬家前的旧 grants.db 不读；
+  1. 文档对得上脚本：技能里写的每条 GH、P、W 命令都能被命令行解析；技能表格里引用的脚本原话、字段名、卡上的结果字样，
      脚本里（或真实渲染出的确认卡上）确实有；
   2. 五要素文件 → P（客户端 → 真的 3353 窗口 → 网关 propose，0E-3b）→ 门卫发确认卡、常浩点「批准派单」（模拟门卫：
      mark_card + decide，门卫本身见 test_gatekeeper_grants）→ 派单事件发出，以及技能里写了回话的各条岔路
      （名单外、点「不派」、过期、中台连不上后补送、续接、停、冻）。
      「把一句话整理成五要素」是模型做的，这里测不到，从整理好的五要素文件开始；
   3. 端到端：临时目录里起真的 agent-autoloop 中台（同 test_autoloop_hub_e2e 的 HubFixture，本机没有命令行时跳过），
-     按技能第 1 节看通道（暂停不派、没规则不派、没钥匙不派），恢复后派一单，中台里出现这张单的轮次；
+     按技能第 1 节看通道（只读窗口给的快照里：暂停不派、没规则不派），恢复后派一单，中台里出现这张单的轮次；
      提单后通道被暂停，中台收到但没有轮次（技能第 4 节第二步要查出来的情况）；
      续接后按技能第 6 节数这张单的事件条数：通道开着多一条，通道暂停时 sent 是 true 但条数不变。
 凭证库、镜像、任务单、名册、中台都在临时目录；窗口在本进程里起（随机端口）。不碰 DigitalTwin/autoloop/ 和正式中台。
@@ -98,6 +101,26 @@ class Window:
         return code, I.last_json(buf.getvalue())
 
 
+GATE_HUB = HERE.parents[2] / "ops/dt_gate_hub.py"
+GH = 'sudo "/Library/Application Support/DigitalTwin/gate/bin/dt-gate-hub" run autoloop_grants'
+
+
+def w_cli(argv):
+    """像猛鬼兽那样跑一条 W 命令（窄窗口客户端：revoke / freeze / complete / send-pending）：返回 (退出码, 输出的 JSON)。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = I.main(argv)
+    return code, json.loads(buf.getvalue())
+
+
+def r_cli(argv, now=T0):
+    """像猛鬼兽那样跑一条 R 命令（fetch / grant）：返回 (退出码, 输出的 JSON)。"""
+    buf = io.StringIO()
+    with mock.patch.object(G, "now_tz", return_value=now), contextlib.redirect_stdout(buf):
+        code = R.main(argv)
+    return code, json.loads(buf.getvalue())
+
+
 def p_cli(argv):
     """像猛鬼兽那样跑一条 P 命令（客户端）：返回 (退出码, 输出的 JSON)。"""
     buf = io.StringIO()
@@ -113,7 +136,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
     def setUpClass(cls):
         cls.text = SKILL.read_text(encoding="utf-8")
         cls.src = {n: (SCRIPTS / f"{n}.py").read_text(encoding="utf-8")
-                   for n in ("autoloop_grants", "autoloop_config", "autoloop_readonly", "ai_access")}
+                   for n in ("autoloop_grants", "autoloop_readonly", "gate_intake", "ai_access")}
 
     def test_front_matter(self):
         head = self.text.split("---")[1]
@@ -121,24 +144,64 @@ class SkillDocMatchesScripts(unittest.TestCase):
         self.assertIn("related_skills: [workshop, progress, merge-officer]", head)
 
     def test_every_gateway_command_in_the_skill_parses(self):
-        cmds = set(re.findall(r"`(G [a-z-]+[^`]*)`", self.text))
-        cmds |= {line.strip() for line in self.text.splitlines() if re.match(r"^G [a-z-]+", line.strip())}
-        self.assertGreaterEqual(len(cmds), 8, cmds)
+        """网关命令只以 GH（常浩在电脑上跑）出现，每条都能被网关的命令行解析。"""
+        cmds = set(re.findall(r"`(GH [a-z-]+[^`]*)`", self.text))
+        cmds |= {line.strip() for line in self.text.splitlines() if re.match(r"^GH [a-z-]+", line.strip())}
+        self.assertGreaterEqual(len(cmds), 5, cmds)
+        self.assertIn(f"`GH` = `{GH}`", self.text)
         subs = next(a for a in G.build_parser()._actions if a.dest == "cmd").choices
         seen = set()
         for cmd in sorted(cmds):
-            if "--" not in cmd and cmd not in ("G show", "G send-pending"):      # 只是提到名字（如「跑 `G freeze`」）
-                self.assertIn(cmd.split()[1], subs, cmd)
-                continue
             filled = re.sub(r"<[^<>|]*\|[^<>]*>", lambda m: m.group(0)[1:-1].split("|")[0], cmd)   # <a|b> 取第一个
             filled = re.sub(r"<[^<>]*>", "x", filled)
             argv = shlex.split(filled)[1:]
             with self.subTest(cmd=cmd), mock.patch("sys.stderr"):
                 a = G.build_parser().parse_args(argv)          # 解析不了会 SystemExit
                 seen.add(a.cmd)
-        self.assertEqual(seen, {"show", "send-pending", "resume-dispatch", "revoke", "freeze", "complete"})
-        # 提单走 P（下一条测试）；批准没有命令（只认门卫卡上的点击，0E-3b）；放权方向的 unfreeze、出口用的 check 不归技能调
+        self.assertEqual(seen, {"show", "resume-dispatch", "revoke", "freeze", "complete"})   # 后三条是窗口连不上时的退路
+        # 提单走 P、停单走 S；批准没有命令（只认门卫卡上的点击，0E-3b）；放权方向的 unfreeze、出口用的 check 不归技能
         self.assertNotIn("approve", subs)
+
+    def test_the_skill_never_runs_the_gateway_or_hub_config_on_the_main_account(self):
+        """搬家后主账号里的 autoloop_grants.py 读的是旧库、autoloop_config.py 和 R show 连不上：技能里一条都不许当命令写。"""
+        self.assertEqual(re.findall(r"`[GC] [a-z-]+[^`]*`", self.text), [])
+        self.assertEqual([ln for ln in self.text.splitlines() if re.match(r"^[GC] [a-z-]+", ln.strip())], [])
+        self.assertNotIn("DT_ROSTER=", self.text)
+        for line in (ln for ln in self.text.splitlines() if "`R show`" in ln):      # 只在「不要跑」的句子里提到
+            self.assertTrue("不要跑" in line or "跑了" in line, line)
+
+    def test_gh_is_the_root_installed_entry_that_runs_the_gateway_inside_dt_gate(self):
+        """GH 的路径和 dt_gate_hub 一致：gate 根目录下 root 装的入口，run 白名单里有 autoloop_grants，中台命令行放行 stop。"""
+        src = GATE_HUB.read_text(encoding="utf-8")
+        self.assertIn('env_path("DT_GATE_ROOT", "/Library/Application Support/DigitalTwin/gate")', src)
+        self.assertIn('return gate_root() / "bin/dt-gate-hub"', src)
+        tools = re.search(r"^TOOLS = \(([^)]*)\)", src, re.M).group(1)
+        self.assertIn('"autoloop_grants"', tools)
+        cli_allowed = re.search(r"^CLI_ALLOWED = \(([^)]*)\)", src, re.M).group(1)
+        self.assertIn('"stop"', cli_allowed)
+        self.assertIn('dt-gate-hub" run agent-autoloop stop <轮次号>', self.text)
+
+    def test_every_window_command_in_the_skill_parses(self):
+        """W 的四个子命令（常浩 11-24 选甲：停、冻、收掉、补发开窗口，续接不开）都写在技能里、都能被客户端解析。"""
+        self.assertIn("`W` = `/usr/bin/python3 ~/.hermes/scripts/gate_intake.py`", self.text)
+        cmds = set(re.findall(r"`(W [a-z-]+[^`]*)`", self.text))
+        seen = set()
+        for cmd in sorted(cmds):
+            filled = re.sub(r"<[^<>]*>", "x", cmd)
+            argv = shlex.split(filled)[1:]
+            if "--" not in cmd and argv != ["send-pending"]:               # 只是提到名字（如「再跑一次 `W freeze`」）
+                self.assertIn(argv[0], I.TASK_ACTIONS, cmd)
+                continue
+            with self.subTest(cmd=cmd), mock.patch.object(I, "task_action", return_value=(0, {})) as m, \
+                    mock.patch.object(I, "send_pending", return_value=(0, [])), mock.patch("sys.stdout"):
+                self.assertEqual(I.main(argv), 0)
+                seen.add(argv[0])
+                if argv[0] != "send-pending" and len(argv) > 1:
+                    self.assertEqual(m.call_args[0][:2], (argv[0], "x"))
+        self.assertEqual(seen, {"revoke", "freeze", "complete", "send-pending"})
+        self.assertNotIn("W resume-dispatch", self.text)
+        with mock.patch("sys.stderr"), self.assertRaises(SystemExit):        # 续接没有窗口
+            I.main(["resume-dispatch", "--task", "x"])
 
     def test_every_propose_command_in_the_skill_parses(self):
         cmds = set(re.findall(r"`(P [^`]*)`", self.text))
@@ -157,8 +220,12 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 self.assertEqual(m.call_args[0][:2], ("x", "claude"))
 
     def test_other_script_commands_exist(self):
-        for script, sub in (("autoloop_config", "status"), ("autoloop_readonly", "show")):
+        self.assertIn("`R` = `/usr/bin/python3 ~/.hermes/scripts/autoloop_readonly.py`", self.text)
+        for script, sub in (("autoloop_readonly", "fetch"), ("autoloop_readonly", "grant"), ("gate_intake", "send-pending")):
             self.assertIn(f'add_parser("{sub}")', self.src[script])
+        self.assertEqual(I.TASK_ACTIONS, ("revoke", "freeze", "complete"))
+        for cmd in ("R fetch", "R grant", "R grant --task <单号>"):
+            self.assertIn(f"`{cmd}`", self.text)
         self.assertIn("ai_access.py status --json", self.text)
         self.assertIn('"default_worker"', self.src["ai_access"])
 
@@ -176,14 +243,16 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur = None
         self.assertEqual([len(t) for t in tables], [11], tables)
         reach = [inspect.getsource(G.propose) + inspect.getsource(RV.ensure_open) + inspect.getsource(G.require_hub_rule)
-                 + inspect.getsource(I.propose_dispatch)]
+                 + inspect.getsource(I.propose_dispatch) + inspect.getsource(I._post)]
         for table, src in zip(tables, reach):
             for words in table:
                 with self.subTest(words=words):
                     self.assertIn(words, src)
         for words, fn in (("门卫会把确认卡发到常浩私聊，他点「批准派单」才签", G.propose), ("不能续接：", G.resume_dispatch),
                           ("已经是终态", G._tighten), ("凭证已过期", G.check_row), ("派单确认 · ", CV.render_grant),
-                          ("连不上 dt-gate 的窗口", I.propose_dispatch), ("✅ 批准派单", CV.render_grant),
+                          ("连不上 dt-gate 的窗口", I._post), ("✅ 批准派单", CV.render_grant),
+                          ("连不上 dt-gate 的只读窗口", R.main), ("凭证镜像里没有", R.grants), ("读不到凭证镜像", R.grants),
+                          ("停可能已经生效", I.task_action),
                           ("不同意？· 展开", CV.render_grant),
                           ("还有没确认送到中台的派单事件", G.resume_dispatch), ("另有入口正在处理", G.task_lock),
                           ("本次未登记提议，也未记派单事件；开闸后重新提议", G.require_recovery), ("恢复闸关着", RV.ensure_open),
@@ -193,15 +262,15 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 self.assertIn(words, inspect.getsource(fn))
 
     def test_field_names_in_the_skill_are_real(self):
-        for field, script in (("usable", "autoloop_grants"), ("why_not", "autoloop_grants"), ("events", "autoloop_grants"),
-                              ("valid_until", "autoloop_grants"), ("freeze_code", "autoloop_grants"),
+        for field, script in (("usable", "autoloop_readonly"), ("why_not", "autoloop_readonly"), ("events", "autoloop_grants"),
+                              ("valid_until", "autoloop_readonly"), ("status", "autoloop_readonly"),
+                              ("freeze_code", "autoloop_grants"),
                               ("mirror_error", "autoloop_grants"), ("event_key", "autoloop_grants"),
                               ("in_flight", "autoloop_grants"), ("runs_stopped", "autoloop_grants"),
                               ("runs_finished", "autoloop_grants"), ("runs_stop_error", "autoloop_grants"),
-                              ("dispatch_rules", "autoloop_config"),
-                              ("source_hermes", "autoloop_config"), ("key_file", "autoloop_config"),
-                              ("loaded", "autoloop_config"), ("paused", "autoloop_config"),
-                              ("key", "autoloop_config"), ("executor", "autoloop_grants"), ("repo", "autoloop_grants"),
+                              ("lines", "autoloop_readonly"), ("id", "autoloop_readonly"),
+                              ("paused", "autoloop_readonly"),
+                              ("executor", "autoloop_readonly"), ("repo", "autoloop_readonly"),
                               ("runs", "autoloop_readonly"), ("subject", "autoloop_readonly"),
                               ("cards", "autoloop_readonly"), ("recentCards", "autoloop_readonly"),
                               ("kind", "autoloop_readonly"), ("state", "autoloop_readonly"),
@@ -226,14 +295,79 @@ class SkillDocMatchesScripts(unittest.TestCase):
         self.assertEqual((I.MAX_SCOPE, I.EXECUTORS), (G.MAX_SCOPE, G.EXECUTORS))            # 窗口先核的形状和网关一致
 
 
+class MainAccountReadsTheMirrorNotTheOldDb(Base):
+    """搬家后主账号里还留着旧的 grants.db；技能的 R grant 只读 dt-gate 写的镜像，旧库里有什么都不影响它。"""
+
+    def test_grant_reads_the_mirror_even_when_an_old_db_is_lying_around(self):
+        self.status.parent.mkdir(parents=True)
+        self.status.write_text(json.dumps({"schema": 1, "updated_at": "2026-11-24T11:57:02+08:00", "tasks": {
+            "t-20261124-459329": {"repo": "dt-sandbox", "executor": "claude", "rule": "dispatch-dt-sandbox-claude",
+                                  "status": "active", "generation": 1, "voided_generations": [],
+                                  "valid_until": G.iso(T0 + dt.timedelta(hours=12)), "actions": ["edit"],
+                                  "scope_hash": "x"}}}), encoding="utf-8")
+        with G.tx() as con:                                               # 旧库：空的（搬家前的单都不在）
+            self.assertEqual(con.execute("SELECT count(*) FROM grants").fetchone()[0], 0)
+        code, (g,) = r_cli(["grant", "--task", "t-20261124-459329"])
+        self.assertEqual((code, g["usable"], g["why_not"], g["executor"], g["repo"]), (0, True, None, "claude", "dt-sandbox"))
+        self.assertEqual(r_cli(["grant", "--task", "t-20261124-459329"], now=T0 + dt.timedelta(hours=13))[1][0]["why_not"],
+                         "凭证已过期")
+        code, out = r_cli(["grant", "--task", "t-20261124-000000"])
+        self.assertEqual(code, 1)
+        self.assertIn("凭证镜像里没有 t-20261124-000000 这张单", out["why"])
+        self.status.write_text("{", encoding="utf-8")
+        code, out = r_cli(["grant"])
+        self.assertEqual(code, 1)
+        self.assertIn("读不到凭证镜像", out["why"])
+
+
+class ReadOnlyWindowClient(unittest.TestCase):
+    """R fetch：经真的 3352 处理函数（本进程里起，随机端口）取快照；令牌不对、窗口不在都给一句 why、退出码 1。"""
+
+    SNAP = {"now": "x", "cards": [], "recentCards": [], "runs": [], "channels": [],
+            "lines": [{"id": "dispatch-dt-sandbox-claude", "source": "hermes", "types": ["t"], "agent": "dt-claude",
+                       "paused": False}]}
+
+    def setUp(self):
+        import http.server
+        import threading
+        tmp = tempfile.TemporaryDirectory(prefix="dt-skill-readonly-")
+        self.addCleanup(tmp.cleanup)
+        self.tok = Path(tmp.name) / "readonly.token"
+        self.tok.write_text("r" * 40 + "\n", encoding="utf-8")
+        os.chmod(self.tok, 0o600)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), R.make_handler("r" * 40, lambda: self.SNAP))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        p = mock.patch.dict(os.environ, {"DT_READONLY_TOKEN_FILE": str(self.tok),
+                                         "DT_READONLY_URL": f"http://127.0.0.1:{srv.server_address[1]}"})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_fetch_returns_the_window_snapshot_and_never_reads_the_hub_itself(self):
+        with mock.patch.object(R, "read", side_effect=AssertionError("主账号不该本机读中台")):
+            self.assertEqual(r_cli(["fetch"]), (0, self.SNAP))
+
+    def test_wrong_token_or_no_window_is_one_sentence(self):
+        self.tok.write_text("s" * 40, encoding="utf-8")
+        code, out = r_cli(["fetch"])
+        self.assertEqual(code, 1)
+        self.assertIn("连不上 dt-gate 的只读窗口", out["why"])
+        self.tok.write_text("r" * 40, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"DT_READONLY_URL": "http://127.0.0.1:9"}):
+            code, out = r_cli(["fetch"])
+        self.assertEqual(code, 1)
+        self.assertIn("连不上 dt-gate 的只读窗口", out["why"])
+        self.tok.unlink()                                                 # 客户端不生成令牌
+        self.assertEqual(r_cli(["fetch"])[0], 1)
+        self.assertFalse(self.tok.exists())
+
+
 class InstalledLayoutRoster(unittest.TestCase):
     """#316：安装副本缺默认名册时明确拒绝；技能中的显式 DT_ROSTER 前缀仍可选定其他名册。"""
 
-    def test_missing_default_rejects_cleanly_and_skill_prefix_still_works(self):
-        text = SKILL.read_text(encoding="utf-8")
-        prefix = "DT_ROSTER=$HOME/Documents/ChatGPT/个人/work/digital-twin/projects.json /usr/bin/python3 ~/.hermes/scripts/"
-        for script in ("autoloop_grants.py", "autoloop_config.py"):
-            self.assertIn(f"`{prefix}{script}`", text)
+    def test_missing_default_rejects_cleanly_and_explicit_roster_still_works(self):
+        # 技能里已不在主账号跑 autoloop_grants / autoloop_config（#380），这里只核脚本本身的名册读取（#316）
         with tempfile.TemporaryDirectory(prefix="dt-skill-install-") as tmp:
             root = Path(tmp)
             shutil.copytree(SCRIPTS, root / "scripts", ignore=shutil.ignore_patterns("tests", "__pycache__"))
@@ -306,9 +440,10 @@ class OneSentenceToDispatch(Base):
         self.assertNotIn("README", json.dumps(ev, ensure_ascii=False))
         self.assertIn(FIVE, (self.tasks / f"{tid}.md").read_text(encoding="utf-8"))      # 工人读的任务单 = 他确认的原文
 
-        code, (g,) = cli(["show", "--task", tid])              # 技能第 4 节回执、第 5 节第 1 层
-        self.assertEqual((code, g["usable"], g["why_not"], g["executor"], g["github"]), (0, True, None, "claude", "o/dt-sandbox"))
+        code, (g,) = r_cli(["grant", "--task", tid])           # 技能第 4 节回执、第 5 节第 1 层：读 dt-gate 写的镜像
+        self.assertEqual((code, g["usable"], g["why_not"], g["executor"], g["repo"]), (0, True, None, "claude", "dt-sandbox"))
         self.assertEqual(g["valid_until"], G.iso(T0 + dt.timedelta(hours=12)))
+        code, (g,) = cli(["show", "--task", tid])              # 常浩在电脑上跑的 GH show：多一栏派单事件送没送到
         self.assertEqual([(e["kind"], e["state"]) for e in g["events"]], [("start", "已送到中台")])
 
     def test_outside_the_list_is_refused_before_anything_is_sent(self):
@@ -468,6 +603,74 @@ class OneSentenceToDispatch(Base):
         self.assertIn("另有入口正在处理", out["why"])
         self.assertEqual(len(self.posted), 2)                  # 两次 start，续接没发
 
+    def test_stop_freeze_complete_through_the_window(self):
+        """技能第 7 节：W revoke / freeze / complete 经 3353 窗口（窗口里跑的是网关的同名命令）；R grant 随后看到结果。"""
+        tid = self.dispatch()
+        code, out = w_cli(["revoke", "--task", tid, "--reason", "常浩说停"])
+        self.assertEqual((code, out["status"]), (0, "revoked"))
+        self.assertTrue({"runs_stopped", "runs_stop_error"} & set(out), out)     # 叫停轮次的结果原样带回来（隔离环境没有中台库）
+        (g,) = r_cli(["grant", "--task", tid])[1]
+        self.assertEqual((g["status"], g["usable"], g["why_not"]), ("revoked", False, "凭证已撤销"))
+        code, out = w_cli(["revoke", "--task", tid, "--reason", "再停一次"])
+        self.assertEqual(code, 1)
+        self.assertIn("已经是终态", out["why"])
+        self.assertEqual(w_cli(["revoke", "--task", "nope"])[0], 1)  # 单号形状不对：不发
+        with mock.patch.dict(os.environ, {"DT_INTAKE_URL": "http://127.0.0.1:9"}):
+            code, out = w_cli(["freeze", "--task", tid])
+        self.assertEqual(code, 2)
+        self.assertIn("连不上 dt-gate 的窗口", out["why"])
+
+        other = self.dispatch()
+        code, out = w_cli(["freeze", "--task", other])                # 没写原因：窗口记「秘书窄窗口」，网关不拒
+        self.assertEqual((code, out["status"]), (0, "frozen"))
+        self.assertRegex(out["freeze_code"], r"^[0-9a-f]{6}$")      # 冻结码回到技能，由它转告常浩
+        again = w_cli(["freeze", "--task", other, "--reason", "再冻"])           # 技能：忘了冻结码就再冻一次，给同一个
+        self.assertEqual((again[0], again[1].get("freeze_code")), (0, out["freeze_code"]))
+        self.assertEqual(r_cli(["grant", "--task", other])[1][0]["why_not"], "凭证已冻结")
+
+        third = self.dispatch()
+        code, out = w_cli(["complete", "--task", third])
+        self.assertEqual((code, out["status"]), (0, "done"))
+        self.assertEqual(r_cli(["grant", "--task", third])[1][0]["why_not"], "任务已完成")
+        self.assertEqual(len(self.posted), 3)                  # 三次 start，停、冻、收掉都不往中台发事件
+
+    def test_send_pending_through_the_window(self):
+        """技能第 5 节第 1 层：派单消息没确认送到时，W send-pending 经窗口补发；只补发已签过的，不新增凭证。"""
+        def down(body):
+            raise G.Rejected("连不上中台或回应不对：URLError")
+        res = click(self.propose()[1]["code"], post=down)
+        self.assertIsNone(res["send"][0]["sent"])
+        self.assertEqual(w_cli(["send-pending"]), (0, []))        # 不到 60 秒：跳过，空列表
+        self.window.now = LATER
+        code, sent = w_cli(["send-pending"])
+        self.assertEqual((code, [(s["event_key"], s["sent"]) for s in sent]), (0, [(f"{res['task_id']}:g1:start", True)]))
+        self.assertEqual((len(self.posted), len(G.show())), (1, 1))
+        self.assertEqual(w_cli(["send-pending"]), (0, []))        # 补过了：再跑什么都不发
+        with mock.patch.object(RV, "ensure_open", side_effect=EX.Refused("恢复闸关着：x")):
+            code, out = w_cli(["send-pending"])
+        self.assertEqual(code, 1)                              # 闸关着：网关拒、什么都不发（技能第 5 节表：退出码 1、恢复闸关着）
+        self.assertIn("恢复闸关着", out["why"])
+
+    def test_window_exit_codes_from_what_the_gateway_returns(self):
+        """网关退出码 2 是「已生效但镜像没写成」：客户端算生效；网关没打印 JSON 算结果不明。补发要的是列表。"""
+        tid = "t-20261124-abcdef"
+        for reply, want in (((0, {"code": 2, "result": {"status": "revoked", "mirror_error": "x"}}), 0),
+                            ((0, {"code": 0, "result": {"status": "revoked"}}), 0),
+                            ((0, {"code": 1, "result": {"ok": False, "why": "已经是终态"}}), 1),
+                            ((0, {"code": 1, "result": None}), 2),
+                            ((2, {"ok": False, "why": "连不上"}), 2)):
+            for action in I.TASK_ACTIONS:
+                with self.subTest(reply=reply, action=action), mock.patch.object(I, "_post", return_value=reply):
+                    self.assertEqual(I.task_action(action, tid)[0], want)
+        with mock.patch.object(I, "_post", return_value=(0, {"code": 2, "result": {"mirror_error": "x"}})):
+            self.assertEqual(I.task_action("revoke", tid)[1], {"mirror_error": "x"})
+        self.assertEqual(I.task_action("resume-dispatch", tid)[0], 1)  # 续接不经窗口
+        for reply, want in (((0, {"code": 0, "result": []}), 0), ((0, {"code": 0, "result": [{"sent": True}]}), 0),
+                            ((0, {"code": 1, "result": {"ok": False, "why": "x"}}), 1), ((0, {"code": 0, "result": None}), 2),
+                            ((2, {"ok": False, "why": "连不上"}), 2)):
+            with self.subTest(reply=reply), mock.patch.object(I, "_post", return_value=reply):
+                self.assertEqual(I.send_pending()[0], want)
+
     def test_no_grant_no_event(self):
         for argv in (["resume-dispatch", "--task", "t-20261122-000000", "--kind", "redispatch", "--reason", "x"],
                      ["show", "--task", "t-20261122-000000"], ["revoke", "--task", "t-20261122-000000"]):
@@ -493,14 +696,11 @@ class SkillOnRealHub(HubFixture):
         self.scope.write_text(FIVE, encoding="utf-8")
 
     def gate(self, repo="dt-sandbox", executor="claude"):
-        """技能第 1 节第 3 步：这条通道现在能不能派。"""
-        st = C.status()
-        rule = st["dispatch_rules"].get(f"dispatch-{repo}-{executor}")
+        """技能第 1 节第 3 步：只读窗口给的快照（R fetch 拿到的就是 dt-gate 里 R.read() 的结果）里这条通道能不能派。"""
+        rule = {line["id"]: line for line in R.read()["lines"]}.get(f"dispatch-{repo}-{executor}")
         if rule is None:
             return "没有通道"
-        if not rule["loaded"] or rule["paused"]:
-            return "通道暂停"
-        return "能派" if st["source_hermes"]["key"] and st["source_hermes"]["key_file"] else "没有钥匙"
+        return "通道暂停" if rule["paused"] else "能派"
 
     def runs_of(self, tid):
         """技能第 4 节第二步、第 5 节第 2 层：中台里对象是这张单的轮次。"""
@@ -520,10 +720,7 @@ class SkillOnRealHub(HubFixture):
             "projects": [{"id": "digital-twin", "github": "o/digital-twin", "category": "活跃", "write_allowed": True}],
             "inventory": [{"path": "github:o/dt-sandbox", "category": "沙盒", "sandbox": True}]}), encoding="utf-8")
         C.install(confirm=True, target=self.home)
-        self.assertEqual(self.gate(), "通道暂停")                      # 装完默认暂停，钥匙也还没签
-        C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})
-        self.assertEqual(self.gate(), "没有钥匙")                      # 规则开着但钥匙没签：技能第 1 节表里第三行
-        C.install(confirm=True, target=self.home)                      # 重装把它重新暂停，才能签钥匙
+        self.assertEqual(self.gate(), "通道暂停")                      # 装完默认暂停
         C.issue_source_key(confirm=True, target=self.home)
         self.assertEqual(self.gate(), "通道暂停")
         # 网关的名单比中台的通道宽：digital-twin 网关会放行，但中台没有它的派单规则，技能在这一步停下

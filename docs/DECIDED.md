@@ -6,6 +6,19 @@
 
 ---
 
+## 2026-11-24 · 派单技能搬家后：3353 窄窗口加冻结、收掉、补发（选甲）
+
+- **在哪定的**：「派单技能｜搬进 dt-gate 后能从飞书派单」会话出甲 / 乙 / 丙三种方案（共享笔记 `autoloop技能搬家后-授权面方案.md`），协调会话转问常浩，常浩回「按推荐」（协调会话 11-24 转达）。
+- **代码**：PR #380（`gate_intake.py` 的新入口和客户端、`autoloop_readonly.py` 的 fetch / grant、派单技能第 1、4–7 节）。
+
+**定了什么**（逐条可对照）
+
+1. **3353 窄窗口加三个入口**：`POST /v1/tasks/<单号>/freeze`、`/v1/tasks/<单号>/complete`（收紧方向，和撤销一样谁都可以）、`POST /v1/dispatch/send-pending`（只补发已签、代次有效的派单事件，不新增授权）。冻结码随结果回到调用方，由派单技能转告常浩。
+2. **续接（resume-dispatch）不开窗口**：只在电脑上跑 `sudo "/Library/Application Support/DigitalTwin/gate/bin/dt-gate-hub" run autoloop_grants resume-dispatch …`。以后要开，先问常浩。
+3. **主账号搬家前的旧 `grants.db` 存档**：协调会话在主账号改名留档；派单技能不在主账号跑 `autoloop_grants.py` / `autoloop_config.py`。
+
+---
+
 ## 2026-11-24 · 工作台记录页、沉淀页
 
 - **在哪定的**：Claude 会话「数字分身工作台｜页面进度盘点」，常浩 11-24 说「继续完成剩下的页面」，先看两页的页面逻辑和四处细节，回「按推荐出三版」；看完两页各三版（记录：流水表 / 时间轴 / 按项目分；沉淀：四段清单 / 看板 / 左右分）回「都选乙」；issue #379。
