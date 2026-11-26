@@ -30,6 +30,7 @@ import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
 import fake_gh  # noqa: E402
+import gate_github as GG  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
 from test_dt_worktree import SCRIPT, WorkerBase, git  # noqa: E402
 
@@ -712,7 +713,7 @@ class ExitLedger(PublishBase):
         self.assertEqual(self.row("open_pr")["state"], "unknown")
         head = self.handoff(self.tid)["head"]
         (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(self.tid, head)]))   # GitHub 上其实有了
-        with mock.patch.dict(os.environ, {"DT_GH": self.backend["gh"]}):
+        with mock.patch.object(E, "TEST_GH", self.backend["gh"]):
             out = P.publish(self.tid)                      # 对账查到这条 PR：不再开
         self.assertEqual(out["pr_opened"], False)
         self.assertEqual(self.row("open_pr")["state"], "done")
@@ -752,6 +753,9 @@ class PrIdentity(PublishBase):
         self.assertEqual(P.publish(tid)["pr"], "u8")
 
 
+SWITCH_ON = {"enabled": True, "repos": ["dt-sandbox"], "proxy": None, "login": "shanhao1997", "at": None, "by": None}
+
+
 class GateAndRealRemote(PublishBase):
     def test_only_dt_gate_account_may_publish(self):
         tid = self.worked()
@@ -759,20 +763,85 @@ class GateAndRealRemote(PublishBase):
             self.rejects(tid, "只在 dt-gate 账号里跑")
             self.assertEqual(P.scan()[0]["check"], "可以发")                 # 只读的 scan 不受限
 
-    def test_publish_is_off_before_0d_without_test_backend(self):
-        """审查第 2 轮 P1-07：开关关着时整体拒绝，开 PR 也不做（远端分支已经是这个头提交、不用推时同样）。"""
+    def test_test_backend_must_be_a_local_bare_repo(self):
+        """测试后端的远端不是 file:// 一律拒绝，开 PR 也不做（远端分支已经是这个头提交、不用推时同样）。"""
         tid = self.worked()
         git("fetch", "-q", str(self.wt(tid)), f"refs/heads/claude/{tid}:refs/heads/claude/{tid}", cwd=self.remote)  # 远端已有
-        env = {"DT_PUBLISH_REMOTE": self.backend["remote"], "DT_GH": self.backend["gh"]}   # 环境变量不算数
-        for backend in (None, {**self.backend, "remote": "https://github.com/{github}.git"}):
-            with mock.patch.object(P, "TEST_BACKEND", backend), mock.patch.dict(os.environ, env):
-                with self.assertRaises(P.Rejected) as c:
-                    P.publish(tid)
-            self.assertIn("整体关闭", str(c.exception))
+        with mock.patch.object(P, "TEST_BACKEND", {**self.backend, "remote": "https://github.com/{github}.git"}):
+            with self.assertRaises(P.Rejected) as c:
+                P.publish(tid)
+        self.assertIn("只能是本地裸仓库", str(c.exception))
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(P.remote_url("o/x"), self.backend["remote"].format(github="o/x"))
         with mock.patch.object(P, "TEST_BACKEND", None):
-            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", "gh"))
+            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", GG.GH))
+
+    def test_switch_off_refuses_real_path(self):
+        """0E-4：真发布看 root 写的开关文件，没有文件就不发（合并代码不等于放开）；环境变量不算数。"""
+        tid = self.worked()
+        env = {"DT_PUBLISH_REMOTE": self.backend["remote"], "DT_GH": self.backend["gh"]}   # 环境变量不算数
+        with mock.patch.object(P, "TEST_BACKEND", None), mock.patch.object(GG, "SWITCH", str(self.root / "no.json")), \
+                mock.patch.dict(os.environ, env), mock.patch.object(GG, "ready") as ready:
+            self.rejects(tid, "真发布开关关着")
+        ready.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_real_path_without_credentials_refuses_before_touching_remote(self):
+        """真路径（0E-4）：开关开着但没放令牌 → 不发；开关没放开这个仓库 → 不发。都在联网之前（不取远端、不推、不开 PR）。"""
+        tid = self.worked()
+        home = self.root / "gatehome"
+        home.mkdir()
+        with mock.patch.object(P, "TEST_BACKEND", None), mock.patch.object(GG, "home", return_value=home), \
+                mock.patch.object(GG, "read_switch", return_value=SWITCH_ON), \
+                mock.patch.object(G, "allowed_repos", return_value={"dt-sandbox": "o/dt-sandbox"}), \
+                mock.patch.object(P, "ensure_mirror") as mirror:
+            self.rejects(tid, "put-publish-token")
+            with mock.patch.object(GG, "read_switch", return_value={**SWITCH_ON, "repos": ["other"]}):
+                self.rejects(tid, "没有放开 dt-sandbox")
+        mirror.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+        self.assertFalse((self.root / "mirrors").exists())
+
+    def test_real_path_uses_minimal_env_and_keeps_token_off_command_lines(self):
+        """真路径：git、gh 全部拿 gate_github 的最小环境（没有代理、PATH 固定），令牌只给推送和 gh，取包、核历史、
+        取 main、查远端分支都不带；令牌不出现在任何命令行参数里。远端、gh 换成本地的（真 GitHub 不在测试里碰）。"""
+        tid = self.worked()
+        home = self.root / "gatehome"
+        home.mkdir()
+        gh = self.root / "ghbin/gh-real"                     # 最小环境里没有 FAKE_GH_STATE：状态目录写死在包装脚本里
+        gh.write_text(f'#!/bin/sh\nFAKE_GH_STATE="{self.gh_state}" exec "{sys.executable}" -B "{fake_gh.__file__}" "$@"\n')
+        gh.chmod(0o755)
+        token = "ghp_" + "Z9y8X7w6V5" * 3 + "u4T3s2"
+        seen, real_run = [], subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] in ("git", str(gh)):
+                seen.append((list(cmd), kw.get("env")))
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(P, "TEST_BACKEND", None), mock.patch.object(GG, "home", return_value=home), \
+                mock.patch.object(P, "remote_url", side_effect=lambda g: self.backend["remote"].format(github=g)), \
+                mock.patch.object(P, "gh_cmd", return_value=str(gh)), \
+                mock.patch.object(GG, "read_switch", return_value=SWITCH_ON), \
+                mock.patch.object(GG, "ready", side_effect=lambda repo, github: (GG.env(), GG.env(token))) as ready, \
+                mock.patch.object(P.subprocess, "run", side_effect=spy):
+            out = P.publish(tid)
+        ready.assert_called_once_with("dt-sandbox", "o/dt-sandbox")
+        self.assertEqual((out["pushed"], out["pr_opened"]), (True, True))
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+        self.assertTrue(seen)
+        authed = []
+        for cmd, env in seen:
+            with self.subTest(cmd=cmd[:4]):
+                self.assertIsNotNone(env, "真路径不许继承调用方环境")
+                self.assertEqual(env["PATH"], GG.SAFE_PATH)
+                self.assertFalse([k for k in env if "proxy" in k.lower() or k.startswith("FAKE_")])
+                self.assertFalse([x for x in cmd if token in x])
+                if "GH_TOKEN" in env:
+                    authed.append("gh" if cmd[0] == str(gh) else next(x for x in cmd if x in ("push", "fetch",
+                                                                                                "ls-remote", "bundle")))
+        self.assertEqual(authed, ["push", "gh", "gh"], "令牌只给推送和 gh（查 PR、开 PR）")
+        self.assertTrue([c for c, e in seen if "ls-remote" in c and "GH_TOKEN" not in e])
 
 
 def P_opt(args, name):
