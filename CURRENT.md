@@ -6,6 +6,14 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-26 晚：执行底座 48 小时上线开工（常浩「按推荐开工」，不再送审）
+
+- **决定**（登记在 `docs/DECIDED.md` 11-26）：11-28 之前上线；不再送审、不做替身验证、不逐步核对真机清单，问题在用的过程中修；CI 照跑、不拦着等；第 1 天 dt-sandbox 全自动，第 2 天加 2–3 个真实项目（常浩点名）；秘书代批、推翻与汇报、0E-5、批 3–8 往后放。
+- **今晚合并（都没送审）**：#385 代次边界 `276d662`；#319 发布凭据 `830e8f2`（合 main 时解了受信发布和 AGENTS 两处冲突）；#393 受信发布常驻自动发布 `56157bf`（新加：`autoloop_publish.py watch` + dt-gate 服务 `cn.digital-twin.gate.publisher`，`update` 时跟着中台装上，开关开着时每分钟把交出的包自动推分支、开 PR）；#380 派单技能适配搬家后布局 `e979d51`（合 main 两次，解了 AGENTS 和技能测试的冲突）。合并后全量 `Ran 2878 tests` OK（main + #380，证据 `evidence/2026-11-26-launch/claude-01-全量测试.log`）。
+- **今晚装的**：派单技能 `autoloop` 装给猛鬼兽，连同主账号客户端 `autoloop_readonly.py`、`gate_intake.py` 及它们导入的 `autoloop_config.py`、`autoloop_grants.py`、`hub_listener.py`（装前备份在 `evidence/2026-11-26-launch/before-install/`；`install_hold.txt` 删掉这 5 行）。装后试过：`autoloop_readonly.py fetch` 读得到中台（`dispatch-dt-sandbox-claude` 开着、codex 暂停），`grant` 读得到凭证镜像。网关重启时新旧进程撞了一下（新进程报「已有网关占着」后退出），19:02 再拉起一次，飞书已连上。
+- **明早常浩亲手做**：`docs/DT-ORC/migration/2026-11-27-上线照抄单.md`（建 shanhao1997 令牌 → dt-worker 跑 setup 出 Claude 长期令牌 → 换工人启动脚本、装工人接单服务 → stage + update → 放令牌 → publish on → 恢复 codex 派单规则）。做完回 Claude 会话说「装完了」，再在飞书真派第一单。
+- **另记**：主账号里还有 3 个 `agent-autoloop up` 进程（nat 身份，`~/.local/bin/agent-autoloop`），不是 dt-gate 的中台，来历没查，没动。
+
 ## 2026-11-25 中午：亚古兽进度卡片写法补四条（常浩点名，侧会话）
 
 - 起因：常浩让 Claude 手动出 11-19～11-24 那期进度卡片（已私发，`om_x100b7f515c8ec4b0c0cbc89ede67c87`，存档 `sidebar/progress/2026-11-24.json`），过程中纠正了四处，要求写进说明。
