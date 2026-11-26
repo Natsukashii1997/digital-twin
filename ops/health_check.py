@@ -6,7 +6,8 @@
 辅助任务失败和定时任务；网关、异常退出、回退、辅助任务猛鬼兽和亚古兽各查一遍（#147），另提醒飞书技能源头有更新。
 另查两件唤醒类的事（P9，全局坑 G-19 / G-20）：网关 launchd plist 的 EnvironmentVariables 里代理变量齐不齐
 （只读键名，不读、不输出值；也不读任何进程的环境变量，G-42）；定时任务最近一次晚点或失败时，附那段时间 pmset 的睡眠 / 唤醒记录。
-另查工人账号 dt-worker 的两道隔离（#190）：过滤代理在跑且拦得住本机地址、门卫规则（pf）在生效。
+另查工人账号 dt-worker 的两道隔离（#190）：过滤代理在跑且拦得住本机地址、门卫规则（pf）在生效；
+以及 dt-worker 里接单程序（agent-autoloop up）在不在跑（11-24：门卫重载清掉它后 18 小时没人发现）。
 launchd 起的 python 读不了 ~/Documents，沙盒和仓库自检已搬到 self_check.py（Hermes 无模型定时任务调用）。
 """
 import datetime as dt
@@ -34,6 +35,7 @@ BOTS = (("猛鬼兽", "ai.hermes.gateway", ""), ("亚古兽", "ai.hermes.gateway
 EGRESS_PORT = 8090                       # 工人账号的过滤代理（ops/dt_worker_egress.py，#190）
 PF_STATUS = Path("/Library/Application Support/DigitalTwin/pf-dt-worker.status")   # 门卫规则每 5 分钟刷新一次
 PF_STALE_MIN = 10   # 每 5 分钟重载并逐条回读一次；超过两个周期没刷新就算停了（L3 P1-03）
+WORKER = "dt-worker"
 PF_USERS = ("dt-worker", "dt-secretary")   # 门卫规则要管的账号：本机有哪个就要管上哪个（ADR-015 0E-1）
 LAUNCH_AGENTS = HOME / "Library/LaunchAgents"
 PROXY_KEYS = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy")   # G-19：大小写两套
@@ -380,6 +382,30 @@ def check_pf(path=PF_STATUS, now=None, accounts=None):
     return []
 
 
+def check_worker_up(account=WORKER, ps=None):
+    """dt-worker 里有没有接单程序（node 起的 agent-autoloop.ts up；系统服务 cn.digital-twin.worker-up 外面那层 sh
+    的命令行里也有这几个字，不算）。没有这个账号就不查。只看进程表，不读工人家目录。"""
+    try:
+        uid = str(pwd.getpwnam(account).pw_uid)
+    except KeyError:
+        return []
+    if ps is None:
+        try:
+            r = subprocess.run(["/bin/ps", "-axww", "-o", "uid=,args="], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            return [f"查不了工人接单程序在不在跑（ps：{type(e).__name__}）"]
+        if r.returncode != 0:
+            return [f"查不了工人接单程序在不在跑（ps 返回 {r.returncode}）"]
+        ps = r.stdout
+    for line in ps.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == uid and parts[1] != "/bin/sh" \
+                and parts[-1] == "up" and parts[-2].endswith("/agent-autoloop.ts"):
+            return []
+    return [f"工人接单程序没在跑（{account} 里没有 agent-autoloop up）：派的单会一直排队。装了系统服务的看 "
+            "`sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py status`（门卫规则不在生效时它会等）；没装的要登录 dt-worker"]
+
+
 def send(msg, key, now):
     r = run(["lark-cli", "--profile", LARK_PROFILE, "im", "+messages-send", "--as", "bot",
              "--chat-id", DM_CHAT, "--text", msg, "--idempotency-key", key])
@@ -389,7 +415,7 @@ def send(msg, key, now):
 
 def main():
     dry = "--dry-run" in sys.argv
-    issues = check_bots() + check_skill_sync() + check_cron() + check_egress() + check_pf()
+    issues = check_bots() + check_skill_sync() + check_cron() + check_egress() + check_pf() + check_worker_up()
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_DIR / f"{now[:7]}.log", "a") as f:

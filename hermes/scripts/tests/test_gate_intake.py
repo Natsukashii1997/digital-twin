@@ -97,6 +97,19 @@ class IntakeTest(Base):
         self.assertEqual(self.calls[0], {"script": "secretary.py", "args": ["off", "--source", I.SOURCE]})
         self.assertEqual(self.calls[1]["args"], ["revoke", "--task", "t-20261120-abc123", "--reason", f"{I.SOURCE}：不做了"])
 
+    def test_freeze_complete_send_pending(self):
+        """常浩 11-24 选甲（#380）：冻结、收掉、补发开窗口，参数原样交网关；冻结没写原因记窗口名（网关要求有原因）。"""
+        tid = "t-20261120-abc123"
+        for path, body in ((f"/v1/tasks/{tid}/freeze", json.dumps({"reason": "先别动"}).encode()),
+                           (f"/v1/tasks/{tid}/freeze", b""), (f"/v1/tasks/{tid}/complete", b"{}"),
+                           ("/v1/dispatch/send-pending", b"{}")):
+            with self.subTest(path=path):
+                self.assertEqual(post(self.url + path, body)[0], 200)
+        self.assertEqual([c["args"] for c in self.calls], [
+            ["freeze", "--task", tid, "--reason", f"{I.SOURCE}：先别动"], ["freeze", "--task", tid, "--reason", I.SOURCE],
+            ["complete", "--task", tid], ["send-pending"]])
+        self.assertEqual({c["script"] for c in self.calls}, {"autoloop_grants.py"})
+
     def test_dispatch_proposal_goes_to_grants_propose(self):
         """0E-3b：派单提议交网关 propose（只登记，确认卡由门卫发）；五要素写成私有临时文件，用完删掉。"""
         self.reply = (0, {"code": "abcd1234", "card": "门卫会把确认卡发到常浩私聊"})
@@ -149,9 +162,10 @@ class IntakeTest(Base):
             self.assertEqual((code, out["request_id"]), (2, RID))                          # 结果不明：带同一个请求号再跑
             self.assertIn("结果不明", out["why"])
 
-    def test_only_four_paths_and_valid_task_ids(self):
+    def test_only_known_paths_and_valid_task_ids(self):
         for path in ("/v1/tasks/../revoke", "/v1/tasks/t-1/revoke", "/v1/secretary/on", "/v1/answer", "/v1/tasks/t-20261120-abc123/approve",
-                     "/v1/dispatch/approve", "/v1/dispatch/proposal/x"):
+                     "/v1/dispatch/approve", "/v1/dispatch/proposal/x", "/v1/tasks/t-20261120-abc123/resume-dispatch",
+                     "/v1/tasks/t-20261120-abc123/unfreeze", "/v1/tasks/t-1/freeze", "/v1/dispatch/send-pending/x"):
             with self.subTest(path=path):
                 self.assertEqual(post(self.url + path)[0], 404)
         self.assertEqual(post(self.url + "/v1/tasks/t-20261120-abc123/revoke", json.dumps({"reason": "长" * 201}).encode())[0], 400)

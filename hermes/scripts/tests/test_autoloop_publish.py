@@ -30,6 +30,7 @@ import autoloop_grants as G  # noqa: E402
 import autoloop_publish as P  # noqa: E402
 import autoloop_recovery as R  # noqa: E402
 import fake_gh  # noqa: E402
+import gate_github as GG  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401  批 0D：整个模块指到临时目录
 from test_dt_worktree import SCRIPT, WorkerBase, git  # noqa: E402
 
@@ -179,6 +180,34 @@ class Publish(PublishBase):
             self.assertEqual(w.branch_name(ex, "t-20261118-abcdef"), P.branch_name(ex, "t-20261118-abcdef"))
 
 
+class Watch(PublishBase):
+    """常驻自动发布（watch）：开关开着时，工人交出的包自动推分支、开 PR；同一个头提交只处理一次，新头提交再发。"""
+
+    def test_publishes_new_handoff_once_then_again_after_new_head(self):
+        tid = self.worked()
+        (r,) = P.watch_once()
+        self.assertEqual((r["task_id"], r["ok"]), (tid, True))
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+        self.assertEqual(P.watch_once(), [])                                  # 同一头提交：不再试
+        self.run_turn([self.answer_event(tid)])                              # 返修出了新提交
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, self.handoff(tid)["head"])]))
+        (r,) = P.watch_once()
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+
+    def test_rejected_is_recorded_once_and_switch_off_does_nothing(self):
+        tid = self.worked()
+        (self.gh_state / "pr_list.json").write_text(json.dumps([{"number": 8, "url": "u8", "state": "CLOSED"}]))
+        (r,) = P.watch_once()
+        self.assertFalse(r["ok"])
+        self.assertIn("已关闭或已合并", r["reason"])
+        self.assertEqual(P.watch_once(), [])                                  # 拒过的同一头提交不再刷日志
+        tid2 = self.worked()
+        with mock.patch.object(P, "require_publish_enabled", side_effect=P.Rejected("开关关着")):
+            self.assertEqual(P.watch_once(), [])
+        self.assertIsNone(self.remote_branch(tid2))
+
+
 class OnlyNonMain(PublishBase):
     """验收 3：只能推非 main，只推本单分支。"""
 
@@ -210,7 +239,7 @@ class OnlyNonMain(PublishBase):
     def test_base_not_on_main_is_refused(self):
         tid = self.worked()
         head = self.handoff(tid)["head"]
-        self.rewrite_manifest(tid, base=head)                                     # 基线写成自己的提交
+        self.rewrite_manifest(tid, base=head, gen_base=head)                      # 基线（连同本代起点）写成自己的提交
         self.rejects(tid, "基线不是 main 上的提交")
 
     def test_symlinked_manifest_is_refused(self):
@@ -362,6 +391,88 @@ class GrantAtPublish(PublishBase):
         self.assertEqual((item["task_id"], item["check"]), (tid, "可以发"))
         self.assertIsNone(self.remote_branch(tid))
         self.assertEqual(self.gh_calls(), [])
+
+
+class GenerationBoundaryAtPublish(PublishBase):
+    """#320（常浩 2026-11-24 选甲）：冻结后作废代次的提交不能经新代次发布进 PR；冻结前已推出去的照常保留。"""
+    def remote_commits(self, tid):
+        m = self.handoff(tid)
+        return git("rev-list", f"{m['base']}..refs/heads/claude/{tid}", cwd=self.remote).split()
+
+    def test_late_commit_of_voided_generation_never_reaches_new_generation_pr(self):
+        """issue #320 原场景：第 1 代在途事件在冻结后、镜像刷新前到，工人照旧开工、在分支上留下提交；
+        第 2 代接着做、发布——PR 里有冻结前推出去的第 1 代提交，没有晚到的那个。"""
+        tid = self.worked()
+        h1 = P.publish(tid)["head"]                                              # 第 1 代冻结前推出去
+        stale = self.status.read_text()
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        fresh = self.status.read_text()
+        self.status.write_text(stale)                                             # 镜像没刷新时第 1 代事件晚到
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=1, kind="redispatch")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        late = self.handoff(tid)["head"]
+        self.assertNotEqual(late, h1)
+        self.rejects_keeping_remote(tid, "第 1 代已作废")
+        self.status.write_text(fresh)
+        r, calls = self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        self.assertEqual((r.returncode, len(calls)), (0, 1), r.stderr)
+        m = self.handoff(tid)
+        self.assertEqual((m["generation"], m["gen_base"]), (2, h1))
+        out = P.publish(tid)
+        self.assertTrue(out["pushed"])
+        commits = self.remote_commits(tid)
+        self.assertIn(h1, commits)                                                # 冻结前的第 1 代提交照常保留
+        self.assertNotIn(late, commits)                                           # 晚到的第 1 代提交不进 PR
+        self.assertEqual(commits[0], m["head"])
+        with G.tx() as con:
+            self.assertEqual(G.boundary(con, tid, 3), m["head"])                  # 记下了，下一代从这里起
+
+    def test_start_point_other_than_boundary_is_refused(self):
+        """旧版启动脚本没退回边界（或清单被改）：本代起点不等于边界就不发，交常浩。"""
+        tid = self.worked()
+        h1 = P.publish(tid)["head"]
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        head = self.handoff(tid)["head"]
+        self.rewrite_manifest(tid, gen_base=head)
+        self.rejects_keeping_remote(tid, "不是代次边界", h1)
+        m = self.handoff(tid)
+        self.rewrite_manifest(tid, gen_base=h1, schema=1)                         # 字段和版本号对不上
+        self.rejects_keeping_remote(tid, "交接清单的字段不对", h1)
+        legacy = {k: v for k, v in m.items() if k != "gen_base"}
+        (self.outbox / tid / "handoff.json").write_text(json.dumps({**legacy, "schema": 1}))
+        self.rejects_keeping_remote(tid, "只认第 1 代", h1)                         # 旧格式清单不能用在第 2 代
+
+    def test_unpublished_work_before_freeze_is_not_carried_over(self):
+        """甲的代价（常浩知情）：冻结前做完但没推出去的第 1 代改动不带进第 2 代，留在工人那边的备份引用里。"""
+        tid = self.worked()
+        g1 = self.handoff(tid)["head"]
+        code = G.freeze(tid, "推翻", now=self.now)["freeze_code"]
+        self.unfreeze_ok(tid, code, when=self.now)
+        self.run_turn([self.dispatch_event(tid, gen=2, kind="correction")])
+        P.publish(tid)
+        self.assertNotIn(g1, self.remote_commits(tid))
+        backups = git("for-each-ref", "--format=%(objectname)", f"refs/dt-voided/{tid}/", cwd=self.wt(tid)).split()
+        self.assertEqual(backups, [g1])
+
+    def test_first_generation_old_format_manifest_still_publishes(self):
+        """旧版启动脚本写的第 1 版清单（11-24 第 1 单就是）：第 1 代照常发，起点当基线。"""
+        tid = self.worked()
+        m = self.handoff(tid)
+        (self.outbox / tid / "handoff.json").write_text(
+            json.dumps({**{k: v for k, v in m.items() if k != "gen_base"}, "schema": 1}))
+        self.assertTrue(P.publish(tid)["pushed"])
+
+    def rejects_keeping_remote(self, tid, words, remote=None):
+        before = self.remote_branch(tid)
+        with self.assertRaises(P.Rejected) as c:
+            P.publish(tid)
+        self.assertIn(words, str(c.exception))
+        self.assertEqual(self.remote_branch(tid), before)
+        if remote:
+            self.assertEqual(before, remote)
 
 
 class History(PublishBase):
@@ -630,7 +741,7 @@ class ExitLedger(PublishBase):
         self.assertEqual(self.row("open_pr")["state"], "unknown")
         head = self.handoff(self.tid)["head"]
         (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(self.tid, head)]))   # GitHub 上其实有了
-        with mock.patch.dict(os.environ, {"DT_GH": self.backend["gh"]}):
+        with mock.patch.object(E, "TEST_GH", self.backend["gh"]):
             out = P.publish(self.tid)                      # 对账查到这条 PR：不再开
         self.assertEqual(out["pr_opened"], False)
         self.assertEqual(self.row("open_pr")["state"], "done")
@@ -670,6 +781,9 @@ class PrIdentity(PublishBase):
         self.assertEqual(P.publish(tid)["pr"], "u8")
 
 
+SWITCH_ON = {"enabled": True, "repos": ["dt-sandbox"], "proxy": None, "login": "shanhao1997", "at": None, "by": None}
+
+
 class GateAndRealRemote(PublishBase):
     def test_only_dt_gate_account_may_publish(self):
         tid = self.worked()
@@ -677,20 +791,85 @@ class GateAndRealRemote(PublishBase):
             self.rejects(tid, "只在 dt-gate 账号里跑")
             self.assertEqual(P.scan()[0]["check"], "可以发")                 # 只读的 scan 不受限
 
-    def test_publish_is_off_before_0d_without_test_backend(self):
-        """审查第 2 轮 P1-07：开关关着时整体拒绝，开 PR 也不做（远端分支已经是这个头提交、不用推时同样）。"""
+    def test_test_backend_must_be_a_local_bare_repo(self):
+        """测试后端的远端不是 file:// 一律拒绝，开 PR 也不做（远端分支已经是这个头提交、不用推时同样）。"""
         tid = self.worked()
         git("fetch", "-q", str(self.wt(tid)), f"refs/heads/claude/{tid}:refs/heads/claude/{tid}", cwd=self.remote)  # 远端已有
-        env = {"DT_PUBLISH_REMOTE": self.backend["remote"], "DT_GH": self.backend["gh"]}   # 环境变量不算数
-        for backend in (None, {**self.backend, "remote": "https://github.com/{github}.git"}):
-            with mock.patch.object(P, "TEST_BACKEND", backend), mock.patch.dict(os.environ, env):
-                with self.assertRaises(P.Rejected) as c:
-                    P.publish(tid)
-            self.assertIn("整体关闭", str(c.exception))
+        with mock.patch.object(P, "TEST_BACKEND", {**self.backend, "remote": "https://github.com/{github}.git"}):
+            with self.assertRaises(P.Rejected) as c:
+                P.publish(tid)
+        self.assertIn("只能是本地裸仓库", str(c.exception))
         self.assertEqual(self.gh_calls(), [])
         self.assertEqual(P.remote_url("o/x"), self.backend["remote"].format(github="o/x"))
         with mock.patch.object(P, "TEST_BACKEND", None):
-            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", "gh"))
+            self.assertEqual((P.remote_url("o/x"), P.gh_cmd()), ("https://github.com/o/x.git", GG.GH))
+
+    def test_switch_off_refuses_real_path(self):
+        """0E-4：真发布看 root 写的开关文件，没有文件就不发（合并代码不等于放开）；环境变量不算数。"""
+        tid = self.worked()
+        env = {"DT_PUBLISH_REMOTE": self.backend["remote"], "DT_GH": self.backend["gh"]}   # 环境变量不算数
+        with mock.patch.object(P, "TEST_BACKEND", None), mock.patch.object(GG, "SWITCH", str(self.root / "no.json")), \
+                mock.patch.dict(os.environ, env), mock.patch.object(GG, "ready") as ready:
+            self.rejects(tid, "真发布开关关着")
+        ready.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_real_path_without_credentials_refuses_before_touching_remote(self):
+        """真路径（0E-4）：开关开着但没放令牌 → 不发；开关没放开这个仓库 → 不发。都在联网之前（不取远端、不推、不开 PR）。"""
+        tid = self.worked()
+        home = self.root / "gatehome"
+        home.mkdir()
+        with mock.patch.object(P, "TEST_BACKEND", None), mock.patch.object(GG, "home", return_value=home), \
+                mock.patch.object(GG, "read_switch", return_value=SWITCH_ON), \
+                mock.patch.object(G, "allowed_repos", return_value={"dt-sandbox": "o/dt-sandbox"}), \
+                mock.patch.object(P, "ensure_mirror") as mirror:
+            self.rejects(tid, "put-publish-token")
+            with mock.patch.object(GG, "read_switch", return_value={**SWITCH_ON, "repos": ["other"]}):
+                self.rejects(tid, "没有放开 dt-sandbox")
+        mirror.assert_not_called()
+        self.assertEqual(self.gh_calls(), [])
+        self.assertFalse((self.root / "mirrors").exists())
+
+    def test_real_path_uses_minimal_env_and_keeps_token_off_command_lines(self):
+        """真路径：git、gh 全部拿 gate_github 的最小环境（没有代理、PATH 固定），令牌只给推送和 gh，取包、核历史、
+        取 main、查远端分支都不带；令牌不出现在任何命令行参数里。远端、gh 换成本地的（真 GitHub 不在测试里碰）。"""
+        tid = self.worked()
+        home = self.root / "gatehome"
+        home.mkdir()
+        gh = self.root / "ghbin/gh-real"                     # 最小环境里没有 FAKE_GH_STATE：状态目录写死在包装脚本里
+        gh.write_text(f'#!/bin/sh\nFAKE_GH_STATE="{self.gh_state}" exec "{sys.executable}" -B "{fake_gh.__file__}" "$@"\n')
+        gh.chmod(0o755)
+        token = "ghp_" + "Z9y8X7w6V5" * 3 + "u4T3s2"
+        seen, real_run = [], subprocess.run
+
+        def spy(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] in ("git", str(gh)):
+                seen.append((list(cmd), kw.get("env")))
+            return real_run(cmd, *a, **kw)
+
+        with mock.patch.object(P, "TEST_BACKEND", None), mock.patch.object(GG, "home", return_value=home), \
+                mock.patch.object(P, "remote_url", side_effect=lambda g: self.backend["remote"].format(github=g)), \
+                mock.patch.object(P, "gh_cmd", return_value=str(gh)), \
+                mock.patch.object(GG, "read_switch", return_value=SWITCH_ON), \
+                mock.patch.object(GG, "ready", side_effect=lambda repo, github: (GG.env(), GG.env(token))) as ready, \
+                mock.patch.object(P.subprocess, "run", side_effect=spy):
+            out = P.publish(tid)
+        ready.assert_called_once_with("dt-sandbox", "o/dt-sandbox")
+        self.assertEqual((out["pushed"], out["pr_opened"]), (True, True))
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+        self.assertTrue(seen)
+        authed = []
+        for cmd, env in seen:
+            with self.subTest(cmd=cmd[:4]):
+                self.assertIsNotNone(env, "真路径不许继承调用方环境")
+                self.assertEqual(env["PATH"], GG.SAFE_PATH)
+                self.assertFalse([k for k in env if "proxy" in k.lower() or k.startswith("FAKE_")])
+                self.assertFalse([x for x in cmd if token in x])
+                if "GH_TOKEN" in env:
+                    authed.append("gh" if cmd[0] == str(gh) else next(x for x in cmd if x in ("push", "fetch",
+                                                                                                "ls-remote", "bundle")))
+        self.assertEqual(authed, ["push", "gh", "gh"], "令牌只给推送和 gh（查 PR、开 PR）")
+        self.assertTrue([c for c, e in seen if "ls-remote" in c and "GH_TOKEN" not in e])
 
 
 def P_opt(args, name):

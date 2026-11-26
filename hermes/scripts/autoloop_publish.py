@@ -6,9 +6,14 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
 （/Users/dt-worker/dt-outbox/<单号>/handoff.json + <单号>.bundle）。本脚本是控制面的受信发布出口，按 ADR-015 归 dt-gate
 账号（「受信发布出口从第一天按归 dt-gate 写」）：取包、核对后推分支、开 PR：
 
-  0. 只在 dt-gate 账号里跑（ADR-015；按有效用户判，不认环境变量）。0D 恢复门之前（REAL_PUBLISH = False）发布整体关闭：
-     推分支、开 PR 都不做；只有测试在进程内注入测试后端（TEST_BACKEND：本地裸仓库 file:// + 假 gh）时才走一遍，
-     远端和 gh 都不从环境变量取（审查第 2 轮 P1-07：授权收紧和发布动作的串行化、结果账本在 0D，之前不启用）。
+  0. 只在 dt-gate 账号里跑（ADR-015；按有效用户判，不认环境变量）。真发布要 root 写的开关文件开着
+     （gate_github.SWITCH，0E-4；没有文件、写法不对一律当关着，常浩 doctor --online 全过后亲手打开），只对开关和代码写死的
+     gate_github.REPOS（现在只有 dt-sandbox）都列着的仓库放开：拿到凭证行后先过 gate_github.ready——开关、仓库和名册对得上、
+     dt-gate 自己的令牌文件、root 装的 gh 副本、令牌正是登记的机器账号、对这个仓库 admin=false push=true，任何一步不对就不发。
+     git、gh 一律用 gate_github 的最小环境（不继承调用方的环境变量，代理只从开关文件取）：令牌只给推送和 gh，取包、核历史、
+     取 main、查远端分支都不带；git / gh 的输出进异常和日志前先打码（gate_github.mask）；gh 用 root 副本的路径。
+     测试在进程内注入测试后端（TEST_BACKEND：本地裸仓库 file:// + 假 gh），行为照旧、不过开关和 ready；测试后端的远端不是
+     file:// 一律拒绝。远端和 gh 都不从环境变量取（审查第 2 轮 P1-07）。
   1. 交接包只当资料：清单逐字段按白名单校验，分支名必须正好是 <执行方>/<单号>；包先复制到私有临时目录、
      核对哈希再用；只取 Git 对象（bundle verify + fetch，打开对象校验，钩子关掉），不检出、不运行里面任何东西。
   2. 凭证以凭证库为准（autoloop_grants.check，和所有出口共用）：动手前 push_branch、open_pr 两个动作一起预检；
@@ -27,23 +32,30 @@ dt-worker 不持 GitHub 写凭据：工人侧启动脚本（ops/dt_worktree.py�
   3. 能机械判的发布边界：包里只有本单分支一个引用、头提交对得上；基线是 main 上的提交、头提交从基线长出来；
      不收合并提交；基线到头提交之间的每一个提交、以及最终差异，都不许碰合并规则 merge_rules.json 里的高风险路径
      （.github/、ops/、密钥类……；审查 P1-01：先加后删的历史也算）——碰了就不发、交常浩。
+  3b. 代次边界（#320，常浩 2026-11-24 选甲）：清单第 2 版记这一代的起点 gen_base，必须等于凭证库算出的边界
+     （autoloop_grants.boundary：更旧代次最后推上 GitHub 的头提交；没推过就是基线），且是头提交的祖先——作废代次在冻结之后、
+     镜像还没刷新时做的提交，不会经新代次的发布进 PR。确认远端分支就是这次的头提交后记进凭证库（record_published），
+     下一代的边界从这里算。第 1 版清单（旧启动脚本）只认第 1 代，起点当基线。
   4. 只推非 main：推送目标写死成 refs/heads/<执行方>/<单号>，不带 --force；远端同名分支已有别的提交就不覆盖。
      GitHub 一侧 dt-sandbox 的规则集只放行 main、agent/**、claude/**、codex/**（常浩 11-18 放行，hermes/baselines/dt-sandbox-github.json）。
   5. 同一分支已有开着的 PR，核对它的目标是本仓库 main、来源是本仓库（不是同名 fork 分支）、分支和头提交正是这次的，
      才沿用（审查 P1-05）；对不上就拒绝；已关闭或已合并的不再开新的。标题和正文用凭证库里的五要素，不用工人写的字。
 
-本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务、不配真实凭据（ADR-015 生效顺序第 2 条）；
-测试只推本地裸仓库。推送和开 PR 用运行账号自己的 git / gh 登录：0E 在 dt-gate 里配机器账号令牌（只能推非 main、不能合并，
-#132 的做法），之前不在主账号或秘书账号里真跑（ADR-015 第 5 节第 6 条「真实特权不回流」）。
+本批只做手动入口：不接中台规则、不装常驻服务、不写入 Hermes 定时任务（ADR-015 生效顺序第 2 条）；测试只推本地裸仓库。
+推送和开 PR 用 dt-gate 里机器账号的令牌（0E-4，gate_github.py：只能推非 main、不能合并，#132 的做法），
+主账号、秘书账号里没有这份令牌，真跑不起来（ADR-015 第 5 节第 6 条「真实特权不回流」）。
 状态只放本脚本自己的目录（运行账号的 DigitalTwin/autoloop/publish/、publish.jsonl），不和主账号其他脚本共用；任务锁例外：
 在凭证库旁边（autoloop_grants.task_lock），和续接、秘书 ② / ③ 共用一把（续审第 3 轮）；
 凭证库随 autoloop_grants 一起搬进 dt-gate。写前账本、结果不明冻结已接（0D）；接成正式出口在批 3。
 
   autoloop_publish.py publish --task t-20261118-abcdef
   autoloop_publish.py scan                 只读：列交接目录里的单和各自能不能发
+  autoloop_publish.py watch [--interval 60] [--once]
+                                         常驻（dt-gate 的服务 cn.digital-twin.gate.publisher）：每隔一会儿扫一遍，
+                                         scan 判「可以发」、这个头提交还没处理过的逐张 publish；真发布开关关着就只睡觉
 环境变量：DT_PUBLISH_OUTBOX（交接目录，默认 /Users/dt-worker/dt-outbox）、DT_PUBLISH_MIRRORS（主账号的裸仓库副本）、
-DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://github.com/<仓库>.git、用运行账号的 gh，
-不能用环境变量改（测试在进程内换 TEST_BACKEND）。
+DT_PUBLISH_LOG，以及 autoloop_grants 的 DT_GRANTS_*。远端固定 https://github.com/<仓库>.git、gh 固定 root 副本
+（gate_github.GH），都不能用环境变量改（测试在进程内换 TEST_BACKEND）。
 """
 import argparse
 import contextlib
@@ -62,6 +74,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import autoloop_config as C  # noqa: E402
 import autoloop_grants as G  # noqa: E402
+import gate_github as GG  # noqa: E402
 
 MAX_MANIFEST = 4096
 MAX_BUNDLE = 50 * 1024 * 1024
@@ -69,14 +82,15 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 BRANCH = re.compile(r"^(claude|codex)/t-\d{8}-[0-9a-f]{6}$")
 KEYS = {"schema", "task_id", "generation", "executor", "repo", "branch", "base", "head", "bundle", "bundle_sha256",
-        "run", "at"}
+        "run", "at"}                                       # 清单第 1 版（#320 之前的启动脚本）：只认第 1 代
+KEYS_V2 = KEYS | {"gen_base"}                              # 第 2 版：多记这一代的起点（#320）
+GENERATION_BOUNDARY = 1         # 发布核「本代起点 = 代次边界」（#320）；dt-gate-hub publish on 认这一行才肯打开真发布
 GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "transfer.fsckObjects=true",
             "-c", "fetch.fsckObjects=true"]
 RULES = HERE / "merge_rules.json"
 RUN_ID = re.compile(r"^[1-9]\d{0,11}$")
 MAX_COMMITS = 500
 GATE_USER = "dt-gate"           # ADR-015 控制面账号；测试里在进程内替换，不经环境变量
-REAL_PUBLISH = False            # 0D 恢复门（串行化、结果账本）之前发布整体关闭（审查 P1-07）
 TEST_BACKEND = None             # 测试在进程内换成 {"remote": "file://…/{github}.git", "gh": 假 gh 路径}；不经环境变量
 STOPPED = "停下了"               # 启动脚本出了问题没交接的一轮，最后一条消息以它开头（ops/dt_worktree.stop_text）
 MAX_HOPS = 5                    # 回答卡片的一轮往回追提问那一轮，最多几层
@@ -114,7 +128,7 @@ def hub_db():
 
 
 def gh_cmd():
-    return TEST_BACKEND["gh"] if TEST_BACKEND else "gh"
+    return TEST_BACKEND["gh"] if TEST_BACKEND else GG.GH          # 真路径用 root 装的 gh 副本（0E-4）
 
 
 def sensitive_patterns(repo):
@@ -150,12 +164,17 @@ def read_manifest(task_id):
         m = json.loads(raw.decode("utf-8"))
     except ValueError:
         raise Rejected("交接清单不是合法的 JSON")
-    if not isinstance(m, dict) or set(m) != KEYS:
+    if not isinstance(m, dict) or set(m) not in (KEYS, KEYS_V2) or m.get("schema") != (1 if set(m) == KEYS else 2):
         raise Rejected("交接清单的字段不对")
-    ok = (m["schema"] == 1 and m["task_id"] == task_id and type(m["generation"]) is int and m["generation"] >= 1
+    if m["schema"] == 1:                                    # 旧版启动脚本：只有第 1 代，起点就是基线
+        if m["generation"] != 1:
+            raise Rejected("旧格式的交接清单（没记本代起点）只认第 1 代，请用新版启动脚本重跑这一轮")
+        m["gen_base"] = m["base"]
+    ok = (m["task_id"] == task_id and type(m["generation"]) is int and m["generation"] >= 1
           and m["executor"] in G.EXECUTORS and isinstance(m["repo"], str) and G.REPO_NAME.match(m["repo"])
           and m["branch"] == branch_name(m["executor"], task_id) and isinstance(m["base"], str)
           and SHA.match(m["base"]) and isinstance(m["head"], str) and SHA.match(m["head"])
+          and isinstance(m["gen_base"], str) and SHA.match(m["gen_base"])
           and m["bundle"] == f"{task_id}.bundle" and isinstance(m["bundle_sha256"], str)
           and HEX64.match(m["bundle_sha256"]) and isinstance(m["run"], str) and RUN_ID.match(m["run"]))
     if not ok:
@@ -164,26 +183,38 @@ def read_manifest(task_id):
 
 
 # ---------- git ----------
-def git(*args, cwd=None, check=True, timeout=300):
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    r = subprocess.run(["git", *GIT_SAFE, *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+def git(*args, cwd=None, check=True, timeout=300, env=None):
+    """env=None 只在测试后端用（继承当前环境）；真路径一律传 gate_github 的最小环境，没传就拒（不退回继承调用方的环境、
+    PATH 里的 git 和已有登录）。没给工作目录时用最小环境的空家目录。超时 → Rejected（推送时算结果不明：不是 Definite）。"""
+    if env is None:
+        if not TEST_BACKEND:
+            raise Rejected("真发布路径的 git 没拿到最小环境，不跑")
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    elif cwd is None:
+        cwd = env["HOME"]
+    try:
+        r = subprocess.run(["git", *GIT_SAFE, *args], cwd=cwd, env=env, capture_output=True, text=True,
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Rejected(f"git {args[0]} 超时（{timeout} 秒）")
+    r.stdout, r.stderr = GG.mask(r.stdout), GG.mask(r.stderr)
     if check and r.returncode != 0:
         raise Rejected(f"git {args[0]} 失败：{(r.stderr or r.stdout).strip()[:300]}")
     return r
 
 
-def ensure_mirror(repo, github):
+def ensure_mirror(repo, github, env=None):
     m = mirrors() / f"{repo}.git"
     if not (m / "HEAD").exists():
         m.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(m.parent, 0o700)
-        git("init", "--quiet", "--bare", str(m))
-    git("fetch", "--quiet", remote_url(github), "+refs/heads/main:refs/remotes/origin/main", cwd=m)
+        git("init", "--quiet", "--bare", str(m), env=env)
+    git("fetch", "--quiet", remote_url(github), "+refs/heads/main:refs/remotes/origin/main", cwd=m, env=env)
     return m
 
 
-def is_ancestor(mirror, a, b):
-    return git("merge-base", "--is-ancestor", a, b, cwd=mirror, check=False).returncode == 0
+def is_ancestor(mirror, a, b, env=None):
+    return git("merge-base", "--is-ancestor", a, b, cwd=mirror, check=False, env=env).returncode == 0
 
 
 def assert_not_main(branch):
@@ -234,11 +265,27 @@ def require_gate():
 
 
 def require_publish_enabled():
-    """0D 之前整体关闭：不推分支、不开 PR；只认进程内注入的测试后端，而且远端必须是本地裸仓库。"""
-    if REAL_PUBLISH:
+    """测试后端只认本地裸仓库（file://）；没有测试后端时 root 写的真发布开关必须开着（0E-4），先挡一道，
+    拿到凭证行后 publish_envs 再按仓库完整核一遍。"""
+    if TEST_BACKEND:
+        if not str(TEST_BACKEND.get("remote", "")).startswith("file://"):
+            raise Rejected("测试后端只能是本地裸仓库（file://），不推真远端")
         return
-    if not TEST_BACKEND or not str(TEST_BACKEND.get("remote", "")).startswith("file://"):
-        raise Rejected("0D 恢复门（授权收紧与发布动作的串行化、结果账本）之前受信发布整体关闭，推分支、开 PR 都不做")
+    try:
+        GG.read_switch()
+    except GG.NotReady as e:
+        raise Rejected(f"推分支、开 PR 都不做：{e}")
+
+
+def publish_envs(repo, github):
+    """git / gh 用的环境：(不带令牌的, 带令牌的)。测试后端返回 (None, None)，行为不变；真路径先过 gate_github.ready
+    （开关、仓库、令牌、gh 副本、账号和权限都对）。带令牌的只给推送和 gh。不对 → Rejected，不发。"""
+    if TEST_BACKEND:
+        return None, None
+    try:
+        return GG.ready(repo, github)
+    except GG.NotReady as e:
+        raise Rejected(f"发布凭据没就绪：{e}")
 
 
 def _hub():
@@ -370,17 +417,17 @@ def check_run(run_id, row, generation):
     return f"交接包对应的那一轮：{reason}" if reason else None
 
 
-def history_hits(mirror, base, head, repo):
+def history_hits(mirror, base, head, repo, env=None):
     """基线到头提交之间每个提交的改动路径，加上最终差异，碰到高风险路径的都列出来；有合并提交直接拒绝。"""
-    if git("rev-list", "--min-parents=2", f"{base}..{head}", cwd=mirror).stdout.split():
+    if git("rev-list", "--min-parents=2", f"{base}..{head}", cwd=mirror, env=env).stdout.split():
         raise Rejected("交接里有合并提交，不自动发布")
-    commits = git("rev-list", f"{base}..{head}", cwd=mirror).stdout.split()
+    commits = git("rev-list", f"{base}..{head}", cwd=mirror, env=env).stdout.split()
     if len(commits) > MAX_COMMITS:
         raise Rejected(f"交接里提交太多（{len(commits)} 个），不自动发布")
-    paths = set(git("diff", "--name-only", "-z", "--no-renames", base, head, cwd=mirror).stdout.split("\0"))
+    paths = set(git("diff", "--name-only", "-z", "--no-renames", base, head, cwd=mirror, env=env).stdout.split("\0"))
     for c in commits:
         paths |= set(git("diff-tree", "-r", "--no-commit-id", "--name-only", "-z", "--no-renames", c,
-                         cwd=mirror).stdout.split("\0"))
+                         cwd=mirror, env=env).stdout.split("\0"))
     pats = sensitive_patterns(repo)
     return sorted(f for f in paths if f and any(pt.search(f) for pt in pats))
 
@@ -397,46 +444,54 @@ def publish(task_id, now=None, path=None):
             must(task_id, action, gen, now, path)
         with G.tx(path) as con:
             row = dict(G.grant_row(con, task_id))
+            edge = G.boundary(con, task_id, gen)
         if (row["repo"], row["executor"]) != (m["repo"], m["executor"]):
             raise Rejected("交接清单的仓库或执行方和凭证不一致")
+        if m["gen_base"] != (edge or m["base"]):           # 代次边界（#320）：这一代必须从旧代次最后推出去的提交起
+            raise Rejected(f"第 {gen} 代的起点 {m['gen_base'][:12]} 不是代次边界 {(edge or m['base'])[:12]}"
+                           f"（{'旧代次最后推上 GitHub 的头提交' if edge else '基线'}）：分支上可能有作废代次的提交，不发，交常浩")
         github, branch, head, base = row["github"], m["branch"], m["head"], m["base"]
         assert_not_main(branch)
         reason = check_run(m["run"], row, gen)
         if reason:
             raise Rejected(reason)
-        mirror = ensure_mirror(row["repo"], github)
+        local, authed = publish_envs(row["repo"], github)
+        mirror = ensure_mirror(row["repo"], github, local)
         with tempfile.TemporaryDirectory(prefix="dt-publish-") as tmp:
             data = _read_regular(outbox() / task_id / m["bundle"], MAX_BUNDLE, "交接包")
             if hashlib.sha256(data).hexdigest() != m["bundle_sha256"]:
                 raise Rejected("交接包和清单的哈希对不上（可能正在更新，稍后再试）")
             bundle = Path(tmp) / "handoff.bundle"
             bundle.write_bytes(data)
-            git("bundle", "verify", "--quiet", str(bundle), cwd=mirror)
-            heads = git("bundle", "list-heads", str(bundle), cwd=mirror).stdout.split()
+            git("bundle", "verify", "--quiet", str(bundle), cwd=mirror, env=local)
+            heads = git("bundle", "list-heads", str(bundle), cwd=mirror, env=local).stdout.split()
             if heads != [head, f"refs/heads/{branch}"]:
                 raise Rejected("交接包里不只有本单分支，或头提交对不上")
             git("fetch", "--quiet", "--no-tags", str(bundle), f"+refs/heads/{branch}:refs/dt-publish/{task_id}",
-                cwd=mirror)
-        if git("rev-parse", f"refs/dt-publish/{task_id}", cwd=mirror).stdout.strip() != head:
+                cwd=mirror, env=local)
+        if git("rev-parse", f"refs/dt-publish/{task_id}", cwd=mirror, env=local).stdout.strip() != head:
             raise Rejected("取进来的头提交对不上")
-        if not is_ancestor(mirror, base, "refs/remotes/origin/main") or not is_ancestor(mirror, base, head):
+        if not is_ancestor(mirror, base, "refs/remotes/origin/main", local) or not is_ancestor(mirror, base, head, local):
             raise Rejected("基线不是 main 上的提交，或头提交不是从基线长出来的")
-        hits = history_hits(mirror, base, head, row["repo"])
+        if not is_ancestor(mirror, m["gen_base"], head, local):
+            raise Rejected("头提交不是从这一代的起点长出来的")
+        hits = history_hits(mirror, base, head, row["repo"], local)
         if hits:
             raise Rejected(f"改动或提交历史碰到高风险路径（{'、'.join(hits[:5])}），不自动发布，交常浩")
         url = remote_url(github)
-        remote = git("ls-remote", url, f"refs/heads/{branch}", cwd=mirror).stdout.split()
+        remote = git("ls-remote", url, f"refs/heads/{branch}", cwd=mirror, env=local).stdout.split()
         existing = remote[0] if remote else None
         pushed = False
         if existing != head:
-            if existing and not (SHA.match(existing) and is_ancestor(mirror, existing, head)):
+            if existing and not (SHA.match(existing) and is_ancestor(mirror, existing, head, local)):
                 raise Rejected("远端同名分支已有别的提交，不覆盖")
             got = exit_guard("push_branch", task_id, gen, branch, head,     # 推之前在凭证库锁里现读（取代 must）
                              {"github": github, "remote": url, "branch": branch, "head": head, "before": existing},
-                             lambda: push_branch(mirror, url, branch, head))
+                             lambda: push_branch(mirror, url, branch, head, authed))
             pushed = not got["again"]
+        G.record_published(task_id, gen, head, path=path)  # 远端分支现在就是 head：记进凭证库，下一代的边界从这里算（#320）
         pr = exit_guard("open_pr", task_id, gen, branch, head, {"github": github, "branch": branch, "head": head},
-                        lambda: _open_pr_once(github, branch, head, row))
+                        lambda: _open_pr_once(github, branch, head, row, authed))
         pr = {"pr": pr.get("pr"), "pr_opened": bool(pr.get("pr_opened")) and not pr["again"]}
         out = {"task_id": task_id, "generation": gen, "github": github, "branch": branch, "head": head,
                "run": m["run"], "pushed": pushed, **pr}
@@ -446,7 +501,9 @@ def publish(task_id, now=None, path=None):
 
 # ---------- 出口账本（批 0D 恢复门，docs/恢复门-0D-设计.md 第 6 节） ----------
 NOT_SENT = ("Could not resolve host", "Failed to connect", "Connection refused", "Couldn't connect",
-            "[rejected]", "[remote rejected]")   # 推送确定没落到远端：没连上，或远端明确拒绝（拒绝也是权威的「没推」）
+            "[rejected]", "[remote rejected]",   # 推送确定没落到远端：没连上，或远端明确拒绝（拒绝也是权威的「没推」）
+            "Authentication failed", "could not read Username", "could not read Password",
+            "The requested URL returned error: 401", "The requested URL returned error: 403")   # 认证没过：0E-4
 
 
 class PrUnknown(Rejected):
@@ -468,11 +525,11 @@ def exit_guard(kind, task_id, gen, branch, head, target, do):
         raise Rejected(f"确定没做成（可以再试）：{e}")
 
 
-def push_branch(mirror, url, branch, head):
+def push_branch(mirror, url, branch, head, env=None):
     """真正的推送。没连上、远端明确拒绝 → 确定没推（Definite）；其余报错、超时 → 结果不明（原样抛出）。"""
     import autoloop_exits as E
     try:
-        r = git("push", "--quiet", "--no-verify", url, f"{head}:refs/heads/{branch}", cwd=mirror, check=False)
+        r = git("push", "--quiet", "--no-verify", url, f"{head}:refs/heads/{branch}", cwd=mirror, check=False, env=env)
     except OSError as e:                                     # git 本身没跑起来：确定没推
         raise E.Definite(f"git 跑不起来（{type(e).__name__}）")
     if r.returncode == 0:
@@ -483,11 +540,11 @@ def push_branch(mirror, url, branch, head):
     raise Rejected(f"git push 失败、分不清推没推：{err[:200]}")
 
 
-def _open_pr_once(github, branch, head, row):
+def _open_pr_once(github, branch, head, row, env=None):
     """开 PR 的出口动作：建之前的查询和核对出问题 → 确定没开（Definite）；建的那一步报错 → 结果不明。"""
     import autoloop_exits as E
     try:
-        return open_pr(github, branch, head, row)
+        return open_pr(github, branch, head, row, env)
     except PrUnknown:
         raise
     except Rejected as e:
@@ -506,11 +563,15 @@ def pr_is_ours(p, github, branch, head):
             and p.get("isCrossRepository") is False and src_owner == owner.lower() and src_name == name.lower())
 
 
-def open_pr(github, branch, head, row):
+def open_pr(github, branch, head, row, env=None):
+    """env=None 只在测试后端用；真路径传 gate_github 的最小环境（带令牌），没传就拒。gh 的输出先打码。"""
+    if env is None and not TEST_BACKEND:
+        raise Rejected("真发布路径的 gh 没拿到最小环境，不跑")
+    cwd = env["HOME"] if env else None
     r = subprocess.run([gh_cmd(), "pr", "list", "-R", github, "--head", branch, "--state", "all",
-                        "--json", PR_FIELDS], capture_output=True, text=True, timeout=60)
+                        "--json", PR_FIELDS], capture_output=True, text=True, timeout=60, env=env, cwd=cwd)
     if r.returncode != 0:
-        raise Rejected(f"查 PR 失败：{r.stderr.strip()[:200]}")
+        raise Rejected(f"查 PR 失败：{GG.mask(r.stderr).strip()[:200]}")
     prs = json.loads(r.stdout or "[]")
     live = [p for p in prs if p.get("state") == "OPEN"]
     if live:
@@ -529,11 +590,11 @@ def open_pr(github, branch, head, row):
     try:
         r = subprocess.run([gh_cmd(), "pr", "create", "-R", github, "-B", "main", "-H", branch,
                             "-t", f"{row['task_id']}：{first}", "-F", f.name], capture_output=True, text=True,
-                           timeout=120)
+                           timeout=120, env=env, cwd=cwd)
     finally:
         os.unlink(f.name)
     if r.returncode != 0:                                    # 建的那一步报错：PR 可能已经开了，结果不明（对账查 PR 列表）
-        raise PrUnknown(f"开 PR 报错、分不清开没开：{r.stderr.strip()[:200]}")
+        raise PrUnknown(f"开 PR 报错、分不清开没开：{GG.mask(r.stderr).strip()[:200]}")
     return {"pr": r.stdout.strip().splitlines()[-1] if r.stdout.strip() else None, "pr_opened": True}
 
 
@@ -554,13 +615,94 @@ def scan(now=None, path=None):
     return out
 
 
+def _done_path():
+    return log_path().parent / "publish-watch-done.json"
+
+
+def _load_done():
+    try:
+        d = json.loads(_done_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_done(d):
+    p = _done_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False)
+    os.replace(tmp, p)
+
+
+def watch_once(now=None, path=None):
+    """扫一遍：开关开着时，把 scan 判「可以发」、这个头提交还没处理过的单逐张发布。
+    发成了、拒发了都记进 publish-watch-done.json（按单号 → 头提交），同一个头提交不再试；出错（超时、跑不起来）不记，下一轮再试，
+    真推过、结果不明的由出口账本挡住（再试会被拒、随后记成处理过）。返回这一轮处理了哪些单。"""
+    require_gate()
+    try:
+        require_publish_enabled()
+    except Rejected:
+        return []                                            # 开关关着：什么都不做
+    done, out = _load_done(), []
+    for item in scan(now=now, path=path):
+        if item.get("check") != "可以发":
+            continue
+        tid = item["task_id"]
+        try:
+            head = read_manifest(tid)["head"]
+        except Rejected:
+            continue
+        if done.get(tid) == head:
+            continue
+        try:
+            res = publish(tid, now=now, path=path)
+            entry = {"task_id": tid, "ok": True, "pr": res.get("pr")}
+        except (Rejected, G.Rejected) as e:
+            with contextlib.suppress(OSError):
+                record({"what": "拒发", "task_id": tid, "reason": str(e), "by": "watch"})
+            entry = {"task_id": tid, "ok": False, "reason": str(e)}
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            with contextlib.suppress(OSError):
+                record({"what": "出错", "task_id": tid, "reason": GG.mask(str(e))[:300], "by": "watch"})
+            out.append({"task_id": tid, "ok": False, "retry": True})
+            continue
+        done[tid] = head
+        _save_done(done)
+        out.append(entry)
+    return out
+
+
+def watch(interval=60):
+    import time
+    while True:
+        try:
+            for r in watch_once():
+                print(json.dumps({"at": G.iso(G.now_tz()), **r}, ensure_ascii=False), flush=True)
+        except Exception as e:                               # 常驻：一轮出错只记一行，下一轮照跑
+            print(json.dumps({"at": G.iso(G.now_tz()), "error": f"{type(e).__name__}: {GG.mask(str(e))[:300]}"},
+                             ensure_ascii=False), flush=True)
+        time.sleep(interval)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="受信发布（最小版）：取 dt-worker 的交接包，核凭证后推非 main 分支、开 PR")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("publish")
     p.add_argument("--task", required=True)
     sub.add_parser("scan")
+    w = sub.add_parser("watch")
+    w.add_argument("--interval", type=int, default=60)
+    w.add_argument("--once", action="store_true")
     a = ap.parse_args(argv)
+    if a.cmd == "watch":
+        if a.once:
+            print(json.dumps({"ok": True, "result": watch_once()}, ensure_ascii=False, indent=1))
+            return 0
+        watch(max(10, a.interval))
+        return 0
     try:
         out = publish(a.task) if a.cmd == "publish" else scan()
     except (Rejected, G.Rejected) as e:
@@ -568,6 +710,13 @@ def main(argv=None):
             with contextlib.suppress(OSError):
                 record({"what": "拒发", "task_id": a.task, "reason": str(e)})
         print(json.dumps({"ok": False, "reason": str(e)}, ensure_ascii=False))
+        return 1
+    except (subprocess.SubprocessError, OSError, ValueError) as e:   # 超时、跑不起来、输出读不懂：留痕，不只是堆栈
+        reason = f"出错（{type(e).__name__}）：{GG.mask(str(e))[:300]}；推分支、开 PR 若已开始，出口账本记结果不明"
+        if a.cmd == "publish":
+            with contextlib.suppress(OSError):
+                record({"what": "出错", "task_id": a.task, "reason": reason})
+        print(json.dumps({"ok": False, "reason": reason}, ensure_ascii=False))
         return 1
     print(json.dumps({"ok": True, "result": out}, ensure_ascii=False, indent=1))
     return 0
