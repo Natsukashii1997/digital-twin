@@ -90,7 +90,8 @@ PY_FLAGS = ("-B", "-E", "-s")          # 不写缓存、不认 PYTHON* 环境变
 SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 OWNER_AGENT = "agent-autoloop"         # 主账号中台的 LaunchAgent 标签
 LABEL = {"hub": "cn.digital-twin.gate.hub", "readonly": "cn.digital-twin.gate.readonly",
-         "intake": "cn.digital-twin.gate.intake"}
+         "intake": "cn.digital-twin.gate.intake", "publisher": "cn.digital-twin.gate.publisher"}
+SERVICES = ("hub", "readonly", "intake", "publisher")   # publisher：受信发布常驻（autoloop_publish watch），不开端口
 HUB_FILES = ("hub.db", "master.key", "config.json", "rules.json", "secrets.env")   # engine backup 的全部内容
 NEEDED = ("hub.db", "master.key", "config.json", "rules.json")
 REPO_FILES = ("projects.json", "ops/dt_gate_user.py", "ops/dt_gate_hub.py", "ops/dt_root_guard.sh", "ops/dt_worktree.py")
@@ -832,6 +833,8 @@ def program(current, which):
     scripts = Path(current["repo"]["dir"]) / "hermes/scripts"
     if which == "hub":
         return [current["cli"], "up"]
+    if which == "publisher":
+        return [PY, *PY_FLAGS, str(scripts / "autoloop_publish.py"), "watch", "--interval", "60"]
     if which == "readonly":
         return [PY, *PY_FLAGS, str(scripts / "autoloop_readonly.py"), "serve", "--port",
                 str(port("DT_GATE_READONLY_PORT", 3352))]
@@ -1466,6 +1469,8 @@ def _install_all(host, current, s, which_list):
         install_daemon(host, current, which, s["hub_url"])
         if which == "hub":
             wait_health(host, s["hub_url"], current["engine"]["commit"], guid)
+        elif which == "publisher":
+            continue                                    # 不开端口：launchd 起得来就算装好，开关关着时它只睡觉
         else:
             wait_answering(host, port("DT_GATE_READONLY_PORT" if which == "readonly" else "DT_GATE_INTAKE_PORT",
                                       3352 if which == "readonly" else 3353), guid)
@@ -1476,6 +1481,8 @@ def cmd_update(host, a):
         raise Stop("会重启 dt-gate 的服务：确认后加 --confirm")
     s, current = need_state(), load_current()
     which_list = [w for w in ("hub", "readonly", "intake") if installed(w)]
+    if "hub" in which_list:                     # 受信发布常驻跟着中台走：搬好家的机器上 update 时没装就装上
+        which_list.append("publisher")
     if "hub" in which_list:                     # 新引擎可能改写库：换之前先备份（在 dt-gate 自己家里，复核 P2-d）
         gp = gate_paths(host)
         target = gp["home"] / f".agent-autoloop-update-{now_stamp()}"
@@ -1660,7 +1667,7 @@ def cmd_status(host, a):
     say(f"搬家：{'于 ' + s['migrated_at'] + '，主账号原目录 ' + s['owner_moved'] if s else '还没搬'}")
     if (gate_root() / "migrating.json").exists():
         say("  有搬到一半的记录（migrating.json）：跑 rollback --confirm 收拾")
-    for which in ("hub", "readonly", "intake"):
+    for which in SERVICES:
         code, out = host.launchctl("print", f"system/{LABEL[which]}")
         pid = re.search(r"\bpid = (\d+)", out or "")
         say(f"  {LABEL[which]}：{'在跑（进程 ' + pid.group(1) + '）' if code == 0 and pid else ('已装、没在跑' if code == 0 else '没装')}")
@@ -1704,7 +1711,7 @@ def _rollback_move(host, current, s, gp, gate, stamp):
         except Stop as e:
             say(f"  备份没做成（{e}），继续回滚；dt-gate 的中台目录整个改名留着")
     say("2. 停掉 dt-gate 的三个服务，核三个端口都没人在听（门卫先开着）")
-    for which in ("intake", "readonly", "hub"):          # 卸不掉就停在这里：plist、门卫、目录、停写都不动（P1-01）
+    for which in ("publisher", "intake", "readonly", "hub"):   # 卸不掉就停在这里：plist、门卫、目录、停写都不动（P1-01）
         remove_daemon(host, which)
     for p in rollback_ports(s):
         wait_no_listener(host, p)                        # 三个端口都没有任何账号在听了才往下

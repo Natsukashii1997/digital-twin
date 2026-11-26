@@ -180,6 +180,34 @@ class Publish(PublishBase):
             self.assertEqual(w.branch_name(ex, "t-20261118-abcdef"), P.branch_name(ex, "t-20261118-abcdef"))
 
 
+class Watch(PublishBase):
+    """常驻自动发布（watch）：开关开着时，工人交出的包自动推分支、开 PR；同一个头提交只处理一次，新头提交再发。"""
+
+    def test_publishes_new_handoff_once_then_again_after_new_head(self):
+        tid = self.worked()
+        (r,) = P.watch_once()
+        self.assertEqual((r["task_id"], r["ok"]), (tid, True))
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+        self.assertEqual(P.watch_once(), [])                                  # 同一头提交：不再试
+        self.run_turn([self.answer_event(tid)])                              # 返修出了新提交
+        (self.gh_state / "pr_list.json").write_text(json.dumps([self.legit_pr(tid, self.handoff(tid)["head"])]))
+        (r,) = P.watch_once()
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.remote_branch(tid), self.handoff(tid)["head"])
+
+    def test_rejected_is_recorded_once_and_switch_off_does_nothing(self):
+        tid = self.worked()
+        (self.gh_state / "pr_list.json").write_text(json.dumps([{"number": 8, "url": "u8", "state": "CLOSED"}]))
+        (r,) = P.watch_once()
+        self.assertFalse(r["ok"])
+        self.assertIn("已关闭或已合并", r["reason"])
+        self.assertEqual(P.watch_once(), [])                                  # 拒过的同一头提交不再刷日志
+        tid2 = self.worked()
+        with mock.patch.object(P, "require_publish_enabled", side_effect=P.Rejected("开关关着")):
+            self.assertEqual(P.watch_once(), [])
+        self.assertIsNone(self.remote_branch(tid2))
+
+
 class OnlyNonMain(PublishBase):
     """验收 3：只能推非 main，只推本单分支。"""
 
