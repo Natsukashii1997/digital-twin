@@ -314,28 +314,6 @@
       "github": "Natsukashii1997/obsidian-kb"
     },
     {
-      "id": "multi-agent",
-      "name": "多 Agent 协同",
-      "type": "capability",
-      "aliases": [
-        "多 Agent 协同",
-        "多 Agent",
-        "多Agent",
-        "协同模式",
-        "multi-agent"
-      ],
-      "path": "~/Documents/ChatGPT/个人/work/multi-agent",
-      "main": "main",
-      "agents": "AGENTS.md",
-      "card": null,
-      "test": "node --test tests/*.test.mjs",
-      "default_worker": null,
-      "write_allowed": false,
-      "notes": "跨项目协同模式的契约、角色协议、接力约定与模式评测（思维评审、工程审查、独立验证、并行研究、自治委派等）。Hermes 控制面与 Multica 实施归 digital-twin（DT-ORC），可执行方法归 my-skills，界面传信归驿窗。2026-11-07 按《项目体系重构 V1.3》新建；write_allowed=false，常浩批准后再开放写入单。没有 CI。",
-      "category": "活跃",
-      "github": "Natsukashii1997/multi-agent"
-    },
-    {
       "id": "ui-system",
       "name": "UI 设计体系",
       "type": "capability",
@@ -403,7 +381,8 @@
     "沙盒": "第三方克隆、探针；已移到 ~/Sandbox/，每月 1 号巡检提醒超过 30 天的",
     "拆外壳": "空仓库或套着别的仓库的外层仓库；.git 已移到 ~/Archive/repos/拆外壳/，文件原地保留",
     "待删": "空目录或常浩定删除的项目；已移到 ~/Archive/repos/待删/（移入记录.tsv），真正删除由常浩动手；github: 开头的是只在 GitHub 上的仓库",
-    "常浩自删": "营销战役相关，常浩整体删除，本计划不处理"
+    "常浩自删": "营销战役相关，常浩整体删除，本计划不处理",
+    "退役": "已并入别的仓库、不再开发；GitHub 设归档（只读），本地目录只供查历史；不在 projects 里，不派单、不巡检、不合并"
   },
   "inventory": [
     {
@@ -735,6 +714,12 @@
       "category": "待删",
       "todo": "可删：只是 Little Steps 8 月的打包产物，没开 GitHub Pages；源码在 work/little-steps 与私有仓库 Natsukashii1997/little-steps；需常浩删除",
       "why": "Little Steps 的网页成品（PWA 打包产物）"
+    },
+    {
+      "path": "~/Documents/ChatGPT/个人/work/multi-agent",
+      "category": "退役",
+      "todo": "2026-11-27 并入 agent-kit（协同/、tools/probe-agents.mjs；agent-kit#138、digital-twin#395）；全局指令装上新路径后清 worktree 和本地分支，GitHub 归档（先问常浩）",
+      "why": "原「多 Agent 协同」能力仓库（Natsukashii1997/multi-agent）；协同契约只留一份：常浩 2026-11-26 批并入、11-27 定放 agent-kit"
     }
   ],
   "types": {
