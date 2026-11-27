@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.6.0
+version: 0.7.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -24,12 +24,10 @@ metadata:
 - 收到“准备好就跑”或绝对截止变更时，先查真实本地时间并换成带时区的具体日期时间，保留本人原文另记变更，更新现行批复中的冲突时间，并核对已有计划、批准标记、定时入口和运行态；仅改文档不能声称运行时已改。绝对截止优先于相对时长，停机须预留取消与回读时间；无法可靠兑现则不放行。
 - 执行许可与执行结果分开：测试进度点不是通过证据，须核对最终汇总与退出码；版本变化须重新核对证据适用性。更新审批文件后准确报告“已记录/已批准/已安装/已开跑”的真实层级；尚无执行通道或准备证据时不得声称后台会自动推进。
 
-## 0b. 「派单 <8 位确认码>」（autoloop 任务凭证，#195 0B-1）
+## 0b. 新底座的写入派单（autoloop）不归这个技能
 
-- 常浩私聊回「派单 <8 位十六进制>」是批准 `autoloop_grants.py propose` 发出的【派单确认】，不是 `dispatch.py` 单号。先在私聊记录里找到对应的【派单确认】原文和常浩这条消息的 message_id，再跑：`DT_ROSTER=~/Documents/ChatGPT/个人/work/digital-twin/projects.json /usr/bin/python3 ~/.hermes/scripts/autoloop_grants.py approve --message-id <他这条消息的 message_id>`。脚本自己核验本人、私聊、时效、防重放并签凭证、发 start 事件；不要替他补码或用别的消息号。
-- 必须带 `DT_ROSTER`：安装副本在 `~/.hermes/scripts/`，默认名册路径会算成 `~/projects.json`，不带就 `FileNotFoundError`（凭证没签、消息没记已用，修好可重跑）。
-- 回读：`grants.db` 的 `grants` 表该 `task_id` 为 `active`、代次 1，`/Users/Shared/dt-autoloop/tasks/<task_id>.md` 已写。工人有没有领走、跑没跑完，脚本输出不说明，不要说成已开工。
-- 确认码 30 分钟有效；过期就原样告诉常浩，不自己重新 propose。
+- 「让 Claude / Codex 给 dt-sandbox 做 xx」这类走新底座的单，按 `autoloop` 技能办。批准只认常浩在门卫「卫士」确认卡上点「批准派单」（0E-3b，常浩 11-23 定删掉打字批准）；私聊里打「派单」「可以」都不算，也不再有确认码，`autoloop_grants.py approve` 这个命令已经没有了，不要跑。
+- 主账号里不跑 `autoloop_grants.py`（那里是搬家前的旧凭证库），查新底座的单按 `autoloop` 技能第 4、5 节。
 
 ## 1. 整理成派单
 
@@ -37,9 +35,7 @@ metadata:
    - **要登记的是第三方/上游仓库（如 Hermes 本体 `~/.hermes/hermes-agent`）时先查三件事再提方案**：`git status --short` 和 `git branch --show-current`（游离 HEAD 上未提交的本地补丁要先存成本地分支，名册 `main` 指向这个分支，否则 worktree 从 origin 拉、补丁不在底里）；`git remote -v`（origin 是别人的上游就**不填 `github`**——填了 `D new` 会往上游建 issue、`D pr` 往上游开 PR）；名册 `test` 只填相关测试子集，不跑上游全量。改 Hermes 本体、改名册、改网关都是常设授权清单 D 档，三项分别列出等常浩逐项点头，不合在一个“可以”里默认放行。
 2. **只读还是写入**：要改代码、改文档、提交的就是写入单；看、查、总结、出方案的是只读单。只读单把“不得修改项目文件、不得运行会写缓存或产物的测试/构建、不提交或丢弃”写进任务；派单元数据可写在项目外。主目录未提交改动必须在现有工作区读，不能用新 worktree 代替。具体核对方法见 [只读调查](references/read-only-investigation.md)。
 3. **交给谁**：常浩点名 Claude 或 Codex 就听他的，开单带 `--tool`；**没点名就不带 `--tool`**，由派单脚本按 AI 接入设置里车间的执行方选（`/usr/bin/python3 ~/.hermes/scripts/ai_access.py status` 能看当前默认和各家能不能用），不要自己按任务类型猜。常浩说「以后默认用 Claude / Codex」时，跑 `ai_access.py set default claude|codex`，把输出原样告诉他（下一张单生效）。
-4. **任务说明**写进一个临时文件，必须包含五要素：目标、交付物、验收标准（怎么算做完）、边界（哪些不做）、交给谁。车间看不到你和常浩的对话，要写清楚。
-   - **源文件与安装副本分开授权**：常浩明确要求“只改仓库、不碰安装文件”时，把不复制、不安装、不同步、不重启写进任务，并明确覆盖仓库默认的安装同步约定，避免车间按 AGENTS.md 扩大修改范围。区分派单元数据/日志与安装副本；自测使用隔离临时目录，不操作真实派单和回执。
-   - **把自测写成可验收交付物**：要求准确命令、预期结果和真实执行输出，不只交一段说明。涉及续跑、覆盖或历史文件时，覆盖首次操作、连续多轮、已有文件不覆盖、普通路径不变，并验证保存失败时不会继续破坏原数据；优先用隔离 fixture/mock 验证，不为自测启动真实模型或外部服务。
+4. **任务说明**写进一个临时文件，五要素（目标、交付物、验收、边界、交给谁）怎么写统一按共享参考库的「五要素任务说明」模块，动手前先读：`skill_view(name="dt-shared-reference", file_path="references/task-brief.md")`。车间看不到你和常浩的对话，要写清楚。缺了哪一项，`D new` 会拒绝开单、说缺哪项（模块第 4 节）；补齐再开，不填「无」「待定」凑数。只改仓库不碰安装副本、把自测写成可验收交付物这两条，也在模块第 2 节。
 
 ## 2. 开单和确认门
 

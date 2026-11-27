@@ -1,7 +1,7 @@
 ---
 name: pdaily-act
 description: "个人项目日报卡片「需要你拍板」的办理：常浩点了卡片上的「按推荐」按钮（会话里出现「【日报按钮】……拍板账 p-…」），或引用日报卡片回「① 按推荐」「③ 不做」「④ 先放着」「办 ②」「都按推荐」时，记进拍板账，按推荐把事办掉（要 Claude 做的写成任务派单），办完回一条带单号的回执"
-version: 0.1.0
+version: 0.2.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -38,7 +38,7 @@ metadata:
 - 要清理、删除的东西（worktree、分支、文件）：先 `ls` / `git branch -a --list` 看还在不在；已经不在就记「现场已不在，无需清理」，不要说成是你清的。
 
 
-1. **要 Claude / Codex 在仓库里做的**（变基、返修、补测试、写文档、核对、出小结）：读 `report` 里第三段这条的来龙去脉和 `sources`，按 workshop 技能第 1 节写任务说明（五要素齐全，车间看不到日报和你们的对话）。推荐写了谁做就用谁，没写就不带 `--tool`。
+1. **要 Claude / Codex 在仓库里做的**（变基、返修、补测试、写文档、核对、出小结）：读 `report` 里第三段这条的来龙去脉和 `sources`，按共享参考库的「五要素任务说明」模块写任务说明（先读 `skill_view(name="dt-shared-reference", file_path="references/task-brief.md")`；五要素齐全，目标末尾写「出自 <统计日> 日报拍板 <编号>」，车间看不到日报和你们的对话；缺项 `D new` 会拒绝开单）。推荐写了谁做就用谁，没写就不带 `--tool`。
    - 开单：`D new --project <项目 id> [--tool claude|codex] --mode read|write --task-file <文件>`。这次点击 / 回复就是写入单的确认，**不再发「待确认派单」**，直接开跑（workshop 第 3 节，后台 `D run <单号>`）。
    - 一条推荐涉及多个项目，每个项目一张单；同一时间最多 2 张在跑，其余排队，按 workshop 的规矩。
    - 开单后马上记：`A done --entry <拍板账号> --result "<一句话：派了什么>" --order <单号>`；多张单就记多次。

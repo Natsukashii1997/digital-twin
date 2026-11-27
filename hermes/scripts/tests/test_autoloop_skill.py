@@ -45,6 +45,7 @@ import autoloop_exits as EX  # noqa: E402
 import autoloop_readonly as R  # noqa: E402
 import autoloop_recovery as RV  # noqa: E402
 import gate_intake as I  # noqa: E402
+import task_brief as TB  # noqa: E402
 from test_autoloop_grants import CHAT, LATER, T0, Base, hub  # noqa: E402
 from test_autoloop_hub_e2e import SKIP, HubFixture  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
@@ -241,8 +242,9 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [11], tables)
+        self.assertEqual([len(t) for t in tables], [14], tables)
         reach = [inspect.getsource(G.propose) + inspect.getsource(RV.ensure_open) + inspect.getsource(G.require_hub_rule)
+                 + inspect.getsource(TB)   # 五要素和受限内容的说法在 task_brief（#358）
                  + inspect.getsource(I.propose_dispatch) + inspect.getsource(I._post)]
         for table, src in zip(tables, reach):
             for words in table:

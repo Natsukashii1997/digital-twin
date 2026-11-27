@@ -6,6 +6,19 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-27 · 5b-1 统一五要素任务说明（#358，Claude；PR 送审中，未安装）
+
+- 来由：批 5b 技能部分第一项（`docs/技能架构.md` 第 9 节 5b-1）。常浩 11-27 回「三件都按推荐」，其中「5b-1 拦：加」。
+- 做了：
+  - 先把猛鬼兽自改的 `workshop`（v0.6.0）、`pdaily-act` 安装副本原样收回仓库（技能以安装副本为准）。
+  - 共享参考库加模块 `dt-shared-reference/references/task-brief.md`：五行（目标、交付物、验收、边界、交给谁，认旧写法「验收标准」「范围」）、每项怎么写（目标末尾写出处、不丢已定的验收和决定、只读写入、不碰安装副本、自测写成交付物）、按接收方过滤（不放 Vault 内容、私聊原文、密钥）、写得再全也不带来执行权限、两个派单脚本拦什么。`workshop`、`autoloop`、`pdaily-act`、`groupdigest-act` 改成读它。
+  - `workshop` 第 0b 节（打字「派单 <确认码>」+ `autoloop_grants.py approve`，0E-3b 已删）改成「新底座的单按 `autoloop` 技能办，批准只认卫士卡上的点击」。
+  - 新脚本 `hermes/scripts/task_brief.py`，接进两处：**改了已有行为**——`dispatch.py new` 原来任务文件有内容就收，现在缺五要素任何一项就不开单、说缺哪项；`autoloop_grants.py propose` 原来非空、不超过 3000 字就收，现在缺项、夹带疑似密钥 / Vault 路径 / `sensitivity:` 标记都不登记。
+- 带出的影响（单独列出）：调度器 `twin_scheduler.py` 写的任务说明只有目标和验收，打开自动开单（默认关着）的话会被 `dispatch.py new` 拦下。没替它补假内容；测试里用 `BriefTests` 钉住这一点，打开前要先给调度任务补上交付物、边界、交给谁。
+- 测试：新加 `test_task_brief.py`、`test_shared_reference.py` 的 `TaskBrief` 8 条、`test_autoloop_grants` 的拦截用例、`test_twin_scheduler.BriefTests`；改坏试验（去掉两处检查、去掉受限内容检查、某个技能不读模块）对应测试都红。全量数字见 PR。
+- 装的时候要注意（安装是 D 档，另问）：`task_brief.py` 要和 `dispatch.py`、`autoloop_grants.py` 一起装进 `~/.hermes/scripts/`，单装后两个会导入失败；dt-gate 的副本 `stage` 时整个 `hermes/scripts` 都带上；门卫目录是手工装的，重装门卫代码时要连 `task_brief.py`（照抄清单已补）。合并后没装之前，工程自检会在日报里报这三个文件缺失或不一致。
+- 合并属于例外（`autoloop_grants.py` 在敏感路径里，L3），要常浩回「合并」。
+
 ## 2026-11-27 晚：引擎一次性合入上游 v1.10.4，随上线照抄单第 4 步升级（常浩「合并上游再升级」）
 
 - **决定**（登记在 `docs/DECIDED.md` 11-27）：上游 KKKKhazix/agent-autoloop 最新发布 v1.10.4 一次性合进自有引擎，dt-gate 里的中台从 `abc8d41` 升上去；11-20「不再跟上游」照旧。
@@ -41,15 +54,16 @@
 - **写了**：`ops/dt_worker_service.py`（install / status / remove）、`ops/dt_worker_setup.sh` 第 4b 步和 `claude-proxy.sh` 读令牌、巡检加「工人接单程序在不在跑」；未安装。
 - **装法（合并前就可以在 PR 分支上实测）**：① 登录 dt-worker 跑 `bash <仓库>/ops/dt_worker_setup.sh`（共享副本合并后再更新）补令牌 → 注销 dt-worker；② 主账号 `sudo /usr/bin/python3 -B -E -s ops/dt_worker_service.py install`：它先实测「没登录时两家 CLI 登录读不读得到」，不过就停下、什么都不改；③ 验收：门卫强制重载一次、重启电脑一次，接单程序都自己回来（中台「在线」）。
 
-## 2026-11-24 · 5b-2 拍板请求模块（#359，Claude；PR 待常浩合并，未安装）
+## 2026-11-24 · 5b-2 拍板请求模块（#359，Claude；已合并 `a7ec0f8`，未安装）
 
 - 来由：批 5b 技能部分第一项（`docs/技能架构.md` 第 9 节）。交接会话出了三份计划（共享笔记 `5b-实施计划-claude-01.md`），常浩 11-24 回「按计划开工」，只批了 5b-2。
 - 做了：新建参考库技能 `hermes/skills/dt-shared-reference/`（`SKILL.md`、`CHANGELOG.md`、`references/decision-request.md`）。拍板请求模块写四块：按常设授权清单四档判断要不要问（拿不准按 D）、已经定了的不再问；最多三问、推荐放第一、写清不定会怎样的模板；各种事从哪发（私聊、日报卡片、写入派单只递提议由卫士发卡、旧车间「待确认派单」、合并卡片）；回了之后认准哪一问、带回原任务、只按回答的范围做、含糊回复不当高风险授权、回报说真实层级。附三类案例。
 - 顺手：`docs/技能架构.md` 第 9 节两处「常浩在私聊回『派单 <确认码>』」改成门卫确认卡（0E-3b，11-23 已定打字批准删掉，11-24 真机走通）。`HERMES.md` 第 26 行同样过期，是已定内容，另发改动确认，这个 PR 没动。
-- 测试：新增 `test_shared_reference.py` 16 条（改坏模块时对应条目会红，核过）；全量见 PR。
+- 测试：新增 `test_shared_reference.py` 19 条（最终版；改坏模块时对应条目会红，核过）。
 - 送审：驿窗审查链 `r1a20c35270701`。第 1 轮返修（P1 1、P2 4）：新底座派不了时，改走旧车间要常浩先明说「按老办法派」；日报拍板的消息号写进 `--note`；账本还没处置入口时不另找文件代替；选项写主要风险；测试补核各通道的授权条件和例子里的处理句。
 - 没做：还没有场景技能读它（5b-3、5b-4、5b-6 接）；安装（D 档，另问）；三类案例的行为验收要装上后用 `hermes chat` 跑。
-- 已知过期：猛鬼兽已装的 `workshop`（v0.6.0，自改）第 0b 节还教 `autoloop_grants.py approve`，5b-1 收回仓库时处理。
+- 结果：ChatGPT 五轮审查第 5 轮通过（受审 `2ad1ff6`），按策略交合并执行器合并 → `a7ec0f8`（PR #383），#359 已关。安装：常浩 11-24「先不装」，等 5b-3 / 5b-4 接上时一起装；装后的行为验收在 #387。
+- 已知过期：猛鬼兽已装的 `workshop`（v0.6.0，自改）第 0b 节还教 `autoloop_grants.py approve`，已在 5b-1（#358）收回仓库并改掉。
 
 ## 2026-11-24 · #379 工作台记录页、沉淀页（并进 PR #378，待常浩合并）
 

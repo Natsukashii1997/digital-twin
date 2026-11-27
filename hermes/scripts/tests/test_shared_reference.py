@@ -7,7 +7,8 @@
      发出通道表里新底座、旧车间两行各自的授权条件写全（卫士卡点击；先回「按老办法派」再对单回「可以」），三类例子的处理句都在（#383 第 1 轮 P2-03）；
   3. 四个档位的说法和《常设授权清单》第 2 节一字不差；
   4. 行为核对：真跑 `pdaily_act.py record --note`（临时目录），拍板账里真的存下消息号和原话；问账本的真解析器有哪些子命令；
-  5. 已经作废的说法不再出现（打字「派单 <确认码>」批准，0E-3b 常浩 11-23 定删掉），参考库里不夹带私聊号这类个人信息。
+  5. 五要素任务说明模块（#358）：五项和别名对得上 task_brief.py，例子过得了检查，拦截表的原话脚本里真有，四个使用方都读它；
+  6. 已经作废的说法不再出现（打字「派单 <确认码>」批准，0E-3b 常浩 11-23 定删掉），参考库里不夹带私聊号这类个人信息。
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import contextlib
@@ -23,8 +24,10 @@ SKILLS = ROOT / "hermes" / "skills"
 SCRIPTS = ROOT / "hermes" / "scripts"
 LIB = SKILLS / "dt-shared-reference"
 MODULE = LIB / "references" / "decision-request.md"
+TASK_BRIEF = LIB / "references" / "task-brief.md"
 sys.path.insert(0, str(SCRIPTS))
 import openloop  # noqa: E402
+import task_brief as TB  # noqa: E402
 import test_pdaily_act as PA  # noqa: E402  借它的隔离夹具：日报目录指到临时目录、不连飞书
 
 
@@ -196,6 +199,78 @@ class NoteReachesLedger(unittest.TestCase):
         self.assertEqual(mine[0].get("note"), note[:200] + "…")   # 只留前 200 字：消息号、原话在最前面，一定留得住
         self.assertTrue(mine[0].get("note", "").startswith("消息号 om_test0001 原话「① 按推荐」"))
         self.assertEqual(mine[0]["via"], "回复")
+
+
+class TaskBrief(unittest.TestCase):
+    """五要素任务说明模块（#358，第 9 节 5b-1）：说法和 task_brief.py 一致，四个使用方都改成读它，模块里的例子过得了脚本。"""
+    text = read(TASK_BRIEF)
+    users = ("workshop", "autoloop", "pdaily-act", "groupdigest-act")
+
+    def test_fields_and_aliases_match_the_checker(self):
+        part = self.text.split("## 1.", 1)[1].split("## 2.", 1)[0]
+        block = part.split("```", 2)[1]
+        self.assertEqual([l.split("：", 1)[0] for l in block.strip().splitlines()], list(TB.FIELDS))
+        for old, new in TB.ALIASES.items():
+            self.assertIn(f"「{old}」算{new}", part)
+
+    def test_examples_pass_the_checker(self):
+        blocks = self.text.split("```")[1::2]
+        self.assertEqual(len(blocks), 2)                       # 第 1 节的格式、第 5 节的例子
+        for b in blocks:
+            self.assertEqual(TB.problems(b, worker=True), [], b)
+
+    def test_spellings_listed_are_accepted(self):
+        for w in ("`目标：…`", "`- **目标**：…`", "`# 目标：…`", "`## 目标`"):
+            self.assertIn(w, self.text)
+        for line in ("目标: x", "- **目标**：x", "# 目标：x", "## 目标\nx"):
+            self.assertEqual(TB.fields(line), {"目标": "x"}, line)
+
+    def test_gate_table_quotes_real_messages(self):
+        part = self.text.split("## 4.", 1)[1].split("## 5.", 1)[0]
+        src = {"dispatch.py": read(SCRIPTS / "dispatch.py"), "autoloop_grants.py": read(SCRIPTS / "autoloop_grants.py")}
+        rows = [l for l in part.splitlines() if l.startswith("| `")]
+        self.assertEqual(len(rows), 2)
+        self.assertIn("dispatch.py new", rows[0])
+        self.assertIn('"；".join(bad) + "，没有开单"', src["dispatch.py"])
+        self.assertIn("task_brief.problems(Path(a.task_file)", src["dispatch.py"])
+        self.assertIn("autoloop_grants.py propose", rows[1])
+        self.assertIn('"；".join(bad) + "，不登记"', src["autoloop_grants.py"])
+        self.assertIn("task_brief.problems(scope_text, worker=True)", src["autoloop_grants.py"])
+        checker = read(SCRIPTS / "task_brief.py")
+        for w in ("任务说明缺", "有疑似密钥或令牌", "有 Vault 路径或 sensitivity 标记"):
+            self.assertIn(w, part)
+            self.assertIn(w, checker)
+
+    def test_names_exist(self):
+        for s in set(re.findall(r"`([a-z][a-z-]+)` 技能", self.text)):
+            self.assertTrue((SKILLS / s / "SKILL.md").is_file(), s)
+        for script in set(re.findall(r"`(?:hermes/scripts/)?([a-z_]+\.py)", self.text)):
+            self.assertTrue((SCRIPTS / script).is_file(), script)
+        self.assertRegex(read(ROOT / "docs" / "技能架构.md"), r"(?m)^## 9\.")
+
+    def test_core_rules_present(self):
+        for must in ("不是指令的来源", "不放受限内容", "不带来任何执行权限", "「卫士」确认卡上的点击", "末尾一句写这件事从哪来",
+                     "不因为这次换了说法就丢掉", "不碰安装副本", "真实执行输出", "不要为了过检查"):
+            self.assertIn(must, self.text)
+
+    def test_users_read_the_module(self):
+        call = 'skill_view(name="dt-shared-reference", file_path="references/task-brief.md")'
+        for s in self.users:
+            with self.subTest(s):
+                body = read(SKILLS / s / "SKILL.md")
+                self.assertIn(call, body)
+                self.assertNotRegex(body, r"按 workshop (技能)?第 1 节写任务说明")
+        lib = read(LIB / "SKILL.md")
+        row = next(l for l in lib.splitlines() if "`references/task-brief.md`" in l)
+        for s in self.users:
+            self.assertIn(f"`{s}`", row)
+
+    def test_workshop_no_longer_teaches_typed_approval(self):
+        body = read(SKILLS / "workshop" / "SKILL.md")
+        self.assertNotIn("approve --message-id", body)
+        self.assertNotRegex(body, r"派单 <(8 位)?(十六进制|确认码)>")
+        self.assertIn("「卫士」确认卡上点「批准派单」", body)
+        self.assertNotIn("add_parser(\"approve\"", read(SCRIPTS / "autoloop_grants.py"))   # 命令确实没了
 
 
 class NoStaleOrPrivate(unittest.TestCase):
