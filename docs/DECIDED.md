@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-11-27 · 中台第一条自动规则：跟进 dt-sandbox 的 GitHub Issue，只分析
+
+- **在哪定的**：Claude 会话「agent-autoloop｜上游新版试装与首条规则」。试跑通过后问「第一条规则先交给它自动处理哪件事」，常浩选「跟进 GitHub Issue」；再问盯哪个仓库、做到哪一步，选「dt-sandbox」「只分析，飞书报给我」。
+- **规则片段**：`ops/autoloop_rules/dt-sandbox-issue-watch.json`，轮询脚本 `ops/issue_watch.py`。
+
+**定了什么**
+
+1. 每 5 分钟看 dt-sandbox 开着的 issue，新的交给 dt-worker 里的 Codex **只读**分析：读代码、不改文件、不提交、不推送、不回复 issue。
+2. 结论发飞书卡片到常浩私聊：要什么、问题在哪（文件和行号）、建议怎么改；要动手照旧在飞书说「让 Claude 给 dt-sandbox 做 #号」、点门卫卡批准，**不改写入派单要常浩点卡的规矩**。
+
+实施时 Claude 定、常浩没单独定过的：只收仓库主人（Natsukashii1997）2026-11-28 起开的 issue（公开仓库谁都能开 issue，挡掉陌生人往 Agent 里塞话）；分析用 Codex 的 read-only 沙箱、模型固定 gpt-6-luna（默认的 gpt-6.1-sol 当天实测 ChatGPT 账号用不了）；轮询不带 GitHub 凭据。
+
+---
+
 ## 2026-11-27 · 引擎一次性合入上游 v1.10.4，再升级 dt-gate 里的中台
 
 - **在哪定的**：Claude 会话「agent-autoloop｜上游新版试装与首条规则」。常浩说「帮我装一下这个项目的最新：https://github.com/KKKKhazix/agent-autoloop」；Claude 发改动确认（11-20「不再跟上游」的原话和理由、合并 19 个重叠文件和升级在用中台的风险、临时目录试装这个不改也行的做法），常浩回「合并上游再升级」。

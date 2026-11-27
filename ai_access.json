@@ -128,6 +128,14 @@
       "reads": "送审包 Markdown",
       "writes": "回执文件、~/Library/Application Support/DigitalTwin/relay/；结论是返工时把回执路径交给 ORCA 终端里的 Claude",
       "note": "仅支持 ChatGPT 网页：送审本身就是要另一家独立审；可用性在送审时用 chatgpt_relay.py status 查。"
+    },
+    {
+      "id": "issue-watch",
+      "name": "跟进 GitHub Issue · 只分析（中台第一条自动规则：每 5 分钟看 dt-sandbox 新 issue，Codex 只读分析后发飞书卡片；ops/autoloop_rules/dt-sandbox-issue-watch.json，未装）",
+      "executor": "codex",
+      "reads": "dt-sandbox 开着的 issue（GitHub 公开接口，不带凭据；只收仓库主人 2026-11-28 起开的）、dt-worker 里 ~/dt-read/dt-sandbox 只读镜像",
+      "writes": "中台卡片（feishu 通道，发常浩私聊）；只读镜像每轮对齐远端，不提交、不推送、不回复 issue",
+      "note": "仅支持 Codex：issue 正文是公开仓库里别人能写的资料，要靠 Codex 的 read-only 沙箱真正挡住写文件和联网（Claude 的只读只是工具白名单）。切换不走 ai_access.py set，要改规则片段里 issue-reader 的 use 和 program。模型固定 gpt-6-luna：本机 Codex 默认的 gpt-6.1-sol 2026-11-27 实测 ChatGPT 账号用不了。轮询脚本 ops/issue_watch.py 不调 AI。"
     }
   ],
   "no_ai": [

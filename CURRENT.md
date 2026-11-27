@@ -6,6 +6,13 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-27 晚：中台第一条自动规则「跟进 dt-sandbox Issue · 只分析」写好，未装（常浩选定，登记在 DECIDED 11-27）
+
+- **写了**：`ops/autoloop_rules/dt-sandbox-issue-watch.json`（规则片段）、`ops/issue_watch.py`（轮询脚本）、测试 `hermes/scripts/tests/test_issue_watch.py`；`ai_access.json` 和本文件「AI 接入」加 `issue-watch`。
+- **试跑（替身：临时中台、本机 Codex，不是 dt-worker）**：上游 v1.10.4 合并版 `try` 通过（常浩选蓝色）；规则换成本机版、指向 agent-autoloop 仓库：找到 #15 → Codex 只读分析 → 卡片写到文件和行号 → 22:10 下一轮不重复；只读镜像没被改。证据 `evidence/2026-11-27-engine-merge-upstream/claude-04-try-status.txt`、`claude-05-issue-watch-e2e.txt`。正式规则片段过了引擎 `check`。
+- **没装的原因**：`autoloop_config install`（正式中台唯一的写规则工具）每次都会把派单规则重新暂停，上线后照抄单第 6 步恢复的 Codex 派单会被停掉；装法要另定。
+- **当天发现**：本机 Codex 默认模型 `gpt-6.1-sol` 用 ChatGPT 账号跑报「not supported」（Homebrew 0.166 和 ChatGPT.app 里 0.169 都一样），`gpt-6-luna` 能跑；dt-worker 的 Codex 配置没核（读不了它的家目录），照抄单第 6 步恢复的 Codex 派单可能碰到同样的错。主账号 `claude auth status` 报没登录（Hermes 主模型走本机 claude）。
+
 ## 2026-11-27 晚：引擎一次性合入上游 v1.10.4，随上线照抄单第 4 步升级（常浩「合并上游再升级」）
 
 - **决定**（登记在 `docs/DECIDED.md` 11-27）：上游 KKKKhazix/agent-autoloop 最新发布 v1.10.4 一次性合进自有引擎，dt-gate 里的中台从 `abc8d41` 升上去；11-20「不再跟上游」照旧。
