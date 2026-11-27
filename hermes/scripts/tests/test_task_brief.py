@@ -92,6 +92,23 @@ class Leaks(unittest.TestCase):
         self.assertEqual(B.problems(FULL.replace("交给谁：Claude", "交给谁：Codex"), executor="codex"), [])
         self.assertIsNone(B.mismatch(FULL, None))
 
+    def test_negation_and_both_named(self):
+        """#405 第 2 轮 P2-01：否定写法认出正向接收方；两家都写又没说哪家都行的，看不出交给谁、不放。"""
+        cases = (("不要 Claude，给 Codex", "claude", "不交给 Claude"), ("不要 Claude，给 Codex", "codex", None),
+                 ("不要 Codex，给 Claude", "codex", "不交给 Codex"), ("不要 Codex，给 Claude", "claude", None),
+                 ("Claude 或 Codex", "claude", None), ("Claude 或 Codex", "codex", None), ("Claude / Codex 都行", "codex", None),
+                 ("跟随默认执行方", "codex", None), ("按派单参数里的执行方", "claude", None),
+                 ("Claude 和 Codex", "claude", "看不出交给哪家"), ("先给 Claude 再给 Codex", "codex", "看不出交给哪家"),
+                 ("除了 Claude", "claude", "不交给 Claude"), ("别给 Codex", "claude", None),
+                 ("Codex（不是 Claude）", "claude", "不交给 Claude"), ("Codex（不是 Claude）", "codex", None))
+        for who, executor, want in cases:
+            with self.subTest(who=who, executor=executor):
+                got = B.mismatch(FULL.replace("交给谁：Claude", f"交给谁：{who}"), executor)
+                if want is None:
+                    self.assertIsNone(got)
+                else:
+                    self.assertIn(want, got)
+
     def test_ordinary_words_are_not_flagged(self):
         """task-brief、ghp 开头的短词、正文里的 sensitivity 都不算。"""
         text = FULL + "\n参考 references/task-brief.md；讨论 sensitivity 分级怎么写；ghp_short"
