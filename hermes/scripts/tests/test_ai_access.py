@@ -221,7 +221,7 @@ class DispatchTest(Base):
         (self.root / "roster.json").write_text(json.dumps({"projects": [
             {"id": "fixture", "name": "夹具", "path": str(repo), "main": "main", "write_allowed": False}]}))
         self.task = self.root / "task.md"
-        self.task.write_text("# 目标：AI 接入测试\n交付物：无（只读）\n验收：能开单\n边界：不改文件\n交给谁：Claude\n", encoding="utf-8")
+        self.task.write_text("# 目标：AI 接入测试\n交付物：无（只读）\n验收：能开单\n边界：不改文件\n交给谁：按派单参数里的执行方\n", encoding="utf-8")
 
     def dispatch(self, *args, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("H_", "DT_STATE_NOTIFY"))}

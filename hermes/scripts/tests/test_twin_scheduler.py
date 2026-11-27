@@ -35,7 +35,7 @@ OK_RECEIPT = {"exit_code": 0, "timed_out": False, "worker_error": False, "sessio
 # 调度器现在写的任务说明只有目标和验收，dispatch.py new 的五要素检查会拦下（#358，预期：自动开单默认关着，
 # 要开先给任务补齐交付物、边界、交给谁；BriefTests 钉住这一点）。其余开单测试测的是预留、关联、恢复，开单时补上另三项。
 REAL_TASK_TEXT = sched.task_text
-BRIEF_TAIL = "交付物：无（只读）\n边界：不改文件\n交给谁：Claude\n"
+BRIEF_TAIL = "交付物：无（只读）\n边界：不改文件\n交给谁：按派单参数里的执行方\n"
 PATCH_BRIEF = ("_t = sched.task_text\n"
                "sched.task_text = lambda *a: _t(*a) + " + repr(BRIEF_TAIL) + "\n")   # 给子进程脚本用
 

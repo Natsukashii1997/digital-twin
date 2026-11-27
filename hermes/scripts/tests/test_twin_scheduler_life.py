@@ -29,7 +29,7 @@ class Life(Base):
         (self.root / "roster.json").write_text(json.dumps({"projects": [
             {"id": p, "name": p, "path": str(self.root / "repo"), "main": "main", "write_allowed": False}
             for p in ("alpha", "beta")]}))
-        (self.root / "task.md").write_text("# 目标：隔离\n交付物：无（只读）\n验收：能开单\n边界：不改文件\n交给谁：Claude\n", encoding="utf-8")
+        (self.root / "task.md").write_text("# 目标：隔离\n交付物：无（只读）\n验收：能开单\n边界：不改文件\n交给谁：按派单参数里的执行方\n", encoding="utf-8")
         self.procs = []
         self.addCleanup(self.reap)
 
