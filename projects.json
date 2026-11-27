@@ -331,7 +331,7 @@
       "default_worker": null,
       "write_allowed": false,
       "notes": "跨项目 UI 设计原则、资产索引、可复用模式与界面验收标准；ui-styles、excel-aura 等可执行 Skill 留在 my-skills，只做引用。2026-11-07 按《项目体系重构 V1.3》新建；write_allowed=false，常浩批准后再开放写入单。没有 CI。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/ui-system"
     },
     {
