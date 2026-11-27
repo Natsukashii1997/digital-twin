@@ -483,7 +483,10 @@ def extract_archive(host, owner, repo, sha, dest, keep):
 
 
 def repo_keep(name):
-    return name in REPO_FILES or (name.startswith("hermes/scripts/") and not name.startswith("hermes/scripts/tests/"))
+    """副本里要的文件：名册和几份 ops 脚本、hermes/scripts（不含测试）、手写的中台规则片段（只收 .json 数据，
+    autoloop_config add-rules 从副本里按名字读，2026-11-27 第一条自动规则）。"""
+    return (name in REPO_FILES or (name.startswith("hermes/scripts/") and not name.startswith("hermes/scripts/tests/"))
+            or (name.startswith("ops/autoloop_rules/") and name.endswith(".json") and name.count("/") == 2))
 
 
 def stage_node(host, owner, gate, src, root):

@@ -131,7 +131,7 @@
     },
     {
       "id": "issue-watch",
-      "name": "跟进 GitHub Issue · 只分析（中台第一条自动规则：每 5 分钟看 dt-sandbox 新 issue，Codex 只读分析后发飞书卡片；ops/autoloop_rules/dt-sandbox-issue-watch.json，未装）",
+      "name": "跟进 GitHub Issue · 只分析（中台第一条自动规则：每 5 分钟看 dt-sandbox 新 issue，Codex 只读分析后发飞书卡片；ops/autoloop_rules/dt-sandbox-issue-watch.json；装法是上线照抄单第 7 步 autoloop_config add-rules，未装）",
       "executor": "codex",
       "reads": "dt-sandbox 开着的 issue（GitHub 公开接口，不带凭据；只收仓库主人 2026-11-28 起开的）、dt-worker 里 ~/dt-read/dt-sandbox 只读镜像",
       "writes": "中台卡片（feishu 通道，发常浩私聊）；只读镜像每轮对齐远端，不提交、不推送、不回复 issue",
