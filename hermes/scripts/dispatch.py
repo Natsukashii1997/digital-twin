@@ -297,8 +297,10 @@ def cmd_new(a):
         d.mkdir(parents=True)
         if a.sched_key:     # 关联键先落盘：开单中途失败也能被恢复按键找到
             (d / "sched_key").write_text(a.sched_key)
-    (d / "task.md").write_text(task_text, encoding="utf-8")
-    os.chmod(d / "task.md", task_mode)   # 和原来 shutil.copy 一样带上源文件的权限位
+    fd = os.open(d / "task.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL, task_mode)   # 建出来就是源文件的权限位（同原来的 shutil.copy）
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(task_text)
+    os.chmod(d / "task.md", task_mode)   # umask 会削掉一些位：再设一次，和源文件一样
     o = {"no": no, "project": p["id"], "tool": a.tool, "tool_source": chosen_by, "mode": a.mode, "status": "new",
          "created": dt.datetime.now().isoformat(timespec="seconds"), "cwd": p["path"]}
     if a.sched_key:
