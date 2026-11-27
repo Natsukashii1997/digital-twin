@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.5.1
+version: 0.6.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -23,6 +23,13 @@ metadata:
 - 委托范围内由 Hermes 逐项给出“批准/不批准＋理由”；条件批准必须写清何时生效。本人要求“不批就跳过留痕”时照办，不重复上交同一决定；依赖未获批准项的下游动作不得绕过前提。委托审批不等于代替专业 Agent 作独立技术终审，也不能扩大冻结恢复等明确保留权限。
 - 收到“准备好就跑”或绝对截止变更时，先查真实本地时间并换成带时区的具体日期时间，保留本人原文另记变更，更新现行批复中的冲突时间，并核对已有计划、批准标记、定时入口和运行态；仅改文档不能声称运行时已改。绝对截止优先于相对时长，停机须预留取消与回读时间；无法可靠兑现则不放行。
 - 执行许可与执行结果分开：测试进度点不是通过证据，须核对最终汇总与退出码；版本变化须重新核对证据适用性。更新审批文件后准确报告“已记录/已批准/已安装/已开跑”的真实层级；尚无执行通道或准备证据时不得声称后台会自动推进。
+
+## 0b. 「派单 <8 位确认码>」（autoloop 任务凭证，#195 0B-1）
+
+- 常浩私聊回「派单 <8 位十六进制>」是批准 `autoloop_grants.py propose` 发出的【派单确认】，不是 `dispatch.py` 单号。先在私聊记录里找到对应的【派单确认】原文和常浩这条消息的 message_id，再跑：`DT_ROSTER=~/Documents/ChatGPT/个人/work/digital-twin/projects.json /usr/bin/python3 ~/.hermes/scripts/autoloop_grants.py approve --message-id <他这条消息的 message_id>`。脚本自己核验本人、私聊、时效、防重放并签凭证、发 start 事件；不要替他补码或用别的消息号。
+- 必须带 `DT_ROSTER`：安装副本在 `~/.hermes/scripts/`，默认名册路径会算成 `~/projects.json`，不带就 `FileNotFoundError`（凭证没签、消息没记已用，修好可重跑）。
+- 回读：`grants.db` 的 `grants` 表该 `task_id` 为 `active`、代次 1，`/Users/Shared/dt-autoloop/tasks/<task_id>.md` 已写。工人有没有领走、跑没跑完，脚本输出不说明，不要说成已开工。
+- 确认码 30 分钟有效；过期就原样告诉常浩，不自己重新 propose。
 
 ## 1. 整理成派单
 
@@ -59,6 +66,8 @@ metadata:
 ## 4. 回报
 
 写入单跑完、状态是 done 时，先执行 `D pr <单号>`：推分支、开 PR，返回 `pr_url`。`ok: false` 时（提交里像有密钥、推不上去、PR 没开成）把 `msg` 原样写进回报，不要重试。续跑后再跑完，同样执行一次，新提交会推到原来的 PR。
+- 车间回执的 `need_decision` 问「规矩不准 push，验收又要开 PR，谁来推」时：开 PR 已在原授权（确认派单或日报「按推荐」）范围内就由 Hermes 跑 `D pr`，不给车间 push 权限——推送和开 PR 本来就是派单脚本的活，车间不 push 是护栏。
+- `D pr` 后约一分钟用 `gh pr view <号> -R <owner/repo> --json state,mergeable,statusCheckRollup` 回读：主分支在单子跑期间前进了，PR 可能是 `CONFLICTING`、CI 不触发。处理：在本单 worktree `git fetch origin main && git rebase origin/main`（先用 `git merge-tree --write-tree --name-only origin/main HEAD` 看冲突文件）；`CURRENT.md`、`AGENTS.md` 这类两边各加一节的冲突两节都留（本单节放上面），代码冲突不自己改，转常浩；`GIT_EDITOR=true git rebase --continue` 后重跑本单定向测试，再 `D pr` 推到原 PR，回读到 `MERGEABLE` 且 CI 结论 SUCCESS 才报“可合并”。
 
 然后读 `~/.hermes/dispatch/<单号>/out/receipt.json`，在飞书回报：
 - 第一行：✅/❌/⚠️ 单号 · 交给谁 · 用时
@@ -78,6 +87,12 @@ metadata:
 2. 先按单号核对答复和原授权。常浩明确说“不续跑”“先不合并”时，只把决定记录到该单的 `user-decision.md`，保留分支/worktree，不自动 followup 或合并；说另派一单的问题不塞回原单。
 3. 需要继续执行且仍在授权范围内时，把答复写进临时文件（例如 `~/.hermes/dispatch/<单号>/answer.md`），后台运行 `D run <单号> --followup <这个文件>`。车间会在**原来的会话**里接着做，前面的上下文都在。只读报告中的“建议提交/丢弃”或 `need_decision` 不会自动升级为写权限；确需修改或提交，按写入单确认门另行办理。
 4. 跑完照第 4 节回报。
+
+## 5b. 单子被中断（状态卡在 running、没有回执）
+
+- 网关重启或停机会连带杀掉 `D run` 起的车间进程，单子停在 running、`out/` 没有 receipt。**有单在跑时不重启网关**；要重启先 `D list` 确认没有 running 的单。网关不能从网关内部重启（命令会被一起杀掉，安全机制也会拦），请常浩在独立终端执行 `hermes gateway restart`。
+- 恢复：`ps -p <dispatch PID>,<worker PID>` 确认进程都已不在 → 备份 `order.json`（`order.json.bak-<日期>`）→ 把 `status` 改成 `failed` 并加一条说明（谁、为何改、依据哪次授权）→ 写续跑说明：注明这是**新会话**（旧会话已死，上下文不在）、原任务路径 `~/.hermes/dispatch/<单号>/task.md`、worktree 里未提交改动是上次留下的要在其上接着做不推倒重来、已核实的测试结果和尚缺的验收项 → 后台 `D run <单号> --followup <说明文件> --timeout <足够>`。不另开新单，未提交改动就在原 worktree 里。
+- 原授权仍有效才续跑；状态不明不盲启。
 
 ## 6. 话题
 
