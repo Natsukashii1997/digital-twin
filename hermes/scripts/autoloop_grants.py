@@ -671,7 +671,7 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
     scope_text = (scope_text or "").strip()
     if not scope_text or len(scope_text) > MAX_SCOPE:
         raise Rejected(f"五要素不能为空，最多 {MAX_SCOPE} 字")
-    bad = task_brief.problems(scope_text, worker=True)   # 缺要素、夹带受限内容都不登记（#358）：任务单 dt-worker 读得到
+    bad = task_brief.problems(scope_text, worker=True, executor=executor)   # 缺要素、夹带受限内容、交给谁对不上都不登记（#358）
     if bad:
         raise Rejected("；".join(bad) + "，不登记")
     if not 0 < hours <= MAX_HOURS:
@@ -880,8 +880,11 @@ def _decide(token, choice, message_id, event_id, now=None, path=None, post=None)
     why = None
     if choice == "ok" and not p["decision"] and now < parse_iso(p["expires_at"]):
         actions = json.loads(p["actions"])     # 中台规则、名册是外部状态：在写事务外先读
+        bad = task_brief.problems(p["scope_text"], worker=True, executor=p["executor"])
         if content_hash(p["repo"], p["github"], p["executor"], actions, p["valid_until"], p["scope_text"]) != p["content_hash"]:
             why = "提议内容和提出时对不上，不签"
+        elif bad:   # 升级前登记、没过这道检查的旧提议：点了也不签、不写工人任务单（#405 审查 P1-02）
+            why = "提议没过现在的任务说明检查：" + "；".join(bad) + "，不签"
         elif allowed_repos().get(p["repo"]) != p["github"]:
             why = f"名册里 {p['repo']} 的仓库变了或已不能派写入单"
         else:

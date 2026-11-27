@@ -5,6 +5,7 @@
 """
 import _isolation  # noqa: F401  统一测试隔离（#212），必须是第一句：在导入任何被测脚本之前
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -41,6 +42,15 @@ class Fields(unittest.TestCase):
                          ["交付物", "边界"])
         self.assertEqual(B.missing("## 目标\n## 交付物\nx"), ["目标", "验收", "边界", "交给谁"])   # 标题下紧跟标题算空
 
+    def test_heading_followed_by_another_item_is_empty(self):
+        """#405 审查 P1-01：「## 目标」下面紧跟着另一项（不管哪种写法），目标算空，不拿下一项冒充。"""
+        rest = FULL.split("\n", 1)[1]
+        for nxt in ("- **交付物**：README.md", "**交付物**", "交付物", "验收：PR 只有 README.md", "# 交付物：README.md", "## 交付物"):
+            with self.subTest(nxt):
+                self.assertEqual(B.missing(f"## 目标\n\n{nxt}\n\n{rest}"), ["目标"])
+        self.assertEqual(B.missing(f"## 目标\n\n改 README，补一节测试说明\n\n{rest}"), [])   # 标题下一行写正文照旧算数
+        self.assertEqual(B.missing("## 目标\n交付物是 README 里新的一节\n" + rest), [])          # 正文里提到某项的名字不算另一项
+
     def test_names_must_start_the_line(self):
         """正文里顺口提到「目标：」不算写了这一项。"""
         self.assertEqual(B.missing("说明：我们的目标：改 README\n" + FULL.split("\n", 1)[1]), ["目标"])
@@ -64,6 +74,23 @@ class Leaks(unittest.TestCase):
                 (msg,) = B.problems(FULL + extra, worker=True)
                 self.assertIn(why, msg)
                 self.assertNotIn(key, msg)
+
+    def test_sensitivity_marker_with_list_or_bold_prefix(self):
+        for line in ("- sensitivity: 受限", "**sensitivity**: restricted", "> sensitivity：受限", "sensitivity: 受限"):
+            with self.subTest(line):
+                self.assertEqual(len(B.leaks(FULL + "\n" + line)), 1)
+
+    def test_executor_must_match_who(self):
+        """#405 审查 P2-01：「交给谁」只点名一家时要和实际派的一致；两家都写或都没写不判。"""
+        self.assertEqual(B.problems(FULL, executor="claude"), [])
+        (msg,) = B.problems(FULL, executor="codex")
+        self.assertEqual(msg, "任务说明写交给 Claude，实际要派给 Codex")
+        for who in ("Claude 或 Codex", "跟随默认执行方", "CLAUDE CODE"):
+            with self.subTest(who):
+                text = FULL.replace("交给谁：Claude", f"交给谁：{who}")
+                self.assertEqual(B.problems(text, executor="claude"), [])
+        self.assertEqual(B.problems(FULL.replace("交给谁：Claude", "交给谁：Codex"), executor="codex"), [])
+        self.assertIsNone(B.mismatch(FULL, None))
 
     def test_ordinary_words_are_not_flagged(self):
         """task-brief、ghp 开头的短词、正文里的 sensitivity 都不算。"""
@@ -89,6 +116,30 @@ class DispatchNew(DispatchBase):
 
     def test_full_brief_opens_order(self):
         self.assertTrue(self.new())
+
+    def test_who_must_match_the_tool(self):
+        self.task.write_text(FULL.replace("交给谁：Claude", "交给谁：Codex"), encoding="utf-8")
+        code, out = self.run_cmd("new", "--project", "fixture", "--tool", "claude", "--mode", "read", "--task-file", str(self.task))
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("任务说明写交给 Codex，实际要派给 Claude", out.get("msg", ""), out)
+        self.assertEqual(list(self.ledger.glob("D*/order.json")), [])
+
+    def test_order_gets_the_text_that_was_checked(self):
+        """#405 审查 P1-03：核完之后源文件被改掉，交给车间的仍是核过的那份；权限位照源文件带上（原来 shutil.copy 也这样）。"""
+        self.task.write_text(FULL, encoding="utf-8")
+        self.task.chmod(0o600)
+        go = self.root / "go"
+        p = self.spawn("new", "--project", "fixture", "--tool", "claude", "--mode", "read", "--task-file", str(self.task),
+                       H_GO=go, H_PRELOCK_DELAY=3)   # 进程起好后在起跑线等；放行后马上读、核，拿派单锁之前睡 3 秒
+        time.sleep(1.5)
+        go.touch()
+        time.sleep(1)                                # 这时已经核完、正在锁前睡：把源文件换掉
+        self.task.write_text("目标：被换掉的内容\n", encoding="utf-8")
+        code, out = self.result(p)
+        self.assertEqual(code, 0, out)
+        saved = self.ledger / out["order"]["no"] / "task.md"
+        self.assertEqual(saved.read_text(encoding="utf-8"), FULL)
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

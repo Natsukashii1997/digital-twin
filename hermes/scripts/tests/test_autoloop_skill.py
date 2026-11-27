@@ -242,7 +242,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [14], tables)
+        self.assertEqual([len(t) for t in tables], [15], tables)
         reach = [inspect.getsource(G.propose) + inspect.getsource(RV.ensure_open) + inspect.getsource(G.require_hub_rule)
                  + inspect.getsource(TB)   # 五要素和受限内容的说法在 task_brief（#358）
                  + inspect.getsource(I.propose_dispatch) + inspect.getsource(I._post)]
@@ -417,6 +417,7 @@ class OneSentenceToDispatch(Base):
     def test_project_without_dispatch_rule_is_refused_at_propose(self):
         """常浩 11-23 定（#346）：中台没有这条派单规则，网关提议时就拒绝，不登记提议；技能第 3 节的表认得这句原话。"""
         self.hub_rules = hub(("dt-sandbox", "claude"))
+        self.scope.write_text(FIVE.replace("交给谁：Claude", "交给谁：Codex"), encoding="utf-8")   # 交给谁和执行方一致（#405 P2-01）
         code, out = self.propose(executor="codex")
         self.assertEqual(code, 1)
         self.assertIn("名册放行了写入，但中台没有接", out["why"])

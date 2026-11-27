@@ -232,12 +232,15 @@ class TaskBrief(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertIn("dispatch.py new", rows[0])
         self.assertIn('"；".join(bad) + "，没有开单"', src["dispatch.py"])
-        self.assertIn("task_brief.problems(Path(a.task_file)", src["dispatch.py"])
+        self.assertIn("task_brief.problems(task_text)", src["dispatch.py"])
+        self.assertIn("task_brief.problems(task_text, executor=a.tool)", src["dispatch.py"])
         self.assertIn("autoloop_grants.py propose", rows[1])
         self.assertIn('"；".join(bad) + "，不登记"', src["autoloop_grants.py"])
-        self.assertIn("task_brief.problems(scope_text, worker=True)", src["autoloop_grants.py"])
+        self.assertIn("task_brief.problems(scope_text, worker=True, executor=executor)", src["autoloop_grants.py"])
         checker = read(SCRIPTS / "task_brief.py")
-        for w in ("任务说明缺", "有疑似密钥或令牌", "有 Vault 路径或 sensitivity 标记"):
+        self.assertIn('"提议没过现在的任务说明检查："', src["autoloop_grants.py"])
+        self.assertIn("提议没过现在的任务说明检查", part)
+        for w in ("任务说明缺", "有疑似密钥或令牌", "有 Vault 路径或 sensitivity 标记", "任务说明写交给", "实际要派给"):
             self.assertIn(w, part)
             self.assertIn(w, checker)
 
