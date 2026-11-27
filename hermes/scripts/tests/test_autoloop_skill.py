@@ -242,7 +242,7 @@ class SkillDocMatchesScripts(unittest.TestCase):
                 cur.append(re.match(r"\| `([^`]+)`", line).group(1))
             elif cur is not None and not line.startswith("|"):
                 cur = None
-        self.assertEqual([len(t) for t in tables], [15], tables)
+        self.assertEqual([len(t) for t in tables], [16], tables)
         reach = [inspect.getsource(G.propose) + inspect.getsource(RV.ensure_open) + inspect.getsource(G.require_hub_rule)
                  + inspect.getsource(TB)   # 五要素和受限内容的说法在 task_brief（#358）
                  + inspect.getsource(I.propose_dispatch) + inspect.getsource(I._post)]

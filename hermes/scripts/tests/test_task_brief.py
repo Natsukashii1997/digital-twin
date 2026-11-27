@@ -92,22 +92,33 @@ class Leaks(unittest.TestCase):
         self.assertEqual(B.problems(FULL.replace("交给谁：Claude", "交给谁：Codex"), executor="codex"), [])
         self.assertIsNone(B.mismatch(FULL, None))
 
-    def test_negation_and_both_named(self):
-        """#405 第 2 轮 P2-01：否定写法认出正向接收方；两家都写又没说哪家都行的，看不出交给谁、不放。"""
-        cases = (("不要 Claude，给 Codex", "claude", "不交给 Claude"), ("不要 Claude，给 Codex", "codex", None),
-                 ("不要 Codex，给 Claude", "codex", "不交给 Codex"), ("不要 Codex，给 Claude", "claude", None),
-                 ("Claude 或 Codex", "claude", None), ("Claude 或 Codex", "codex", None), ("Claude / Codex 都行", "codex", None),
-                 ("跟随默认执行方", "codex", None), ("按派单参数里的执行方", "claude", None),
-                 ("Claude 和 Codex", "claude", "看不出交给哪家"), ("先给 Claude 再给 Codex", "codex", "看不出交给哪家"),
-                 ("除了 Claude", "claude", "不交给 Claude"), ("别给 Codex", "claude", None),
-                 ("Codex（不是 Claude）", "claude", "不交给 Claude"), ("Codex（不是 Claude）", "codex", None))
+    def test_who_only_takes_fixed_forms(self):
+        """#405 第 3 轮 P2-01：「交给谁」只认固定写法；否定、未定、先后顺序、两家并列一律不认，不再猜自由文本。"""
+        ok = (("Claude", "claude"), ("claude code", "claude"), ("Codex", "codex"), ("Claude 或 Codex", None),
+              ("跟随默认执行方", None), ("车间默认执行方。", None), ("按派单参数里的执行方", None), ("Claude（常浩点名）", "claude"),
+              ("Codex (日报推荐)", "codex"), ("Claude。", "claude"))
+        for who, want in ok:
+            with self.subTest(who=who):
+                self.assertEqual(B.who_of(who), (True, want))
+        bad = ("不要 Claude，给 Codex", "不要用 Claude", "不要给 Claude", "不让 Claude", "不要 Claude 或 Codex",
+               "Claude 或 Codex 都不行", "Claude / Codex 不确定", "Claude 和 Codex，先后顺序随便", "非常适合 Claude",
+               "Claude（不是 Codex）", "随便", "Claude Codex", "Claude？")
+        for who in bad:
+            with self.subTest(who=who):
+                self.assertEqual(B.who_of(who), (False, None))
+                for executor in ("claude", "codex"):
+                    msg = B.mismatch(FULL.replace("交给谁：Claude", f"交给谁：{who}"), executor)
+                    self.assertIn("交给谁只能写", msg)
+
+    def test_named_worker_must_be_the_executor(self):
+        cases = (("Claude", "claude", None), ("Claude", "codex", "任务说明写交给 Claude，实际要派给 Codex"),
+                 ("Codex（常浩点名）", "claude", "任务说明写交给 Codex，实际要派给 Claude"),
+                 ("Claude 或 Codex", "codex", None), ("跟随默认执行方", "claude", None))
         for who, executor, want in cases:
             with self.subTest(who=who, executor=executor):
-                got = B.mismatch(FULL.replace("交给谁：Claude", f"交给谁：{who}"), executor)
-                if want is None:
-                    self.assertIsNone(got)
-                else:
-                    self.assertIn(want, got)
+                self.assertEqual(B.mismatch(FULL.replace("交给谁：Claude", f"交给谁：{who}"), executor), want)
+        self.assertIsNone(B.mismatch(FULL.replace("交给谁：Claude\n", ""), "claude"))   # 缺这一项归 missing 报
+        self.assertIsNone(B.mismatch(FULL, "gpt"))
 
     def test_ordinary_words_are_not_flagged(self):
         """task-brief、ghp 开头的短词、正文里的 sensitivity 都不算。"""
