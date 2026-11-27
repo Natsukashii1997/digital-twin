@@ -6,6 +6,13 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-27 晚：引擎一次性合入上游 v1.10.4，随上线照抄单第 4 步升级（常浩「合并上游再升级」）
+
+- **决定**（登记在 `docs/DECIDED.md` 11-27）：上游 KKKKhazix/agent-autoloop 最新发布 v1.10.4 一次性合进自有引擎，dt-gate 里的中台从 `abc8d41` 升上去；11-20「不再跟上游」照旧。
+- **引擎**：agent-autoloop#19（Closes #18），冲突 6 处保留自有改动；`npm test` 884 条 0 失败、2 万步模拟过；本仓库 `ops/autoloop_drill.py` 演练 `abc8d41 → ee70228` 升级、回滚、搬家都过。证据 `evidence/2026-11-27-engine-merge-upstream/`。
+- **照抄单**：`docs/DT-ORC/migration/2026-11-27-上线照抄单.md` 第 4 步改成装引擎 origin/main（先核最后一行是合入上游那个提交），`update` 后加 `autoloop_recovery pin` + `reconcile`。dt-worker 的接单程序仍是 v1.8.5，本次不动。
+- **下一步**：常浩回「合并」（agent-autoloop#19、本 PR）→ 照抄单照常做；做完说「装完了」，Claude 核中台版本、恢复闸，再在临时目录跑 `try` 试跑、写第一条规则。
+
 ## 2026-11-26 晚：执行底座 48 小时上线开工（常浩「按推荐开工」，不再送审）
 
 - **决定**（登记在 `docs/DECIDED.md` 11-26）：11-28 之前上线；不再送审、不做替身验证、不逐步核对真机清单，问题在用的过程中修；CI 照跑、不拦着等；第 1 天 dt-sandbox 全自动，第 2 天加 2–3 个真实项目（常浩点名）；秘书代批、推翻与汇报、0E-5、批 3–8 往后放。
