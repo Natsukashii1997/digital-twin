@@ -133,16 +133,28 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(self.state(), "OPEN")
 
     def test_v2_signature_is_void_under_v3(self):
-        """#412 迁移：按 v2 授权范围签的策略记录，装上 v3 规则后自动失效（要常浩重签），回到发卡片，不合并。"""
+        """#412 迁移（#413 审查 P2-03）：用 v2 当时的算法（SCOPE_KEYS 里还没有 append_only_docs）按 v2 规则签的策略记录，
+        装上 v3 规则后失效（要常浩重签），回到发卡片，不合并。本机实测：旧算法 × 已装 v2 规则 = 线上已签的 31a6fe23be1a，
+        v3 是 c83b94d2c9c0（DigitalTwin/evidence/2026-11-28-合并放权修订2-412/v2_v3_scope_hash.txt）。"""
+        old_keys = ("sensitive", "repo_sensitive", "l0_paths", "rule_docs", "direction_docs", "l1_max_files", "ask_labels", "auto")
         v3 = self.rules_now()
         v2 = {k: v for k, v in v3.items() if k != "append_only_docs"}
         v2["version"] = "2"
         v2["direction_docs"] = ["(^|/)PRD\\.md$", "(^|/)ARCHITECTURE\\.md$", "(^|/)adr/", "(^|/)DECIDED\\.md$",
                                 "^global/(claude|codex)/", "(^|/)工程流程\\.md$", "(^|/)常设授权清单\\.md$"]
-        self.assertNotEqual(MP.scope_sha(v2), MP.scope_sha(v3))
-        self.rules.write_text(json.dumps(v2, ensure_ascii=False), encoding="utf-8")
-        self.sign()                                                    # 在 v2 下签
-        self.rules.write_text(json.dumps(v3, ensure_ascii=False), encoding="utf-8")   # 装上 v3
+        with unittest.mock.patch.object(MP, "SCOPE_KEYS", old_keys):
+            v2_sha = MP.scope_sha(v2)                                  # v2 时代真正签下的哈希
+        self.assertNotIn("append_only_docs", old_keys)
+        self.assertNotEqual(v2_sha, MP.scope_sha(v3))
+        self.dir.mkdir(parents=True, exist_ok=True)
+        sig = {"type": MP.POLICY_TYPE, "scope_sha256": v2_sha, "rules_version": "2",
+               "message_id": "om_sign", "open_id": "ou_owner", "signed_at": "2026-11-22T18:25:14+08:00"}
+        (self.dir / "policy.json").write_text(json.dumps(
+            {"schema": MP.SCHEMA, "enabled": True, "signature": sig, "used_messages": {}, "history": []}), encoding="utf-8")
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
+            ok, why, _ = MP.active(v3)
+        self.assertFalse(ok)
+        self.assertIn("范围哈希对不上", why)
         r = self.auto()
         self.assertEqual(r.returncode, 3)
         self.assertIn("范围哈希对不上", r.stdout)
