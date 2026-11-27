@@ -166,8 +166,8 @@ V2 想加的唯一内核补丁（规则加 `tier` 字段）取消：`tier` 已�
 
 | 资产 | 去处 | 在新架构里变成 |
 |---|---|---|
-| multi-agent `docs/routing.md`、MA-02 L0–L3 | C + A | 规则模板；审查轮数 |
-| multi-agent `scripts/probe-agents.mjs` | A | 派单前健康检查 |
+| agent-kit `协同/routing.md`、`协同/审查契约.md`（原 multi-agent routing、MA-02，2026-11-27 并入） | C + A（引用，不搬：常浩 2026-11-27 定协同契约放 agent-kit、不放中台，autoloop 评估定了再引用，digital-twin#395） | 规则模板；审查轮数 |
+| agent-kit `tools/probe-agents.mjs`（原 multi-agent `scripts/`） | A（引用 agent-kit） | 派单前健康检查 |
 | agent-kit《工程流程》第 5 节 | A | 合并出口的固定步骤 |
 | agent-kit `hooks/guard-git.mjs`、`bash-precheck.mjs`、权限配置 | A | dt-worker 下 Claude 的工具层拦截（账号隔离之外再加一层） |
 | agent-kit LESSONS | C | 运维清单直接引用（第 8 节） |
