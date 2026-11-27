@@ -124,7 +124,7 @@
       "default_worker": null,
       "write_allowed": true,
       "notes": "M3 批 3 建了 main（指向 claude/v1），远端默认分支已改成 main；codex/bootstrap、claude/v1 保留；M3 批 6（2026-10-27）主目录已切到 main。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/github-center"
     },
     {
@@ -226,7 +226,7 @@
       "default_worker": null,
       "write_allowed": true,
       "notes": "Chrome 桌面版 MV3 插件，常浩自用：把 ChatGPT / Claude 的回答存成长图 PNG + 离线 HTML + Markdown 放进 Obsidian。2026-11-07 常浩定转为活跃，同日建私有远端。没有 CI。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/chatgpt-clipper"
     },
     {
@@ -245,7 +245,7 @@
       "default_worker": null,
       "write_allowed": true,
       "notes": "macOS 菜单栏小工具（Swift），清理下载与缓存、构建产物，空间暴涨时提醒，已挂进驿窗侧栏。测试用 scripts/test.sh，不要直接 swift test（L-04）；只能在 macOS 上跑，没有 CI。2026-11-07 常浩定转为活跃，同日建私有远端；第 0–9 批经 disk-slim PR #1 合回 main（19adc49）。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/disk-slim"
     },
     {
@@ -266,7 +266,7 @@
       "default_worker": null,
       "write_allowed": true,
       "notes": "Obsidian 知识库 KB-04 的 GET NOTES 索引增量维护工具（Python，本机确定性执行，不调模型不联网）；GET NOTES 严格只读。2026-11-07 常浩定转为活跃，同日建私有远端：只放代码，索引数据 part-*.jsonl、state/、.runtime/ 不入库（含受限笔记元数据），远端是去掉数据后新起的历史，旧历史打包在 ~/Archive/repos/备份/。没有 CI。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/get-index"
     },
     {
@@ -288,7 +288,7 @@
       "default_worker": null,
       "write_allowed": true,
       "notes": "家庭育儿记录 PWA 与微信小程序（React + Vite）。2026-11-07 常浩定转为活跃：目录从 ~/Documents/AI 项目/baby-care-workbench 挪来，同日建私有远端；仓库含宝宝姓名与出生数据，常浩同意放私有库，不得公开。端到端 npx playwright test 要先装 Playwright 浏览器，没放进 test。没有 CI。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/little-steps"
     },
     {
@@ -310,7 +310,7 @@
       "default_worker": null,
       "write_allowed": true,
       "notes": "知识库项目的工程仓库：进度、交接、验收结论和维护脚本。知识正文在 ~/Documents/Obsidian Vault，只在本机，不进本仓库、不推 GitHub（Vault「决定/Vault 只开放给本人本地入口」，Vault AGENTS 禁止 git push）；写 Vault 照 Vault 自己的 AGENTS。vault-read 在 Vault 的 .claude/scripts/，Hermes vault 技能在本仓库 hermes/skills/vault/，GET 索引见 get-index。2026-11-07 常浩定登记为活跃并另建这个工程仓库。没有 CI。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/obsidian-kb"
     },
     {
@@ -331,7 +331,7 @@
       "default_worker": null,
       "write_allowed": false,
       "notes": "跨项目 UI 设计原则、资产索引、可复用模式与界面验收标准；ui-styles、excel-aura 等可执行 Skill 留在 my-skills，只做引用。2026-11-07 按《项目体系重构 V1.3》新建；write_allowed=false，常浩批准后再开放写入单。没有 CI。",
-      "category": "活跃",
+      "category": "冻结",
       "github": "Natsukashii1997/ui-system"
     },
     {
@@ -377,6 +377,7 @@
   ],
   "categories": {
     "活跃": "在 projects 里，可派单",
+    "冻结": "常浩 2026-11-27 定的冻结项目（agent-kit 深度梳理批阅单第 8 项）：留在 projects 里可查，不再改造钩子、不再同步骨架；agent-kit doctor 只报会坏事的。Hermes 里只认「活跃」的合并官、openloop、秘书、中台授权不再管它",
     "只登记": "原地不动，不在 M3 处理；todo 写由谁定",
     "沙盒": "第三方克隆、探针；已移到 ~/Sandbox/，每月 1 号巡检提醒超过 30 天的",
     "拆外壳": "空仓库或套着别的仓库的外层仓库；.git 已移到 ~/Archive/repos/拆外壳/，文件原地保留",
