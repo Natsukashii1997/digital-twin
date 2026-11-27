@@ -279,6 +279,14 @@ class ExtractTest(unittest.TestCase):
         self.assertFalse((dest / "other.md").exists())
         self.assertEqual(self.extract(H.repo_keep), dest)                                # 已有就不重取
 
+    def test_rule_fragments_are_kept_as_data_only(self):
+        """手写的中台规则片段（ops/autoloop_rules/*.json）要进副本，add-rules 从副本读；同目录别的文件、子目录不进。"""
+        keep = H.repo_keep
+        self.assertTrue(keep("ops/autoloop_rules/dt-sandbox-issue-watch.json"))
+        self.assertFalse(keep("ops/autoloop_rules/run.py"))
+        self.assertFalse(keep("ops/autoloop_rules/x/y.json"))
+        self.assertFalse(keep("ops/issue_watch.py"))
+
     def test_dirs_are_755_even_under_strict_umask(self):
         old = os.umask(0o077)
         try:
