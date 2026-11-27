@@ -193,7 +193,7 @@ class StatusTest(Base):
         self.assertIn("compression aux-model", out)
         self.assertIn("回退 deepseek 调用 2 次", out)
         self.assertIn("已登记的例外", out)
-        self.assertNotIn("sk-", out)
+        self.assertNotRegex(out, r"sk-[A-Za-z0-9_-]{20,}")   # 不打印密钥；只认像密钥的写法（worktree 路径里可能有 task-brief 这种字）
 
     def test_status_json_and_session_models(self):
         self.fake_hermes()
@@ -221,7 +221,7 @@ class DispatchTest(Base):
         (self.root / "roster.json").write_text(json.dumps({"projects": [
             {"id": "fixture", "name": "夹具", "path": str(repo), "main": "main", "write_allowed": False}]}))
         self.task = self.root / "task.md"
-        self.task.write_text("# 目标：AI 接入测试\n", encoding="utf-8")
+        self.task.write_text("# 目标：AI 接入测试\n交付物：无（只读）\n验收：能开单\n边界：不改文件\n交给谁：Claude\n", encoding="utf-8")
 
     def dispatch(self, *args, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith(("H_", "DT_STATE_NOTIFY"))}

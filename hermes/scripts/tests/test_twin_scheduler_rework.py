@@ -17,13 +17,14 @@ import sys
 import time
 import unittest
 
-from test_twin_scheduler import Base, sched, ts, dead_identity, SCRIPTS
+from test_twin_scheduler import Base, PATCH_BRIEF, sched, ts, dead_identity, SCRIPTS
 from test_twin_scheduler_life import Life, HARNESS
 
 CRASH_AFTER_SPAWN = r"""
 import os, signal, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 import twin_scheduler as sched, twin_state as ts
+""" + PATCH_BRIEF + r"""
 db, ledger, harness = sys.argv[2:5]
 class Crash(sched.DispatchExecutor):
     def create(self, decision, sched_key, task_file, on_spawn, **kw):

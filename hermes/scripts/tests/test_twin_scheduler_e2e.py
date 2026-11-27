@@ -21,7 +21,7 @@ import time
 import unittest
 from unittest import mock
 
-from test_twin_scheduler import OK_RECEIPT, sched, ts, SCRIPTS
+from test_twin_scheduler import OK_RECEIPT, PATCH_BRIEF, sched, ts, SCRIPTS
 from test_twin_scheduler_life import Life, HARNESS
 
 TICKER = r"""
@@ -29,6 +29,7 @@ import sys, time, json
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import twin_scheduler as sched, twin_state as ts
+""" + PATCH_BRIEF + r"""
 db, ledger, harness, go = sys.argv[2:6]
 while not Path(go).exists():
     time.sleep(0.005)

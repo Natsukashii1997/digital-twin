@@ -26,7 +26,8 @@ import gatekeeper as G  # noqa: E402
 import test_gatekeeper as TG  # noqa: E402
 from prod_guard import setUpModule, tearDownModule  # noqa: E402,F401
 
-SCOPE = "目标：给 dt-sandbox 的 README 加一节\n范围：只改 README.md\n验收：PR 里只有 README.md"
+SCOPE = ("目标：给 dt-sandbox 的 README 加一节\n交付物：README.md 里新的一节\n范围：只改 README.md\n验收：PR 里只有 README.md\n"
+         "交给谁：Claude")
 
 
 def hub(*pairs):

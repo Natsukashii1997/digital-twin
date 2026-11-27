@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -31,8 +32,19 @@ OK_RECEIPT = {"exit_code": 0, "timed_out": False, "worker_error": False, "sessio
               "guard_main_changed": False, "guard_remote_changed": False, "summary": "改好了。"}
 
 
+# 调度器现在写的任务说明只有目标和验收，dispatch.py new 的五要素检查会拦下（#358，预期：自动开单默认关着，
+# 要开先给任务补齐交付物、边界、交给谁；BriefTests 钉住这一点）。其余开单测试测的是预留、关联、恢复，开单时补上另三项。
+REAL_TASK_TEXT = sched.task_text
+BRIEF_TAIL = "交付物：无（只读）\n边界：不改文件\n交给谁：Claude\n"
+PATCH_BRIEF = ("_t = sched.task_text\n"
+               "sched.task_text = lambda *a: _t(*a) + " + repr(BRIEF_TAIL) + "\n")   # 给子进程脚本用
+
+
 class Base(unittest.TestCase):
     def setUp(self):
+        real = sched.task_text
+        sched.task_text = lambda *a: real(*a) + BRIEF_TAIL
+        self.addCleanup(setattr, sched, "task_text", real)
         tmp = tempfile.TemporaryDirectory(prefix="digital-twin-sched-test-")
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
@@ -566,6 +578,7 @@ CRASHER = r"""
 import os, signal, sys
 sys.path.insert(0, sys.argv[1])
 import twin_scheduler as sched, twin_state as ts
+""" + PATCH_BRIEF + r"""
 db, ledger, harness, when = sys.argv[2:6]
 class Crash(sched.DispatchExecutor):
     def create(self, *a, **k):
@@ -617,6 +630,26 @@ class CrashTests(Base):
         self.t = dt.datetime.now().astimezone() + dt.timedelta(seconds=ts.SCHED_LEASE + 1)
         self.assertEqual(sched.recover_claims(self.store, self.ledger)[cl["sched_key"]]["result"], "void")
         self.assertEqual(list(self.ledger.glob("D*")), [])
+
+
+class BriefTests(Base):
+    """#358：调度器现在写的任务说明缺交付物、边界、交给谁，真实 dispatch.py new 拦下、不开单，预留释放。"""
+
+    def test_scheduler_brief_is_refused_by_dispatch(self):
+        sched.task_text = REAL_TASK_TEXT            # 不补齐（setUp 里登记过还原）
+        (self.root / "repo").mkdir()
+        (self.root / "roster.json").write_text(json.dumps({"projects": [
+            {"id": "alpha", "name": "甲", "path": str(self.root / "repo"), "main": "main", "write_allowed": False}]}))
+        t = self.task(self.goal("alpha"))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("H_", "DT_STATE_NOTIFY", "DT_SCHED"))}
+        with mock.patch.dict(os.environ, {**env, "H_ROOT": str(self.root)}, clear=True):
+            out = sched.tick(self.store, sched.DispatchExecutor("read", argv=[sys.executable, "-B",
+                                                                               str(HERE / "dispatch_harness.py")]), self.ledger)
+        self.assertEqual(len(out["released"]), 1, out)
+        self.assertIn("任务说明缺交付物、边界、交给谁", out["released"][0]["dispatch_msg"])
+        self.assertEqual(list(self.ledger.glob("D*/order.json")), [])
+        self.assertEqual(self.store.claims(states=ts.CLAIM_OPEN), [])
+        self.assertEqual(self.by_task()[t]["decision"], "dispatch")
 
 
 class CliTests(Base):

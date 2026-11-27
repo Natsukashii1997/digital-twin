@@ -152,7 +152,7 @@ class ExecGateEndToEnd(HubFixture):
         C.install(confirm=True, target=self.home)
         C.issue_source_key(confirm=True, target=self.home)
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})      # 只在临时中台里恢复
-        code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n范围：只改 README.md", hours=2)["code"]
+        code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n交付物：README.md\n验收：多一行\n范围：只改 README.md\n交给谁：Claude", hours=2)["code"]
         return click_card(G, code)["task_id"]
 
     def test_unreachable_repo_is_queued_for_retry_not_done(self):
@@ -237,7 +237,7 @@ class ExecGateEndToEnd(HubFixture):
         C.issue_source_key(confirm=True, target=self.home)
         C.hub("POST", "/v1/rules/dispatch-dt-sandbox-claude/resume", {})      # 只在临时中台里恢复
 
-        code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n范围：只改 README.md", hours=2)["code"]
+        code = G.propose("dt-sandbox", "claude", "目标：README 加一行\n交付物：README.md\n验收：多一行\n范围：只改 README.md\n交给谁：Claude", hours=2)["code"]
         tid = click_card(G, code)["task_id"]
         (run,) = self.wait_runs(tid, 1)
         self.assertEqual(run["state"], "done", run)

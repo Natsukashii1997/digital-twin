@@ -265,7 +265,8 @@ def pick_tool(a):
 
 
 def cmd_new(a):
-    import task_brief
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import task_brief   # 同目录（安装副本在 ~/.hermes/scripts/）
     try:
         bad = task_brief.problems(Path(a.task_file).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as e:
