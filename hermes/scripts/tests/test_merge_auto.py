@@ -48,7 +48,7 @@ class Auto(Fixture, unittest.TestCase):
     def sign(self):
         """直接写一条有效的策略记录（签署流程另测）。"""
         self.dir.mkdir(parents=True, exist_ok=True)
-        sig = {"type": MP.POLICY_TYPE, "scope_sha256": MP.scope_sha(self.rules_now()), "rules_version": "2",
+        sig = {"type": MP.POLICY_TYPE, "scope_sha256": MP.scope_sha(self.rules_now()), "rules_version": self.rules_now()["version"],
                "message_id": "om_sign", "open_id": "ou_owner", "signed_at": "2026-11-07T09:00:00+08:00"}
         (self.dir / "policy.json").write_text(json.dumps(
             {"schema": MP.SCHEMA, "enabled": True, "signature": sig, "used_messages": {}, "history": []}), encoding="utf-8")
@@ -131,6 +131,22 @@ class Auto(Fixture, unittest.TestCase):
         self.scan()
         self.assertEqual(len(self.calls("lark.jsonl")), 1)             # 没开策略：每个新版本照旧发卡片
         self.assertEqual(self.state(), "OPEN")
+
+    def test_v2_signature_is_void_under_v3(self):
+        """#412 迁移：按 v2 授权范围签的策略记录，装上 v3 规则后自动失效（要常浩重签），回到发卡片，不合并。"""
+        v3 = self.rules_now()
+        v2 = {k: v for k, v in v3.items() if k != "append_only_docs"}
+        v2["version"] = "2"
+        v2["direction_docs"] = ["(^|/)PRD\\.md$", "(^|/)ARCHITECTURE\\.md$", "(^|/)adr/", "(^|/)DECIDED\\.md$",
+                                "^global/(claude|codex)/", "(^|/)工程流程\\.md$", "(^|/)常设授权清单\\.md$"]
+        self.assertNotEqual(MP.scope_sha(v2), MP.scope_sha(v3))
+        self.rules.write_text(json.dumps(v2, ensure_ascii=False), encoding="utf-8")
+        self.sign()                                                    # 在 v2 下签
+        self.rules.write_text(json.dumps(v3, ensure_ascii=False), encoding="utf-8")   # 装上 v3
+        r = self.auto()
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("范围哈希对不上", r.stdout)
+        self.assertEqual(self.merges_called(), [])
 
     def test_scope_change_voids_signature(self):
         """签过之后规则里的授权范围变了（多了一个仓库、放宽了风险档）：策略自动失效，回到发卡片。"""
@@ -775,6 +791,24 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout)
         self.assertIn("标签 needs-info", r.stdout)
         self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+
+    def test_decided_edited_between_reads_is_exception(self):
+        """#412（#413 审查建议）：第一次读取时登记表只新增，最后一次读取时变成删改原有的行：按例外办，不合，交出登记作废。"""
+        self.sign()
+        self.update_pr(files=[{"path": "docs/DECIDED.md", "additions": 1, "deletions": 0}])
+        (self.fake / "decided_edit_on_view2").write_text("")
+        r = self.auto()
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("已定内容登记表", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+
+    def test_decided_append_only_merges(self):
+        """#412：只往登记表里新增条目的 PR 按策略合并。"""
+        self.sign()
+        self.update_pr(files=[{"path": "docs/DECIDED.md", "additions": 3, "deletions": 0}])
+        r = self.auto()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.state(), "MERGED")
 
     def test_off_and_merge_start_share_one_lock(self):
         """#260-P1-03：最后读开关、记要合、起合并请求在开关锁里做。开关锁被占着（正在关）时，合并请求起不来。"""

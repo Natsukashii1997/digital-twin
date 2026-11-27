@@ -923,7 +923,7 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
         wrong = after.get("baseRefName") != main            # 目标分支在最后一次核对之后被改了（接口绑不住目标分支）
         return _res("merged", (f"⚠️ {ref} 合进的是 {after.get('baseRefName')}，不是 {main}，请常浩看一眼。" if wrong else "")
                     + f"已按策略合并 {ref}@{head[:7]} → {sha[:7]}（记录 {mid}）。没拉本机主目录、没安装；"
-                    f"要安装、发布或写 CURRENT，仍先问常浩。撤回：merge_act.py revert {ref}", id=mid, merge_commit=sha, warn=wrong)
+                    f"拉齐主目录、装机、发布由开 PR 的会话接着做并核实（ADR-016 修订 2；先问清单里的动作仍先问）。撤回：merge_act.py revert {ref}", id=mid, merge_commit=sha, warn=wrong)
     if verdict == "failed":                                 # 确定没合：请求没发出去，或 GitHub 明确拒绝且 PR 还开着
         why = clip(res["why"])
         permanent = not res["launched"] or not TRANSIENT.search(detail)       # 只有限流、版本刚变这几类会自己好
