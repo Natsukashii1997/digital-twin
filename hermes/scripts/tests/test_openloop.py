@@ -1581,5 +1581,155 @@ class Dispatch(Base):
         self.assertTrue(any("中台库不在了" in g for g in ol.gaps(led)), ol.gaps(led))
 
 
+class Disposition(Base):
+    """处置记录入口（#361 前置，台账 D-13）：dispose 只追加 dispositions.jsonl，下次扫描每行多一个 disposition，来源算的字段不动。"""
+
+    LATER = NOW + dt.timedelta(minutes=5)
+    FIELDS = {"fact": "PR 等送审，还没人看", "owner": "猛鬼兽", "next": "猛鬼兽 18:00 再查一次有没有人接",
+              "check_at": "2026-11-20T18:00", "done_when": "PR 合并或关掉", "by": "猛鬼兽"}
+
+    def setUp(self):
+        super().setUp()
+        self.roster(self.project("dt", CURRENT))
+        self.prs = [pr(1, "没人审的", checks=[run("test")]), pr(2, "红的", checks=[run("test", "FAILURE")]),
+                    pr(218, "授权门", checks=[run("test")])]
+        self.numbers = {"o/dt": {253: {"__typename": "PullRequest", "state": "MERGED", "mergedAt": "2026-11-20T03:00:00Z"}}}
+
+    def scan(self, prs=None, now=NOW, down=()):
+        hub = Hub(prs={"o/dt": self.prs if prs is None else prs}, numbers=self.numbers, down=down)
+        with mock.patch.object(ol.merge_officer, "load_rules", return_value=RULES):
+            return ol.scan(now=now, fetch=False, hub=hub, folder=self.out)
+
+    def dispose(self, id_, now=None, **kw):
+        return ol.dispose(id_, {**self.FIELDS, **kw}, now=now or self.LATER, folder=self.out)
+
+    def lines(self):
+        return [json.loads(l) for l in (self.out / "dispositions.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    @staticmethod
+    def rows(led):
+        return {r["id"]: r for r in led["rows"]}
+
+    def test_record_then_next_scan_attaches_without_touching_source_fields(self):
+        before = self.scan()
+        ledger_bytes = (self.out / "ledger.json").read_bytes()
+        rec = self.dispose("pr:dt#1", blocked="没人送审", ref="om_fixture_0001", note="常浩说「先等等」")
+        self.assertEqual((self.out / "ledger.json").read_bytes(), ledger_bytes)          # dispose 不碰账本本身
+        self.assertEqual(self.lines(), [rec])
+        self.assertEqual((rec["id"], rec["kind"], rec["check_at"], rec["at"], rec["ledger_at"]),
+                         ("pr:dt#1", "row", "2026-11-20T18:00:00+08:00", "2026-11-20T16:05:00+08:00", "2026-11-20T16:00:00+08:00"))
+        after = self.scan(now=NOW)                    # 同一时刻再扫：只多了 disposition
+        for i, r in self.rows(after).items():
+            old = {k: v for k, v in self.rows(before)[i].items() if k != "disposition"}
+            self.assertEqual({k: v for k, v in r.items() if k != "disposition"}, old, i)
+        row = self.rows(after)["pr:dt#1"]
+        self.assertEqual(row["disposition"], rec)
+        self.assertNotEqual(row["next"], rec["next"])                                   # 来源的下一步照旧
+        self.assertIsNone(self.rows(after)["pr:dt#2"]["disposition"])
+        self.assertEqual(after["coverage"]["dispositions"], {"rows": 1, "orphan": 0, "bad": 0})
+        text = ol.render(after, now=NOW)
+        self.assertIn("处置：11-20 16:05 猛鬼兽 记｜事实：PR 等送审，还没人看｜卡在：没人送审｜谁：猛鬼兽｜"
+                      "下一步：猛鬼兽 18:00 再查一次有没有人接｜下次看：11-20 18:00｜怎样算完：PR 合并或关掉｜出处：om_fixture_0001｜备注：常浩说「先等等」", text)
+        self.assertEqual(text.count("处置："), 1)
+
+    def test_latest_wins_and_merged_part_ids_count(self):
+        self.scan()
+        row = self.rows(self.scan())["pr:dt#218"]
+        part = next(x["id"] for x in row["parts"] if x["id"] != row["id"])             # 并进来的主线项
+        self.assertTrue(part.startswith("mainline:"), part)
+        self.dispose("pr:dt#218", fact="第一条")
+        self.dispose(part, now=self.LATER + dt.timedelta(minutes=1), fact="第二条（记在主线项上）")
+        led = self.scan(now=NOW)
+        self.assertEqual(self.rows(led)["pr:dt#218"]["disposition"]["fact"], "第二条（记在主线项上）")
+
+    def test_refusals_write_nothing(self):
+        with self.assertRaisesRegex(ol.Fail, "还没有账本"):
+            self.dispose("pr:dt#1")
+        self.scan()
+        cases = (({"id_": "pr:dt#999"}, "账本里没有 pr:dt#999"), ({"fact": "  "}, "处置缺当前事实"), ({"owner": ""}, "处置缺负责人"),
+                 ({"next": ""}, "处置缺下一步"), ({"done_when": ""}, "处置缺怎样算完"), ({"by": ""}, "处置缺谁记的"),
+                 ({"check_at": "明天上午"}, "读不懂"), ({"check_at": "2026-11-20T16:05"}, "不晚于现在"),
+                 ({"check_at": "2026-11-20T09:00"}, "不晚于现在"), ({"fact": "长" * 201}, "当前事实超过 200 字"),
+                 ({"note": "长" * 201}, "备注超过 200 字"))
+        for kw, why in cases:
+            with self.subTest(why=why), self.assertRaisesRegex(ol.Fail, why):
+                kw = dict(kw)
+                self.dispose(kw.pop("id_", "pr:dt#1"), **kw)
+        self.assertFalse((self.out / "dispositions.jsonl").exists())
+        with self.assertRaisesRegex(ol.Fail, "账本里没有"):
+            self.dispose("pr:dt#1".replace("1", "3"))
+
+    def test_mismatch_can_be_disposed_but_never_as_done(self):
+        led = self.scan()
+        (m,) = led["mismatches"]
+        rec = self.dispose(m["id"], fact="PR #253 已合并，CURRENT 那节标题还写着待合并", next="交给事实核对：改 CURRENT 那节标题",
+                           done_when="CURRENT 不再写待合并")
+        self.assertEqual(rec["kind"], "mismatch")
+        for key in ("fact", "next", "done_when", "note"):
+            for word in ("已完成", "办完了", "已解决"):
+                with self.subTest(key=key, word=word), self.assertRaisesRegex(ol.Fail, "只能交给事实核对"):
+                    self.dispose(m["id"], **{key: f"这件事{word}"})
+        self.assertEqual(len(self.lines()), 1)
+        self.dispose("pr:dt#1", next="已完成也不拦：只有对不上的那一类不许")                 # 普通行不查这条
+        after = self.scan(now=NOW)
+        self.assertEqual(after["mismatches"][0]["disposition"], rec)
+        self.assertIn("处置：11-20 16:05 猛鬼兽 记｜事实：PR #253 已合并", ol.render(after, now=NOW))
+
+    def test_row_gone_keeps_file_and_carried_row_keeps_disposition(self):
+        self.scan()
+        self.dispose("pr:dt#2")
+        one = self.dispose("pr:dt#1")
+        led = self.scan(prs=[self.prs[0], self.prs[2]], now=NOW + dt.timedelta(hours=1))    # #2 关了
+        self.assertNotIn("pr:dt#2", self.rows(led))
+        self.assertEqual(led["coverage"]["dispositions"], {"rows": 1, "orphan": 1, "bad": 0})
+        self.assertEqual(len(self.lines()), 2)                                          # 文件里照样留着
+        down = self.scan(prs=[], down={"o/dt"}, now=NOW + dt.timedelta(hours=2))         # GitHub 取不到：沿用上一份
+        row = self.rows(down)["pr:dt#1"]
+        self.assertTrue(row["carried"])
+        self.assertEqual(row["disposition"], one)
+
+    def test_bad_lines_are_skipped_and_reported(self):
+        self.scan()
+        good = self.dispose("pr:dt#1")
+        with open(self.out / "dispositions.jsonl", "a", encoding="utf-8") as f:
+            f.write('{"id": "pr:dt#1", "at": "不是时间"}\n[1, 2]\n{"写到一半\n')
+        led = self.scan(now=NOW)
+        self.assertEqual(self.rows(led)["pr:dt#1"]["disposition"], good)
+        self.assertEqual(led["coverage"]["dispositions"]["bad"], 3)
+        self.assertIn("处置记录：dispositions.jsonl 有 3 行读不懂，跳过了", ol.gaps(led))
+
+    def test_parallel_records_all_land_whole(self):
+        import threading
+        self.scan()
+        errs = []
+
+        def one(i):
+            try:
+                self.dispose("pr:dt#1", fact=f"第 {i} 条" + "字" * 150)
+            except Exception as e:   # noqa: BLE001
+                errs.append(e)
+        threads = [threading.Thread(target=one, args=(i,)) for i in range(16)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+        self.assertEqual(errs, [])
+        self.assertEqual(sorted(int(re.match(r"第 (\d+) 条", x["fact"]).group(1)) for x in self.lines()), list(range(16)))
+
+    def test_cli(self):
+        self.scan()
+        env = {"DT_OPENLOOP_DIR": str(self.out), "DT_NOW": "2026-11-20T16:05:00+08:00"}
+        args = ["dispose", "--id", "pr:dt#1", "--fact", "事实", "--owner", "猛鬼兽", "--next", "再看", "--check-at", "2026-11-21T10:00",
+                "--done-when", "合并", "--by", "猛鬼兽"]
+        for argv, code, want in ((args, 0, {"ok": True}), (args[:3] + ["--id", "nope"] + args[3:], 1, {"ok": False})):
+            buf = io.StringIO()
+            with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
+                self.assertEqual(ol.main(argv), code)
+            out = json.loads(buf.getvalue())
+            self.assertEqual(out["ok"], want["ok"], out)
+        self.assertEqual(out["why"].split("（")[0], "账本里没有 nope")
+        self.assertEqual([x["blocked"] for x in self.lines()], [""])
+
+
 if __name__ == "__main__":
     unittest.main()

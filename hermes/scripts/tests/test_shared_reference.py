@@ -157,8 +157,8 @@ class References(unittest.TestCase):
         self.assertIn("不自己找个文件代替账本", self.text)
         self.assertIn("依赖这个决定的动作也先不做", self.text)
 
-    def test_ledger_has_no_disposition_entry_yet(self):
-        # 账本只要多了任何子命令，就回来改模块第 4 节第 2 条的过渡办法（#383 第 2～4 轮 P2-03）。
+    def test_ledger_entry_is_the_disposition_command(self):
+        # 账本的子命令变了，就回来改模块第 4 节第 2 条「账本里的事」（#383 第 2～4 轮 P2-03；#361 前置加了 dispose）。
         # 不看源码写法，直接问真解析器有哪些子命令：起别名、getattr 间接调用都绕不过去
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit) as end:
@@ -167,7 +167,20 @@ class References(unittest.TestCase):
         usage = buf.getvalue().split("\n", 1)[0]
         found = re.findall(r"\{([^}]*)\}", usage)
         self.assertEqual(len(found), 1, usage)
-        self.assertEqual(sorted(found[0].split(",")), ["scan", "show"], "账本命令变了：改模块第 4 节第 2 条的过渡办法")
+        self.assertEqual(sorted(found[0].split(",")), ["dispose", "scan", "show"], "账本命令变了：改模块第 4 节第 2 条")
+        item = next(l for l in self.text.splitlines() if l.strip().startswith("- 账本里的事"))
+        self.assertIn("`openloop.py dispose`", item)
+        self.assertNotIn("没有处置记录入口", item)
+        # 模块点名的参数，真解析器都认；点名的必填项和脚本要求的一致
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            openloop.main(["dispose", "-h"])
+        for flag in re.findall(r"`(--[a-z-]+)`", item):
+            self.assertIn(flag, buf.getvalue())
+        for _, label in openloop.DISPOSE_NEED:
+            self.assertIn(label, item)
+        for w in ("不会因为你记了就变成已处理", "不能写成已完成（脚本会拒绝）", "原话里有受限内容的不抄"):
+            self.assertIn(w, item)
 
     def test_ledger_exception_keeps_own_approval(self):
         # 没地方存时的那条例外：只是先产生第一份记录，派单通道自己的批准照旧（#383 第 3 轮 P2-03）
