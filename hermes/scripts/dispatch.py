@@ -265,6 +265,13 @@ def pick_tool(a):
 
 
 def cmd_new(a):
+    import task_brief
+    try:
+        bad = task_brief.problems(Path(a.task_file).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as e:
+        done(False, f"任务文件读不了（{type(e).__name__}），没有开单")
+    if bad:   # 五要素缺项不开单（#358，docs/技能架构.md 第 9 节 5b-1）：车间看不到对话，缺了就只能猜
+        done(False, "；".join(bad) + "，没有开单")
     a.tool, chosen_by = pick_tool(a)
     p = project(a.project)
     if a.mode == "write" and not p.get("write_allowed"):

@@ -82,6 +82,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hub_listener  # noqa: E402
+import task_brief  # noqa: E402
 import twin_identity as I  # noqa: E402
 
 TZ = dt.timezone(dt.timedelta(hours=8))
@@ -670,6 +671,9 @@ def propose(repo, executor, scope_text, hours=12, actions=ACTIONS, now=None, pat
     scope_text = (scope_text or "").strip()
     if not scope_text or len(scope_text) > MAX_SCOPE:
         raise Rejected(f"五要素不能为空，最多 {MAX_SCOPE} 字")
+    bad = task_brief.problems(scope_text, worker=True)   # 缺要素、夹带受限内容都不登记（#358）：任务单 dt-worker 读得到
+    if bad:
+        raise Rejected("；".join(bad) + "，不登记")
     if not 0 < hours <= MAX_HOURS:
         raise Rejected(f"有效期 1 到 {MAX_HOURS} 小时")
     require_hub_rule(repo, executor)
