@@ -16,6 +16,13 @@
 - 测试：`test_openloop.Disposition` 8 条，`test_shared_reference` 改成核三个子命令、模块点名的参数真解析器都认。改坏试验：不并进账本、不查对不上、不查时间都红；去掉文件锁测试测不出（短行追加本身整行写入，锁只是保险）。
 - 合并后没装之前，工程自检会报 `openloop.py` 不一致；安装（D 档）另问。
 
+## 2026-11-27 晚：中台第一条自动规则「跟进 dt-sandbox Issue · 只分析」写好，未装（常浩选定，登记在 DECIDED 11-27）
+
+- **写了**：`ops/autoloop_rules/dt-sandbox-issue-watch.json`（规则片段）、`ops/issue_watch.py`（轮询脚本）、测试 `hermes/scripts/tests/test_issue_watch.py`；`ai_access.json` 和本文件「AI 接入」加 `issue-watch`。
+- **试跑（替身：临时中台、本机 Codex，不是 dt-worker）**：上游 v1.10.4 合并版 `try` 通过（常浩选蓝色）；规则换成本机版、指向 agent-autoloop 仓库：找到 #15 → Codex 只读分析 → 卡片写到文件和行号 → 22:10 下一轮不重复；只读镜像没被改。证据 `evidence/2026-11-27-engine-merge-upstream/claude-04-try-status.txt`、`claude-05-issue-watch-e2e.txt`。正式规则片段过了引擎 `check`。
+- **装法（常浩回「先做装规则的工具」）**：`autoloop_config.py` 加 `add-rules` / `remove-rules <片段名>`：只读 `ops/autoloop_rules/` 下按名字找的片段，不许碰数字分身这一块，**不暂停、不恢复任何规则**（`install` 每次都会把派单规则重新暂停，上线后用它会停掉第 6 步恢复的 Codex 派单）；`dt_gate_hub` 的 stage 把这个目录的 `.json` 一起放进副本。临时中台（引擎 `a270604`）实测：先暂停「试一下」，add-rules 后它仍暂停、两条新规则载入，再跑一次不改；remove-rules 原样拿掉（`evidence/…/claude-09-add-rules-real-hub.txt`）。照抄单加第 7 步。
+- **当天发现**：本机 Codex 默认模型 `gpt-6.1-sol` 用 ChatGPT 账号跑报「not supported」（Homebrew 0.166 和 ChatGPT.app 里 0.169 都一样），`gpt-6-luna` 能跑；dt-worker 的 Codex 配置没核（读不了它的家目录），照抄单第 6 步恢复的 Codex 派单可能碰到同样的错。主账号 `claude auth status` 报没登录（Hermes 主模型走本机 claude）。
+
 ## 2026-11-27 晚：引擎一次性合入上游 v1.10.4，随上线照抄单第 4 步升级（常浩「合并上游再升级」）
 
 - **决定**（登记在 `docs/DECIDED.md` 11-27）：上游 KKKKhazix/agent-autoloop 最新发布 v1.10.4 一次性合进自有引擎，dt-gate 里的中台从 `abc8d41` 升上去；11-20「不再跟上游」照旧。

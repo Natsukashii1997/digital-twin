@@ -30,6 +30,16 @@
                                           正好是预期的（feishu 只有常浩的 open_id，secretary 只有「秘书」）才签，写到 600 文件
   （--target 必须写明，且和实际要改的中台目录一致，免得继承来的环境变量把操作落到别的中台上）
   autoloop_config.py status               只读：来源、通道、派单规则是否暂停、钥匙有没有（只列名字）
+  autoloop_config.py add-rules <片段名> --confirm --target ~/.agent-autoloop
+  autoloop_config.py remove-rules <片段名> --confirm --target ~/.agent-autoloop
+                                          把手写的规则片段（本仓库 ops/autoloop_rules/<片段名>.json，2026-11-27 第一条自动规则起）
+                                          并进 / 拿出中台规则：只认副本里这个目录下按名字找到的文件；片段只能有 sources / agents / rules，
+                                          不许碰数字分身这一块（dispatch-* 规则、hermes 来源、dt-claude / dt-codex、feishu / secretary
+                                          通道的定义、defaultChannels），不许接 hermes 来源、不许点名秘书通道；同名的规则、Agent、来源
+                                          整条换成片段里的（可重复跑）。和 install 不同，**不暂停、不恢复任何规则**（派单规则的暂停状态原样
+                                          保留）；同样在配置锁里：check 校验 → 备份 → 原子替换 → 等中台载入（片段里的每条规则、每个 Agent
+                                          逐字段在中台在用的配置里），没载入就把原文件换回去。remove-rules 只拿掉片段里的规则，以及
+                                          剩下的规则不再用到的片段 Agent、来源。
 环境变量：AGENT_AUTOLOOP_HOME（中台目录，默认 ~/.agent-autoloop）、DT_AUTOLOOP_CLI（中台命令行）、DT_ROSTER、
 DT_OWNER_OPEN_ID（同 twin_state）、DT_HERMES_SOURCE_KEY_FILE（同 autoloop_grants）、DT_AUTOLOOP_EVIDENCE（备份目录）、
 DT_AUTOLOOP_CHANNEL_KEY_DIR（通道钥匙文件所在目录，默认 DigitalTwin/autoloop/，文件名 <通道>-channel.key）。
@@ -518,6 +528,133 @@ def _issue_channel_key(channel):
     return {"ok": True, "channel": channel, "file": str(f), "mode": "600"}
 
 
+# ---------- 手写的规则片段（add-rules / remove-rules） ----------
+RULES_DIR = HERE.parents[1] / "ops/autoloop_rules"
+FRAGMENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+FRAGMENT_KEYS = {"sources", "agents", "rules"}
+
+
+def fragment(name):
+    """按名字读片段：只认 RULES_DIR 下的 <名字>.json（dt-gate 里是 root 所有的副本），不收任意路径。"""
+    if not FRAGMENT_NAME.match(name or ""):
+        raise Rejected(f"片段名只能是小写字母、数字和连字符，不认 {name!r}")
+    path = RULES_DIR / f"{name}.json"
+    try:
+        frag = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise Rejected(f"没有这个规则片段：{path}")
+    except (OSError, ValueError) as e:
+        raise Rejected(f"规则片段读不了（{type(e).__name__}）：{path}")
+    if not isinstance(frag, dict) or not set(frag) <= FRAGMENT_KEYS or not isinstance(frag.get("rules"), list):
+        raise Rejected("规则片段只能有 sources、agents、rules 三项，rules 要是列表")
+    for k in ("sources", "agents"):
+        if not isinstance(frag.get(k, {}), dict):
+            raise Rejected(f"规则片段的 {k} 要是对象")
+    names = [r.get("name") if isinstance(r, dict) else None for r in frag["rules"]]
+    if not frag["rules"] or not all(isinstance(n, str) and n for n in names) or len(set(names)) != len(names):
+        raise Rejected("规则片段里每条规则都要有名字，而且不重名")
+    bad = [n for n in names if n.startswith("dispatch-")]
+    bad += [f"{r['name']}←hermes" for r in frag["rules"] if (r.get("when") or {}).get("source") == SOURCE]
+    bad += [f"{r['name']}→secretary" for r in frag["rules"] if "secretary" in (r.get("channels") or [])]
+    bad += [f"sources.{SOURCE}"] * (SOURCE in frag.get("sources", {}))
+    bad += [f"agents.{a}" for a in frag.get("agents", {}) if a in {aid for aid, _ in AGENTS.values()}]
+    if bad:
+        raise Rejected(f"规则片段碰了数字分身这一块，不装：{'、'.join(bad)}")
+    return frag
+
+
+def with_fragment(current, frag):
+    new = copy.deepcopy(current)
+    for k in ("sources", "agents"):
+        new.setdefault(k, {}).update(copy.deepcopy(frag.get(k, {})))
+    names = {r["name"] for r in frag["rules"]}
+    new["rules"] = [r for r in new.get("rules", []) if r.get("name") not in names] + copy.deepcopy(frag["rules"])
+    return new
+
+
+def without_fragment(current, frag):
+    new = copy.deepcopy(current)
+    names = {r["name"] for r in frag["rules"]}
+    new["rules"] = [r for r in new.get("rules", []) if r.get("name") not in names]
+    used_agents = {r.get("to") for r in new["rules"]}
+    used_sources = {(r.get(k) or {}).get("source") for r in new["rules"] for k in ("when", "emits")}
+    for aid in frag.get("agents", {}):
+        if aid not in used_agents:
+            new.get("agents", {}).pop(aid, None)
+    for sid in frag.get("sources", {}):
+        if sid not in used_sources:
+            new.get("sources", {}).pop(sid, None)
+    return new
+
+
+def dt_block(rules):
+    """数字分身这一块：add-rules / remove-rules 前后必须一字不差。"""
+    return {"dispatch": dispatch_rules_of(rules), "source": rules.get("sources", {}).get(SOURCE),
+            "agents": {aid: rules.get("agents", {}).get(aid) for aid, _ in AGENTS.values()},
+            "channels": {c: rules.get("channels", {}).get(c) for c in NEW_CHANNELS},
+            "defaultChannels": rules.get("defaultChannels")}
+
+
+def fragment_loaded(new, frag, removing):
+    """中台在用的配置里，片段的规则和 Agent 是不是已经是 new 里的样子（中台载入时补的默认字段不算差别）。"""
+    live = loaded_rules()
+    live_rules = {r.get("name"): r for r in live.get("rules", []) if isinstance(r, dict)}
+    want_rules = {r["name"]: r for r in new.get("rules", [])}
+    for r in frag["rules"]:
+        have, want = live_rules.get(r["name"]), want_rules.get(r["name"])
+        if removing:
+            if have is not None:
+                return False
+        elif have is None or any(have.get(k) != v for k, v in want.items()):
+            return False
+    for aid in frag.get("agents", {}):
+        have, want = live.get("agents", {}).get(aid), new.get("agents", {}).get(aid)
+        if want is None:
+            if have is not None:
+                return False
+        elif not isinstance(have, dict) or any(have.get(k) != v for k, v in want.items()):
+            return False
+    return True
+
+
+def change_fragment(name, removing, confirm=False, target=None, now=None, timeout=30.0):
+    if not confirm:
+        raise Rejected("改中台规则要常浩确认：加 --confirm")
+    check_target(target)
+    frag = fragment(name)
+    with config_lock():
+        current = load_current()
+        new = (without_fragment if removing else with_fragment)(current, frag)
+        if dt_block(new) != dt_block(current):
+            raise Rejected("这次改动会改到数字分身这一块（派单规则、hermes 来源、dt-* Agent、飞书 / 秘书通道），不装")
+        listeners, routes = hermes_listeners(new), secretary_routes(new)
+        if listeners or routes:
+            raise Rejected(f"改完会有规则接 hermes 来源或点名秘书通道，不装：{'、'.join(listeners + routes)}")
+        if new == current:
+            return {"ok": True, "changed": False, "fragment": name}
+        stamp = (now or dt.datetime.now(G.TZ)).strftime("%Y%m%d-%H%M%S")
+        ev = evidence_dir()
+        ev.mkdir(parents=True, exist_ok=True)
+        os.chmod(ev, 0o700)
+        draft = ev / f"rules-{name}-{stamp}.json"
+        _atomic_write(draft, dumps(new), 0o600)
+        code, out, err = run_cli("check", str(draft))
+        if code:
+            raise Rejected(f"改完的规则没通过 agent-autoloop check：{(err or out).strip()[:300]}")
+        backup = ev / f"rules-before-{name}-{stamp}.json"
+        _atomic_write(backup, rules_file().read_text(encoding="utf-8"), 0o600)
+        mode = rules_file().stat().st_mode & 0o777
+        _atomic_write(rules_file(), dumps(new), mode)
+        end = time.monotonic() + timeout
+        while not fragment_loaded(new, frag, removing):
+            if time.monotonic() >= end:
+                _atomic_write(rules_file(), backup.read_text(encoding="utf-8"), mode)
+                raise Rejected("中台没有载入改过的规则，已把规则文件换回原样")
+            time.sleep(0.5)
+        return {"ok": True, "changed": True, "fragment": name, "removed" if removing else "added":
+                [r["name"] for r in frag["rules"]], "backup": str(backup), "draft": str(draft)}
+
+
 def status():
     rules = load_current()
     s = state()
@@ -542,6 +679,11 @@ def main(argv=None):
         sp = sub.add_parser(name)
         sp.add_argument("--confirm", action="store_true")
         sp.add_argument("--target", help="要改的中台目录，必须和实际的一致，如 ~/.agent-autoloop")
+    for name in ("add-rules", "remove-rules"):
+        sp = sub.add_parser(name)
+        sp.add_argument("fragment", help="ops/autoloop_rules/ 下的片段名（不带 .json）")
+        sp.add_argument("--confirm", action="store_true")
+        sp.add_argument("--target", help="要改的中台目录，必须和实际的一致，如 ~/.agent-autoloop")
     sp = sub.add_parser("issue-channel-key")
     sp.add_argument("channel", choices=NEW_CHANNELS)
     sp.add_argument("--confirm", action="store_true")
@@ -556,6 +698,8 @@ def main(argv=None):
         out = {"install": lambda: install(a.confirm, a.target),
                "issue-source-key": lambda: issue_source_key(a.confirm, a.target),
                "issue-channel-key": lambda: issue_channel_key(a.channel, a.confirm, a.target),
+               "add-rules": lambda: change_fragment(a.fragment, False, a.confirm, a.target),
+               "remove-rules": lambda: change_fragment(a.fragment, True, a.confirm, a.target),
                "status": status}[a.cmd]()
     except Rejected as e:
         print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False))

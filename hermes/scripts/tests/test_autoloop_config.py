@@ -277,6 +277,117 @@ class LoadedCompare(unittest.TestCase):
             C.loaded_rules()
 
 
+FRAG = {
+    "sources": {"github-issues": {"name": "GitHub issue 轮询"}},
+    "agents": {"issue-watcher": {"name": "看", "worker": "dt-worker", "use": "command", "command": ["/usr/bin/true"]},
+               "issue-reader": {"name": "读", "worker": "dt-worker", "use": "codex", "access": "read"}},
+    "rules": [{"name": "看新 issue", "when": {"cron": "*/5 * * * *"}, "to": "issue-watcher", "tell": "never",
+               "emits": {"source": "github-issues", "types": ["issues.opened"]}},
+              {"name": "分析 issue", "when": {"source": "github-issues", "types": ["issues.opened"]},
+               "to": "issue-reader", "channels": ["feishu"]}],
+}
+
+
+class Fragments(unittest.TestCase):
+    """add-rules / remove-rules：手写的规则片段并进、拿出中台规则，不碰数字分身这一块、不动暂停状态（2026-11-27）。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="dt-config-frag-")
+        self.addCleanup(tmp.cleanup)
+        self.d = Path(tmp.name)
+        (self.d / "rules").mkdir()
+        self.write_frag("issue-watch", FRAG)
+        self.home = self.d / "hub"
+        self.home.mkdir()
+        self.current = C.render(CURRENT, OWNER, REPOS)
+        (self.home / "rules.json").write_text(C.dumps(self.current), encoding="utf-8")
+        for p in (mock.patch.object(C, "RULES_DIR", self.d / "rules"),
+                  mock.patch.dict(os.environ, {"AGENT_AUTOLOOP_HOME": str(self.home),
+                                               "DT_AUTOLOOP_EVIDENCE": str(self.d / "ev")}),
+                  mock.patch.object(C, "run_cli", return_value=(0, "", ""))):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def write_frag(self, name, frag):
+        (self.d / "rules" / f"{name}.json").write_text(json.dumps(frag, ensure_ascii=False), encoding="utf-8")
+
+    def on_disk(self):
+        return json.loads((self.home / "rules.json").read_text(encoding="utf-8"))
+
+    def live_follows_disk(self):
+        """中台载入：在用的配置就是磁盘上的，另外补一个默认字段（比较时不算差别）。"""
+        def loaded():
+            live = self.on_disk()
+            for r in live["rules"]:
+                r.setdefault("group", r["name"])
+            return live
+        return mock.patch.object(C, "loaded_rules", side_effect=loaded)
+
+    def test_real_fragment_in_repo_is_accepted(self):
+        with mock.patch.object(C, "RULES_DIR", HERE.parents[2] / "ops/autoloop_rules"):
+            self.assertEqual(len(C.fragment("dt-sandbox-issue-watch")["rules"]), 2)
+
+    def test_only_names_in_the_rules_dir(self):
+        for bad in ("../x", "/etc/passwd", "Issue", "", "a.json"):
+            with self.assertRaisesRegex(C.Rejected, "片段名"):
+                C.fragment(bad)
+        with self.assertRaisesRegex(C.Rejected, "没有这个规则片段"):
+            C.fragment("nope")
+
+    def test_fragment_cannot_touch_the_dispatch_block(self):
+        cases = [
+            {**FRAG, "rules": FRAG["rules"] + [{"name": "dispatch-x-claude", "when": {"cron": "* * * * *"}, "to": "issue-reader"}]},
+            {**FRAG, "rules": [{**FRAG["rules"][1], "when": {"source": "hermes", "types": ["x"]}}]},
+            {**FRAG, "rules": [{**FRAG["rules"][1], "channels": ["feishu", "secretary"]}]},
+            {**FRAG, "sources": {"hermes": {"name": "冒充"}}},
+            {**FRAG, "agents": {**FRAG["agents"], "dt-claude": {"name": "x", "worker": "w", "use": "claude"}}},
+            {**FRAG, "channels": {"feishu": {"name": "飞书"}}},
+        ]
+        for i, frag in enumerate(cases):
+            self.write_frag("bad", frag)
+            with self.subTest(i), self.assertRaises(C.Rejected):
+                C.fragment("bad")
+
+    def test_add_keeps_dispatch_block_and_never_calls_the_hub(self):
+        """模块级把 C.hub 换成一调就抛：add-rules 不暂停、不恢复任何规则，也就不会调中台接口。"""
+        with self.live_follows_disk():
+            out = C.change_fragment("issue-watch", False, True, str(self.home))
+        self.assertTrue(out["changed"])
+        new = self.on_disk()
+        self.assertEqual(C.dt_block(new), C.dt_block(self.current))
+        self.assertEqual([r["name"] for r in new["rules"]][-2:], ["看新 issue", "分析 issue"])
+        self.assertEqual(new["agents"]["issue-reader"]["access"], "read")
+        self.assertTrue(Path(out["backup"]).is_file())
+        with self.live_follows_disk():                                     # 再跑一次：原样，不写
+            self.assertFalse(C.change_fragment("issue-watch", False, True, str(self.home))["changed"])
+
+    def test_remove_takes_out_only_the_fragment(self):
+        with self.live_follows_disk():
+            C.change_fragment("issue-watch", False, True, str(self.home))
+            C.change_fragment("issue-watch", True, True, str(self.home))
+        self.assertEqual(self.on_disk(), self.current)
+
+    def test_not_loaded_puts_the_old_file_back(self):
+        before = (self.home / "rules.json").read_text(encoding="utf-8")
+        with mock.patch.object(C, "loaded_rules", return_value=self.current), \
+                self.assertRaisesRegex(C.Rejected, "换回原样"):
+            C.change_fragment("issue-watch", False, True, str(self.home), timeout=0)
+        self.assertEqual((self.home / "rules.json").read_text(encoding="utf-8"), before)
+
+    def test_check_failure_writes_nothing(self):
+        before = (self.home / "rules.json").read_text(encoding="utf-8")
+        with mock.patch.object(C, "run_cli", return_value=(1, "", "规则有问题")), \
+                self.assertRaisesRegex(C.Rejected, "check"):
+            C.change_fragment("issue-watch", False, True, str(self.home))
+        self.assertEqual((self.home / "rules.json").read_text(encoding="utf-8"), before)
+
+    def test_needs_confirm_and_target(self):
+        with self.assertRaisesRegex(C.Rejected, "--confirm"):
+            C.change_fragment("issue-watch", False)
+        with self.assertRaisesRegex(C.Rejected, "目标中台目录"):
+            C.change_fragment("issue-watch", False, True, None)
+
+
 class Guards(unittest.TestCase):
     def test_install_and_key_share_one_lock(self):
         with tempfile.TemporaryDirectory() as d:
