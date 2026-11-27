@@ -64,7 +64,8 @@ SCHEMA = "dt-merge-policy/1"
 POLICY_TYPE = "owner_approved_policy"
 SIGN_TEXT = re.compile(r"^开自动合并\s+([0-9a-fA-F]{12})$")
 PUNCT = " \t\r\n　。.!！~～"
-SCOPE_KEYS = ("sensitive", "repo_sensitive", "l0_paths", "rule_docs", "direction_docs", "l1_max_files", "ask_labels", "auto")
+SCOPE_KEYS = ("sensitive", "repo_sensitive", "l0_paths", "rule_docs", "direction_docs", "append_only_docs", "l1_max_files",
+              "ask_labels", "auto")
 HISTORY_KEEP = 50
 USED_KEEP_DAYS = 30
 LOCK_WAIT = float(os.environ.get("DT_MERGE_LOCK_WAIT", "180"))      # 等合并锁最多几秒（自测时调小）

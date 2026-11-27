@@ -142,7 +142,7 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertIn("范围哈希对不上", r.stdout)
         self.assertEqual(self.merges_called(), [])
-        for key, value in (("sensitive", []), ("direction_docs", []), ("auto", {"tiers": ["L0", "L1", "L2", "L3"]})):
+        for key, value in (("sensitive", []), ("direction_docs", []), ("append_only_docs", []), ("auto", {"tiers": ["L0", "L1", "L2", "L3"]})):
             changed = {**self.rules_now(), key: value}
             self.assertNotEqual(MP.scope_sha(changed), MP.scope_sha(self.rules_now()), key)
         same = {**self.rules_now(), "note": "改说明不算", "return_when": {}}
@@ -176,7 +176,7 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual((started["event"], started["id"], started["limit"]), ("started", intent["id"], 60.0))   # 请求的起止都有记录
         self.assertEqual(done["ended"], {"how": "自己退出", "exit": 0})
         for key, want in (("repo", "o/app"), ("pr", "5"), ("title", "PR 5"), ("head", self.head), ("base", self.base),
-                          ("tier", "L0"), ("rules_version", "2"), ("suggestion", mo.MERGE), ("checks", ["test"]),
+                          ("tier", "L0"), ("rules_version", "3"), ("suggestion", mo.MERGE), ("checks", ["test"]),
                           ("identity", "owner-gh")):
             self.assertEqual(intent[key], want, key)
         self.assertEqual(intent["auth"], {"type": "owner_approved_policy", "scope_sha256": MP.scope_sha(self.rules_now()),
@@ -201,7 +201,7 @@ class Auto(Fixture, unittest.TestCase):
 
     def test_exceptions_are_not_merged(self):
         self.sign()
-        cases = {"敏感路径": {"files": [{"path": "ops/x.sh"}]}, "定方向文档": {"files": [{"path": "docs/DECIDED.md"}]},
+        cases = {"敏感路径": {"files": [{"path": "ops/x.sh"}]}, "定方向文档": {"files": [{"path": "docs/PRD.md"}]}, "已定内容登记表": {"files": [{"path": "docs/DECIDED.md"}]},
                  "标签 needs-info": {"labels": [{"name": "needs-info"}]}}
         for word, kw in cases.items():
             self.update_pr(files=[{"path": "docs/a.md"}], labels=[])
@@ -382,7 +382,7 @@ class Auto(Fixture, unittest.TestCase):
 
     def test_exception_still_gets_card_when_policy_on(self):
         self.sign()
-        self.update_pr(files=[{"path": "docs/DECIDED.md"}])
+        self.update_pr(files=[{"path": "docs/PRD.md"}])
         self.scan()
         (card,) = self.calls("lark.jsonl")
         text = json.loads(card[card.index("--content") + 1])["body"]["elements"][0]["content"]
