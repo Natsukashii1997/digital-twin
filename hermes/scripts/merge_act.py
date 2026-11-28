@@ -6,13 +6,14 @@
    只认发过的卡片，不认别的 PR 或版本。
 2. 按策略合并（#257，ADR-016，owner_approved_policy）：常浩 2026-11-20 定，L0–L2 的 PR 不再逐张等他点。策略记录有效
    （merge_policy.active）时，开 PR 的会话调 auto 交出一个版本，机械检查全过就合；当时还不能合的（CI 在跑等）由合并官
-   每轮巡视再试（auto_scan）。例外不合，仍发卡片问常浩：L3、改定方向文档、ask_labels、改动文件没看全、来自 fork 的 PR（merge_officer.exception_reasons）。
+   每轮巡视再试（auto_scan）。例外不合，仍发卡片问常浩：L3、改定方向文档、删改已定内容登记表原有的行、ask_labels、改动文件没看全、
+   来自 fork 的 PR（merge_officer.exception_reasons；v3 按全局规则「先问清单」缩小，ADR-016 修订 2）。
    合并官判「退回」的不拦，理由写进账本。每次合并在 merge_policy 的账本先记「要合」、再记结果；合并走 REST 合并接口，
    只有接口回执说这次合上了才记成按策略合并（_merge_verdict，和托管合并同一套证据标准）；结果不明的不重发，巡视时只读核对。
    合并请求由独立的看门进程起、自带硬期限（发起它的进程死了也到点收场）。结果不明、PR 还开着且版本没变的，没有
    「GitHub 那头不会再处理这次请求」的凭据，所以一直挂着不结算、不放开重新交出：PR 换了版本（旧请求绑的是旧版本）
    或关掉了，且本机没有这次请求的进程，才记没合上（reconcile_unsettled，#260-P1-01）。脚本不停任何进程（#260-P2-14）。
-   合并后不拉本机主目录、不安装、不发布（常浩定：装机、发布、部署不放）。
+   合并后不拉本机主目录、不安装、不发布：这些由开 PR 的会话做并核实（ADR-016 修订 2，常浩 2026-11-28 定）。
    撤回用 revert：撤回 PR 只自动合并开出当时核对过并记下的那个版本；核对到内容：撤回提交的树必须正好等于
    「把原合并提交倒回去」的结果，只取 Git 对象、不检出、不运行（_revert_content_why，#260-P1-07）。
 
@@ -922,7 +923,7 @@ def auto_try(repo, pr, by, rules, want=None, register=True):
         wrong = after.get("baseRefName") != main            # 目标分支在最后一次核对之后被改了（接口绑不住目标分支）
         return _res("merged", (f"⚠️ {ref} 合进的是 {after.get('baseRefName')}，不是 {main}，请常浩看一眼。" if wrong else "")
                     + f"已按策略合并 {ref}@{head[:7]} → {sha[:7]}（记录 {mid}）。没拉本机主目录、没安装；"
-                    f"要安装、发布或写 CURRENT，仍先问常浩。撤回：merge_act.py revert {ref}", id=mid, merge_commit=sha, warn=wrong)
+                    f"拉齐主目录、装机、发布由开 PR 的会话接着做并核实（ADR-016 修订 2；先问清单里的动作仍先问）。撤回：merge_act.py revert {ref}", id=mid, merge_commit=sha, warn=wrong)
     if verdict == "failed":                                 # 确定没合：请求没发出去，或 GitHub 明确拒绝且 PR 还开着
         why = clip(res["why"])
         permanent = not res["launched"] or not TRANSIENT.search(detail)       # 只有限流、版本刚变这几类会自己好

@@ -120,13 +120,46 @@ class Evaluate(unittest.TestCase):
 
     def test_direction_docs_ask_owner(self):
         """#257：改定方向文档的 PR 仍然问常浩，风险档不因此上调。"""
-        for path in ("PRD.md", "docs/DT-ORC/ARCHITECTURE.md", "docs/DT-ORC/adr/ADR-016.md", "docs/DECIDED.md",
-                     "global/claude/CLAUDE.md", "global/codex/AGENTS.md", "工程流程.md", "docs/常设授权清单.md"):
+        for path in ("PRD.md", "docs/DT-ORC/ARCHITECTURE.md", "docs/DT-ORC/adr/ADR-016.md", "docs/常设授权清单.md"):
             tier, sug, why = mo.evaluate(facts([path, "src/a.py"]), RULES)
             self.assertEqual((tier, sug), ("L1", mo.ASK), path)
             self.assertIn(path, why[0])
-        for path in ("AGENTS.md", "CLAUDE.md", "docs/LESSONS.md", "CURRENT.md", "docs/adr-notes.md", "myglobal/claude/x.md"):
-            self.assertEqual(mo.evaluate(facts([path]), RULES)[1], mo.MERGE, path)     # 项目级约定、状态、普通文档不算
+        for path in ("AGENTS.md", "CLAUDE.md", "docs/LESSONS.md", "CURRENT.md", "docs/adr-notes.md", "myglobal/claude/x.md",
+                     "global/claude/CLAUDE.md", "global/codex/AGENTS.md", "工程流程.md"):   # v3（#412）起全局规则、《工程流程》放开
+            self.assertEqual(mo.evaluate(facts([path], deleting=[path]), RULES)[1], mo.MERGE, path)
+
+    def test_v3_keeps_shared_sensitive_lists(self):
+        """#412：sensitive、repo_sensitive 不动——执行底座发布边界（autoloop_publish）和托管合并共用这两张表。"""
+        for path in ("ops/health_check.py", "ops/self_check.py", "a/b.plist", "src/tokens.css", "projects.json"):
+            self.assertEqual(mo.tier_of("o/digital-twin", [path], RULES), "L3", path)
+
+    def decided(self, *files):
+        """按 gh 的 files 格式造 PR，走 facts_of，再判例外。"""
+        pr = {"number": 1, "files": [{"path": p, "additions": a, "deletions": d} for p, a, d in files],
+              "changedFiles": len(files), "isCrossRepository": False, "headRepositoryOwner": {"login": "o"},
+              "headRepository": {"name": "app"}}
+        return mo.exception_reasons(mo.facts_of("o/app", pr), RULES)
+
+    def test_decided_append_only(self):
+        """#412（审查 #165-P1-03 的六种情况）：已定内容登记表只新增条目不问；改已有行（git 里是删一行加一行）、删行、
+        增删混合都问；看不出删没删（旧快照、GitHub 没给删除行数）也问。"""
+        D = "docs/DECIDED.md"
+        self.assertEqual(self.decided((D, 1, 0), ("src/a.py", 3, 5)), [])                   # 只增加一行（别的文件删行不影响）
+        for name, files in {"改已有行正文": [(D, 1, 1)], "改已有行备注": [(D, 1, 1)], "删已有行": [(D, 0, 1)],
+                            "新增一行同时改已有行": [(D, 2, 1)], "删一行后新增一行": [(D, 1, 1)],
+                            "没给删除行数": [(D, 1, None)]}.items():
+            why = self.decided(*files)
+            self.assertTrue(any("已定内容登记表" in w and D in w for w in why), (name, why))
+        self.assertTrue(mo.exception_reasons(facts([D]), RULES))                            # 旧快照没有 deleting 键
+        old = {k: v for k, v in RULES.items() if k != "append_only_docs"}                    # 旧规则文件没有这一项：不报错
+        self.assertEqual(mo.exception_reasons(facts([D]), old), [])
+
+    def test_facts_deleting_from_gh_files(self):
+        """删除行数是 0 的才算没删；GitHub 没给、给的不是整数的，都当删过。"""
+        f = mo.facts_of("o/app", {"number": 1, "files": [
+            {"path": "a.md", "additions": 3, "deletions": 0}, {"path": "b.md", "additions": 1, "deletions": 2},
+            {"path": "c.md"}, {"path": "d.md", "deletions": None}, {"path": "e.md", "deletions": True}]})
+        self.assertEqual(f["deleting"], ["b.md", "c.md", "d.md", "e.md"])
 
     def test_exception_reasons_are_exactly_the_ask_cases(self):
         self.assertEqual(mo.exception_reasons(facts(["docs/a.md"]), RULES), [])
@@ -198,7 +231,7 @@ class Replay(unittest.TestCase):
                 {"repo": "o/app", "pr": "3", "head_sha": A, "source": "live", "outcome": mo.MERGED, "outcome_head": A}]
         fx = {("o/app", "1", A): f1, ("o/app", "2", A): f2}          # 第 3 条没记状态，跳过
         new = json.loads(json.dumps(RULES))
-        new["version"] = "3"
+        new["version"] = "4"
         new["return_when"]["missing_closes"] = False
         before, after, changed = mo.replay(rows, fx, RULES, new)
         self.assertEqual((before["L0"]["live"]["agree"], before["L0"]["live"]["n"]), (1, 2))
@@ -246,7 +279,7 @@ class Cli(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)       # 成功不输出
         rows = self.ledger()
         self.assertEqual([(x["pr"], x["tier"], x["suggestion"], x["rules_version"]) for x in rows],
-                         [("1", "L0", mo.MERGE, "2"), ("2", "L3", mo.ASK, "2")])
+                         [("1", "L0", mo.MERGE, "3"), ("2", "L3", mo.ASK, "3")])
         self.assertEqual(self.run_cli("scan").returncode, 0)
         self.assertEqual(len(self.ledger()), 2)                               # 同一个 HEAD 不重复判
         self.prs({"o/app": [pr(1, B), pr(2, A, paths=("ops/x.sh",))]})       # PR 1 又推了提交
@@ -305,13 +338,13 @@ class Cli(unittest.TestCase):
         self.prs({"o/app": [pr(1, A, state="MERGED", body="")]})
         self.run_cli("backfill")
         new = json.loads((HERE.parent / "merge_rules.json").read_text(encoding="utf-8"))
-        new["version"] = "3"
+        new["version"] = "4"
         new["return_when"]["missing_closes"] = False
-        p = self.tmp / "v3.json"
+        p = self.tmp / "v4.json"
         p.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
         r = self.run_cli("replay", "--rules", str(p))
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("v2 → v3", r.stdout)
+        self.assertIn("v3 → v4", r.stdout)
         self.assertIn("0/1（0%） | 1/1（100%）", r.stdout)
         self.assertIn("o/app#1（合并）：L0 退回 → L0 建议合并", r.stdout)
         self.assertEqual(len(self.ledger()), 1)                              # 回放只读，不改记录

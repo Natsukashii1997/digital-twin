@@ -24,6 +24,7 @@ ACT = HERE.parent / "merge_act.py"
 # api -X PUT repos/<仓库>/pulls/<号>/merge（按策略合并的 REST 合并接口，#260）：合上就打印 {sha, merged}；版本不对 409、
 # 已不是 OPEN 405；fail.json 的 merge 在合之前断网、merge_lost 合上之后断网；FAKE_DIR/other_merges_first 存在时先被别处合掉。
 # FAKE_DIR/label_on_view2 存在时，第二次 pr view 起 PR 带 needs-info。
+# FAKE_DIR/decided_edit_on_view2 存在时，第二次 pr view 起 PR 的改动变成删改 docs/DECIDED.md 原有的行（#412）。
 # pr list 和真 gh 一样只给 --limit 个（按 prs.json 里的顺序）；FAKE_DIR/hide_from_list 里写的 PR 号不出现在列表里（pr view 照常）。
 # FAKE_DIR/merge_deny 存在时合并接口报 403（权限不够）；FAKE_DIR/merge_error 里写报错原文：合并接口照这句话拒绝（限流、要审批等）。
 # FAKE_DIR/real_git 里写裸仓库路径时（test_merge_auto 用，#260-P1-07），合并和撤回像 GitHub 那样真的动 Git 对象：
@@ -114,6 +115,12 @@ if args[:2] == ["pr", "view"] and (root / "label_on_view2").exists():     # 第�
     (root / "label_on_view2").write_text(str(n))
     if n == 2:
         pr["labels"] = [{"name": "needs-info"}]
+        (root / "prs.json").write_text(json.dumps(prs))
+if args[:2] == ["pr", "view"] and (root / "decided_edit_on_view2").exists():   # 第二次读取时登记表已被删改（#412）
+    n = int((root / "decided_edit_on_view2").read_text() or 0) + 1
+    (root / "decided_edit_on_view2").write_text(str(n))
+    if n == 2:
+        pr["files"] = [{"path": "docs/DECIDED.md", "additions": 1, "deletions": 1}]
         (root / "prs.json").write_text(json.dumps(prs))
 if args[:2] == ["pr", "apimerge"]:
     (root / "put_called").write_text("")

@@ -48,7 +48,7 @@ class Auto(Fixture, unittest.TestCase):
     def sign(self):
         """直接写一条有效的策略记录（签署流程另测）。"""
         self.dir.mkdir(parents=True, exist_ok=True)
-        sig = {"type": MP.POLICY_TYPE, "scope_sha256": MP.scope_sha(self.rules_now()), "rules_version": "2",
+        sig = {"type": MP.POLICY_TYPE, "scope_sha256": MP.scope_sha(self.rules_now()), "rules_version": self.rules_now()["version"],
                "message_id": "om_sign", "open_id": "ou_owner", "signed_at": "2026-11-07T09:00:00+08:00"}
         (self.dir / "policy.json").write_text(json.dumps(
             {"schema": MP.SCHEMA, "enabled": True, "signature": sig, "used_messages": {}, "history": []}), encoding="utf-8")
@@ -132,6 +132,34 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(len(self.calls("lark.jsonl")), 1)             # 没开策略：每个新版本照旧发卡片
         self.assertEqual(self.state(), "OPEN")
 
+    def test_v2_signature_is_void_under_v3(self):
+        """#412 迁移（#413 审查 P2-03）：用 v2 当时的算法（SCOPE_KEYS 里还没有 append_only_docs）按 v2 规则签的策略记录，
+        装上 v3 规则后失效（要常浩重签），回到发卡片，不合并。本机实测：旧算法 × 已装 v2 规则 = 线上已签的 31a6fe23be1a，
+        v3 是 c83b94d2c9c0（DigitalTwin/evidence/2026-11-28-合并放权修订2-412/v2_v3_scope_hash.txt）。"""
+        old_keys = ("sensitive", "repo_sensitive", "l0_paths", "rule_docs", "direction_docs", "l1_max_files", "ask_labels", "auto")
+        v3 = self.rules_now()
+        v2 = {k: v for k, v in v3.items() if k != "append_only_docs"}
+        v2["version"] = "2"
+        v2["direction_docs"] = ["(^|/)PRD\\.md$", "(^|/)ARCHITECTURE\\.md$", "(^|/)adr/", "(^|/)DECIDED\\.md$",
+                                "^global/(claude|codex)/", "(^|/)工程流程\\.md$", "(^|/)常设授权清单\\.md$"]
+        with unittest.mock.patch.object(MP, "SCOPE_KEYS", old_keys):
+            v2_sha = MP.scope_sha(v2)                                  # v2 时代真正签下的哈希
+        self.assertNotIn("append_only_docs", old_keys)
+        self.assertNotEqual(v2_sha, MP.scope_sha(v3))
+        self.dir.mkdir(parents=True, exist_ok=True)
+        sig = {"type": MP.POLICY_TYPE, "scope_sha256": v2_sha, "rules_version": "2",
+               "message_id": "om_sign", "open_id": "ou_owner", "signed_at": "2026-11-22T18:25:14+08:00"}
+        (self.dir / "policy.json").write_text(json.dumps(
+            {"schema": MP.SCHEMA, "enabled": True, "signature": sig, "used_messages": {}, "history": []}), encoding="utf-8")
+        with unittest.mock.patch.dict(os.environ, {"DT_MERGE_DIR": str(self.dir)}):
+            ok, why, _ = MP.active(v3)
+        self.assertFalse(ok)
+        self.assertIn("范围哈希对不上", why)
+        r = self.auto()
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("范围哈希对不上", r.stdout)
+        self.assertEqual(self.merges_called(), [])
+
     def test_scope_change_voids_signature(self):
         """签过之后规则里的授权范围变了（多了一个仓库、放宽了风险档）：策略自动失效，回到发卡片。"""
         self.sign()
@@ -142,7 +170,7 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 3)
         self.assertIn("范围哈希对不上", r.stdout)
         self.assertEqual(self.merges_called(), [])
-        for key, value in (("sensitive", []), ("direction_docs", []), ("auto", {"tiers": ["L0", "L1", "L2", "L3"]})):
+        for key, value in (("sensitive", []), ("direction_docs", []), ("append_only_docs", []), ("auto", {"tiers": ["L0", "L1", "L2", "L3"]})):
             changed = {**self.rules_now(), key: value}
             self.assertNotEqual(MP.scope_sha(changed), MP.scope_sha(self.rules_now()), key)
         same = {**self.rules_now(), "note": "改说明不算", "return_when": {}}
@@ -176,7 +204,7 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual((started["event"], started["id"], started["limit"]), ("started", intent["id"], 60.0))   # 请求的起止都有记录
         self.assertEqual(done["ended"], {"how": "自己退出", "exit": 0})
         for key, want in (("repo", "o/app"), ("pr", "5"), ("title", "PR 5"), ("head", self.head), ("base", self.base),
-                          ("tier", "L0"), ("rules_version", "2"), ("suggestion", mo.MERGE), ("checks", ["test"]),
+                          ("tier", "L0"), ("rules_version", "3"), ("suggestion", mo.MERGE), ("checks", ["test"]),
                           ("identity", "owner-gh")):
             self.assertEqual(intent[key], want, key)
         self.assertEqual(intent["auth"], {"type": "owner_approved_policy", "scope_sha256": MP.scope_sha(self.rules_now()),
@@ -201,7 +229,7 @@ class Auto(Fixture, unittest.TestCase):
 
     def test_exceptions_are_not_merged(self):
         self.sign()
-        cases = {"敏感路径": {"files": [{"path": "ops/x.sh"}]}, "定方向文档": {"files": [{"path": "docs/DECIDED.md"}]},
+        cases = {"敏感路径": {"files": [{"path": "ops/x.sh"}]}, "定方向文档": {"files": [{"path": "docs/PRD.md"}]}, "已定内容登记表": {"files": [{"path": "docs/DECIDED.md"}]},
                  "标签 needs-info": {"labels": [{"name": "needs-info"}]}}
         for word, kw in cases.items():
             self.update_pr(files=[{"path": "docs/a.md"}], labels=[])
@@ -382,7 +410,7 @@ class Auto(Fixture, unittest.TestCase):
 
     def test_exception_still_gets_card_when_policy_on(self):
         self.sign()
-        self.update_pr(files=[{"path": "docs/DECIDED.md"}])
+        self.update_pr(files=[{"path": "docs/PRD.md"}])
         self.scan()
         (card,) = self.calls("lark.jsonl")
         text = json.loads(card[card.index("--content") + 1])["body"]["elements"][0]["content"]
@@ -775,6 +803,24 @@ class Auto(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout)
         self.assertIn("标签 needs-info", r.stdout)
         self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+
+    def test_decided_edited_between_reads_is_exception(self):
+        """#412（#413 审查建议）：第一次读取时登记表只新增，最后一次读取时变成删改原有的行：按例外办，不合，交出登记作废。"""
+        self.sign()
+        self.update_pr(files=[{"path": "docs/DECIDED.md", "additions": 1, "deletions": 0}])
+        (self.fake / "decided_edit_on_view2").write_text("")
+        r = self.auto()
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("已定内容登记表", r.stdout)
+        self.assertEqual((self.state(), self.merges_called(), self.book(), self.handoffs()), ("OPEN", [], [], []))
+
+    def test_decided_append_only_merges(self):
+        """#412：只往登记表里新增条目的 PR 按策略合并。"""
+        self.sign()
+        self.update_pr(files=[{"path": "docs/DECIDED.md", "additions": 3, "deletions": 0}])
+        r = self.auto()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(self.state(), "MERGED")
 
     def test_off_and_merge_start_share_one_lock(self):
         """#260-P1-03：最后读开关、记要合、起合并请求在开关锁里做。开关锁被占着（正在关）时，合并请求起不来。"""

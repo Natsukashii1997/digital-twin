@@ -3,7 +3,7 @@
 
 对名册（projects.json）里活跃仓库的 open PR，按带版本号的 merge_rules.json 给出「建议合并 / 退回 / 问常浩」，
 记进 agreement.csv；PR 有了真实结局（合并或关闭）后自动标出是否一致，按风险档（L0–L3）算一致率。
-「问常浩」就是例外：L3（敏感路径）、改定方向文档（direction_docs）、带 ask_labels 的标签。
+「问常浩」就是例外：L3（敏感路径）、改定方向文档（direction_docs）、删改已定内容登记表原有的行（append_only_docs）、带 ask_labels 的标签。
 判定思路取自 orca/merge_gate.py（在 claude/37-* 分支）：绑定完整 HEAD/base、敏感路径交给人、有硬性问题一律退回
 （不能靠「交给人」绕过）；风险档按 docs/DT-ORC/ARCHITECTURE.md 4.2，路径只能上调风险。
 
@@ -113,7 +113,8 @@ def _any(patterns, p):
 def facts_of(repo, pr):
     """把 gh 的 PR JSON 收成判定要用的状态快照（也是回放的依据）。
     files_total：GitHub 报的改动文件总数（gh 的 files 一次最多给 100 个，对不上就是没看全）；renamed：改名的文件
-    （gh 只给新路径，看不到原来的路径）。这两种都判不了有没有碰敏感路径，exception_reasons 按例外处理。"""
+    （gh 只给新路径，看不到原来的路径）。这两种都判不了有没有碰敏感路径，exception_reasons 按例外处理。
+    deleting：删了行的文件，GitHub 没给删除行数的也算进来（只新增不删改的已定内容登记表不算例外，#412）。"""
     checks = []
     total = pr.get("changedFiles")
     owner, _, name = repo.partition("/")
@@ -133,6 +134,9 @@ def facts_of(repo, pr):
         "paths": sorted(f.get("path", "") for f in pr.get("files") or []),
         "files_total": total if isinstance(total, int) and not isinstance(total, bool) else None,
         "renamed": sorted(f.get("path", "") for f in pr.get("files") or [] if f.get("changeType") == "RENAMED"),
+        "deleting": sorted(f.get("path", "") for f in pr.get("files") or []
+                           if not (isinstance(f.get("deletions"), int) and not isinstance(f.get("deletions"), bool)
+                                   and f["deletions"] == 0)),
         "from_fork": from_fork,
         "checks": checks,
         "closes": bool(pr.get("closingIssuesReferences")) or bool(CLOSES.search(pr.get("body") or "")),
@@ -151,7 +155,8 @@ def tier_of(repo, paths, rules):
 
 def exception_reasons(f, rules):
     """例外（仍然问常浩，不按策略合并）的理由；空列表就是不属于例外。
-    L3（敏感路径）、改定方向文档（PRD、架构、ADR、已定内容登记表、全局规则等，#257）、带 ask_labels 的标签；
+    L3（敏感路径）、改定方向文档（PRD、架构、ADR、常设授权清单，#257；v3 起全局规则、《工程流程》放开，#412）、
+    已定内容登记表（append_only_docs）里删改了原有的行（只新增条目不问，#412）、带 ask_labels 的标签；
     改动文件没看全（超过 gh 一次给的 100 个）或有文件改名（看不到原路径）：判不了有没有碰敏感路径，按碰了处理；
     来自别的仓库（fork）的 PR：仓库是公开的，机制不核对审查结论，外来代码一律问常浩（常浩 2026-11-20 定，#260-P1-05）；
     规则里收窄了 auto.tiers 时，风险档不在里面的也算。
@@ -167,6 +172,10 @@ def exception_reasons(f, rules):
     docs = [p for p in paths if _any(rules.get("direction_docs") or [], p)]
     if docs:
         ask.append("改动定方向文档：" + "、".join(docs[:5]))
+    deleting = f.get("deleting")                     # 旧的状态快照没有这个键：当成都删改过（看不出来就按例外）
+    edited = [p for p in paths if _any(rules.get("append_only_docs") or [], p) and (deleting is None or p in deleting)]
+    if edited:
+        ask.append("改了或删了已定内容登记表里原有的内容（只新增条目才不问）：" + "、".join(edited[:5]))
     total = f.get("files_total")
     if "files_total" in f and total is None:
         ask.append("GitHub 没给出改动文件总数，核对不了改动文件有没有看全")
