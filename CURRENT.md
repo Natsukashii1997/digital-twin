@@ -6,6 +6,12 @@
 
 证据目录：`~/Library/Application Support/DigitalTwin/evidence/<批次目录>/`（备份含密钥，权限 700/600，不进仓库）。
 
+## 2026-11-28：合并例外按「先问清单」缩小，ADR-016 修订 2（#412，常浩「都按推荐」，PR 待常浩合并、未装）
+
+- 规则 `merge_rules.json` v3：已定内容登记表只新增不问；全局规则、《工程流程》放开；敏感路径两张表不动（执行底座发布边界和托管合并共用，`ops/`、`.plist`、tokens 因此没放）。合并后的装机、发布、拉齐主目录由会话做并核实（取代修订 1 的拉齐名单）。近两周 287 个合并里要问的从 155 个降到 112 个。
+- 配套 agent-kit#156（《工程流程》第 5 节）。改授权属 L3：送审 → 常浩回「合并」→ 装机 → **常浩私聊重签策略**（范围哈希变了，重签前照旧发卡片）→ 真实 PR 上各验一次放行和仍拦。
+- 证据：`DigitalTwin/evidence/2026-11-28-合并放权修订2-412/`。
+
 ## 2026-11-27 晚：中台第一条自动规则「跟进 dt-sandbox Issue · 只分析」写好，未装（常浩选定，登记在 DECIDED 11-27）
 
 - **写了**：`ops/autoloop_rules/dt-sandbox-issue-watch.json`（规则片段）、`ops/issue_watch.py`（轮询脚本）、测试 `hermes/scripts/tests/test_issue_watch.py`；`ai_access.json` 和本文件「AI 接入」加 `issue-watch`。
