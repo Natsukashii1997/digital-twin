@@ -20,6 +20,7 @@
 - **常设授权清单升 v3**（同一决定的直接结果，#413 审查 P1-01）：开 PR 的会话在合并后的装机、发布、部署移出 D 档；Hermes 自主发起、自己执行的安装、部署照旧 D 档；安装本身是先问清单动作的（开托管或代批开关、重签策略、建密钥、先不装清单上的、会停服的）仍 D 档。
 - **效果**：近两周 287 个合并里要问的，按 v2 是 155 个，按 v3 重算 112 个（`DigitalTwin/evidence/2026-11-28-合并放权修订2-412/recount_v3.out.json`）。
 - **还要常浩做的一步**：规则 v3 改了授权范围，旧的策略记录自动失效，要他在猛鬼兽私聊发口令重签；重签前照旧发卡片。
+- **落地**：2026-11-28 常浩回「合并」，PR #413 合并为 `91d04bf`（agent-kit PR #165 为 `eac879f`）；同日装进 Hermes（`merge_officer.py`、`merge_policy.py`、`merge_act.py`、`merge_rules.json`、merge-officer 技能，旧副本在 `DigitalTwin/evidence/2026-11-28-合并放权修订2-412/install-backup/`），装后 `merge_policy.py status` 显示旧签名失效、要重签（范围 `c83b94d2c9c0`）。
 
 ---
 
