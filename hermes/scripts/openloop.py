@@ -25,10 +25,16 @@ DigitalTwin/openloop/（ledger.json 当前账本、history/<日期>.json 每天�
 「记录和事实对不上」（规格第 6 节末）单列在 mismatches：CURRENT 的节标题或主线项写着待合并 / 未合并，
 而那个 PR（或那张 issue 的 PR）已合并或已关。
 
-命令：scan（扫描并写账本）、show（打印账本）。未安装；接日报、午晚单在 5a-3。
+处置记录（#361 前置，docs/技能架构.md 台账 D-13）：猛鬼兽处理完账本里一件事，经 dispose 记一条处置（当前事实、卡在哪、
+负责人、下一步、下次检查时间、怎样算完、谁记的，可带出处和备注），追加到 DigitalTwin/openloop/dispositions.jsonl（只追加）。
+下次 scan 时每行多一个 disposition（这一行和并进来的各来源里最近的一条处置）；来源算出来的 state、owner、next、check_at 一概不动，
+处置和来源分开看。「记录和事实对不上」那一类也能记处置，但不能写成已完成（规格 5b-4：交给事实核对）。技能不直接改账本。
+
+命令：scan（扫描并写账本）、show（打印账本）、dispose（记一条处置）。未安装；接日报、午晚单在 5a-3。
 """
 import argparse
 import datetime as dt
+import fcntl
 import importlib.util
 import json
 import os
@@ -1291,6 +1297,118 @@ def out_dir():
     return Path(os.environ.get("DT_OPENLOOP_DIR", "~/Library/Application Support/DigitalTwin/openloop")).expanduser()
 
 
+# ---------- 处置记录 ----------
+
+DISPOSE_NEED = (("fact", "当前事实"), ("owner", "负责人"), ("next", "下一步"), ("done_when", "怎样算完"), ("by", "谁记的"))
+DISPOSE_MORE = (("blocked", "卡在哪"), ("ref", "出处"), ("note", "备注"))   # 可以不写：没卡住、没有消息号
+DISPOSE_MAX = 200                     # 每项最多这么多字：处置是一句话，不是报告；超了拒绝，不悄悄截
+DONE_WORDS = re.compile(r"已完成|已办完|已结束|已收口|已闭环|已解决|做完了|完成了|办完了|可以关")   # 对不上的不许这样写
+
+
+def dispositions_path(folder=None):
+    return (folder or out_dir()) / "dispositions.jsonl"
+
+
+def disposable(ledger):
+    """账本里能记处置的编号 → 哪一类：每一行、并进这一行的各来源（parts，只是「相关」的不算），和对不上的那几条。"""
+    out = {}
+    for r in ledger.get("rows") or []:
+        for x in [r, *(r.get("parts") or [])]:
+            if x.get("id"):
+                out.setdefault(x["id"], "row")
+    for m in ledger.get("mismatches") or []:
+        if m.get("id"):
+            out[m["id"]] = "mismatch"
+    return out
+
+
+def dispose(id_, fields, now=None, folder=None):
+    """记一条处置，返回记下的那条。编号要在当前账本里；必填项不能空、每项不超过 DISPOSE_MAX 字；
+    下次检查时间要晚于现在；对不上的那一类不能写成已完成。只追加 dispositions.jsonl，不碰 ledger.json。"""
+    now = now or current()
+    ledger = read_ledger(folder)
+    if ledger is None:
+        raise Fail(f"还没有账本：{(folder or out_dir()) / 'ledger.json'} 不存在或读不了，先跑 scan")
+    kind = disposable(ledger).get(id_)
+    if kind is None:
+        raise Fail(f"账本里没有 {id_}（按 {ledger.get('generated_at')} 那份账本）：编号照 show 的原样写，并成一行的写那一行或其中任一来源的编号")
+    rec = {}
+    for key, label in DISPOSE_NEED + DISPOSE_MORE:
+        v = " ".join(str(fields.get(key) or "").split())
+        if not v and (key, label) in DISPOSE_NEED:
+            raise Fail(f"处置缺{label}")
+        if len(v) > DISPOSE_MAX:
+            raise Fail(f"{label}超过 {DISPOSE_MAX} 字，写短一点")
+        rec[key] = v
+    check = parse_ts(fields.get("check_at"))
+    if not check:
+        raise Fail("下次检查时间读不懂：写成 2026-11-28T10:00（北京时间）这样")
+    if check <= now:
+        raise Fail(f"下次检查时间 {stamp(check)} 不晚于现在 {stamp(now)}")
+    if kind == "mismatch":
+        hit = next((label for key, label in DISPOSE_NEED + DISPOSE_MORE if DONE_WORDS.search(rec[key])), None)
+        if hit:
+            raise Fail(f"{id_} 是「记录和事实对不上」：只能交给事实核对，处置的{hit}不能写成已完成")
+    rec = {"at": iso(now), "id": id_, "kind": kind, **rec, "check_at": iso(check), "ledger_at": ledger.get("generated_at")}
+    path = dispositions_path(folder)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+    with open(path, "ab") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)        # 几个会话同时记：整行写完再放锁，不交错
+        try:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    return rec
+
+
+def read_dispositions(folder=None):
+    """(每个编号最近的一条处置, 读不懂的行数)。文件没有就是没有处置；坏行（写到一半、手改坏了）跳过并计数，不拖垮扫描。"""
+    latest, bad = {}, 0
+    try:
+        with open(dispositions_path(folder), "rb") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            raw = f.read()
+    except FileNotFoundError:
+        return {}, 0
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            ok = isinstance(rec, dict) and isinstance(rec.get("id"), str) and parse_ts(rec.get("at"))
+        except ValueError:
+            ok = False
+        if not ok:
+            bad += 1
+            continue
+        old = latest.get(rec["id"])
+        if old is None or parse_ts(rec["at"]) >= parse_ts(old["at"]):   # 同一时刻记了两条：后写的算
+            latest[rec["id"]] = rec
+    return latest, bad
+
+
+def attach(ledger, folder=None):
+    """把处置并进账本：每行、每条对不上的多一个 disposition（它和并进来的各来源里最近的一条，没有就是 None）。
+    只加这一个字段，来源算出来的 state、owner、next、check_at 不动；账本里已经没有的编号，处置留在文件里不报错，只计数。"""
+    latest, bad = read_dispositions(folder)
+    used = set()
+    for r in ledger.get("rows") or []:
+        ids = [r["id"], *(x["id"] for x in r.get("parts") or [])]
+        mine = [latest[i] for i in ids if i in latest]
+        used.update(i for i in ids if i in latest)
+        r["disposition"] = max(mine, key=lambda d: parse_ts(d["at"])) if mine else None
+    for m in ledger.get("mismatches") or []:
+        m["disposition"] = latest.get(m["id"])
+        used.update([m["id"]] if m["id"] in latest else [])
+    ledger.setdefault("coverage", {})["dispositions"] = {
+        "rows": sum(1 for x in (ledger.get("rows") or []) + (ledger.get("mismatches") or []) if x.get("disposition")),
+        "orphan": len(set(latest) - used), "bad": bad}
+    return ledger
+
+
 def ask_kind(r):
     """一行「等你」的事要常浩做哪种：合并 / 点卡 / 亲手做 / 拍板。午晚单收前三种，日报的拍板候选收最后一种。
     PR 行的「下一步」可能来自并进来的会话：写着合并才算合并，别的是要他亲手做的事。"""
@@ -1431,7 +1549,7 @@ def scan(now=None, fetch=True, hub=None, folder=None, save=True):
     except (OSError, ValueError):
         rules = None
     hub = hub or pdaily_data.GitHub(None, wait=netwait.wait_seconds())
-    ledger = build(now, roster(), hub, rules, prev=read_ledger(folder), fetch=fetch)
+    ledger = attach(build(now, roster(), hub, rules, prev=read_ledger(folder), fetch=fetch), folder)
     if save:
         write(ledger, folder)
     return ledger
@@ -1477,7 +1595,17 @@ def gaps(ledger):
         out.append(f"对不上·{name}：{why}（这个项目的「待合并」没核全，沿用上一份里它的）")
     if cov.get("rules"):
         out.append(cov["rules"])
+    if (cov.get("dispositions") or {}).get("bad"):
+        out.append(f"处置记录：dispositions.jsonl 有 {cov['dispositions']['bad']} 行读不懂，跳过了")
     return out
+
+
+def disposition_line(d):
+    """show 里有处置的行多这一行：谁什么时候记的、记了什么。处置是另记的，不改上面那行来源算出来的东西。"""
+    return (f"处置：{stamp(parse_ts(d.get('at')))} {d.get('by')} 记｜事实：{d.get('fact')}"
+            + (f"｜卡在：{d['blocked']}" if d.get("blocked") else "")
+            + f"｜谁：{d.get('owner')}｜下一步：{d.get('next')}｜下次看：{stamp(parse_ts(d.get('check_at')))}｜怎样算完：{d.get('done_when')}"
+            + (f"｜出处：{d['ref']}" if d.get("ref") else "") + (f"｜备注：{d['note']}" if d.get("note") else ""))
 
 
 def render(ledger, now=None):
@@ -1498,6 +1626,8 @@ def render(ledger, now=None):
                        + (f"｜卡在：{r['blocked']}" if r["blocked"] else "")
                        + (f"｜下次看：{stamp(parse_ts(r['check_at']))}" if r["check_at"] else "｜下次看：不催")
                        + f"｜进账本：{stamp(parse_ts(r['since']))}")
+            if r.get("disposition"):
+                out.append("      " + disposition_line(r["disposition"]))
             together = [f"{x['id']}（{x['state']}" + (f"，下一步：{x['next']}" if x["state"] in STATES[:2] and x.get("next") else "") + "）"
                         for x in r["links"] if not x.get("related")]
             nearby = [x["id"] for x in r["links"] if x.get("related")]
@@ -1508,6 +1638,8 @@ def render(ledger, now=None):
         out.append(f"\n【记录和事实对不上】{len(ledger['mismatches'])}")
         for m in ledger["mismatches"]:
             out.append(f"  {m['project']} {m['where']}：「{m['text']}」→ {m['fact']}")
+            if m.get("disposition"):
+                out.append("      " + disposition_line(m["disposition"]))
     if ledger["unparsed"]:
         out.append(f"\n【主线清单里没解析出来的】{len(ledger['unparsed'])}")
         for u in ledger["unparsed"]:
@@ -1538,8 +1670,23 @@ def main(argv=None):
     s.add_argument("--dry-run", action="store_true", help="只打印账本 JSON，不写文件")
     v = sub.add_parser("show", help="打印当前账本")
     v.add_argument("--json", action="store_true", help="原样输出 ledger.json")
+    d = sub.add_parser("dispose", help="给账本里一行记一条处置（只追加 dispositions.jsonl，下次 scan 并进这一行）")
+    d.add_argument("--id", required=True, help="账本编号，照 show 的原样写")
+    d.add_argument("--fact", required=True, help="当前事实")
+    d.add_argument("--blocked", default="", help="卡在哪；没卡住不写")
+    d.add_argument("--owner", required=True, help="现在谁负责")
+    d.add_argument("--next", required=True, help="下一步：谁做什么")
+    d.add_argument("--check-at", required=True, help="下次检查时间，如 2026-11-28T10:00（北京时间），要晚于现在")
+    d.add_argument("--done-when", required=True, help="怎样算完")
+    d.add_argument("--by", required=True, help="谁记的，如 猛鬼兽")
+    d.add_argument("--ref", default="", help="出处：常浩那条消息的消息号、卡片版本等")
+    d.add_argument("--note", default="", help="备注：他的原话和你的理解（原话里有受限内容的不抄）")
     a = ap.parse_args(argv)
     try:
+        if a.cmd == "dispose":
+            rec = dispose(a.id, {k: getattr(a, k) for k in ("fact", "blocked", "owner", "next", "check_at", "done_when", "by", "ref", "note")})
+            print(json.dumps({"ok": True, "disposition": rec}, ensure_ascii=False))
+            return 0
         if a.cmd == "scan":
             ledger = scan(fetch=not a.no_fetch, save=not a.dry_run)
             if a.dry_run:
@@ -1555,10 +1702,11 @@ def main(argv=None):
         print(json.dumps(ledger, ensure_ascii=False, indent=1) if a.json else render(ledger))
         return 0
     except Fail as e:
-        print(f"账本没更新：{e}")
+        print(json.dumps({"ok": False, "why": str(e)}, ensure_ascii=False) if a.cmd == "dispose" else f"账本没更新：{e}")
         return 1
     except Exception as e:   # 没料到的错也收成一句：定时跑的时候要看得出「今天没更新」，不是一屏回溯
-        print(f"账本没更新：出错（{type(e).__name__}：{e}）")
+        why = f"出错（{type(e).__name__}：{e}）"
+        print(json.dumps({"ok": False, "why": why + "，处置没记上"}, ensure_ascii=False) if a.cmd == "dispose" else f"账本没更新：{why}")
         return 1
 
 
