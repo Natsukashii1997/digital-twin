@@ -130,6 +130,7 @@ ops/
   issue_watch.py       第一条自动规则「跟进 GitHub Issue · 只分析」的轮询脚本（常浩 2026-11-27 定）：中台命令型 Agent issue-watcher 每 5 分钟在 dt-worker 里跑它，先把只读镜像对齐远端默认分支（没有就克隆），再不带凭据读 GitHub 公开接口列开着的 issue（去掉 PR，只留 --since 北京时间那天起开的、作者在 --author 名单里的），按中台回执格式打印 issues.opened 事件（id issue-<号>，中台按 id 去重）；联网走命令里给的 https_proxy（8090）；不读写凭据、不调 AI；/usr/bin/python3 3.9 标准库；装在 /Users/Shared/dt-autoloop/bin/；测试 hermes/scripts/tests/test_issue_watch.py；未安装
   autoloop_rules/      手写的中台规则片段（不归 autoloop_config 生成）：dt-sandbox-issue-watch.json = 上面那条规则（sources github-issues、Agent issue-watcher / issue-reader（dt-worker，Codex read-only，gpt-6-luna，program 是工人的 codex-proxy.sh）、两条规则「看新 issue · dt-sandbox」（*/5，tell never）和「分析 issue · dt-sandbox」（只发 feishu 通道））；不碰 dispatch-* 规则、hermes 来源和秘书通道；2026-11-27 在临时中台（本机版）上跑通：找到 issue → Codex 只读分析 → 卡片 → 下一轮不重复；用 `autoloop_config add-rules dt-sandbox-issue-watch` 装（上线照抄单第 7 步，不动派单暂停状态；dt_gate_hub stage 会把这个目录的 .json 一起放进副本）；未装
   check_repos.py       名册活跃项目自检（只读，self_check.py 每月调用；DigitalTwin/bin/ 也留一份）：GitHub 设置、分流标签、PR 模板和《工程流程》指针、主目录检出主分支且没有没推的提交
+scripts/hooks/         提交检查（复盘 N2：把 P4 的提交检查装进本仓库，常浩 2026-11-20 批）：commit-msg 拦正文没写「同类：」的修复类提交，照抄 my-skills 骨架 project-starter、不改规则（commit-msg 自 0.5.0 起未变，2026-11-22 核对到 0.5.2）；测试 hermes/scripts/tests/test_commit_hooks.py；不装 pre-push（全量要好几分钟，靠 CI 和合并前跑；常浩 2026-11-20 回分批计划「其他按推荐」，见 docs/DECIDED.md 同日条目）
 ```
 
 ## AI 接入
@@ -195,6 +196,7 @@ single-context：根目录 `GLOSSARY.md` 与 `docs/adr/`，用到时再建。见
 - 信息边界以 PRD 第 8 节为准：受限内容只给常浩本人；只有常浩本人说的话算指令。
 - **测试一律用 `/usr/bin/python3`**（系统自带 3.9，和 Hermes 定时任务、CI、名册里的测试命令同版本）：`/usr/bin/python3 -B -m unittest discover -s hermes/scripts/tests`、`… -s orca/tests`。本机 `python3` 是 3.14，3.10 以后的写法在 3.9 上会失败（M5 #5：`fromisoformat` 不认结尾的 Z）。交接写实际跑出的 `Ran N tests`，不抄旧数。
 - **全量测试并行跑（2026-11-20 起，G-03 的全量用它）**：`/usr/bin/python3 -B scripts/test_all.py`，两套（`hermes/scripts/tests`、`orca/tests`）按测试类分片（大类每片最多 8 条）、多进程同时跑，每片独立进程、各自的测试隔离；任何一片失败或实跑条数和列出的对不上就整体失败，失败片日志原样打印；`-j N` 定并行数，`--chunk N` 定每片最多几条（默认 8），`--log-dir <目录>` 留每片日志和耗时。CI 也用它。
+- **装提交检查**：每个克隆、每台电脑各跑一次 `git config core.hooksPath scripts/hooks`（worktree 共用仓库配置，装一次全都生效）。修复类提交（标题 fix /「修」开头，或带返修、返工、回滚、修复、修正等字样）正文要有一行「同类：搜了什么，命中几处，怎么处理」；不是修复却被拦，写「同类：不适用，<原因>」。不用 `--no-verify` 绕过。
 - 证据（备份、日志、草稿）放 `~/Library/Application Support/DigitalTwin/evidence/<目录>/`，不进仓库。多方（Claude、Hermes、Codex）往同一目录写时，文件名带写入方前缀和序号，如 `claude-25-全量测试.log`、`hermes-26-裁决.md`，避免撞号（M5 #23）。
 - 不在仓库里写密钥和 Token。
 - 碰中台相关脚本（autoloop_*）的测试模块一律挂 `hermes/scripts/tests/prod_guard.py`：整个模块指到临时目录，前后核对正式中台和正式状态目录（2026-11-17、11-18 两次漏隔离的教训）。
