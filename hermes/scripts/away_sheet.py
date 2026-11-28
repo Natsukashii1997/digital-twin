@@ -85,6 +85,8 @@ push 一次最多要跑七八条飞书命令（每条最多 60 秒），都在�
 托管会话中途断了，没 ack 的下次还是 pending：合并这类动作，办之前先查是不是已经办过。
 只读引用回复；在话题里回的不读（飞书把话题回复放在另一处），卡片上写的就是「引用这张单子」。
 撤回、编辑还没有常浩本人的真实样本，字段按 lark-cli 列消息的输出（deleted、updated、update_time）处理。
+猛鬼兽不接这些话：网关插件 away-sheet-mute（hermes/plugins/away-sheet-mute/）用 muted_ids() 认出引用托管单的消息，
+在交给模型之前丢掉；托管会话读回话走飞书接口，不经过网关，不受影响。
 
 没有环境变量开关：状态目录、现在几点、lark-cli 的位置都不认环境变量。测试在同一进程里改模块属性
 （OWNER_DIR、AWAY_DIR、LARK、NOW、PAGE_MAX）。
@@ -960,10 +962,36 @@ def reads(sheet):
     who, chat = private_chat()
     if sheet["chat_id"] != chat:
         raise Fail("这张单子不是发在常浩私聊里的，不读回复")
-    mine = {sheet["message_id"]}
+    return who, chat, sheet_ids(sheet)
+
+
+def sheet_ids(sheet):
+    """这张单子在飞书上的消息号：卡片和每句提醒（含同一批找到的多句）。"""
+    mine = {sheet["message_id"]} - {None}
     for b in sheet["reminders"]:
         mine |= {x for x in [b.get("message_id")] + (b.get("also") or []) if x}
-    return who, chat, mine
+    return mine
+
+
+def muted_ids(chat):
+    """账本里每张发在这个私聊里的单子（已经结束的也算）的卡片和提醒消息号。引用这些消息的话是回给托管会话的，
+    网关插件 away-sheet-mute 据此在交给猛鬼兽之前丢掉（#305，常浩 11-22 选甲）。
+    只读、不拿锁（写单子都是临时文件加原子替换）；读不了、讲不通的单子跳过，引用它的话照常交给猛鬼兽。"""
+    try:
+        names = sorted(os.listdir(base()))
+    except OSError:
+        return set()
+    ids = set()
+    for name in names:
+        if not SHEET_ID.fullmatch(name):
+            continue
+        try:
+            sheet = load(name)
+        except Fail:
+            continue
+        if sheet["chat_id"] == chat:
+            ids |= sheet_ids(sheet)
+    return ids
 
 
 def his(m, who, mine):

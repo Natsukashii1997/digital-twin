@@ -1,0 +1,4 @@
+name: away-sheet-mute
+version: 0.1.0
+description: "托管单的回话不进猛鬼兽（digital-twin #305）：常浩在飞书私聊里引用托管单卡片或提醒回的话，在交给模型之前丢掉；这些话由托管会话经飞书接口读。"
+author: "常浩 · digital-twin"
