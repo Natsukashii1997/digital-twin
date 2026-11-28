@@ -11,12 +11,14 @@
   record  飞书里常浩问猛鬼兽进度时，猛鬼兽先 find 找到账本里的那一行，再 record 记一行（status=确认）
   screen  每周从 Claude 桌面会话记录里按问法粗筛（参照会话复盘找「纠正」的做法：去掉代码块、贴进来的内容、
           宿主注入、引号里的短词，只看短消息），对一遍账本，记成 status=待核；同一句话不重复记
+recheck：判法改了以后重判已记的追问，结论不同的追加一行更正（supersedes 指向原来那行；周报只算最新的结论）。
 week：一周基线（第 10 节）：你主动追问率，加上现在已经能算的无声中断率、结果证据覆盖率、没核实审查就合并的；
 写 DigitalTwin/openloop/weekly/<结束日>.json。
 
 「当时的账本」= 问的时刻之前最近的一份（ledger.json 或 history/<日期>.json；history 每天只留最后一次扫描）。
 「报过」= 问之前发出的午晚单列着它（runs.jsonl 记的 ids；旧记录没有 ids 的按卡片文字找），或问之前发出的日报
-拍板快照的出处写着它（「未闭环账本 <编号>」，PR 照日报去重的办法按项目和号找），或那天日报的账本风险拿它当了例子。
+拍板快照的出处写着它（「未闭环账本 <编号>」，PR 照日报去重的办法按项目和号找），或那天日报的账本风险拿它当了例子，
+或发出去的日报卡片上写着「项目名 #号」（PR 才认，如风险表里「PR 开着超过 2 天：数字分身 #210 #211」）。
 
 只读：账本、午晚单、日报、会话记录、合并账本都只读，写的只有 asks.jsonl 和 weekly/。不调 AI，不发飞书。未安装。
 """
@@ -201,11 +203,29 @@ def slips_before(r, at):
     return hits
 
 
+def names_of(p):
+    """项目在卡片上可能的叫法：名册全名、括号里的、括号前的（「个人 AI 工作台（数码世界）」→ 三种都认），再加仓库名。"""
+    full = str(p.get("name") or "").strip()
+    out = {full, ol.key_of(p)}
+    m = re.match(r"^(.*?)[（(](.+?)[）)]\s*$", full)
+    if m:
+        out |= {m.group(1).strip(), m.group(2).strip()}
+    return {n for n in out if n}
+
+
+def card_mentions(text, names, n):
+    """卡片上写了「项目名 + 一串 PR 号」且其中有 #n（「数字分身 #173 #187 #211」）。项目名和号之间只许是空白和别的号，
+    「数字分身 #173｜自建技能库 #211」里的 #211 不算数字分身的。"""
+    return any(re.search(re.escape(name) + r"\s*(?:#\d+[\s、，,]*)*#" + n + r"(?!\d)", text) for name in names)
+
+
 def daily_before(r, at, projects):
     hits, folder = [], daily_dir()
     mine = ids_of(r)
     roster_id = {ol.key_of(p): p.get("id") for p in projects}
+    names = {ol.key_of(p): names_of(p) for p in projects}
     prs = {(roster_id.get(m.group(1)), m.group(2)) for i in mine for m in [re.match(r"pr:(.+)#(\d+)$", i)] if m}
+    on_card = {(m.group(1), m.group(2)) for i in mine for m in [re.match(r"pr:(.+)#(\d+)$", i)] if m}
     sources = {f"未闭环账本 {i}" for i in mine}
     example = f"{r.get('project') or '—'}｜{ol.clip(r.get('what'), 40)}"
     for path in sorted(folder.glob("*.delivery.json")):
@@ -223,6 +243,13 @@ def daily_before(r, at, projects):
             for k in (read_json(folder / f"{day}.facts.json") or {}).get("risks") or []:
                 if str(k.get("item") or "").startswith("未闭环账本") and any(str(e).startswith(example) for e in k.get("evidence") or []):
                     how = "风险例子"
+        if not how and on_card:
+            try:   # 发出去的卡片原文（风险表、项目明细里写的「项目名 #号」）
+                card = (folder / f"{day}.card.sent.json").read_text(encoding="utf-8")
+            except OSError:
+                card = ""
+            if any(card_mentions(card, names.get(repo) or {repo}, n) for repo, n in on_card):
+                how = "卡片提到"
         if how:
             hits.append({"where": f"日报 {day}（{how}）", "at": d.get("at")})
     return hits
@@ -256,6 +283,39 @@ def record(question, via, at, target=None, text=None, status="确认", key=None,
         rec["key"] = key
     append(rec)
     return rec
+
+
+# ---------- 重判 ----------
+
+def rec_key(a):
+    """一行追问的身份：更正行有自己的 id；粗筛的有 key；飞书记的按 时间|对象|原话。"""
+    return a.get("id") or a.get("key") or f"{a.get('at')}|{a.get('target') or a.get('text')}|{a.get('question')}"
+
+
+def live(asks):
+    """去掉被更正过的行，只留每次追问最新的结论（asks.jsonl 只追加，更正是新的一行带 supersedes）。"""
+    gone = {a.get("supersedes") for a in asks if a.get("supersedes")}
+    return [a for a in asks if rec_key(a) not in gone]
+
+
+def recheck(projects=None, write=True):
+    """判法改了之后，按现在的判法把有账本编号的追问重判一遍；结论不同的追加一行更正（supersedes 指向原来那行）。"""
+    projects = projects_or_empty() if projects is None else projects
+    snaps, out = ledgers(), []
+    for a in live(read_lines(asks_path())):
+        at = ol.parse_ts(a.get("at"))
+        if not a.get("target") or not at:
+            continue
+        got = judge(a["target"], at, projects, snaps=snaps)
+        if got is None or got["verdict"] == a.get("verdict"):
+            continue
+        now = ol.iso(ol.current())
+        fix = {**a, **got, "id": f"{rec_key(a)}~{now}", "supersedes": rec_key(a), "rechecked_at": now,
+               "was": a.get("verdict")}
+        if write:
+            append(fix)
+        out.append(fix)
+    return out
 
 
 # ---------- 找 ----------
@@ -426,7 +486,7 @@ def week(end_day, projects=None, folder=None):
         seen |= {r.get("id") for r in led.get("parked") or []}
     days = {t.date() for t, _ in snaps}
     missing = [str(start.date() + dt.timedelta(days=i)) for i in range(7) if start.date() + dt.timedelta(days=i) not in days]
-    asks = [a for a in read_lines(asks_path()) if (lambda t: t and start <= t < end)(ol.parse_ts(a.get("at")))]
+    asks = [a for a in live(read_lines(asks_path())) if (lambda t: t and start <= t < end)(ol.parse_ts(a.get("at")))]
     count = {s: {v: sum(1 for a in asks if a.get("status") == s and a.get("verdict") == v) for v in VERDICTS} for s in ("确认", "待核")}
     sure = sum(count["确认"][v] for v in DEFECTS)
     rough = sure + sum(count["待核"][v] for v in DEFECTS)
@@ -494,6 +554,8 @@ def main(argv=None):
     s.add_argument("--days", type=int, default=7)
     s.add_argument("--end", help="截止日（含，YYYY-MM-DD，默认昨天）")
     s.add_argument("--dry-run", action="store_true", help="只打印，不写 asks.jsonl")
+    c = sub.add_parser("recheck", help="判法改了以后按现在的判法重判已记的追问，结论不同的追加一行更正")
+    c.add_argument("--dry-run", action="store_true", help="只打印，不写")
     w = sub.add_parser("week", help="出一周基线")
     w.add_argument("--end", help="截止日（含，YYYY-MM-DD，默认昨天）")
     w.add_argument("--json", action="store_true")
@@ -526,6 +588,13 @@ def main(argv=None):
                   f"｜新记 {len(got)} 条（待核）｜以前记过 {cover['already']}｜问时还没账本 {cover['before_ledger']}")
             for x in got:
                 print(f"  {x['at'][5:16]} {x['verdict']}｜{x['target']}｜{x['question']}")
+            return 0
+        if a.cmd == "recheck":
+            got = recheck(write=not a.dry_run)
+            print(f"重判：{len(got)} 条结论变了" + ("（只打印，没写）" if a.dry_run else ""))
+            for x in got:
+                print(f"  {x['at'][5:16]} {x['was']} → {x['verdict']}｜{x['target']}｜{x['question']}"
+                      + (f"｜报过：{'、'.join(r['where'] for r in x['reported'])}" if x["reported"] else ""))
             return 0
         rep = week(end_day)
         if not a.no_save:
