@@ -41,7 +41,11 @@ def scope_block(shown, full=None):
     begin, end = W.scope_markers(shown if full is None else full)
     return f"{begin}\n{shown}\n{end}"
 PY = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
-GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+           # 关掉后台自动整理：fetch / commit / 收推送之后 git 会在后台起 gc、maintenance 往 objects/pack 里写，
+           # 和测试结束删临时目录撞上就报「Directory not empty: 'pack'」（CI 11-25 main、11-26 PR #381 各一次）
+           "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
+           "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"}
 
 FAKE_CLI = r'''#!{py}
 import json, os, signal, subprocess, sys, time
