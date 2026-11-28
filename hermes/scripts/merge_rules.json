@@ -1,7 +1,7 @@
 {
-  "version": "2",
-  "date": "2026-11-20",
-  "note": "合并官的判定规则（#61；v2 #257）。思路取自 orca/merge_gate.py（在 claude/37-* 分支）和 docs/DT-ORC/ARCHITECTURE.md 4.2、5.5：完整 HEAD/base 绑定、敏感路径交给人、有硬性问题一律退回、路径只能上调风险。v2（ADR-016）：改定方向文档（direction_docs）也问常浩；数字分身的敏感路径从整个 hermes/ 收窄到授权、合并、派单、凭据、身份、对外发言、安装相关的脚本和技能，以及合并后不用装机就生效的文件（名册、ai_access.json、保护基线、先不装清单），其余 hermes/ 脚本按 L1 / L2（常浩 2026-11-20「都按推荐」；合并不等于装机，装机仍问常浩）；影子门槛 threshold 废止、删除；新增 auto（按策略合并）。每次被常浩推翻，改这里、版本号加一，并用 merge_officer.py replay 回放历史。",
+  "version": "3",
+  "date": "2026-11-28",
+  "note": "合并官的判定规则（#61；v2 #257）。思路取自 orca/merge_gate.py（在 claude/37-* 分支）和 docs/DT-ORC/ARCHITECTURE.md 4.2、5.5：完整 HEAD/base 绑定、敏感路径交给人、有硬性问题一律退回、路径只能上调风险。v2（ADR-016）：改定方向文档（direction_docs）也问常浩；数字分身的敏感路径从整个 hermes/ 收窄到授权、合并、派单、凭据、身份、对外发言、安装相关的脚本和技能，以及合并后不用装机就生效的文件（名册、ai_access.json、保护基线、先不装清单），其余 hermes/ 脚本按 L1 / L2（常浩 2026-11-20「都按推荐」；合并不等于装机，装机仍问常浩）；影子门槛 threshold 废止、删除；新增 auto（按策略合并）。v3（ADR-016 修订 2，#412，常浩 2026-11-28「都按推荐」）：按新分工「做完直接合并发布，只有先问清单里的才问」放开两处——全局规则源文件和《工程流程》不再算定方向文档（改规则「讲清再动」，动手前已问过）；已定内容登记表只新增条目不问、删改原有的行才问（append_only_docs）；sensitive、repo_sensitive 不动：执行底座的发布边界（autoloop_publish.py）和托管合并（ADR-014）共用这两张表，放开 ops/、.plist、tokens 样式会连带放宽那两处，所以这三项本版不放（只收紧，没有多放）。每次被常浩推翻，改这里、版本号加一，并用 merge_officer.py replay 回放历史。",
   "sensitive": [
     "^\\.github/",
     "^ops/",
@@ -29,10 +29,10 @@
     "missing_closes": true
   },
   "ask_labels": ["needs-info"],
-  "direction_docs": ["(^|/)PRD\\.md$", "(^|/)ARCHITECTURE\\.md$", "(^|/)adr/", "(^|/)DECIDED\\.md$", "^global/(claude|codex)/",
-                     "(^|/)工程流程\\.md$", "(^|/)常设授权清单\\.md$"],
+  "direction_docs": ["(^|/)PRD\\.md$", "(^|/)ARCHITECTURE\\.md$", "(^|/)adr/", "(^|/)常设授权清单\\.md$"],
+  "append_only_docs": ["(^|/)DECIDED\\.md$"],
   "auto": {
-    "note": "按策略合并（#257，ADR-016，常浩 2026-11-20 定）。tiers：能按策略合并的风险档；例外（L3、direction_docs、ask_labels）不合，发卡片问常浩。ready：handoff＝会话调 merge_act.py auto 交出过这个版本才合，any＝不是草稿、检查全过就合。daily_cap：每天最多合几个，超了停下告诉常浩。notify：daily＝合成功的只进日报，each＝每合一个私聊说一句。revert_auto_merge：撤回 PR 开出后按同一套检查自动合并。这一节和 sensitive、repo_sensitive、l0_paths、rule_docs、direction_docs、l1_max_files、ask_labels、act.repos 一起是授权范围：改了任何一项，策略记录的哈希对不上，要常浩重签（merge_policy.py status 给口令）",
+    "note": "按策略合并（#257，ADR-016，常浩 2026-11-20 定）。tiers：能按策略合并的风险档；例外（L3、direction_docs、append_only_docs 里删改了原有行的、ask_labels）不合，发卡片问常浩；「按动作兜底」（会碰先问清单的改动，ADR-016 修订 2 第 3 条）是开 PR 的会话判断、不交出，不是这里的机械判定。ready：handoff＝会话调 merge_act.py auto 交出过这个版本才合，any＝不是草稿、检查全过就合。daily_cap：每天最多合几个，超了停下告诉常浩。notify：daily＝合成功的只进日报，each＝每合一个私聊说一句。revert_auto_merge：撤回 PR 开出后按同一套检查自动合并。这一节和 sensitive、repo_sensitive、l0_paths、rule_docs、direction_docs、append_only_docs、l1_max_files、ask_labels、act.repos 一起是授权范围：改了任何一项，策略记录的哈希对不上，要常浩重签（merge_policy.py status 给口令）",
     "tiers": ["L0", "L1", "L2"],
     "ready": "handoff",
     "daily_cap": 30,
