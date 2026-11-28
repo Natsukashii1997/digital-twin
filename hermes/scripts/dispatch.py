@@ -265,7 +265,21 @@ def pick_tool(a):
 
 
 def cmd_new(a):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import task_brief   # 同目录（安装副本在 ~/.hermes/scripts/）
+    try:   # 只读这一次：核过的就是交给车间的，之后源文件再改也不跟（#405 审查 P1-03）
+        with open(a.task_file, "rb") as f:
+            task_mode = os.fstat(f.fileno()).st_mode & 0o777
+            task_text = f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        done(False, f"任务文件读不了（{type(e).__name__}），没有开单")
+    bad = task_brief.problems(task_text)
+    if bad:   # 五要素缺项不开单（#358，docs/技能架构.md 第 9 节 5b-1）：车间看不到对话，缺了就只能猜
+        done(False, "；".join(bad) + "，没有开单")
     a.tool, chosen_by = pick_tool(a)
+    bad = task_brief.problems(task_text, executor=a.tool)   # 「交给谁」点名的和实际派的对不上（#405 审查 P2-01）
+    if bad:
+        done(False, "；".join(bad) + "，没有开单")
     p = project(a.project)
     if a.mode == "write" and not p.get("write_allowed"):
         done(False, f"名册不允许往 {p['name']} 写入")
@@ -283,7 +297,10 @@ def cmd_new(a):
         d.mkdir(parents=True)
         if a.sched_key:     # 关联键先落盘：开单中途失败也能被恢复按键找到
             (d / "sched_key").write_text(a.sched_key)
-    shutil.copy(a.task_file, d / "task.md")
+    fd = os.open(d / "task.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL, task_mode)   # 建出来就是源文件的权限位（同原来的 shutil.copy）
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(task_text)
+    os.chmod(d / "task.md", task_mode)   # umask 会削掉一些位：再设一次，和源文件一样
     o = {"no": no, "project": p["id"], "tool": a.tool, "tool_source": chosen_by, "mode": a.mode, "status": "new",
          "created": dt.datetime.now().isoformat(timespec="seconds"), "cwd": p["path"]}
     if a.sched_key:

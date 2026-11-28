@@ -37,7 +37,8 @@ OWNER = "ou_fixture_owner_0001"
 CHAT = "oc_fixture_p2p_0001"
 T0 = dt.datetime(2026, 11, 17, 10, 0, tzinfo=G.TZ)
 LATER = T0 + dt.timedelta(seconds=61)          # 过了在途窗口
-SCOPE = "目标：给 dt-sandbox 的 README 加一节\n范围：只改 README.md\n验收：PR 里只有 README.md"
+SCOPE = ("目标：给 dt-sandbox 的 README 加一节\n交付物：README.md 里新的一节\n范围：只改 README.md\n验收：PR 里只有 README.md\n"
+         "交给谁：按派单参数里的执行方")   # 不点名：同一份样本派 Claude、Codex 都用
 
 
 def raw_msg(mid, text, when, sender=OWNER, chat=CHAT):
@@ -64,7 +65,7 @@ class InstalledRoster(unittest.TestCase):
         self.home = self.root / "home"
         self.scripts = self.home / ".hermes/scripts"
         self.scripts.mkdir(parents=True)
-        for name in ("autoloop_grants.py", "autoloop_config.py", "twin_identity.py", "hub_listener.py"):
+        for name in ("autoloop_grants.py", "autoloop_config.py", "twin_identity.py", "hub_listener.py", "task_brief.py"):
             shutil.copy2(HERE.parent / name, self.scripts / name)
         self.roster = self.home / "Documents/ChatGPT/个人/work/digital-twin/projects.json"
         self.scope = self.root / "五要素.md"
@@ -306,7 +307,7 @@ class Approval(Base):
         self.assertEqual(len(self.sql("SELECT code FROM proposals")), 1)
 
     def test_same_request_id_at_once_registers_one(self):
-        G.propose("dt-sandbox", "claude", "先建库", now=T0)    # 库先建好，并发只比登记
+        G.propose("dt-sandbox", "claude", SCOPE + "\n先建库", now=T0)    # 库先建好，并发只比登记
         rid, out, gate = "cd" * 16, [], threading.Barrier(4)
 
         def go():
@@ -466,6 +467,47 @@ class Approval(Base):
         with self.assertRaises(G.Rejected):
             G.propose("dt-sandbox", "claude", SCOPE, actions=("edit", "merge"), now=T0)
         self.assertEqual(G.propose("digital-twin", "codex", SCOPE, now=T0)["github"], "o/digital-twin")
+
+    def test_scope_missing_parts_or_carrying_restricted_text_is_not_registered(self):
+        """#358：缺五要素、夹带疑似密钥 / Vault 路径 / sensitivity 标记的都不登记、不发卡；说清缺哪项、哪类，不回显原文。"""
+        key = "ghp_" + "A1b2" * 9
+        cases = ((SCOPE.replace("交给谁：按派单参数里的执行方", ""), "缺交给谁"),
+                 (SCOPE.replace("交付物：README.md 里新的一节\n", "").replace("验收：", "备注："), "缺交付物、验收"),
+                 (SCOPE + f"\n令牌：{key}", "疑似密钥"),
+                 (SCOPE + "\n参考 ~/Documents/Obsidian Vault/个人上下文/x.md", "Vault 路径"),
+                 (SCOPE + "\nsensitivity: restricted", "sensitivity"))
+        for scope, why in cases:
+            with self.subTest(why=why), self.assertRaisesRegex(G.Rejected, why) as cm:
+                G.propose("dt-sandbox", "claude", scope, now=T0)
+            self.assertNotIn(key, str(cm.exception))
+        self.assertEqual((G.cards_to_send(now=T0), self.posted), ([], []))
+        self.assertTrue(G.propose("dt-sandbox", "claude", SCOPE, now=T0)["code"])      # 补齐就收
+
+    def test_scope_must_name_the_same_executor(self):
+        """#405 审查 P2-01：「交给谁」只点名了一家而实际派另一家，不登记；两家都没点名的照收。"""
+        claude = SCOPE.replace("交给谁：按派单参数里的执行方", "交给谁：Claude")
+        with self.assertRaisesRegex(G.Rejected, "任务说明写交给 Claude，实际要派给 Codex"):
+            G.propose("dt-sandbox", "codex", claude, now=T0)
+        self.assertTrue(G.propose("dt-sandbox", "claude", claude, now=T0)["code"])
+        self.assertTrue(G.propose("dt-sandbox", "codex", SCOPE, now=T0)["code"])
+
+    def test_old_proposal_that_fails_todays_check_is_voided_on_click(self):
+        """#405 审查 P1-02：升级前登记、没过五要素和受限内容检查的待批提议，点了卡也不签、不写工人任务单；合格的照常签。"""
+        key = "ghp_" + "Zz9" * 12
+        old = {}
+        for name, scope in (("缺项", "目标：只有一项"), ("密钥", SCOPE + f"\n令牌：{key}"), ("合格", SCOPE + "\n另一张")):
+            with mock.patch.object(G.task_brief, "problems", return_value=[]):      # 模拟旧版本：propose 还没有这道检查
+                old[name] = G.propose("dt-sandbox", "claude", scope, now=T0)["code"]
+        for name in ("缺项", "密钥"):
+            with self.subTest(name):
+                res = self.click(old[name])
+                self.assertEqual(res["decision"], "void", res)
+                self.assertIn("提议没过现在的任务说明检查", res["note"])
+                self.assertNotIn(key, res["note"])
+        self.assertEqual((G.show(), self.posted), ([], []))
+        self.assertFalse(self.tasks.exists() and any(self.tasks.iterdir()))
+        res = self.click(old["合格"])
+        self.assertEqual(res["decision"], "approved", res)
 
     def test_hub_without_dispatch_rule_rejects_at_propose(self):
         """常浩 11-23 定：名册放行、但中台没有派单规则的项目，提议时就拒绝并说清原因；不记提议、不发私聊。"""

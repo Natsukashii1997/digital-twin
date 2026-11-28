@@ -1,7 +1,7 @@
 ---
 name: workshop
 description: "派 Claude Code / Codex 车间跑单（统一包装脚本）"
-version: 0.5.1
+version: 0.7.0
 author: 常浩 · digital-twin
 platforms: [macos]
 metadata:
@@ -24,15 +24,18 @@ metadata:
 - 收到“准备好就跑”或绝对截止变更时，先查真实本地时间并换成带时区的具体日期时间，保留本人原文另记变更，更新现行批复中的冲突时间，并核对已有计划、批准标记、定时入口和运行态；仅改文档不能声称运行时已改。绝对截止优先于相对时长，停机须预留取消与回读时间；无法可靠兑现则不放行。
 - 执行许可与执行结果分开：测试进度点不是通过证据，须核对最终汇总与退出码；版本变化须重新核对证据适用性。更新审批文件后准确报告“已记录/已批准/已安装/已开跑”的真实层级；尚无执行通道或准备证据时不得声称后台会自动推进。
 
+## 0b. 新底座的写入派单（autoloop）不归这个技能
+
+- 「让 Claude / Codex 给 dt-sandbox 做 xx」这类走新底座的单，按 `autoloop` 技能办。批准只认常浩在门卫「卫士」确认卡上点「批准派单」（0E-3b，常浩 11-23 定删掉打字批准）；私聊里打「派单」「可以」都不算，也不再有确认码，`autoloop_grants.py approve` 这个命令已经没有了，不要跑。
+- 主账号里不跑 `autoloop_grants.py`（那里是搬家前的旧凭证库），查新底座的单按 `autoloop` 技能第 4、5 节。
+
 ## 1. 整理成派单
 
 1. **项目**：先读名册 `~/Documents/ChatGPT/个人/work/digital-twin/projects.json`，按 `name` 和 `aliases` 匹配，取 `id`。匹配不上，告诉常浩“不在名册里”，问要不要加进去；匹配到多个，先问。不要自己去读名册外的项目来代替派单。
    - **要登记的是第三方/上游仓库（如 Hermes 本体 `~/.hermes/hermes-agent`）时先查三件事再提方案**：`git status --short` 和 `git branch --show-current`（游离 HEAD 上未提交的本地补丁要先存成本地分支，名册 `main` 指向这个分支，否则 worktree 从 origin 拉、补丁不在底里）；`git remote -v`（origin 是别人的上游就**不填 `github`**——填了 `D new` 会往上游建 issue、`D pr` 往上游开 PR）；名册 `test` 只填相关测试子集，不跑上游全量。改 Hermes 本体、改名册、改网关都是常设授权清单 D 档，三项分别列出等常浩逐项点头，不合在一个“可以”里默认放行。
 2. **只读还是写入**：要改代码、改文档、提交的就是写入单；看、查、总结、出方案的是只读单。只读单把“不得修改项目文件、不得运行会写缓存或产物的测试/构建、不提交或丢弃”写进任务；派单元数据可写在项目外。主目录未提交改动必须在现有工作区读，不能用新 worktree 代替。具体核对方法见 [只读调查](references/read-only-investigation.md)。
 3. **交给谁**：常浩点名 Claude 或 Codex 就听他的，开单带 `--tool`；**没点名就不带 `--tool`**，由派单脚本按 AI 接入设置里车间的执行方选（`/usr/bin/python3 ~/.hermes/scripts/ai_access.py status` 能看当前默认和各家能不能用），不要自己按任务类型猜。常浩说「以后默认用 Claude / Codex」时，跑 `ai_access.py set default claude|codex`，把输出原样告诉他（下一张单生效）。
-4. **任务说明**写进一个临时文件，必须包含五要素：目标、交付物、验收标准（怎么算做完）、边界（哪些不做）、交给谁。车间看不到你和常浩的对话，要写清楚。
-   - **源文件与安装副本分开授权**：常浩明确要求“只改仓库、不碰安装文件”时，把不复制、不安装、不同步、不重启写进任务，并明确覆盖仓库默认的安装同步约定，避免车间按 AGENTS.md 扩大修改范围。区分派单元数据/日志与安装副本；自测使用隔离临时目录，不操作真实派单和回执。
-   - **把自测写成可验收交付物**：要求准确命令、预期结果和真实执行输出，不只交一段说明。涉及续跑、覆盖或历史文件时，覆盖首次操作、连续多轮、已有文件不覆盖、普通路径不变，并验证保存失败时不会继续破坏原数据；优先用隔离 fixture/mock 验证，不为自测启动真实模型或外部服务。
+4. **任务说明**写进一个临时文件，五要素（目标、交付物、验收、边界、交给谁）怎么写统一按共享参考库的「五要素任务说明」模块，动手前先读：`skill_view(name="dt-shared-reference", file_path="references/task-brief.md")`。车间看不到你和常浩的对话，要写清楚。缺了哪一项，`D new` 会拒绝开单、说缺哪项（模块第 4 节）；补齐再开，不填「无」「待定」凑数。只改仓库不碰安装副本、把自测写成可验收交付物这两条，也在模块第 2 节。
 
 ## 2. 开单和确认门
 
@@ -59,6 +62,8 @@ metadata:
 ## 4. 回报
 
 写入单跑完、状态是 done 时，先执行 `D pr <单号>`：推分支、开 PR，返回 `pr_url`。`ok: false` 时（提交里像有密钥、推不上去、PR 没开成）把 `msg` 原样写进回报，不要重试。续跑后再跑完，同样执行一次，新提交会推到原来的 PR。
+- 车间回执的 `need_decision` 问「规矩不准 push，验收又要开 PR，谁来推」时：开 PR 已在原授权（确认派单或日报「按推荐」）范围内就由 Hermes 跑 `D pr`，不给车间 push 权限——推送和开 PR 本来就是派单脚本的活，车间不 push 是护栏。
+- `D pr` 后约一分钟用 `gh pr view <号> -R <owner/repo> --json state,mergeable,statusCheckRollup` 回读：主分支在单子跑期间前进了，PR 可能是 `CONFLICTING`、CI 不触发。处理：在本单 worktree `git fetch origin main && git rebase origin/main`（先用 `git merge-tree --write-tree --name-only origin/main HEAD` 看冲突文件）；`CURRENT.md`、`AGENTS.md` 这类两边各加一节的冲突两节都留（本单节放上面），代码冲突不自己改，转常浩；`GIT_EDITOR=true git rebase --continue` 后重跑本单定向测试，再 `D pr` 推到原 PR，回读到 `MERGEABLE` 且 CI 结论 SUCCESS 才报“可合并”。
 
 然后读 `~/.hermes/dispatch/<单号>/out/receipt.json`，在飞书回报：
 - 第一行：✅/❌/⚠️ 单号 · 交给谁 · 用时
@@ -78,6 +83,12 @@ metadata:
 2. 先按单号核对答复和原授权。常浩明确说“不续跑”“先不合并”时，只把决定记录到该单的 `user-decision.md`，保留分支/worktree，不自动 followup 或合并；说另派一单的问题不塞回原单。
 3. 需要继续执行且仍在授权范围内时，把答复写进临时文件（例如 `~/.hermes/dispatch/<单号>/answer.md`），后台运行 `D run <单号> --followup <这个文件>`。车间会在**原来的会话**里接着做，前面的上下文都在。只读报告中的“建议提交/丢弃”或 `need_decision` 不会自动升级为写权限；确需修改或提交，按写入单确认门另行办理。
 4. 跑完照第 4 节回报。
+
+## 5b. 单子被中断（状态卡在 running、没有回执）
+
+- 网关重启或停机会连带杀掉 `D run` 起的车间进程，单子停在 running、`out/` 没有 receipt。**有单在跑时不重启网关**；要重启先 `D list` 确认没有 running 的单。网关不能从网关内部重启（命令会被一起杀掉，安全机制也会拦），请常浩在独立终端执行 `hermes gateway restart`。
+- 恢复：`ps -p <dispatch PID>,<worker PID>` 确认进程都已不在 → 备份 `order.json`（`order.json.bak-<日期>`）→ 把 `status` 改成 `failed` 并加一条说明（谁、为何改、依据哪次授权）→ 写续跑说明：注明这是**新会话**（旧会话已死，上下文不在）、原任务路径 `~/.hermes/dispatch/<单号>/task.md`、worktree 里未提交改动是上次留下的要在其上接着做不推倒重来、已核实的测试结果和尚缺的验收项 → 后台 `D run <单号> --followup <说明文件> --timeout <足够>`。不另开新单，未提交改动就在原 worktree 里。
+- 原授权仍有效才续跑；状态不明不盲启。
 
 ## 6. 话题
 

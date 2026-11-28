@@ -1,0 +1,28 @@
+# 门卫目录（/Library/Application Support/DigitalTwin/gatekeeper/）要装的脚本，都在 hermes/scripts/ 下。
+# 就是 gatekeeper.py 连同它直接、间接导入的同目录脚本；少一个门卫启动就导入失败。
+# 测试 hermes/scripts/tests/test_gatekeeper_files.py 按导入关系现算一遍，和这里对不上就红：改了导入要跟着改这份。
+# 装法（照抄清单第 2 步）：cd "$REPO/hermes/scripts" && sudo install -o root -g wheel -m 644 $(grep -v '^#' "$REPO/ops/gatekeeper_files.txt") "$D/gatekeeper/"
+autoloop_answer.py
+autoloop_cardview.py
+autoloop_config.py
+autoloop_exits.py
+autoloop_feishu.py
+autoloop_grants.py
+autoloop_publish.py
+autoloop_readonly.py
+autoloop_recovery.py
+custody.py
+custody_ledger.py
+feishu_home.py
+gate_github.py
+gatekeeper.py
+hub_listener.py
+lark_pages.py
+multica_night.py
+netwait.py
+secretary.py
+secretary_ledger.py
+task_brief.py
+tidings_weekly.py
+twin_identity.py
+twin_state.py

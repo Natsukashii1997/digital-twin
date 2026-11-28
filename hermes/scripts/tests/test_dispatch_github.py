@@ -68,7 +68,7 @@ class DispatchGitHubTests(unittest.TestCase):
         for name, value in {"ROOT": root / "dispatch", "WT_ROOT": root / "worktrees", "ROSTER": self.roster}.items():
             stack.enter_context(patch.object(dispatch, name, value))
         self.task = root / "task.md"
-        self.task.write_text("目标：README 加一行说明\n交付物：README.md\n验收：有新行\n边界：只改 README\n交给谁：Claude\n",
+        self.task.write_text("目标：README 加一行说明\n交付物：README.md\n验收：有新行\n边界：只改 README\n交给谁：按派单参数里的执行方\n",
                              encoding="utf-8")
 
     def write_roster(self, **extra):

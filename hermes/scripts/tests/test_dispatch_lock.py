@@ -29,7 +29,7 @@ class Base(unittest.TestCase):
             {"id": "fixture", "name": "夹具", "path": str(self.root / "repo"), "main": "main", "write_allowed": False},
             {"id": "other", "name": "另一个", "path": str(self.root / "repo"), "main": "main", "write_allowed": False}]}))
         self.task = self.root / "task.md"
-        self.task.write_text("# 目标：隔离测试\n", encoding="utf-8")
+        self.task.write_text("# 目标：隔离测试\n交付物：无（只读）\n验收：能开单\n边界：不改文件\n交给谁：按派单参数里的执行方\n", encoding="utf-8")
         self.ledger = self.root / "dispatch"
 
     def env(self, **kw):
